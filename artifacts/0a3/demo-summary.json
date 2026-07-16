@@ -1,0 +1,46 @@
+{
+  "lab_root": "<temporary-marker-validated-lab-root>",
+  "logical_path_length": 285,
+  "managed_payload_path_length": 146,
+  "mirrored_control_path_length": 348,
+  "quarantine_result": {
+    "allocation_id": "67ce3df1e8ff4666a85cfb61a7736d52",
+    "manifest": {
+      "allocation_id": "67ce3df1e8ff4666a85cfb61a7736d52",
+      "created_utc": "2026-07-16T20:13:31Z",
+      "logical_role": "QUARANTINE",
+      "original_relative_path": "target/quarantine.bin",
+      "payload_relative_path": ".mediasync/installations/spike-installation/objects/67/67ce3df1e8ff4666a85cfb61a7736d52.payload",
+      "payload_sha256": "c2d66755e6d0b42f7a54187c020f4c80f779620a057c070c779007da6b851f5d",
+      "size": 10
+    },
+    "status": "QUARANTINED"
+  },
+  "replace_filew_probe": {
+    "backup_content": "old",
+    "final_content": "new",
+    "same_volume": true,
+    "status": "PASS"
+  },
+  "replace_result": {
+    "allocation_id": "71536cce00fa413c934a073495683746",
+    "final_sha256": "11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437",
+    "version_manifest": {
+      "allocation_id": "1a300d3247874b5a8b10093c40239b7d",
+      "created_utc": "2026-07-16T20:13:31Z",
+      "logical_role": "VERSION",
+      "original_relative_path": "target/final.bin",
+      "payload_relative_path": ".mediasync/installations/spike-installation/objects/1a/1a300d3247874b5a8b10093c40239b7d.payload",
+      "payload_sha256": "cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4",
+      "size": 3
+    }
+  },
+  "restore_result": {
+    "restored_relative_path": "target/final.bin",
+    "restored_sha256": "cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4"
+  },
+  "source_guard": {
+    "guard_level": "DENY_WRITE_AND_DELETE",
+    "writer_blocked": true
+  }
+}

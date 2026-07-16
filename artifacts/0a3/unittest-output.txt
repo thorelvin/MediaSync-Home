@@ -1,0 +1,17 @@
+test_crash_window_after_verify_recovers_catalog_record (test_recovery_paths.RecoveryPathsSpikeTests) ... ok
+test_crash_windows_before_apply_do_not_overwrite_old_target (test_recovery_paths.RecoveryPathsSpikeTests) ... ok
+test_demo_writes_summary_artifact (test_recovery_paths.RecoveryPathsSpikeTests) ... ok
+test_directory_type_conflict_is_not_idempotent_success (test_recovery_paths.RecoveryPathsSpikeTests) ... ok
+test_fallback_replace_preserves_old_target_and_restore_uses_manifest (test_recovery_paths.RecoveryPathsSpikeTests) ... ok
+test_lab_root_must_have_matching_marker (test_recovery_paths.RecoveryPathsSpikeTests) ... ok
+test_quarantine_uses_opaque_object_and_restore_uses_manifest (test_recovery_paths.RecoveryPathsSpikeTests) ... ok
+test_recovery_after_crash_after_apply_records_final_verification (test_recovery_paths.RecoveryPathsSpikeTests) ... ok
+test_recovery_after_crash_before_apply_does_not_overwrite_old_target (test_recovery_paths.RecoveryPathsSpikeTests) ... ok
+test_replacefilew_probe_documents_same_volume_backup (test_recovery_paths.RecoveryPathsSpikeTests) ... ok
+test_short_managed_object_manifest_avoids_mirrored_path_growth (test_recovery_paths.RecoveryPathsSpikeTests) ... ok
+test_source_guard_reports_ntfs_or_fallback_policy (test_recovery_paths.RecoveryPathsSpikeTests) ... ok
+
+----------------------------------------------------------------------
+Ran 12 tests in 0.253s
+
+OK
