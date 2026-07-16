@@ -8,8 +8,8 @@
 | 0A.3 — Recovery og stier | passed | `spikes/0a3_recovery_paths/`; `tests/spikes/0a3_recovery_paths/`; `artifacts/0a3/` | Lokal NTFS/path/recovery bestått; SMB SourceReadGuard ikke kjørt uten SMB-lab | Bruk fallbackpolicy for uprovede SMB eller still SMB-lab til rådighet |
 | 0A.4 — SQLite og kapasitet | passed | `spikes/0a4_sqlite_capacity/`; `tests/spikes/0a4_sqlite_capacity/`; `artifacts/0a4/` | Lokal 1M SQLite-/kapasitetsmåling bestått; ADR-003 anbefales, men eiergodkjenning gjenstår | Eier vurderer ADR-003-anbefalingen i 0A.6 |
 | 0A.5 — Windows argv/pakking | blocked | `spikes/0a5_windows_packaging/`; `tests/spikes/0a5_windows_packaging/`; `artifacts/0a5/` | `GetSystemDirectoryW`/argv bestått; pakkebevis avventer PySide6/BLAKE3/Nuitka/Windows SDK/signing tools og ren Windows-VM | Klargjør toolchain/VM før ADR-028 kan anbefales |
-| 0A.6 — Beslutningsreview | blocked | | Avventer tilgjengelige 0A-bevis | Eier gjennomgår ADR-er etter 0A.1–0A.5 |
-| 0A — Samlet arkitekturbevis | in_progress | 0A.0 passed | Gjenstår 0A.1–0A.6 | Fortsett én arbeidspakke om gangen |
+| 0A.6 — Beslutningsreview | blocked | `docs/adr/0A_DECISION_REVIEW.md` | Eierbeslutninger, SMB-/Task Scheduler-lab og pakkemiljø mangler | Eier velger ADR-beslutninger eller scope-reduksjon |
+| 0A — Samlet arkitekturbevis | blocked | 0A.0–0A.6 evidence/status docs | 0A.1/0A.2/0A.5 har åpne lab-/toolchainblockers; ADR-owner gate ikke passert | Ikke start 0B før eierporten er passert |
 | 0B — Repository og kontrakter | blocked | | Avventer eiergodkjente 0A-ADR-er | Ikke start |
 
 Tillatte milepælstatuser: `not_started`, `in_progress`, `blocked`, `passed`, `failed`.

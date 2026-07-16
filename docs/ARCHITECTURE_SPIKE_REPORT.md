@@ -10,7 +10,7 @@
 | 0A.3 — Recovery og stier | passed | `spike/0a3-recovery-and-paths` | `spikes/0a3_recovery_paths/`, `tests/spikes/0a3_recovery_paths/`, `artifacts/0a3/` | Lokal NTFS/path/recovery bestått; SMB SourceReadGuard ikke kjørt uten SMB-lab |
 | 0A.4 — SQLite og kapasitet | passed | `spike/0a4-sqlite-capacity` | `spikes/0a4_sqlite_capacity/`, `tests/spikes/0a4_sqlite_capacity/`, `artifacts/0a4/` | Lokal 1M SQLite-/kapasitetsmåling bestått; ADR-003 anbefales, men eiergodkjenning gjenstår |
 | 0A.5 — Windows argv/pakking | blocked | `spike/0a5-windows-argv-and-packaging` | `spikes/0a5_windows_packaging/`, `tests/spikes/0a5_windows_packaging/`, `artifacts/0a5/` | `GetSystemDirectoryW`/argv bestått; PySide6/BLAKE3/Nuitka/SDK/signing tools og ren Windows-VM mangler |
-| 0A.6 — Beslutningsreview | blocked | | | Avventer 0A.1–0A.5-bevis |
+| 0A.6 — Beslutningsreview | blocked | `spike/0a6-decision-review` | `docs/adr/0A_DECISION_REVIEW.md` | Eierbeslutninger, SMB-/Task Scheduler-lab og pakkemiljø mangler; 0B forblir blokkert |
 
 ## Miljøpreflight
 
@@ -159,6 +159,20 @@ Baseline ble kontrollert med streng hashverifisering før Git-initialisering og 
 | Minimal Python/PySide6/BLAKE3/Win32-app | `BLOCKED_BY_ENVIRONMENT` | `PySide6`, `blake3` og `nuitka` mangler i aktiv Python |
 | Reproduserbar pakking og ren VM-smoke | `BLOCKED_BY_ENVIRONMENT` | `pyside6-deploy`, `nuitka`, `cl`, `rc`, `signtool` og ren Windows-VM mangler |
 
+0A.6 ble kjørt som ren evidenssyntese uten nye tekniske prober. `docs/adr/0A_DECISION_REVIEW.md` oppsummerer alle ADR-ene med tilgjengelig 0A-bevis, alternativer, risiko/reverseringskostnad, Codex-anbefaling og konkret eierhandling.
+
+### 0A.6 beslutningsport
+
+| Kontroll | Resultat | Bevis |
+|---|---|---|
+| Alle 0A-bevis har miljø/kommando/artefakt/resultat | `PASS` | Bevismatrise, lokale evidenstabeller og kommandojournal i denne rapporten |
+| PASS/BLOCKED/INCONCLUSIVE skilt tydelig | `PASS` | 0A.1, 0A.2 og 0A.5 er delvis/lab-blokkert; 0A.3/0A.4 er lokale pass med SMB-caveats |
+| Hver blocker har produktkonsekvens | `PASS` | Blockertabellen og `docs/adr/0A_DECISION_REVIEW.md` |
+| Hver ADR har alternativ/risiko/anbefaling/eierhandling | `PASS` | `docs/adr/0A_DECISION_REVIEW.md` |
+| Ingen eierbeslutning forfalsket | `PASS` | Alle ADR-er har fortsatt `owner_decision: PENDING` |
+| Ingen kontrakt frosset | `PASS` | `schema/contracts-manifest.yaml` forblir draft/blocked |
+| 0B åpnet automatisk | `PASS` | Ikke åpnet; status forblir blokkert |
+
 ### Kommandojournal
 
 ```powershell
@@ -255,6 +269,14 @@ git diff --check
 & "C:\claude\witchery\tmp\mediasync-handoff-venv\Scripts\python.exe" tools\validate_handoff.py
 python tools\build_adr_docs.py --check
 python tools\build_master.py --check
+
+git switch -c spike/0a6-decision-review
+python tools\build_adr_docs.py --check
+python tools\build_master.py --check
+python -m pytest tests\spikes -q
+python -m ruff check .
+git diff --check
+& "C:\claude\witchery\tmp\mediasync-handoff-venv\Scripts\python.exe" tools\validate_handoff.py
 ```
 
 Notater:
@@ -266,6 +288,7 @@ Notater:
 - `python -m ruff check .` besto.
 - `python -m mypy --version` og `python -m importlinter --version` feilet fordi modulene ikke er installert i aktiv Python. De er ikke registrert som bestått.
 - `python -m pytest tests\spikes -q` besto med `23 passed` etter 0A.4 og `32 passed` etter 0A.5.
+- `python -m pytest tests\spikes -q` besto med `39 passed` etter 0A.2/0A.6-review.
 - Sikkerhetsord-scan etter 0A.5 fant bare de forventede negative-test-/avvisningsforekomstene av de forbudte Robocopy-flaggene.
 - `python -m unittest discover -s tests\spikes` fant ingen tester på grunn av nested discover-layout; de reproduserbare unittest-kommandoene er per spikekatalog.
 
@@ -305,12 +328,14 @@ Tallene er lokale spike-målinger på syntetiske metadata, ikke en produksjons-S
 
 ADR-003 er satt til `RECOMMENDED` med Codex-anbefaling om to lokale SQLite-databaser og eksplisitte handoffs. ADR-011, ADR-018 og ADR-027 er satt til `EVIDENCE_COMPLETE`. ADR-028 er satt til `BLOCKED` fordi pakkebeviset mangler toolchain og ren Windows-VM. ADR-020 har lokal klassifiseringsevidens, men forblir `PROPOSED` til eier vurderer BLAKE3-markeravviket. ADR-006, ADR-016 og ADR-019 forblir `PROPOSED` til to-klient SMB-bevis finnes eller eier godkjenner scope-reduksjon. Alle `owner_decision`-felt forblir `PENDING`; bare eier kan akseptere, avvise eller godkjenne scope-reduksjon. ADR-001, ADR-002 og ADR-013 bør forbli `PROPOSED` til de blokkerte identitets-/Task Scheduler-radene er bevist eller eier eksplisitt godkjenner en scope-reduksjon.
 
+`docs/adr/0A_DECISION_REVIEW.md` er eierens beslutningsliste. Den viser også mulige scope-reduksjoner for lokal-only første release, ingen non-interactive trigger i første omgang, zip/dev-run preview uten pakket `.exe`, og utsatt BLAKE3 marker-freeze.
+
 ## Anbefalt rekkefølge
 
 1. Fullfør de blokkerte 0A.1-identitetsradene med dedikert Task Scheduler-session og feil-SID/remote klient, eller få eksplisitt eiergodkjent scope-reduksjon.
 2. Forbered dedikert to-klient SMB-lab før `0A.2` skal bestå cross-machine writer ownership og før SMB SourceReadGuard kan oppgraderes fra fallback.
 3. Forbered PySide6/BLAKE3/Nuitka/Windows SDK/signing tools og en ren Windows-VM før ADR-028 kan få full pakke-evidens.
-4. Kjør `0A.6` først etter at 0A.1–0A.5 enten har bestått eller fått eksplisitt eiergodkjent scope-reduksjon.
+4. Bruk `docs/adr/0A_DECISION_REVIEW.md` til å fatte eksplisitte ADR-beslutninger eller scope-reduksjoner. 0B skal ikke starte før de nødvendige ADR-ene har eierbeslutning.
 
 ## Bevisst ikke implementert
 
