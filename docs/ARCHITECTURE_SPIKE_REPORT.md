@@ -6,7 +6,7 @@
 |---|---|---|---|---|
 | 0A.0 — Miljøpreflight | passed | `spike/0a0-environment-preflight` / baseline `d3282ef` | `docs/ARCHITECTURE_SPIKE_REPORT.md` | Ingen 0A.0-blocker |
 | 0A.1 — Prosess og IPC | blocked | `spike/0a1-process-and-ipc` | `spikes/0a1_process_ipc/`, `tests/spikes/0a1_process_ipc/`, `artifacts/0a1/unittest-output.txt` | Lokal IPC/Job Object-fixture består; ekte wrong-SID/remote og non-interactive Task Scheduler-kontekst mangler |
-| 0A.2 — Endpoint-eierskap | not_started | | | To-klient SMB-lab mangler for global writer-bevis |
+| 0A.2 — Endpoint-eierskap | blocked | `spike/0a2-endpoint-ownership-local` | `spikes/0a2_endpoint_ownership/`, `tests/spikes/0a2_endpoint_ownership/`, `artifacts/0a2/` | Lokal klassifisering/lock/takeover bestått; to-klient SMB-lab og endelig BLAKE3-marker mangler |
 | 0A.3 — Recovery og stier | passed | `spike/0a3-recovery-and-paths` | `spikes/0a3_recovery_paths/`, `tests/spikes/0a3_recovery_paths/`, `artifacts/0a3/` | Lokal NTFS/path/recovery bestått; SMB SourceReadGuard ikke kjørt uten SMB-lab |
 | 0A.4 — SQLite og kapasitet | passed | `spike/0a4-sqlite-capacity` | `spikes/0a4_sqlite_capacity/`, `tests/spikes/0a4_sqlite_capacity/`, `artifacts/0a4/` | Lokal 1M SQLite-/kapasitetsmåling bestått; ADR-003 anbefales, men eiergodkjenning gjenstår |
 | 0A.5 — Windows argv/pakking | blocked | `spike/0a5-windows-argv-and-packaging` | `spikes/0a5_windows_packaging/`, `tests/spikes/0a5_windows_packaging/`, `artifacts/0a5/` | `GetSystemDirectoryW`/argv bestått; PySide6/BLAKE3/Nuitka/SDK/signing tools og ren Windows-VM mangler |
@@ -58,7 +58,7 @@ Tillatte klassifiseringer: `RUNNABLE_NOW`, `RUNNABLE_WITH_LOCAL_FIXTURE`, `REQUI
 | Engine Host discovery/IPC | 0A.1 | Lokal Windows-fixture | `python -m unittest discover -s tests\spikes\0a1_process_ipc -v` | `PASS` | `artifacts/0a1/unittest-output.txt` | ADR-001, ADR-002 |
 | Suspended child → Job Object → resume | 0A.1 | Lokal Windows-fixture | `python -m unittest discover -s tests\spikes\0a1_process_ipc -v` | `PASS` | `artifacts/0a1/unittest-output.txt` | ADR-013 |
 | To-klient SMB writer ownership | 0A.2 | `REQUIRES_USER_LAB_ACTION` | Ikke kjørt i 0A.0 | `BLOCKED` | Mangler to-klient SMB-lab | ADR-006, ADR-016, ADR-019 |
-| `.mediasync`-klassifisering | 0A.2 | `RUNNABLE_WITH_LOCAL_FIXTURE` | Ikke kjørt i 0A.0 | `INCONCLUSIVE` | Se kjørbarhetsmatrise | ADR-020 |
+| `.mediasync`-klassifisering | 0A.2 | Marker-validert lokal NTFS-labrot | `python -m unittest discover -s tests\spikes\0a2_endpoint_ownership -v` | `PASS` | `artifacts/0a2/unittest-output.txt`, `artifacts/0a2/demo-summary.json` | ADR-020 |
 | Short managed-object path | 0A.3 | Marker-validert lokal NTFS-labrot | `python -m unittest discover -s tests\spikes\0a3_recovery_paths -v` | `PASS` | `artifacts/0a3/unittest-output.txt`, `artifacts/0a3/demo-summary.json` | ADR-024 |
 | Replace/fallback crashpunkter | 0A.3 | Marker-validert lokal NTFS-labrot | `python -m unittest discover -s tests\spikes\0a3_recovery_paths -v` | `PASS` | `artifacts/0a3/unittest-output.txt`, `artifacts/0a3/demo-summary.json` | ADR-004, ADR-007, ADR-011 |
 | SourceReadGuard/fallback | 0A.3 | Lokal NTFS pass; SMB-lab ikke tilgjengelig | `python -m unittest discover -s tests\spikes\0a3_recovery_paths -v` | `PASS` | Lokal guard returnerte `DENY_WRITE_AND_DELETE`; bruk fallback for uprovede SMB-endepunkter | ADR-010, ADR-022, ADR-023 |
@@ -92,6 +92,21 @@ Baseline ble kontrollert med streng hashverifisering før Git-initialisering og 
 | Engine Host close/crash stopper child | `PASS` for Job Object-close-scenariet | `test_suspended_child_is_contained_before_resume_and_killed_on_job_close` |
 | Task Scheduler-lignende non-interactive sesjon | `BLOCKED_BY_ENVIRONMENT` | Krever opprettet task/credential/session-policy som ikke ble etablert i denne økten |
 | Remote eller feil-SID klient | `BLOCKED_BY_ENVIRONMENT` | Krever separat Windows-bruker, remote client eller lab som kan forsøke faktisk feil principal |
+
+0A.2 ble kjørt som en marker-validert lokal endpoint-ownership-spike under `spikes/0a2_endpoint_ownership/` og `tests/spikes/0a2_endpoint_ownership/`. Harnesset muterer bare temp-labrøtter med `.mediasync_test_root`; to prosesser på samme maskin brukes bare som lokal lockharness, ikke som SMB-bevis.
+
+### 0A.2 lokal evidens
+
+| Eksperiment | Resultat | Bevis |
+|---|---|---|
+| Alle ni `.mediasync`-klassifiseringstilstander | `PASS` | Demo og test dekker `ABSENT`, `VALID_OWNED`, `VALID_FOREIGN`, `VALID_READ_ONLY_NEWER_SCHEMA`, `PARTIAL_CONTROL_AREA`, `UNKNOWN_EMPTY_DIRECTORY`, `UNKNOWN_NONEMPTY_DIRECTORY`, `CASE_ALIAS_COLLISION`, `CORRUPT_MARKER` |
+| Ukjent ikke-tom `.mediasync` | `PASS` | Klassifiseres `UNKNOWN_NONEMPTY_DIRECTORY`, ekskluderes ikke fra snapshot og gir ingen mutasjonstillatelse |
+| Markerchecksum og root identity | `PASS` for spike-algoritme | Tamper gir `CORRUPT_MARKER`; root identity mismatch gir `PARTIAL_CONTROL_AREA`; checksumalgoritmen er `SHA256-0A2-SPIKE` fordi `blake3` mangler |
+| Lokal eksklusiv `mutation.lock` | `PASS` lokalt | Første Win32 handle med share-mode 0 blokkerer andre åpning til handle close; dette er ikke cross-machine-bevis |
+| Fremmed owner | `PASS` lokalt | Klassifiseres `VALID_FOREIGN`, read-only og ingen mutasjonstillatelse |
+| Kontrollert takeover | `PASS` lokalt | Ny owner publiseres med økt `ownership_epoch`; gammel permit blir stale |
+| Namespace cleanup | `PASS` lokalt | Egen installasjonsnamespace kan ryddes i lab; fremmed namespace gir `REFUSED_FOREIGN_NAMESPACE`; feil labmarkør stopper cleanup |
+| To-klient SMB writer ownership | `BLOCKED_BY_ENVIRONMENT` | Ingen dedikert SMB-share og to ekte Windows-klienter/VM-er tilgjengelig |
 
 0A.3 ble kjørt som en marker-validert lokal filesystem-spike under `spikes/0a3_recovery_paths/` og `tests/spikes/0a3_recovery_paths/`. Hver testlab opprettes i temp med `.mediasync_test_root`, matching `run_id`, matching root identity og `cleanup_allowed=true`; harnesset nekter mutasjon dersom markøren ikke validerer.
 
@@ -199,6 +214,13 @@ python -m importlinter --version
 & "C:\claude\witchery\tmp\mediasync-handoff-venv\Scripts\python.exe" tools\build_adr_docs.py --check
 & "C:\claude\witchery\tmp\mediasync-handoff-venv\Scripts\python.exe" tools\build_master.py --check
 
+git switch -c spike/0a2-endpoint-ownership-local
+python -m py_compile spikes\0a2_endpoint_ownership\endpoint_ownership.py tests\spikes\0a2_endpoint_ownership\test_endpoint_ownership.py
+python -m unittest discover -s tests\spikes\0a2_endpoint_ownership -v
+python -m ruff check spikes\0a2_endpoint_ownership tests\spikes\0a2_endpoint_ownership
+python spikes\0a2_endpoint_ownership\endpoint_ownership.py demo --output artifacts\0a2\demo-summary.json
+cmd.exe /c "python -m unittest discover -s tests\spikes\0a2_endpoint_ownership -v > artifacts\0a2\unittest-output.txt 2>&1"
+
 git switch -c spike/0a3-recovery-and-paths
 python -m py_compile spikes\0a3_recovery_paths\recovery_paths.py tests\spikes\0a3_recovery_paths\test_recovery_paths.py
 python spikes\0a3_recovery_paths\recovery_paths.py demo --output artifacts\0a3\demo-summary.json
@@ -274,12 +296,14 @@ Tallene er lokale spike-målinger på syntetiske metadata, ikke en produksjons-S
 | 0A0-BLK-003 | 0A.2/0A.5 | Hypervisor er present, men `Get-VM` mangler og valgfri Windows-feature-query krever elevation | Codex kan ikke selv inventere eller orkestrere lokal VM-lab | Eier må bekrefte VM-oppsett eller gi eksplisitt labinstruks | Eier |
 | 0A1-BLK-001 | 0A.1 | Ekte non-interactive Task Scheduler-session under samme bruker er ikke etablert | 0A.1 kan ikke bevise registrert trigger-client/session-policy fullt ut | Eier må tillate/opprette dedikert `\MediaSyncHome-Spike\<run-id>` task eller gi testcredential/sessionoppsett | Eier |
 | 0A1-BLK-002 | 0A.1 | Feil-SID eller remote pipe-klient er ikke tilgjengelig | DACL/local-only-policy er konfigurert, men faktisk avvisning av annen principal er ikke demonstrert | Kjør 0A.1-identitetstesten fra separat Windows-bruker/VM eller remote klient | Eier |
+| 0A2-BLK-001 | 0A.2 | To-klient SMB-lab er ikke tilgjengelig | Global writer ownership, fremmed owner fra annen maskin, stale reconnect og SMB-lock kan ikke bestås | Still dedikert SMB-share og to ekte Windows-klienter/VM-er til rådighet | Eier |
+| 0A2-BLK-002 | 0A.2 | `blake3` er ikke installert | Endelig `endpoint.json`-checksum etter schemaets `BLAKE3-256` kan ikke bevises; lokal spike bruker `SHA256-0A2-SPIKE` | Installer/lås BLAKE3 før final marker-/schemaevidens | Eier |
 | 0A3-BLK-001 | 0A.3 | SMB SourceReadGuard-lab er ikke tilgjengelig | SMB guard kan ikke påstå `DENY_WRITE_AND_DELETE`; uprovede SMB-endepunkter må bruke fallbackpolicy | Kjør samme source-guard-probe mot dedikert SMB-lab eller behold `POST_TRANSFER_HASH_ONLY`/`DEFER_UNSTABLE_SOURCE` for uprovede SMB | Eier |
 | 0A5-BLK-001 | 0A.5 | PySide6/BLAKE3/Nuitka/Windows SDK/signing tools og ren Windows-VM er ikke tilgjengelig | Reproduserbar pakket `.exe` og ren-VM-oppstart kan ikke bevises | Installer/lås toolchain og kjør 0A.5-pakkedelen på ren VM før ADR-028 kan anbefales | Eier |
 
 ## Beslutninger
 
-ADR-003 er satt til `RECOMMENDED` med Codex-anbefaling om to lokale SQLite-databaser og eksplisitte handoffs. ADR-011, ADR-018 og ADR-027 er satt til `EVIDENCE_COMPLETE`. ADR-028 er satt til `BLOCKED` fordi pakkebeviset mangler toolchain og ren Windows-VM. Alle `owner_decision`-felt forblir `PENDING`; bare eier kan akseptere, avvise eller godkjenne scope-reduksjon. ADR-001, ADR-002 og ADR-013 bør forbli `PROPOSED` til de blokkerte identitets-/Task Scheduler-radene er bevist eller eier eksplisitt godkjenner en scope-reduksjon.
+ADR-003 er satt til `RECOMMENDED` med Codex-anbefaling om to lokale SQLite-databaser og eksplisitte handoffs. ADR-011, ADR-018 og ADR-027 er satt til `EVIDENCE_COMPLETE`. ADR-028 er satt til `BLOCKED` fordi pakkebeviset mangler toolchain og ren Windows-VM. ADR-020 har lokal klassifiseringsevidens, men forblir `PROPOSED` til eier vurderer BLAKE3-markeravviket. ADR-006, ADR-016 og ADR-019 forblir `PROPOSED` til to-klient SMB-bevis finnes eller eier godkjenner scope-reduksjon. Alle `owner_decision`-felt forblir `PENDING`; bare eier kan akseptere, avvise eller godkjenne scope-reduksjon. ADR-001, ADR-002 og ADR-013 bør forbli `PROPOSED` til de blokkerte identitets-/Task Scheduler-radene er bevist eller eier eksplisitt godkjenner en scope-reduksjon.
 
 ## Anbefalt rekkefølge
 
@@ -290,4 +314,4 @@ ADR-003 er satt til `RECOMMENDED` med Codex-anbefaling om to lokale SQLite-datab
 
 ## Bevisst ikke implementert
 
-0A.0, 0A.1, 0A.3, 0A.4 og 0A.5 opprettet ikke produktkode under `src/`, endelig produktdatabase, migrasjon, GUI, syncmotor, Robocopy-adapter, Task Scheduler-oppgave eller SMB-lock. 0A.1 opprettet bare spikehost, spikeklient, instrumentert childprosess og midlertidige receipt-/markerfiler under testens tempområde. 0A.3 opprettet bare marker-validerte lokale labrøtter under temp og muterte filer inne i disse røttene. 0A.4 opprettet bare syntetiske SQLite-kandidatdatabaser i temp og lagret kompakte JSON-/testartefakter. 0A.5 startet bare en instrumentert Python-child for argv-verifikasjon og startet aldri Robocopy eller et pakket produkt. Ingen reelle brukerdata, produksjons-NAS, Bilder-/Dokumenter-/Skrivebord-stier eller diskrot ble brukt som testgrunnlag.
+0A.0, 0A.1, 0A.2, 0A.3, 0A.4 og 0A.5 opprettet ikke produktkode under `src/`, endelig produktdatabase, migrasjon, GUI, syncmotor, Robocopy-adapter, Task Scheduler-oppgave eller SMB-lock. 0A.1 opprettet bare spikehost, spikeklient, instrumentert childprosess og midlertidige receipt-/markerfiler under testens tempområde. 0A.2 opprettet bare marker-validerte lokale labrøtter under temp og en spike-local `.mediasync`-fixture inne i dem. 0A.3 opprettet bare marker-validerte lokale labrøtter under temp og muterte filer inne i disse røttene. 0A.4 opprettet bare syntetiske SQLite-kandidatdatabaser i temp og lagret kompakte JSON-/testartefakter. 0A.5 startet bare en instrumentert Python-child for argv-verifikasjon og startet aldri Robocopy eller et pakket produkt. Ingen reelle brukerdata, produksjons-NAS, Bilder-/Dokumenter-/Skrivebord-stier eller diskrot ble brukt som testgrunnlag.

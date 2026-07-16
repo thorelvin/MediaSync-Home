@@ -1,0 +1,24 @@
+{
+  "canonicalization_algorithm": "JCS-RFC8785-SPIKE",
+  "checksum_algorithm": "SHA256-0A2-SPIKE",
+  "classification_states": {
+    "absent": "ABSENT",
+    "case_alias_collision": "CASE_ALIAS_COLLISION",
+    "corrupt_marker": "CORRUPT_MARKER",
+    "partial_control_area": "PARTIAL_CONTROL_AREA",
+    "unknown_empty": "UNKNOWN_EMPTY_DIRECTORY",
+    "unknown_nonempty": "UNKNOWN_NONEMPTY_DIRECTORY",
+    "valid_foreign": "VALID_FOREIGN",
+    "valid_owned": "VALID_OWNED",
+    "valid_read_only_newer_schema": "VALID_READ_ONLY_NEWER_SCHEMA"
+  },
+  "lab_root": "<temporary-marker-validated-lab-root>",
+  "local_lock_second_open_blocked": true,
+  "old_permit_current_after_takeover": false,
+  "smb_cross_machine": "BLOCKED_BY_ENVIRONMENT",
+  "takeover": {
+    "new_epoch": 2,
+    "previous_epoch": 1,
+    "status": "TAKEN_OVER"
+  }
+}

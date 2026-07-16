@@ -1,0 +1,12 @@
+test_checksum_tamper_and_root_identity_mismatch_block_mutation (test_endpoint_ownership.EndpointOwnershipLocalSpikeTests) ... ok
+test_classifier_covers_all_documented_states (test_endpoint_ownership.EndpointOwnershipLocalSpikeTests) ... ok
+test_cleanup_refuses_foreign_namespace_and_checks_lab_marker (test_endpoint_ownership.EndpointOwnershipLocalSpikeTests) ... ok
+test_demo_writes_sanitized_summary (test_endpoint_ownership.EndpointOwnershipLocalSpikeTests) ... ok
+test_foreign_owner_takeover_increments_epoch_and_stales_old_permit (test_endpoint_ownership.EndpointOwnershipLocalSpikeTests) ... ok
+test_local_mutation_lock_is_exclusive_until_handle_close (test_endpoint_ownership.EndpointOwnershipLocalSpikeTests) ... ok
+test_unknown_nonempty_control_name_is_not_excluded (test_endpoint_ownership.EndpointOwnershipLocalSpikeTests) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.262s
+
+OK
