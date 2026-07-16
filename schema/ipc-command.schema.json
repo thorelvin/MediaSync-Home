@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mediasync-home:draft:ipc-command:2",
+  "title": "MediaSync Home IPC command envelope (draft)",
+  "$comment": "Authorization comes from the verified OS client token/session. payload_hash is BLAKE3-256 over JCS-RFC8785 canonical UTF-8 bytes of payload only. Envelope fields, including expected_entity_revision, are compared separately for idempotency conflicts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "schema_version",
+    "message_type",
+    "request_id",
+    "client_instance_id",
+    "idempotency_key",
+    "command_name",
+    "payload",
+    "payload_hash_scope",
+    "payload_canonicalization_algorithm",
+    "payload_hash_algorithm",
+    "payload_hash"
+  ],
+  "properties": {
+    "protocol_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "message_type": {
+      "const": "COMMAND"
+    },
+    "request_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "client_instance_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "command_name": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{1,127}$"
+    },
+    "payload": {
+      "type": "object"
+    },
+    "expected_entity_revision": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Optional optimistic-concurrency revision for the addressed mutable entity."
+    },
+    "payload_hash_scope": {
+      "const": "PAYLOAD_ONLY"
+    },
+    "payload_canonicalization_algorithm": {
+      "const": "JCS-RFC8785"
+    },
+    "payload_hash_algorithm": {
+      "const": "BLAKE3-256"
+    },
+    "payload_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

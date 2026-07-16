@@ -1,0 +1,5 @@
+-- MediaSync Home catalog schema
+-- STATUS: BLOCKED PLACEHOLDER — NOT AUTHORITATIVE, NOT FOR PRODUCT USE.
+-- Milestone 0A must decide the one-vs-two-database architecture.
+-- Milestone 1 must replace this file with versioned migrations and negative
+-- composite-foreign-key tests before any writable product database exists.

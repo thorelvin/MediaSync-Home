@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mediasync-home:draft:endpoint-marker:2",
+  "title": "MediaSync Home endpoint marker (draft)",
+  "$comment": "Draft for 0A.2/0B. marker_checksum is BLAKE3-256 over JCS-RFC8785 canonical UTF-8 bytes of the complete object excluding marker_checksum itself.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "control_schema_version",
+    "endpoint_id",
+    "control_area_id",
+    "owner_installation_id",
+    "ownership_epoch",
+    "ownership_mode",
+    "root_identity_hash_algorithm",
+    "root_identity_hash",
+    "latest_ownership_record",
+    "created_utc",
+    "updated_utc",
+    "canonicalization_algorithm",
+    "marker_checksum_algorithm",
+    "marker_checksum",
+    "application"
+  ],
+  "properties": {
+    "control_schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "endpoint_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "control_area_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "owner_installation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "ownership_epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "ownership_mode": {
+      "const": "EXCLUSIVE_WRITER"
+    },
+    "expected_volume_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 512
+    },
+    "expected_share": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 2048
+    },
+    "root_identity_hash_algorithm": {
+      "const": "BLAKE3-256"
+    },
+    "root_identity_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "latest_ownership_record": {
+      "type": "string",
+      "pattern": "^ownership/epoch-[0-9]{8}\\.json$"
+    },
+    "created_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "canonicalization_algorithm": {
+      "const": "JCS-RFC8785"
+    },
+    "marker_checksum_algorithm": {
+      "const": "BLAKE3-256"
+    },
+    "marker_checksum": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "application": {
+      "const": "MediaSync Home"
+    }
+  }
+}

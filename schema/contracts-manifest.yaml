@@ -1,0 +1,67 @@
+bundle_version: '2.9.2'
+status: draft
+owner_acceptance_required: true
+authority_note: No contract is authoritative until every governing ADR has owner_decision OWNER_ACCEPTED, the contract is versioned and validated,
+  and its status is frozen.
+precedence:
+- canonical_product_and_safety_requirements
+- owner_accepted_adrs
+- frozen_machine_readable_contracts
+- constraints_and_types_generated_from_frozen_contracts
+- executable_conformance_and_safety_tests
+- milestone_gates
+- explanatory_markdown
+allowed_contract_statuses:
+- draft
+- candidate
+- blocked
+- frozen
+contracts:
+- path: catalog.sql
+  status: blocked
+  governing_adrs:
+  - ADR-003
+  - ADR-021
+  freeze_after: governing ADRs with owner_decision=OWNER_ACCEPTED + Milestone 1 migrations/tests
+- path: recovery.sql
+  status: blocked
+  governing_adrs:
+  - ADR-003
+  - ADR-011
+  - ADR-012
+  freeze_after: governing ADRs with owner_decision=OWNER_ACCEPTED + Milestone 1 migrations/tests
+- path: endpoint-marker.schema.json
+  status: draft
+  governing_adrs:
+  - ADR-019
+  - ADR-020
+  freeze_after: governing ADRs with owner_decision=OWNER_ACCEPTED + Milestone 0B validation tests
+- path: ipc-command.schema.json
+  status: draft
+  governing_adrs:
+  - ADR-002
+  - ADR-026
+  freeze_after: governing ADRs with owner_decision=OWNER_ACCEPTED + Milestone 0B compatibility tests
+- path: ipc-event.schema.json
+  status: draft
+  governing_adrs:
+  - ADR-002
+  - ADR-026
+  freeze_after: governing ADRs with owner_decision=OWNER_ACCEPTED + Milestone 0B compatibility tests
+- path: intent-segment.schema.json
+  status: draft
+  governing_adrs:
+  - ADR-012
+  - ADR-026
+  freeze_after: governing ADRs with owner_decision=OWNER_ACCEPTED + Milestone 1 recovery tests
+- path: reason-codes.yaml
+  status: draft
+  governing_adrs:
+  - ADR-026
+  freeze_after: governing ADR with owner_decision=OWNER_ACCEPTED + Milestone 0B/1 generated-code tests
+- path: state-machines.yaml
+  status: draft
+  governing_adrs:
+  - ADR-011
+  - ADR-026
+  freeze_after: governing ADRs with owner_decision=OWNER_ACCEPTED + Milestone 1 transition tests

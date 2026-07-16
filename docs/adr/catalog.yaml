@@ -1,0 +1,294 @@
+catalog_version: 1
+bundle_version: '2.9.2'
+allowed_evidence_statuses:
+- PROPOSED
+- EVIDENCE_COMPLETE
+- RECOMMENDED
+- BLOCKED
+allowed_owner_decisions:
+- PENDING
+- OWNER_ACCEPTED
+- REJECTED
+- DEFERRED_WITH_SCOPE_REDUCTION
+- SUPERSEDED
+adrs:
+- id: ADR-001
+  title: Headless Engine Host er eneste muterende tilstandseier
+  evidence_package: 0A.1
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Samme motor for GUI og Task Scheduler; færre races
+  consequence: Krever lokal IPC og prosesslivssyklus
+- id: ADR-002
+  title: Lokale named pipes med ACL og versjonert JSON-protokoll
+  evidence_package: 0A.1
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Windows-native, reconnect og tydelig sikkerhetsgrense
+  consequence: Wire-schema må testes og vedlikeholdes
+- id: ADR-003
+  title: Én eller to lokale SQLite-databaser fryses etter Milepæl 0A
+  evidence_package: 0A.4
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Målt avveining mellom enkel atomisitet og isolasjon av bulk/read model fra varig recovery
+  consequence: Ved to databaser kreves eksplisitt handoff/backup-epoch; ved én database kreves differensiert durability og samme recoveryinvarianter
+- id: ADR-004
+  title: Robocopy skriver kun til unik staging
+  evidence_package: 0A.3 + 0A.5
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Isolerer tredjeparts prosess fra final tree
+  consequence: Python må eie commit og verifisering
+- id: ADR-005
+  title: Jobber, endepunkter og planer bruker uforanderlige revisjoner
+  evidence_package: 0B + Milepæl 1
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Reproduserbar analyse, audit og retry
+  consequence: Flere rader og tydelig retention kreves
+- id: ADR-006
+  title: OS-håndtak er leaseautoritet; DB-rad er diagnostikk
+  evidence_package: 0A.2
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Tåler prosesskrasj og kan sperre over SMB
+  consequence: Endepunkt uten pålitelig låsing får begrenset funksjon
+- id: ADR-007
+  title: Targetmutasjon bruker compare-and-swap-preconditions
+  evidence_package: 0A.3
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Hindrer overskriving av eksterne endringer etter analyse
+  consequence: Flere revalideringer og mulige `Plan utdatert`-resultater
+- id: ADR-008
+  title: Outbox og desired-state reconciliation for eksterne systemer
+  evidence_package: 0B + Milepæl 1
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Unngår falsk atomisitet med Task Scheduler/varsler
+  consequence: Sideeffekter kan leveres minst én gang
+- id: ADR-009
+  title: Ingen runtime-plugins eller dynamisk kodeinnlasting i første versjon
+  evidence_package: 0B
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Reduserer angrepsflate og pakkeusikkerhet
+  consequence: Nye adapters krever ny signert build
+- id: ADR-010
+  title: Live snapshot er eksplisitt best-effort, ikke VSS
+  evidence_package: 0A.3
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Ærlig semantikk og korrekt revalidering
+  consequence: Speiling krever strengere preconditions
+- id: ADR-011
+  title: Catalog/recovery/filsystem koordineres som saga med durable handoffs
+  evidence_package: 0A.3 + 0A.4
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Ingen falsk cross-store-atomisitet; restartbar avstemming
+  consequence: Flere eksplisitte mellomtilstander
+- id: ADR-012
+  title: Target-side recoverybevis lagres som bounded immutable intentsegmenter
+  evidence_package: 0A.3
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Sekundært bevis uten én kontrollfil per brukerfil
+  consequence: Recovery må inspisere faktisk filtilstand per operasjon
+- id: ADR-013
+  title: Alle runtimeprosesser kjører unelevated; transferchild opprettes suspended og contained før resume
+  evidence_package: 0A.1
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Minste privilegium og ingen orphan-race
+  consequence: Manglende tilgang/Job Object-støtte blokkerer arbeid
+- id: ADR-014
+  title: Toveisbaseline bindes til immutable baselinekontekst
+  evidence_package: Milepæl 1 + Milepæl 14
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Hindrer at endret filter/root/semantikk tolkes mot gammel historikk
+  consequence: Contextendring krever ny, ikke-destruktiv etablering
+- id: ADR-015
+  title: Finalmutasjon eksponeres bare gjennom capability-typede porter
+  evidence_package: 0A.3 + 0B
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Gjør bypass av lease/path/precondition vanskelig i kode
+  consequence: Flere smale porter og opaque runtimeobjekter
+- id: ADR-016
+  title: Endpointleaser bruker monotone fencing tokens
+  evidence_package: 0A.2
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Avviser stale workers/recovery etter lease loss/reacquire
+  consequence: Token må følge meldinger, journal og intentsegment
+- id: ADR-017
+  title: Idempotency- og deliverynøkler komprimeres til permanente tombstones
+  evidence_package: 0B + Milepæl 1
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Retention kan ikke gjøre en gammel retry til ny sideeffekt
+  consequence: Små dedupindekser beholdes langsiktig
+- id: ADR-018
+  title: Catalog/recovery backup og restore bruker ett manifestert epoch-sett
+  evidence_package: 0A.4
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Hindrer blandet intern sannhet etter crash/restore
+  consequence: Quiesce, high-water barrier og parvis swap kreves
+- id: ADR-019
+  title: Ett skrivbart endpoint har én writer-installasjon per eierskapsepoke
+  evidence_package: 0A.2
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Unngår distribuert multi-writer-synkronisering i hjemmeproduktet
+  consequence: Overtakelse er eksplisitt saga; fremmed owner er read-only
+- id: ADR-020
+  title: '`.mediasync` klassifiseres før ekskludering/adoption'
+  evidence_package: 0A.2
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Hindrer tap av legitim brukerdata med samme navn
+  consequence: Flere kontrolltilstander og recovery-UI
+- id: ADR-021
+  title: Aktive revisjoner lagres i separate head-tabeller og alle parent-scope-relasjoner har DB-constraints
+  evidence_package: 0B + Milepæl 1
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Gjør umulige kombinasjoner fysisk ugyldige
+  consequence: Flere composite keys og migrasjonstester
+- id: ADR-022
+  title: Hashes bærer evidensnivå; metadatarevalidert cache er ikke nåværende innholdsbevis
+  evidence_package: 0A.3 + Milepæl 3
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Hindrer falsk `SKIP_IDENTICAL`
+  consequence: Mer hashing i sikker modus
+- id: ADR-023
+  title: Kilden bindes med `SourceReadGuard` eller post-transfer current hash
+  evidence_package: 0A.3
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Lukker source-TOCTOU så langt endepunktet tillater
+  consequence: Aktive handles og eksplisitt fallbackpolicy
+- id: ADR-024
+  title: Kontrollområdet bruker korte objektstier med manifester
+  evidence_package: 0A.3
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Unngår path-length-feil i staging/versions/quarantine
+  consequence: Restore og browsing går gjennom objektkatalog
+- id: ADR-025
+  title: Live claims bruker monoton klokke; persistent UTC er diagnostikk
+  evidence_package: 0B + Milepæl 1
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Tåler klokkejustering og restart uten falsk takeover
+  consequence: Startup må avstemme owner instance
+- id: ADR-026
+  title: Eksakte kontrakter ligger i SQL/JSON Schema/YAML og valideres i CI
+  evidence_package: 0B
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Reduserer drift mellom plan, kode og tester
+  consequence: Krever codegen/contract checks
+- id: ADR-027
+  title: Windows-argumentserialisering og sikker systemprogram-resolusjon
+  evidence_package: 0A.5
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Unngår PATH-hijacking, quotingfeil og avvik mellom Python-argumenter og Windows-parsing
+  consequence: Én kanonisk argumentbygger og Windows round-trip-tester kreves
+- id: ADR-028
+  title: Reproduserbar Python/PySide6-pakkestrategi for Windows
+  evidence_package: 0A.5
+  evidence_status: PROPOSED
+  owner_decision: PENDING
+  owner_decision_date: null
+  supersedes: []
+  codex_recommendation: null
+  rationale: Gir en reproducerbar, offline-brukbar Windows-build med kontrollert Python/Qt-kompatibilitet
+  consequence: Toolchain låses etter 0A.5 og smoke-testes på ren Windows-VM

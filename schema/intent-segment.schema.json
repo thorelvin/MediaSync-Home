@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mediasync-home:draft:intent-segment:1",
+  "title": "MediaSync Home intent segment line contracts (draft)",
+  "$comment": "The physical format is a header/manifest plus canonical JSONL operation rows. This schema defines both record kinds.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/header"
+    },
+    {
+      "$ref": "#/$defs/operation"
+    }
+  ],
+  "$defs": {
+    "header": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_type",
+        "schema_version",
+        "segment_id",
+        "run_id",
+        "endpoint_id",
+        "endpoint_revision_id",
+        "owner_installation_id",
+        "ownership_epoch",
+        "lease_id",
+        "local_fencing_token",
+        "sequence_no",
+        "operation_count",
+        "payload_bytes",
+        "segment_hash",
+        "plan_checksum"
+      ],
+      "properties": {
+        "record_type": {
+          "const": "SEGMENT_HEADER"
+        },
+        "schema_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "segment_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "endpoint_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "endpoint_revision_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "owner_installation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "ownership_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lease_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "local_fencing_token": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sequence_no": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "operation_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "payload_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777216
+        },
+        "previous_segment_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "segment_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "plan_checksum": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_type",
+        "operation_id",
+        "operation_type",
+        "source_relative_path",
+        "target_relative_path",
+        "target_precondition_kind",
+        "expected_target_fingerprint",
+        "managed_object_id"
+      ],
+      "properties": {
+        "record_type": {
+          "const": "OPERATION_INTENT"
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "operation_type": {
+          "type": "string"
+        },
+        "source_relative_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target_relative_path": {
+          "type": "string"
+        },
+        "target_precondition_kind": {
+          "type": "string",
+          "enum": [
+            "ABSENT",
+            "MATCH_FINGERPRINT",
+            "DIRECTORY_EMPTY"
+          ]
+        },
+        "expected_target_fingerprint": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "source_precondition_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "managed_object_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "manifest_checksum": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

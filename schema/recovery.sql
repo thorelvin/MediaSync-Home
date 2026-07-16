@@ -1,0 +1,5 @@
+-- MediaSync Home recovery schema
+-- STATUS: BLOCKED PLACEHOLDER — NOT AUTHORITATIVE, NOT FOR PRODUCT USE.
+-- If the accepted ADR selects one database, this file may be superseded.
+-- If two databases remain, Milestone 1 must define append-only recovery events,
+-- handoffs, owner/epoch/token fields, monotonic claim ownership and constraints.

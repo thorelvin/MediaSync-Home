@@ -1,0 +1,19 @@
+{
+  "control_schema_version": 1,
+  "endpoint_id": "11111111-1111-4111-8111-111111111111",
+  "control_area_id": "22222222-2222-4222-8222-222222222222",
+  "owner_installation_id": "33333333-3333-4333-8333-333333333333",
+  "ownership_epoch": 1,
+  "ownership_mode": "EXCLUSIVE_WRITER",
+  "expected_volume_id": null,
+  "expected_share": "\\\\\\\\nas\\\\backup",
+  "root_identity_hash_algorithm": "BLAKE3-256",
+  "root_identity_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "latest_ownership_record": "ownership/epoch-00000001.json",
+  "created_utc": "2026-07-15T00:00:00Z",
+  "updated_utc": "2026-07-15T00:00:00Z",
+  "canonicalization_algorithm": "JCS-RFC8785",
+  "marker_checksum_algorithm": "BLAKE3-256",
+  "marker_checksum": "1111111111111111111111111111111111111111111111111111111111111111",
+  "application": "MediaSync Home"
+}

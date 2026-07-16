@@ -1,0 +1,99 @@
+schema_version: 1
+status: draft
+machines:
+  operation_commit:
+    initial: PLANNED
+    terminal:
+    - CLEANED
+    - SKIPPED
+    - CONFLICT
+    - DEFERRED
+    - FAILED_RETRYABLE
+    - FAILED_BLOCKED
+    - CANCELLED
+    - ROLLBACK_REQUIRED
+    - USER_DECISION_REQUIRED
+    linear_success_path:
+    - PLANNED
+    - SOURCE_VALIDATED
+    - SOURCE_STABILITY_BOUND
+    - TARGET_PRECONDITION_VALIDATED
+    - STAGING_ALLOCATED
+    - TRANSFERRED
+    - STAGING_DURABLE
+    - STAGING_VERIFIED
+    - COMMIT_INTENT_RECORDED
+    - COMMIT_PRECONDITIONS_REVALIDATED
+    - FILESYSTEM_APPLIED
+    - FINAL_DURABLE
+    - FINAL_VERIFIED
+    - CATALOG_RECORDED
+    - CLEANED
+    optional_states:
+    - OLD_TARGET_PRESERVED
+  cross_store_handoff:
+    initial: PREPARED
+    linear_success_path:
+    - PREPARED
+    - PEER_COMMITTED
+    - SOURCE_CONFIRMED
+    - COMPLETED
+  endpoint_ownership:
+    states:
+    - UNREGISTERED
+    - OWNED_BY_THIS_INSTALLATION
+    - OWNED_BY_OTHER_INSTALLATION
+    - OWNERSHIP_RECOVERY_REQUIRED
+    - MARKER_CORRUPT
+    takeover_requires:
+    - global_mutation_lock
+    - no_active_foreign_mutation
+    - explicit_user_confirmation
+    - ownership_epoch_increment
+    - new_endpoint_revision
+    - full_reanalysis
+  directory_create:
+    linear_success_path:
+    - ABSENT
+    - CREATE_INTENT_RECORDED
+    - DIRECTORY_CREATED
+    - IDENTITY_VERIFIED
+    - CATALOG_RECORDED
+    conflict: DIRECTORY_TYPE_CONFLICT
+  command_receipt:
+    initial: RECEIVED
+    states:
+    - RECEIVED
+    - VALIDATED
+    - EFFECT_PREPARED
+    - ACCEPTED
+    - RUNNING
+    - SUCCEEDED
+    - REJECTED
+    - FAILED
+    - CANCELLED
+    terminal:
+    - SUCCEEDED
+    - REJECTED
+    - FAILED
+    - CANCELLED
+    transitions:
+      RECEIVED:
+      - VALIDATED
+      - REJECTED
+      VALIDATED:
+      - EFFECT_PREPARED
+      - REJECTED
+      EFFECT_PREPARED:
+      - ACCEPTED
+      - FAILED
+      ACCEPTED:
+      - RUNNING
+      - SUCCEEDED
+      - FAILED
+      - CANCELLED
+      RUNNING:
+      - SUCCEEDED
+      - FAILED
+      - CANCELLED
+    monotonic: true

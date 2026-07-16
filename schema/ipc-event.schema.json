@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mediasync-home:draft:ipc-event:1",
+  "title": "MediaSync Home IPC event envelope (draft)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "schema_version",
+    "message_type",
+    "event_id",
+    "sequence_no",
+    "event_type",
+    "emitted_utc",
+    "payload"
+  ],
+  "properties": {
+    "protocol_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "message_type": {
+      "const": "EVENT"
+    },
+    "event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sequence_no": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "event_type": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{1,127}$"
+    },
+    "emitted_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "correlation_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}
