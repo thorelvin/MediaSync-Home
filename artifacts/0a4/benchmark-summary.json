@@ -1,0 +1,177 @@
+{
+  "backup_sets": {
+    "one_db": {
+      "member_count": 1,
+      "members": [
+        "state"
+      ]
+    },
+    "two_db": {
+      "member_count": 2,
+      "members": [
+        "catalog",
+        "recovery"
+      ]
+    }
+  },
+  "complexity": {
+    "one_db": {
+      "authoritative_db_files": 1,
+      "backup_members": 1,
+      "crash_states_before_readiness": [
+        "rolled_back",
+        "ready"
+      ],
+      "required_handoff_tables": 0,
+      "runstart_write_transactions": 1
+    },
+    "two_db": {
+      "authoritative_db_files": 2,
+      "backup_members": 2,
+      "crash_states_before_readiness": [
+        "PREPARED",
+        "PEER_COMMITTED",
+        "SOURCE_CONFIRMED",
+        "COMPLETED"
+      ],
+      "required_handoff_tables": 2,
+      "runstart_write_transactions": 3
+    }
+  },
+  "created_utc": "2026-07-16T20:24:56Z",
+  "elapsed_seconds": 70.869,
+  "one_db": {
+    "catalog": {
+      "batch_size": 10000,
+      "db_bytes": 333172736,
+      "insert_seconds": 35.107,
+      "page_count": 81341,
+      "page_size": 4096,
+      "peak_rss_bytes": 104202240,
+      "queries": {
+        "coverage_count": {
+          "max_ms": 0.107,
+          "p50_ms": 0.052,
+          "p95_ms": 0.059,
+          "plan": [
+            "(3, 0, 0, 'SEARCH file_entries USING COVERING INDEX idx_file_entries_coverage (snapshot_id=? AND coverage_state=?)')"
+          ]
+        },
+        "hash_lookup": {
+          "max_ms": 0.024,
+          "p50_ms": 0.007,
+          "p95_ms": 0.009,
+          "plan": [
+            "(3, 0, 0, 'SEARCH file_entries USING COVERING INDEX idx_file_entries_hash_size (size_bytes=? AND content_hash=?)')"
+          ]
+        },
+        "parent_page": {
+          "max_ms": 0.33,
+          "p50_ms": 0.09,
+          "p95_ms": 0.101,
+          "plan": [
+            "(5, 0, 0, 'SEARCH file_entries USING INDEX idx_file_entries_parent_page (snapshot_id=? AND parent_id=?)')"
+          ]
+        }
+      },
+      "rows_inserted": 1000000,
+      "rows_per_second": 28484.1,
+      "wal_bytes_after_checkpoint": 0,
+      "wal_bytes_before_checkpoint": 48257592
+    },
+    "db_file_count": 1,
+    "member_sizes": {
+      "state": {
+        "db_bytes": 333422592,
+        "shm_bytes": 0,
+        "wal_bytes": 0
+      }
+    },
+    "mode": "one_db",
+    "recovery": {
+      "db_bytes": 333422592,
+      "events": 1000,
+      "insert_seconds": 0.016,
+      "page_count": 81402,
+      "wal_bytes_before_checkpoint": 280192
+    },
+    "total_db_bytes": 333422592
+  },
+  "python": {
+    "sqlite_version": "3.37.2",
+    "version": "3.10.6"
+  },
+  "recommendation": {
+    "adr_003": "RECOMMEND_TWO_DATABASES_WITH_EXPLICIT_HANDOFFS",
+    "reason": "The two-db candidate costs more recovery states and paired backup handling, but preserves a small FULL-synchronous recovery store when catalog bulk growth hits SQLITE_FULL."
+  },
+  "rows_requested": 1000000,
+  "sqlite_full_probe": {
+    "catalog_fill_rows_before_stop": 30,
+    "classification": "SQLITE_FULL",
+    "committed_recovery_proof_preserved": true,
+    "policy": "stop_new_analysis_and_keep_recovery_writers_authoritative"
+  },
+  "two_db": {
+    "catalog": {
+      "batch_size": 10000,
+      "db_bytes": 333139968,
+      "insert_seconds": 35.466,
+      "page_count": 81333,
+      "page_size": 4096,
+      "peak_rss_bytes": 105373696,
+      "queries": {
+        "coverage_count": {
+          "max_ms": 0.137,
+          "p50_ms": 0.08,
+          "p95_ms": 0.087,
+          "plan": [
+            "(3, 0, 0, 'SEARCH file_entries USING COVERING INDEX idx_file_entries_coverage (snapshot_id=? AND coverage_state=?)')"
+          ]
+        },
+        "hash_lookup": {
+          "max_ms": 0.029,
+          "p50_ms": 0.008,
+          "p95_ms": 0.027,
+          "plan": [
+            "(3, 0, 0, 'SEARCH file_entries USING COVERING INDEX idx_file_entries_hash_size (size_bytes=? AND content_hash=?)')"
+          ]
+        },
+        "parent_page": {
+          "max_ms": 0.246,
+          "p50_ms": 0.108,
+          "p95_ms": 0.171,
+          "plan": [
+            "(5, 0, 0, 'SEARCH file_entries USING INDEX idx_file_entries_parent_page (snapshot_id=? AND parent_id=?)')"
+          ]
+        }
+      },
+      "rows_inserted": 1000000,
+      "rows_per_second": 28196.3,
+      "wal_bytes_after_checkpoint": 0,
+      "wal_bytes_before_checkpoint": 48257592
+    },
+    "db_file_count": 2,
+    "member_sizes": {
+      "catalog": {
+        "db_bytes": 333139968,
+        "shm_bytes": 0,
+        "wal_bytes": 0
+      },
+      "recovery": {
+        "db_bytes": 286720,
+        "shm_bytes": 0,
+        "wal_bytes": 0
+      }
+    },
+    "mode": "two_db",
+    "recovery": {
+      "db_bytes": 286720,
+      "events": 1000,
+      "insert_seconds": 0.037,
+      "page_count": 70,
+      "wal_bytes_before_checkpoint": 280192
+    },
+    "total_db_bytes": 333426688
+  }
+}

@@ -1,0 +1,11 @@
+test_backup_restore_verification_rejects_mixed_two_db_epochs (test_sqlite_capacity.SQLiteCapacitySpikeTests) ... ok
+test_one_db_runstart_is_atomic_at_readiness_boundary (test_sqlite_capacity.SQLiteCapacitySpikeTests) ... ok
+test_read_pool_query_only_rejects_writes (test_sqlite_capacity.SQLiteCapacitySpikeTests) ... ok
+test_small_benchmark_uses_indexes_and_records_backup_complexity (test_sqlite_capacity.SQLiteCapacitySpikeTests) ... ok
+test_sqlite_full_probe_preserves_committed_recovery_proof (test_sqlite_capacity.SQLiteCapacitySpikeTests) ... ok
+test_two_db_handoff_recovers_each_crash_window (test_sqlite_capacity.SQLiteCapacitySpikeTests) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.467s
+
+OK

@@ -8,7 +8,7 @@
 | 0A.1 — Prosess og IPC | blocked | `spike/0a1-process-and-ipc` | `spikes/0a1_process_ipc/`, `tests/spikes/0a1_process_ipc/`, `artifacts/0a1/unittest-output.txt` | Lokal IPC/Job Object-fixture består; ekte wrong-SID/remote og non-interactive Task Scheduler-kontekst mangler |
 | 0A.2 — Endpoint-eierskap | not_started | | | To-klient SMB-lab mangler for global writer-bevis |
 | 0A.3 — Recovery og stier | passed | `spike/0a3-recovery-and-paths` | `spikes/0a3_recovery_paths/`, `tests/spikes/0a3_recovery_paths/`, `artifacts/0a3/` | Lokal NTFS/path/recovery bestått; SMB SourceReadGuard ikke kjørt uten SMB-lab |
-| 0A.4 — SQLite og kapasitet | not_started | | | Avventer eierstart; lokal benchmarkfixture må opprettes i arbeidspakken |
+| 0A.4 — SQLite og kapasitet | passed | `spike/0a4-sqlite-capacity` | `spikes/0a4_sqlite_capacity/`, `tests/spikes/0a4_sqlite_capacity/`, `artifacts/0a4/` | Lokal 1M SQLite-/kapasitetsmåling bestått; ADR-003 anbefales, men eiergodkjenning gjenstår |
 | 0A.5 — Windows argv/pakking | not_started | | | Pakkeverktøy og ren Windows-VM mangler |
 | 0A.6 — Beslutningsreview | blocked | | | Avventer 0A.1–0A.5-bevis |
 
@@ -62,8 +62,8 @@ Tillatte klassifiseringer: `RUNNABLE_NOW`, `RUNNABLE_WITH_LOCAL_FIXTURE`, `REQUI
 | Short managed-object path | 0A.3 | Marker-validert lokal NTFS-labrot | `python -m unittest discover -s tests\spikes\0a3_recovery_paths -v` | `PASS` | `artifacts/0a3/unittest-output.txt`, `artifacts/0a3/demo-summary.json` | ADR-024 |
 | Replace/fallback crashpunkter | 0A.3 | Marker-validert lokal NTFS-labrot | `python -m unittest discover -s tests\spikes\0a3_recovery_paths -v` | `PASS` | `artifacts/0a3/unittest-output.txt`, `artifacts/0a3/demo-summary.json` | ADR-004, ADR-007, ADR-011 |
 | SourceReadGuard/fallback | 0A.3 | Lokal NTFS pass; SMB-lab ikke tilgjengelig | `python -m unittest discover -s tests\spikes\0a3_recovery_paths -v` | `PASS` | Lokal guard returnerte `DENY_WRITE_AND_DELETE`; bruk fallback for uprovede SMB-endepunkter | ADR-010, ADR-022, ADR-023 |
-| Én kontra to databaser | 0A.4 | `RUNNABLE_WITH_LOCAL_FIXTURE` | Ikke kjørt i 0A.0 | `INCONCLUSIVE` | Se kjørbarhetsmatrise | ADR-003, ADR-018 |
-| 1M state/kapasitetsmåling | 0A.4 | `RUNNABLE_WITH_LOCAL_FIXTURE` | Ikke kjørt i 0A.0 | `INCONCLUSIVE` | Se kjørbarhetsmatrise | ADR-003, ADR-018 |
+| Én kontra to databaser | 0A.4 | Lokal SQLite-fixture i temp | `python -m unittest discover -s tests\spikes\0a4_sqlite_capacity -v` | `PASS` | `artifacts/0a4/unittest-output.txt`, `artifacts/0a4/benchmark-summary.json` | ADR-003, ADR-011, ADR-018 |
+| 1M state/kapasitetsmåling | 0A.4 | Lokal SQLite-fixture i temp | `python spikes\0a4_sqlite_capacity\sqlite_capacity.py benchmark --rows 1000000 --query-repetitions 30 --output artifacts\0a4\benchmark-summary.json` | `PASS` | 1M rader per kandidat; peak RSS ca. 100 MiB; indeksert parent-page P95 < 1 ms | ADR-003, ADR-018 |
 | GetSystemDirectoryW/argv | 0A.5 | `RUNNABLE_NOW` | Ikke kjørt i 0A.0 | `INCONCLUSIVE` | Se kjørbarhetsmatrise | ADR-027 |
 | Ren Windows-pakkebygg | 0A.5 | `BLOCKED_BY_ENVIRONMENT` | Ikke kjørt i 0A.0 | `BLOCKED` | Mangler pakkeverktøy/ren VM | ADR-028 |
 
@@ -110,6 +110,24 @@ Baseline ble kontrollert med streng hashverifisering før Git-initialisering og 
 | Katalogoperasjon med typekonflikt | `PASS` | Eksisterende fil på katalogsti gir `TARGET_TYPE_CONFLICT`, ikke idempotent suksess |
 | Lokal NTFS `SourceReadGuard` | `PASS` | Probe åpner read handle uten write/delete-share; samtidig write forsøkes blokkert |
 | SMB `SourceReadGuard` | `BLOCKED_BY_ENVIRONMENT` | Ingen SMB-lab tilgjengelig i denne økten; fallbackpolicy for uprovet endpoint er `POST_TRANSFER_HASH_ONLY` |
+
+0A.4 ble kjørt som en lokal SQLite-spike under `spikes/0a4_sqlite_capacity/` og `tests/spikes/0a4_sqlite_capacity/`. Harnesset oppretter bare kandidatdatabaser i temp, ikke endelig produktskjema, og endrer ikke `schema/catalog.sql` eller `schema/recovery.sql`.
+
+### 0A.4 lokal evidens
+
+| Eksperiment | Resultat | Bevis |
+|---|---|---|
+| Minimal én-databasekandidat | `PASS` | Runstart binder receipt, run og recoverybinding i én FULL-transaksjon; crash før commit etterlater ingen partial readiness |
+| Minimal to-databasekandidat | `PASS` | Durable handoff går `PREPARED` → `PEER_COMMITTED` → `SOURCE_CONFIRMED` → `COMPLETED` uten samtidig write-transaksjon i begge databaser |
+| Crashvinduer i databasehandoff | `PASS` | Tester krasjer etter catalog prepared, recovery peer committed og catalog source confirmed; startup-reconciler fullfører idempotent |
+| Backup-/restore-epoch | `PASS` | Én-db backup har 1 medlem; to-db backup har `catalog` + `recovery`; blandede catalog/recovery-epoker avvises før restore |
+| 1M bulkinnlasting | `PASS` | Én-db: 1,000,000 rader på 35.107 s; to-db catalog: 1,000,000 rader på 35.466 s |
+| Database- og WAL-størrelse | `PASS` | Én-db total 333,422,592 bytes; to-db total 333,426,688 bytes, hvor `recovery.sqlite` er 286,720 bytes; WAL før checkpoint 48,257,592 bytes og 0 etter checkpoint |
+| Representative query plans/P95 | `PASS` | Alle varme queries bruker indekser; parent-page P95 0.101 ms én-db og 0.171 ms to-db; hash lookup P95 ≤ 0.027 ms; coverage count P95 ≤ 0.087 ms |
+| Peak RSS ved 1M | `PASS` | Målt working set peak 104,202,240 bytes én-db og 105,373,696 bytes to-db, under 400 MiB-gaten |
+| Lokal AppData-/`SQLITE_FULL`-oppførsel | `PASS` | Kontrollert liten catalog treffer `SQLITE_FULL`; committet recoverybevis i separat recovery-store bevares |
+| Kode-/testkompleksitet | `PASS` | Én-db trenger 1 runstart-write og 1 backupmedlem; to-db trenger 3 runstart-writes, 2 handofftabeller, 2 backupmedlemmer og flere recoverytilstander |
+| Codex-anbefaling for ADR-003 | `RECOMMENDED` | Anbefal to lokale SQLite-databaser med eksplisitte handoffs: mer kompleksitet, men bedre isolasjon av liten FULL-synkron recovery-state fra stor rekonstruerbar catalogvekst |
 
 ### Kommandojournal
 
@@ -174,6 +192,19 @@ python -m unittest discover -s tests\spikes\0a1_process_ipc -v
 python -m unittest discover -s tests\spikes\0a3_recovery_paths -v
 python -m pytest tests\spikes -q
 python -m ruff check .
+
+git switch -c spike/0a4-sqlite-capacity
+python -m py_compile spikes\0a4_sqlite_capacity\sqlite_capacity.py tests\spikes\0a4_sqlite_capacity\test_sqlite_capacity.py
+python -m unittest discover -s tests\spikes\0a4_sqlite_capacity -v
+python -m ruff check spikes\0a4_sqlite_capacity tests\spikes\0a4_sqlite_capacity
+python spikes\0a4_sqlite_capacity\sqlite_capacity.py benchmark --rows 1000000 --query-repetitions 30 --output artifacts\0a4\benchmark-summary.json
+cmd.exe /c "python -m unittest discover -s tests\spikes\0a4_sqlite_capacity -v > artifacts\0a4\unittest-output.txt 2>&1"
+python -m pytest tests\spikes -q
+python -m ruff check .
+git diff --check
+& "C:\claude\witchery\tmp\mediasync-handoff-venv\Scripts\python.exe" tools\validate_handoff.py
+python tools\build_adr_docs.py --check
+python tools\build_master.py --check
 ```
 
 Notater:
@@ -184,12 +215,26 @@ Notater:
 - `python -m pytest tests\spikes\0a1_process_ipc -q` besto med `5 passed`.
 - `python -m ruff check .` besto.
 - `python -m mypy --version` og `python -m importlinter --version` feilet fordi modulene ikke er installert i aktiv Python. De er ikke registrert som bestått.
-- `python -m pytest tests\spikes -q` besto senere med `17 passed`.
+- `python -m pytest tests\spikes -q` besto med `23 passed` etter 0A.4.
 - `python -m unittest discover -s tests\spikes` fant ingen tester på grunn av nested discover-layout; de reproduserbare unittest-kommandoene er per spikekatalog.
 
 ## Målinger
 
-Ingen ytelses- eller kapasitetsmålinger ble kjørt i 0A.0. Diskplass og verktøyversjoner er registrert som preflightdata. Median/P95, SQLite-størrelse, peak RSS, WAL-atferd og krasjpunkter skal først måles i de relevante 0A.3/0A.4-arbeidspakkene.
+0A.0 kjørte ingen ytelses- eller kapasitetsmålinger. 0A.4 la til første lokale SQLite-måling med 1,000,000 syntetiske file entries per kandidat:
+
+| Metrikk | Én database | To databaser |
+|---|---:|---:|
+| Bulk insert | 35.107 s / 28,484 rows/s | 35.466 s / 28,196 rows/s |
+| Total DB-størrelse etter recovery seed | 333,422,592 bytes | 333,426,688 bytes |
+| Recovery store-størrelse | Inkludert i `state.sqlite` | 286,720 bytes |
+| WAL før checkpoint | 48,257,592 bytes | 48,257,592 bytes |
+| WAL etter checkpoint | 0 bytes | 0 bytes |
+| Parent-page query P95 | 0.101 ms | 0.171 ms |
+| Hash lookup P95 | 0.009 ms | 0.027 ms |
+| Coverage count P95 | 0.059 ms | 0.087 ms |
+| Peak RSS | 104,202,240 bytes | 105,373,696 bytes |
+
+Tallene er lokale spike-målinger på syntetiske metadata, ikke en produksjons-SLA. De viser at begge kandidater håndterer 1M rader godt lokalt, mens to-databasekandidaten kjøper recovery-isolasjon med flere eksplisitte handoff-/backup-tilstander.
 
 ## Sikkerhetsavvik og blockers
 
@@ -204,16 +249,15 @@ Ingen ytelses- eller kapasitetsmålinger ble kjørt i 0A.0. Diskplass og verktø
 
 ## Beslutninger
 
-Ingen ADR-er ble endret i 0A.0, 0A.1 eller 0A.3. ADR-001, ADR-002 og ADR-013 bør forbli `PROPOSED` til de blokkerte identitets-/Task Scheduler-radene er bevist eller eier eksplisitt godkjenner en scope-reduksjon. ADR-004, ADR-007, ADR-010, ADR-011, ADR-012, ADR-015, ADR-022, ADR-023 og ADR-024 har lokal 0A.3-evidens, men bør forbli `PROPOSED` til eier vurderer om SMB-guard-mangelen og senere 0A.4/0B-avhengigheter krever mer bevis. Alle `owner_decision`-felt forblir eierstyrt.
+ADR-003 er satt til `RECOMMENDED` med Codex-anbefaling om to lokale SQLite-databaser og eksplisitte handoffs. ADR-011 og ADR-018 er satt til `EVIDENCE_COMPLETE` etter 0A.3/0A.4-bevis. Alle `owner_decision`-felt forblir `PENDING`; bare eier kan akseptere, avvise eller godkjenne scope-reduksjon. ADR-001, ADR-002 og ADR-013 bør forbli `PROPOSED` til de blokkerte identitets-/Task Scheduler-radene er bevist eller eier eksplisitt godkjenner en scope-reduksjon.
 
 ## Anbefalt rekkefølge
 
 1. Fullfør de blokkerte 0A.1-identitetsradene med dedikert Task Scheduler-session og feil-SID/remote klient, eller få eksplisitt eiergodkjent scope-reduksjon.
-2. Kjør `0A.4 — SQLite og kapasitet`, som er lokalt kjørbar og gir beslutningsgrunnlag for ADR-003/ADR-018.
-3. Forbered dedikert to-klient SMB-lab før `0A.2` skal bestå cross-machine writer ownership og før SMB SourceReadGuard kan oppgraderes fra fallback.
-4. Forbered PySide6/BLAKE3/Nuitka/Windows SDK og en ren Windows-VM før `0A.5` skal bestå pakkebevis.
-5. Kjør `0A.6` først etter at 0A.1–0A.5 enten har bestått eller fått eksplisitt eiergodkjent scope-reduksjon.
+2. Forbered dedikert to-klient SMB-lab før `0A.2` skal bestå cross-machine writer ownership og før SMB SourceReadGuard kan oppgraderes fra fallback.
+3. Forbered PySide6/BLAKE3/Nuitka/Windows SDK og en ren Windows-VM før `0A.5` skal bestå pakkebevis; argv/systemsti-delen er lokalt kjørbar.
+4. Kjør `0A.6` først etter at 0A.1–0A.5 enten har bestått eller fått eksplisitt eiergodkjent scope-reduksjon.
 
 ## Bevisst ikke implementert
 
-0A.0, 0A.1 og 0A.3 opprettet ikke produktkode under `src/`, endelig produktdatabase, migrasjon, GUI, syncmotor, Robocopy-adapter, Task Scheduler-oppgave eller SMB-lock. 0A.1 opprettet bare spikehost, spikeklient, instrumentert childprosess og midlertidige receipt-/markerfiler under testens tempområde. 0A.3 opprettet bare marker-validerte lokale labrøtter under temp og muterte filer inne i disse røttene. Ingen reelle brukerdata, produksjons-NAS, Bilder-/Dokumenter-/Skrivebord-stier eller diskrot ble brukt som testgrunnlag.
+0A.0, 0A.1, 0A.3 og 0A.4 opprettet ikke produktkode under `src/`, endelig produktdatabase, migrasjon, GUI, syncmotor, Robocopy-adapter, Task Scheduler-oppgave eller SMB-lock. 0A.1 opprettet bare spikehost, spikeklient, instrumentert childprosess og midlertidige receipt-/markerfiler under testens tempområde. 0A.3 opprettet bare marker-validerte lokale labrøtter under temp og muterte filer inne i disse røttene. 0A.4 opprettet bare syntetiske SQLite-kandidatdatabaser i temp og lagret kompakte JSON-/testartefakter. Ingen reelle brukerdata, produksjons-NAS, Bilder-/Dokumenter-/Skrivebord-stier eller diskrot ble brukt som testgrunnlag.

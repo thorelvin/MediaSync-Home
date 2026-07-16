@@ -35,11 +35,11 @@ adrs:
 - id: ADR-003
   title: Én eller to lokale SQLite-databaser fryses etter Milepæl 0A
   evidence_package: 0A.4
-  evidence_status: PROPOSED
+  evidence_status: RECOMMENDED
   owner_decision: PENDING
   owner_decision_date: null
   supersedes: []
-  codex_recommendation: null
+  codex_recommendation: Behold to lokale SQLite-databaser med eksplisitte handoffs; kostnaden er flere recoverytilstander, men recovery.sqlite forblir liten og skrivbar når katalogvekst treffer SQLITE_FULL.
   rationale: Målt avveining mellom enkel atomisitet og isolasjon av bulk/read model fra varig recovery
   consequence: Ved to databaser kreves eksplisitt handoff/backup-epoch; ved én database kreves differensiert durability og samme recoveryinvarianter
 - id: ADR-004
@@ -115,11 +115,11 @@ adrs:
 - id: ADR-011
   title: Catalog/recovery/filsystem koordineres som saga med durable handoffs
   evidence_package: 0A.3 + 0A.4
-  evidence_status: PROPOSED
+  evidence_status: EVIDENCE_COMPLETE
   owner_decision: PENDING
   owner_decision_date: null
   supersedes: []
-  codex_recommendation: null
+  codex_recommendation: Lokal 0A.3 og 0A.4 viser restartbare filsystem- og databasehandoffs uten skjult cross-store-atomisitet.
   rationale: Ingen falsk cross-store-atomisitet; restartbar avstemming
   consequence: Flere eksplisitte mellomtilstander
 - id: ADR-012
@@ -185,11 +185,11 @@ adrs:
 - id: ADR-018
   title: Catalog/recovery backup og restore bruker ett manifestert epoch-sett
   evidence_package: 0A.4
-  evidence_status: PROPOSED
+  evidence_status: EVIDENCE_COMPLETE
   owner_decision: PENDING
   owner_decision_date: null
   supersedes: []
-  codex_recommendation: null
+  codex_recommendation: 0A.4 verifiserer manifestert backup-sett og avviser blandede catalog/recovery-epoker.
   rationale: Hindrer blandet intern sannhet etter crash/restore
   consequence: Quiesce, high-water barrier og parvis swap kreves
 - id: ADR-019
