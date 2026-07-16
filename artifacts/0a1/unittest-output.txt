@@ -1,0 +1,10 @@
+test_handshake_uses_os_sid_and_ignores_claimed_sid (test_win32_ipc_job.Win32IpcJobSpikeTests) ... ok
+test_idempotent_command_receipt_survives_host_restart (test_win32_ipc_job.Win32IpcJobSpikeTests) ... ok
+test_protocol_mismatch_is_rejected_without_command_receipt (test_win32_ipc_job.Win32IpcJobSpikeTests) ... ok
+test_same_idempotency_key_with_different_payload_conflicts (test_win32_ipc_job.Win32IpcJobSpikeTests) ... ok
+test_suspended_child_is_contained_before_resume_and_killed_on_job_close (test_win32_ipc_job.Win32IpcJobSpikeTests) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.781s
+
+OK

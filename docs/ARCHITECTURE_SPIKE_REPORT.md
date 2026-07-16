@@ -5,7 +5,7 @@
 | Arbeidspakke | Status | Branch/commit | Rapport-/artefaktsti | Blocker |
 |---|---|---|---|---|
 | 0A.0 — Miljøpreflight | passed | `spike/0a0-environment-preflight` / baseline `d3282ef` | `docs/ARCHITECTURE_SPIKE_REPORT.md` | Ingen 0A.0-blocker |
-| 0A.1 — Prosess og IPC | not_started | | | Avventer eierstart; lokal fixture er mulig |
+| 0A.1 — Prosess og IPC | blocked | `spike/0a1-process-and-ipc` | `spikes/0a1_process_ipc/`, `tests/spikes/0a1_process_ipc/`, `artifacts/0a1/unittest-output.txt` | Lokal IPC/Job Object-fixture består; ekte wrong-SID/remote og non-interactive Task Scheduler-kontekst mangler |
 | 0A.2 — Endpoint-eierskap | not_started | | | To-klient SMB-lab mangler for global writer-bevis |
 | 0A.3 — Recovery og stier | not_started | | | Avventer eierstart; lokal labrot må opprettes i arbeidspakken |
 | 0A.4 — SQLite og kapasitet | not_started | | | Avventer eierstart; lokal benchmarkfixture må opprettes i arbeidspakken |
@@ -55,8 +55,8 @@ Tillatte klassifiseringer: `RUNNABLE_NOW`, `RUNNABLE_WITH_LOCAL_FIXTURE`, `REQUI
 
 | Bevis | Arbeidspakke | Miljø | Kommando/test | Resultat | Artefakt/logg | ADR |
 |---|---|---|---|---|---|---|
-| Engine Host discovery/IPC | 0A.1 | `RUNNABLE_WITH_LOCAL_FIXTURE` | Ikke kjørt i 0A.0 | `INCONCLUSIVE` | Se kjørbarhetsmatrise | ADR-001, ADR-002 |
-| Suspended child → Job Object → resume | 0A.1 | `RUNNABLE_WITH_LOCAL_FIXTURE` | Ikke kjørt i 0A.0 | `INCONCLUSIVE` | Se kjørbarhetsmatrise | ADR-013 |
+| Engine Host discovery/IPC | 0A.1 | Lokal Windows-fixture | `python -m unittest discover -s tests\spikes\0a1_process_ipc -v` | `PASS` | `artifacts/0a1/unittest-output.txt` | ADR-001, ADR-002 |
+| Suspended child → Job Object → resume | 0A.1 | Lokal Windows-fixture | `python -m unittest discover -s tests\spikes\0a1_process_ipc -v` | `PASS` | `artifacts/0a1/unittest-output.txt` | ADR-013 |
 | To-klient SMB writer ownership | 0A.2 | `REQUIRES_USER_LAB_ACTION` | Ikke kjørt i 0A.0 | `BLOCKED` | Mangler to-klient SMB-lab | ADR-006, ADR-016, ADR-019 |
 | `.mediasync`-klassifisering | 0A.2 | `RUNNABLE_WITH_LOCAL_FIXTURE` | Ikke kjørt i 0A.0 | `INCONCLUSIVE` | Se kjørbarhetsmatrise | ADR-020 |
 | Short managed-object path | 0A.3 | `RUNNABLE_WITH_LOCAL_FIXTURE` | Ikke kjørt i 0A.0 | `INCONCLUSIVE` | Se kjørbarhetsmatrise | ADR-024 |
@@ -74,6 +74,24 @@ Resultatverdier: `PASS`, `FAIL`, `BLOCKED`, `INCONCLUSIVE`.
 0A.0 ble kjørt som en ikke-muterende preflight. Ingen Task Scheduler-oppgave, SMB-lock, `.mediasync`-labrot, SQLite-produktdatabase, Engine Host, GUI, syncmotor eller produksjonsadapter ble opprettet.
 
 Baseline ble kontrollert med streng hashverifisering før Git-initialisering og før første dokumentendring. Prosjektet ble deretter flyttet til `C:\claude\mediasynch` etter brukeravklaring om plassering.
+
+0A.1 ble kjørt som en spike-fixture under `spikes/0a1_process_ipc/` og `tests/spikes/0a1_process_ipc/`. Den oppretter bare lokale, midlertidige named pipes, childprosesser og testkvitteringsfiler. Den oppretter ingen produktdatabase, syncmotor, GUI, Robocopy-prosess, Task Scheduler-oppgave eller filsystemfixture med brukerdata.
+
+### 0A.1 lokal evidens
+
+| Eksperiment | Resultat | Bevis |
+|---|---|---|
+| Minimal Engine Host-readiness over lokal named pipe | `PASS` | Testhost publiserer readinessfil og aksepterer same-SID handshake |
+| Local-only pipe med DACL for aktuell SID + `LOCAL_SYSTEM` og `PIPE_REJECT_REMOTE_CLIENTS` | `PASS` for konfigurasjon og same-SID klient | `win32_ipc_job.py` bruker SDDL `D:P(A;;GA;;;current_sid)(A;;GA;;;SY)` og Win32 pipeflagget |
+| Faktisk klienttoken/SID, ikke payload-claim | `PASS` for same-SID klient | Server bruker `ImpersonateNamedPipeClient` + thread token; test sender falsk `claimed_sid` og får bare OS-SID-hash tilbake |
+| Protokollmismatch | `PASS` | Nyere/ukjent protokoll returnerer `PROTOCOL_MISMATCH` uten command receipt |
+| Reconnect/host-restart/idempotency | `PASS` | Samme idempotency key og payload returnerer samme receipt etter host-restart med samme spike receipt store |
+| Idempotency-konflikt | `PASS` | Samme key med annen payload returnerer `IDEMPOTENCY_CONFLICT` |
+| `CREATE_SUSPENDED` før brukerkode | `PASS` | Instrumentert child skriver ikke marker før assignment/resume |
+| Job Object assignment + kill-on-close | `PASS` | Child legges i Job Object med `KILL_ON_JOB_CLOSE`; close terminerer child |
+| Engine Host close/crash stopper child | `PASS` for Job Object-close-scenariet | `test_suspended_child_is_contained_before_resume_and_killed_on_job_close` |
+| Task Scheduler-lignende non-interactive sesjon | `BLOCKED_BY_ENVIRONMENT` | Krever opprettet task/credential/session-policy som ikke ble etablert i denne økten |
+| Remote eller feil-SID klient | `BLOCKED_BY_ENVIRONMENT` | Krever separat Windows-bruker, remote client eller lab som kan forsøke faktisk feil principal |
 
 ### Kommandojournal
 
@@ -118,6 +136,17 @@ Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct
 Get-SmbConnection
 Get-SmbMapping
 rg -n -i "C:\\Users|gmail|<redacted-local-account-marker>" .
+
+git switch -c spike/0a1-process-and-ipc
+python -m py_compile spikes\0a1_process_ipc\win32_ipc_job.py tests\spikes\0a1_process_ipc\test_win32_ipc_job.py
+cmd.exe /c "python -m unittest discover -s tests\spikes\0a1_process_ipc -v > artifacts\0a1\unittest-output.txt 2>&1"
+python -m pytest tests\spikes\0a1_process_ipc -q
+python -m ruff check .
+python -m mypy --version
+python -m importlinter --version
+& "C:\claude\witchery\tmp\mediasync-handoff-venv\Scripts\python.exe" tools\validate_handoff.py
+& "C:\claude\witchery\tmp\mediasync-handoff-venv\Scripts\python.exe" tools\build_adr_docs.py --check
+& "C:\claude\witchery\tmp\mediasync-handoff-venv\Scripts\python.exe" tools\build_master.py --check
 ```
 
 Notater:
@@ -125,6 +154,9 @@ Notater:
 - `Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All` returnerte at operasjonen krever forhøying.
 - Målrettet scan for personlige brukersti-/konto-/epoststrenger fant ingen treff. Den lokale kontomarkøren er redigert bort fra rapporten.
 - En bredere sikkerhetsord-scan fant bare forventede fagtermer i spesifikasjonen, som `token`, `credential` og eksempel-UNC.
+- `python -m pytest tests\spikes\0a1_process_ipc -q` besto med `5 passed`.
+- `python -m ruff check .` besto.
+- `python -m mypy --version` og `python -m importlinter --version` feilet fordi modulene ikke er installert i aktiv Python. De er ikke registrert som bestått.
 
 ## Målinger
 
@@ -137,19 +169,21 @@ Ingen ytelses- eller kapasitetsmålinger ble kjørt i 0A.0. Diskplass og verktø
 | 0A0-BLK-001 | 0A.2 | Ingen andre Windows-klient/VM og ingen dedikert SMB-lab med `.mediasync_test_root` er tilgjengelig | Cross-machine writer ownership, fremmed owner, takeover og stale epoch kan ikke bestås | Lever lokal harness og marker SMB-radene `BLOCKED` til eier stiller lab | Eier |
 | 0A0-BLK-002 | 0A.5 | PySide6, BLAKE3, Nuitka, Windows SDK build/signing tools og ren Windows-VM mangler | Reproduserbar pakking kan ikke bevises i nåværende miljø | Kjør argv/systemsti-delen separat; utsett pakkebevis til toolchain/VM finnes | Eier |
 | 0A0-BLK-003 | 0A.2/0A.5 | Hypervisor er present, men `Get-VM` mangler og valgfri Windows-feature-query krever elevation | Codex kan ikke selv inventere eller orkestrere lokal VM-lab | Eier må bekrefte VM-oppsett eller gi eksplisitt labinstruks | Eier |
+| 0A1-BLK-001 | 0A.1 | Ekte non-interactive Task Scheduler-session under samme bruker er ikke etablert | 0A.1 kan ikke bevise registrert trigger-client/session-policy fullt ut | Eier må tillate/opprette dedikert `\MediaSyncHome-Spike\<run-id>` task eller gi testcredential/sessionoppsett | Eier |
+| 0A1-BLK-002 | 0A.1 | Feil-SID eller remote pipe-klient er ikke tilgjengelig | DACL/local-only-policy er konfigurert, men faktisk avvisning av annen principal er ikke demonstrert | Kjør 0A.1-identitetstesten fra separat Windows-bruker/VM eller remote klient | Eier |
 
 ## Beslutninger
 
-Ingen ADR-er ble endret i 0A.0. Preflighten avdekket miljøblockers, men ingen ny beslutningsblocker som Codex bør registrere i `docs/adr/catalog.yaml` nå. Alle `owner_decision`-felt forblir eierstyrt.
+Ingen ADR-er ble endret i 0A.0 eller den lokale 0A.1-fixturen. ADR-001, ADR-002 og ADR-013 bør forbli `PROPOSED` til de blokkerte identitets-/Task Scheduler-radene er bevist eller eier eksplisitt godkjenner en scope-reduksjon. Alle `owner_decision`-felt forblir eierstyrt.
 
 ## Anbefalt rekkefølge
 
-1. Start `0A.1 — Prosess og IPC`, fordi runtime-API-er, Python og unelevated lokal prosesskontekst er tilgjengelig.
-2. Start lokale deler av `0A.3` og `0A.4` etter 0A.1 dersom eier ønsker mer lokalt bevis før SMB-lab er klar.
+1. Fullfør de blokkerte 0A.1-identitetsradene med dedikert Task Scheduler-session og feil-SID/remote klient, eller få eksplisitt eiergodkjent scope-reduksjon.
+2. Start lokale deler av `0A.3` og `0A.4` dersom eier ønsker mer lokalt bevis før SMB-lab er klar.
 3. Forbered dedikert to-klient SMB-lab før `0A.2` skal bestå cross-machine writer ownership.
 4. Forbered PySide6/BLAKE3/Nuitka/Windows SDK og en ren Windows-VM før `0A.5` skal bestå pakkebevis.
 5. Kjør `0A.6` først etter at 0A.1–0A.5 enten har bestått eller fått eksplisitt eiergodkjent scope-reduksjon.
 
 ## Bevisst ikke implementert
 
-0A.0 opprettet ikke produktkode, endelig produktdatabase, migrasjon, Engine Host, GUI, syncmotor, Robocopy-adapter, Task Scheduler-oppgave, SMB-lock eller muterende filfixture. Ingen reelle brukerdata, produksjons-NAS, Bilder-/Dokumenter-/Skrivebord-stier eller diskrot ble brukt som testgrunnlag.
+0A.0 og 0A.1 opprettet ikke produktkode under `src/`, endelig produktdatabase, migrasjon, GUI, syncmotor, Robocopy-adapter, Task Scheduler-oppgave, SMB-lock eller muterende filfixture. 0A.1 opprettet bare spikehost, spikeklient, instrumentert childprosess og midlertidige receipt-/markerfiler under testens tempområde. Ingen reelle brukerdata, produksjons-NAS, Bilder-/Dokumenter-/Skrivebord-stier eller diskrot ble brukt som testgrunnlag.

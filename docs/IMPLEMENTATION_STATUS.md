@@ -3,7 +3,7 @@
 | Arbeidspakke/milepæl | Status | Bevis/PR | Blockers | Neste eierhandling |
 |---|---|---|---|---|
 | 0A.0 — Miljøpreflight | passed | `docs/ARCHITECTURE_SPIKE_REPORT.md`; branch `spike/0a0-environment-preflight` | Ingen 0A.0-blocker | Gjennomgå rapporten og velg neste arbeidspakke |
-| 0A.1 — Prosess og IPC | blocked | | Avventer eierstart; lokal fixture er mulig | Åpne `spike/0a1-process-and-ipc` manuelt |
+| 0A.1 — Prosess og IPC | blocked | `spikes/0a1_process_ipc/`; `tests/spikes/0a1_process_ipc/`; `artifacts/0a1/unittest-output.txt` | Lokal IPC/Job Object-fixture består; ekte non-interactive Task Scheduler-session og feil-SID/remote klient mangler | Still lab/session til rådighet eller godkjenn scope-reduksjon |
 | 0A.2 — Endpoint-eierskap | blocked | | Avventer eierstart og egnet to-klient SMB-lab | Klargjør dedikert SMB-lab eller godkjenn lokal delscope |
 | 0A.3 — Recovery og stier | blocked | | Avventer eierstart og marker-guarded lokal labrot | Åpne arbeidspakken manuelt etter ønsket rekkefølge |
 | 0A.4 — SQLite og kapasitet | blocked | | Avventer eierstart og lokal benchmarkfixture | Åpne arbeidspakken manuelt etter ønsket rekkefølge |
