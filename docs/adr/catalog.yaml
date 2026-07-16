@@ -275,20 +275,20 @@ adrs:
 - id: ADR-027
   title: Windows-argumentserialisering og sikker systemprogram-resolusjon
   evidence_package: 0A.5
-  evidence_status: PROPOSED
+  evidence_status: EVIDENCE_COMPLETE
   owner_decision: PENDING
   owner_decision_date: null
   supersedes: []
-  codex_recommendation: null
+  codex_recommendation: Behold én kanonisk Windows argv-builder og GetSystemDirectoryW-basert Robocopy-resolver; lokal round-trip og flaggvalidering er bevist i 0A.5.
   rationale: Unngår PATH-hijacking, quotingfeil og avvik mellom Python-argumenter og Windows-parsing
   consequence: Én kanonisk argumentbygger og Windows round-trip-tester kreves
 - id: ADR-028
   title: Reproduserbar Python/PySide6-pakkestrategi for Windows
   evidence_package: 0A.5
-  evidence_status: PROPOSED
+  evidence_status: BLOCKED
   owner_decision: PENDING
   owner_decision_date: null
   supersedes: []
-  codex_recommendation: null
+  codex_recommendation: Pakkestrategi kan ikke anbefales før PySide6/BLAKE3/Nuitka/Windows SDK/signing tools og ren Windows-VM er tilgjengelig og smoke-testet.
   rationale: Gir en reproducerbar, offline-brukbar Windows-build med kontrollert Python/Qt-kompatibilitet
   consequence: Toolchain låses etter 0A.5 og smoke-testes på ren Windows-VM

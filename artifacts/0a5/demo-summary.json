@@ -1,0 +1,125 @@
+{
+  "clean_vm_smoke_test": "BLOCKED_BY_ENVIRONMENT",
+  "created_utc": "2026-07-16T20:34:29Z",
+  "forbidden_switch_validation": {
+    "/MIR": "REJECTED",
+    "/MOV": "REJECTED",
+    "/MOVE": "REJECTED",
+    "/PURGE": "REJECTED"
+  },
+  "launch_plan": {
+    "argv_shape": [
+      "<resolved-robocopy>",
+      "<absolute-source-root>",
+      "<absolute-staging-root>",
+      "/E",
+      "/Z",
+      "/R:1",
+      "/W:1",
+      "/COPY:DAT",
+      "/DCOPY:DA",
+      "/NP",
+      "/NFL",
+      "/NDL",
+      "/UNILOG:<absolute-local-log-file>"
+    ],
+    "command_line_length": 220,
+    "command_line_sha256": "8a64b85712b35686ab5a130aaee9d3ae2ea4b4aa488a0faf2626b9ea2e8bac5c",
+    "environment_keys": [
+      "PATH",
+      "SystemRoot",
+      "TEMP",
+      "TMP",
+      "WINDIR"
+    ],
+    "executable": {
+      "file_version": "10.0.26100.8737",
+      "final_path": "\\\\?\\C:\\Windows\\System32\\Robocopy.exe",
+      "requested_name": "Robocopy.exe",
+      "sha256": "2231ef54ddc324947416c71bc8740c4e80193c4b4fcd88ba4c3c044a196829ec",
+      "system_directory": "C:\\WINDOWS\\system32"
+    },
+    "parsed_equals_built": true,
+    "working_directory": "<windows-system-directory>"
+  },
+  "packaging_preflight": {
+    "clean_windows_vm": "BLOCKED_BY_ENVIRONMENT",
+    "missing_modules": [
+      "PySide6",
+      "blake3",
+      "nuitka"
+    ],
+    "missing_tools": [
+      "pyside6-deploy",
+      "nuitka",
+      "cl",
+      "rc",
+      "signtool"
+    ],
+    "modules": {
+      "PySide6": false,
+      "blake3": false,
+      "nuitka": false
+    },
+    "python_executable": "<current-python>",
+    "python_version": "3.10.6",
+    "status": "BLOCKED_BY_ENVIRONMENT",
+    "tools": {
+      "cl": false,
+      "nuitka": false,
+      "pyside6-deploy": false,
+      "rc": false,
+      "signtool": false
+    }
+  },
+  "real_robocopy_started": false,
+  "resolved_robocopy": {
+    "file_version": "10.0.26100.8737",
+    "final_path": "\\\\?\\C:\\Windows\\System32\\Robocopy.exe",
+    "requested_name": "Robocopy.exe",
+    "sha256": "2231ef54ddc324947416c71bc8740c4e80193c4b4fcd88ba4c3c044a196829ec",
+    "system_directory": "C:\\WINDOWS\\system32"
+  },
+  "round_trip": {
+    "all_passed": true,
+    "max_command_line_length": 30152,
+    "payload_count": 7,
+    "results": [
+      {
+        "length": 161,
+        "received_count": 2,
+        "status": "PASS"
+      },
+      {
+        "length": 185,
+        "received_count": 2,
+        "status": "PASS"
+      },
+      {
+        "length": 166,
+        "received_count": 2,
+        "status": "PASS"
+      },
+      {
+        "length": 200,
+        "received_count": 2,
+        "status": "PASS"
+      },
+      {
+        "length": 196,
+        "received_count": 2,
+        "status": "PASS"
+      },
+      {
+        "length": 188,
+        "received_count": 2,
+        "status": "PASS"
+      },
+      {
+        "length": 30152,
+        "received_count": 1,
+        "status": "PASS"
+      }
+    ]
+  }
+}

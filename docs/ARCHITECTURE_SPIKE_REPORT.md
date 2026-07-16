@@ -9,7 +9,7 @@
 | 0A.2 — Endpoint-eierskap | not_started | | | To-klient SMB-lab mangler for global writer-bevis |
 | 0A.3 — Recovery og stier | passed | `spike/0a3-recovery-and-paths` | `spikes/0a3_recovery_paths/`, `tests/spikes/0a3_recovery_paths/`, `artifacts/0a3/` | Lokal NTFS/path/recovery bestått; SMB SourceReadGuard ikke kjørt uten SMB-lab |
 | 0A.4 — SQLite og kapasitet | passed | `spike/0a4-sqlite-capacity` | `spikes/0a4_sqlite_capacity/`, `tests/spikes/0a4_sqlite_capacity/`, `artifacts/0a4/` | Lokal 1M SQLite-/kapasitetsmåling bestått; ADR-003 anbefales, men eiergodkjenning gjenstår |
-| 0A.5 — Windows argv/pakking | not_started | | | Pakkeverktøy og ren Windows-VM mangler |
+| 0A.5 — Windows argv/pakking | blocked | `spike/0a5-windows-argv-and-packaging` | `spikes/0a5_windows_packaging/`, `tests/spikes/0a5_windows_packaging/`, `artifacts/0a5/` | `GetSystemDirectoryW`/argv bestått; PySide6/BLAKE3/Nuitka/SDK/signing tools og ren Windows-VM mangler |
 | 0A.6 — Beslutningsreview | blocked | | | Avventer 0A.1–0A.5-bevis |
 
 ## Miljøpreflight
@@ -64,7 +64,7 @@ Tillatte klassifiseringer: `RUNNABLE_NOW`, `RUNNABLE_WITH_LOCAL_FIXTURE`, `REQUI
 | SourceReadGuard/fallback | 0A.3 | Lokal NTFS pass; SMB-lab ikke tilgjengelig | `python -m unittest discover -s tests\spikes\0a3_recovery_paths -v` | `PASS` | Lokal guard returnerte `DENY_WRITE_AND_DELETE`; bruk fallback for uprovede SMB-endepunkter | ADR-010, ADR-022, ADR-023 |
 | Én kontra to databaser | 0A.4 | Lokal SQLite-fixture i temp | `python -m unittest discover -s tests\spikes\0a4_sqlite_capacity -v` | `PASS` | `artifacts/0a4/unittest-output.txt`, `artifacts/0a4/benchmark-summary.json` | ADR-003, ADR-011, ADR-018 |
 | 1M state/kapasitetsmåling | 0A.4 | Lokal SQLite-fixture i temp | `python spikes\0a4_sqlite_capacity\sqlite_capacity.py benchmark --rows 1000000 --query-repetitions 30 --output artifacts\0a4\benchmark-summary.json` | `PASS` | 1M rader per kandidat; peak RSS ca. 100 MiB; indeksert parent-page P95 < 1 ms | ADR-003, ADR-018 |
-| GetSystemDirectoryW/argv | 0A.5 | `RUNNABLE_NOW` | Ikke kjørt i 0A.0 | `INCONCLUSIVE` | Se kjørbarhetsmatrise | ADR-027 |
+| GetSystemDirectoryW/argv | 0A.5 | Lokal Windows-runtime | `python -m unittest discover -s tests\spikes\0a5_windows_packaging -v` | `PASS` | `artifacts/0a5/unittest-output.txt`, `artifacts/0a5/demo-summary.json` | ADR-027 |
 | Ren Windows-pakkebygg | 0A.5 | `BLOCKED_BY_ENVIRONMENT` | Ikke kjørt i 0A.0 | `BLOCKED` | Mangler pakkeverktøy/ren VM | ADR-028 |
 
 Resultatverdier: `PASS`, `FAIL`, `BLOCKED`, `INCONCLUSIVE`.
@@ -128,6 +128,21 @@ Baseline ble kontrollert med streng hashverifisering før Git-initialisering og 
 | Lokal AppData-/`SQLITE_FULL`-oppførsel | `PASS` | Kontrollert liten catalog treffer `SQLITE_FULL`; committet recoverybevis i separat recovery-store bevares |
 | Kode-/testkompleksitet | `PASS` | Én-db trenger 1 runstart-write og 1 backupmedlem; to-db trenger 3 runstart-writes, 2 handofftabeller, 2 backupmedlemmer og flere recoverytilstander |
 | Codex-anbefaling for ADR-003 | `RECOMMENDED` | Anbefal to lokale SQLite-databaser med eksplisitte handoffs: mer kompleksitet, men bedre isolasjon av liten FULL-synkron recovery-state fra stor rekonstruerbar catalogvekst |
+
+0A.5 ble kjørt som en lokal Windows argv-/pakkeprobe under `spikes/0a5_windows_packaging/` og `tests/spikes/0a5_windows_packaging/`. Harnesset startet bare en instrumentert Python-child for argv-verifikasjon; det startet ikke Robocopy og utførte ingen backup.
+
+### 0A.5 lokal evidens
+
+| Eksperiment | Resultat | Bevis |
+|---|---|---|
+| `GetSystemDirectoryW`-resolver | `PASS` | `Robocopy.exe` ble resolvert under Windows systemkatalog og final path ble validert via handle; PATH-hijack-fixture ble ignorert |
+| Robocopy executable-diagnostikk | `PASS` | Demo registrerte final path `\\?\C:\Windows\System32\Robocopy.exe`, SHA-256 og file version `10.0.26100.8737` |
+| Kanonisk Windows argv-builder | `PASS` | Egen serializer round-trippet via `CommandLineToArgvW` for tomme args, spaces, quotes, UNC, Unicode, trailing backslash, switch-lignende navn og lang kommando |
+| Instrumentert child round-trip | `PASS` | Python-child mottok eksakt payload for syv corpuscases; maksimal command-line-lengde 30,152 tegn |
+| Forbudte Robocopy-flagg | `PASS` | `/MIR`, `/PURGE`, `/MOVE` og `/MOV` avvises både i typed switchliste og etter final serialisering/parsing |
+| Launch-plan hygiene | `PASS` | Planen bruker absolutt resolversti, sanitert argv-shape, minimal Unicode-env (`SystemRoot`, `WINDIR`, `PATH`, `TEMP`, `TMP`) og `real_robocopy_started=false` |
+| Minimal Python/PySide6/BLAKE3/Win32-app | `BLOCKED_BY_ENVIRONMENT` | `PySide6`, `blake3` og `nuitka` mangler i aktiv Python |
+| Reproduserbar pakking og ren VM-smoke | `BLOCKED_BY_ENVIRONMENT` | `pyside6-deploy`, `nuitka`, `cl`, `rc`, `signtool` og ren Windows-VM mangler |
 
 ### Kommandojournal
 
@@ -205,6 +220,19 @@ git diff --check
 & "C:\claude\witchery\tmp\mediasync-handoff-venv\Scripts\python.exe" tools\validate_handoff.py
 python tools\build_adr_docs.py --check
 python tools\build_master.py --check
+
+git switch -c spike/0a5-windows-argv-and-packaging
+python -m py_compile spikes\0a5_windows_packaging\windows_packaging.py tests\spikes\0a5_windows_packaging\test_windows_packaging.py
+python -m unittest discover -s tests\spikes\0a5_windows_packaging -v
+python -m ruff check spikes\0a5_windows_packaging tests\spikes\0a5_windows_packaging
+python spikes\0a5_windows_packaging\windows_packaging.py demo --output artifacts\0a5\demo-summary.json
+cmd.exe /c "python -m unittest discover -s tests\spikes\0a5_windows_packaging -v > artifacts\0a5\unittest-output.txt 2>&1"
+python -m pytest tests\spikes -q
+python -m ruff check .
+git diff --check
+& "C:\claude\witchery\tmp\mediasync-handoff-venv\Scripts\python.exe" tools\validate_handoff.py
+python tools\build_adr_docs.py --check
+python tools\build_master.py --check
 ```
 
 Notater:
@@ -215,7 +243,8 @@ Notater:
 - `python -m pytest tests\spikes\0a1_process_ipc -q` besto med `5 passed`.
 - `python -m ruff check .` besto.
 - `python -m mypy --version` og `python -m importlinter --version` feilet fordi modulene ikke er installert i aktiv Python. De er ikke registrert som bestått.
-- `python -m pytest tests\spikes -q` besto med `23 passed` etter 0A.4.
+- `python -m pytest tests\spikes -q` besto med `23 passed` etter 0A.4 og `32 passed` etter 0A.5.
+- Sikkerhetsord-scan etter 0A.5 fant bare de forventede negative-test-/avvisningsforekomstene av de forbudte Robocopy-flaggene.
 - `python -m unittest discover -s tests\spikes` fant ingen tester på grunn av nested discover-layout; de reproduserbare unittest-kommandoene er per spikekatalog.
 
 ## Målinger
@@ -246,18 +275,19 @@ Tallene er lokale spike-målinger på syntetiske metadata, ikke en produksjons-S
 | 0A1-BLK-001 | 0A.1 | Ekte non-interactive Task Scheduler-session under samme bruker er ikke etablert | 0A.1 kan ikke bevise registrert trigger-client/session-policy fullt ut | Eier må tillate/opprette dedikert `\MediaSyncHome-Spike\<run-id>` task eller gi testcredential/sessionoppsett | Eier |
 | 0A1-BLK-002 | 0A.1 | Feil-SID eller remote pipe-klient er ikke tilgjengelig | DACL/local-only-policy er konfigurert, men faktisk avvisning av annen principal er ikke demonstrert | Kjør 0A.1-identitetstesten fra separat Windows-bruker/VM eller remote klient | Eier |
 | 0A3-BLK-001 | 0A.3 | SMB SourceReadGuard-lab er ikke tilgjengelig | SMB guard kan ikke påstå `DENY_WRITE_AND_DELETE`; uprovede SMB-endepunkter må bruke fallbackpolicy | Kjør samme source-guard-probe mot dedikert SMB-lab eller behold `POST_TRANSFER_HASH_ONLY`/`DEFER_UNSTABLE_SOURCE` for uprovede SMB | Eier |
+| 0A5-BLK-001 | 0A.5 | PySide6/BLAKE3/Nuitka/Windows SDK/signing tools og ren Windows-VM er ikke tilgjengelig | Reproduserbar pakket `.exe` og ren-VM-oppstart kan ikke bevises | Installer/lås toolchain og kjør 0A.5-pakkedelen på ren VM før ADR-028 kan anbefales | Eier |
 
 ## Beslutninger
 
-ADR-003 er satt til `RECOMMENDED` med Codex-anbefaling om to lokale SQLite-databaser og eksplisitte handoffs. ADR-011 og ADR-018 er satt til `EVIDENCE_COMPLETE` etter 0A.3/0A.4-bevis. Alle `owner_decision`-felt forblir `PENDING`; bare eier kan akseptere, avvise eller godkjenne scope-reduksjon. ADR-001, ADR-002 og ADR-013 bør forbli `PROPOSED` til de blokkerte identitets-/Task Scheduler-radene er bevist eller eier eksplisitt godkjenner en scope-reduksjon.
+ADR-003 er satt til `RECOMMENDED` med Codex-anbefaling om to lokale SQLite-databaser og eksplisitte handoffs. ADR-011, ADR-018 og ADR-027 er satt til `EVIDENCE_COMPLETE`. ADR-028 er satt til `BLOCKED` fordi pakkebeviset mangler toolchain og ren Windows-VM. Alle `owner_decision`-felt forblir `PENDING`; bare eier kan akseptere, avvise eller godkjenne scope-reduksjon. ADR-001, ADR-002 og ADR-013 bør forbli `PROPOSED` til de blokkerte identitets-/Task Scheduler-radene er bevist eller eier eksplisitt godkjenner en scope-reduksjon.
 
 ## Anbefalt rekkefølge
 
 1. Fullfør de blokkerte 0A.1-identitetsradene med dedikert Task Scheduler-session og feil-SID/remote klient, eller få eksplisitt eiergodkjent scope-reduksjon.
 2. Forbered dedikert to-klient SMB-lab før `0A.2` skal bestå cross-machine writer ownership og før SMB SourceReadGuard kan oppgraderes fra fallback.
-3. Forbered PySide6/BLAKE3/Nuitka/Windows SDK og en ren Windows-VM før `0A.5` skal bestå pakkebevis; argv/systemsti-delen er lokalt kjørbar.
+3. Forbered PySide6/BLAKE3/Nuitka/Windows SDK/signing tools og en ren Windows-VM før ADR-028 kan få full pakke-evidens.
 4. Kjør `0A.6` først etter at 0A.1–0A.5 enten har bestått eller fått eksplisitt eiergodkjent scope-reduksjon.
 
 ## Bevisst ikke implementert
 
-0A.0, 0A.1, 0A.3 og 0A.4 opprettet ikke produktkode under `src/`, endelig produktdatabase, migrasjon, GUI, syncmotor, Robocopy-adapter, Task Scheduler-oppgave eller SMB-lock. 0A.1 opprettet bare spikehost, spikeklient, instrumentert childprosess og midlertidige receipt-/markerfiler under testens tempområde. 0A.3 opprettet bare marker-validerte lokale labrøtter under temp og muterte filer inne i disse røttene. 0A.4 opprettet bare syntetiske SQLite-kandidatdatabaser i temp og lagret kompakte JSON-/testartefakter. Ingen reelle brukerdata, produksjons-NAS, Bilder-/Dokumenter-/Skrivebord-stier eller diskrot ble brukt som testgrunnlag.
+0A.0, 0A.1, 0A.3, 0A.4 og 0A.5 opprettet ikke produktkode under `src/`, endelig produktdatabase, migrasjon, GUI, syncmotor, Robocopy-adapter, Task Scheduler-oppgave eller SMB-lock. 0A.1 opprettet bare spikehost, spikeklient, instrumentert childprosess og midlertidige receipt-/markerfiler under testens tempområde. 0A.3 opprettet bare marker-validerte lokale labrøtter under temp og muterte filer inne i disse røttene. 0A.4 opprettet bare syntetiske SQLite-kandidatdatabaser i temp og lagret kompakte JSON-/testartefakter. 0A.5 startet bare en instrumentert Python-child for argv-verifikasjon og startet aldri Robocopy eller et pakket produkt. Ingen reelle brukerdata, produksjons-NAS, Bilder-/Dokumenter-/Skrivebord-stier eller diskrot ble brukt som testgrunnlag.
