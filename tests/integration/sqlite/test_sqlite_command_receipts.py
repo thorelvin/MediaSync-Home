@@ -14,6 +14,8 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     apply_sqlite_connection_policy,
     catalog_critical_writer_policy,
 )
+from mediasync_home.adapters.sqlite.job_catalog import SqliteStandardBackupJobCatalog
+from mediasync_home.adapters.sqlite.job_draft_store import SqliteJobDraftStore
 from mediasync_home.adapters.sqlite.migrations import apply_sqlite_migrations, catalog_migration_plan
 from mediasync_home.application.command_receipts import (
     CommandReceipt,
@@ -21,12 +23,31 @@ from mediasync_home.application.command_receipts import (
     CommandReceiptState,
     transition_command_receipt,
 )
-from mediasync_home.application.job_creation import JobCreationCommandName
+from mediasync_home.application.job_creation import (
+    JobCreationCommandName,
+    StandardBackupJobIdFactory,
+    StandardBackupJobIds,
+)
+from mediasync_home.application.job_drafts import StandardBackupJobDraft
+from mediasync_home.application.runtime_status import startup_status
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
 from mediasync_home.ipc.protocol import IpcReason, IpcStatus
 from mediasync_home.ipc.server import EngineHostIpcService
+
+
+class FixedStandardBackupJobIdFactory(StandardBackupJobIdFactory):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def new_standard_backup_job_ids(self) -> StandardBackupJobIds:
+        self.calls += 1
+        return StandardBackupJobIds(
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            filter_set_id="filter-a",
+        )
 
 
 def test_sqlite_command_receipts_roundtrip_received_receipt(tmp_path: Path) -> None:
@@ -143,6 +164,68 @@ def test_sqlite_command_receipts_persist_from_ipc_command(tmp_path: Path) -> Non
         assert loaded.principal_fingerprint == "same-user"
 
 
+def test_sqlite_enabled_ipc_command_persists_job_and_success_receipt(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        receipts = SqliteCommandReceiptStore(connection)
+        drafts = SqliteJobDraftStore(connection)
+        catalog = SqliteStandardBackupJobCatalog(connection)
+        id_factory = FixedStandardBackupJobIdFactory()
+        drafts.save_standard_backup_draft(_complete_draft())
+        service = EngineHostIpcService(
+            ClientAuthorizationPolicy(
+                expected_user_sid_hash="same-user",
+                expected_session_id=42,
+            ),
+            status=replace(
+                startup_status(ProcessRole.ENGINE_HOST),
+                mutations_enabled=True,
+                scope="0B_LOCAL_MUTATION_PREVIEW",
+            ),
+            job_draft_store=drafts,
+            standard_backup_job_catalog=catalog,
+            standard_backup_job_id_factory=id_factory,
+            command_receipt_store=receipts,
+        )
+        ipc_client = InProcessIpcClient(
+            service=service,
+            identity=VerifiedClientIdentity(
+                user_sid_hash="same-user",
+                session_id=42,
+                is_remote=False,
+                transport="sqlite-ipc-test",
+            ),
+            role=ProcessRole.GUI,
+            client_instance_id="55555555-5555-4555-8555-555555555555",
+        )
+        ipc_client.connect()
+
+        response = ipc_client.submit_command(
+            JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+            request_id="44444444-4444-4444-8444-444444444444",
+            idempotency_key="66666666-6666-4666-8666-666666666666",
+            payload={"draft_id": "draft-a"},
+            payload_hash="98cdbb1f712331be51355f90ab8c193c5c6f681d33d5c052cd38fe94820f3d02",
+        )
+
+        loaded_receipt = receipts.load_command_receipt("66666666-6666-4666-8666-666666666666")
+        loaded_job = catalog.load_standard_backup_job("job-a")
+        assert response.status is IpcStatus.ACCEPTED
+        assert response.reason is None
+        assert response.payload["receipt"]["state"] == CommandReceiptState.SUCCEEDED.value
+        assert response.payload["job"]["job_id"] == "job-a"
+        assert loaded_receipt is not None
+        assert loaded_receipt.state is CommandReceiptState.SUCCEEDED
+        assert loaded_receipt.result_entity_type == "standard_backup_job"
+        assert loaded_receipt.result_entity_id == "job-a"
+        assert loaded_job is not None
+        assert loaded_job.idempotency_key == "66666666-6666-4666-8666-666666666666"
+        assert _row_count(connection, "standard_backup_job_revision_details") == 1
+        assert _row_count(connection, "command_receipts") == 1
+        assert id_factory.calls == 1
+
+
 def _prepare_catalog(connection: sqlite3.Connection, database: Path) -> None:
     apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
     apply_sqlite_migrations(connection, catalog_migration_plan())
@@ -159,6 +242,14 @@ def _receipt() -> CommandReceipt:
         protocol_version=1,
         schema_version=1,
         expected_entity_revision=7,
+    )
+
+
+def _complete_draft() -> StandardBackupJobDraft:
+    return (
+        StandardBackupJobDraft.new("draft-a")
+        .with_source(name="Pictures", path_label="C:/Users/Ada/Pictures")
+        .with_added_target(name="USB 1", path_label="E:/Backup", independent_device_id="disk-a")
     )
 
 

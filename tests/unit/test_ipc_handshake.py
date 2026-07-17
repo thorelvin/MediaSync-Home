@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from mediasync_home.application.command_receipts import (
     CommandReceipt,
+    CommandReceiptState,
     CommandReceiptStore,
     ensure_idempotency_compatible,
 )
-from mediasync_home.application.job_creation import JobCreationCommandName
+from mediasync_home.application.job_creation import (
+    JobCreationCommandName,
+    SealedStandardBackupJob,
+    StandardBackupJobCatalog,
+    StandardBackupJobIdFactory,
+    StandardBackupJobIds,
+)
 from mediasync_home.application.job_drafts import JobDraftStore, StandardBackupJobDraft
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
@@ -50,13 +59,20 @@ def _identity(
     )
 
 
-def _service() -> EngineHostIpcService:
-    return EngineHostIpcService(
+def _service(*, mutations_enabled: bool = False) -> EngineHostIpcService:
+    service = EngineHostIpcService(
         ClientAuthorizationPolicy(
             expected_user_sid_hash=EXPECTED_USER,
             expected_session_id=EXPECTED_SESSION,
         )
     )
+    if mutations_enabled:
+        service.status = replace(
+            service.status,
+            mutations_enabled=True,
+            scope="0B_LOCAL_MUTATION_PREVIEW",
+        )
+    return service
 
 
 class _InMemoryJobDraftStore(JobDraftStore):
@@ -86,6 +102,41 @@ class _InMemoryCommandReceiptStore(CommandReceiptStore):
 
     def update_command_receipt(self, receipt: CommandReceipt) -> None:
         self.receipts[receipt.idempotency_key] = receipt
+
+
+class _InMemoryStandardBackupJobCatalog(StandardBackupJobCatalog):
+    def __init__(self) -> None:
+        self.jobs: dict[str, SealedStandardBackupJob] = {}
+        self.idempotency_keys: dict[str, str] = {}
+
+    def save_standard_backup_job(self, job: SealedStandardBackupJob) -> None:
+        self.jobs[job.job_id] = job
+        self.idempotency_keys[job.idempotency_key] = job.job_id
+
+    def load_standard_backup_job(self, job_id: str) -> SealedStandardBackupJob | None:
+        return self.jobs.get(job_id)
+
+    def load_standard_backup_job_by_idempotency_key(
+        self,
+        idempotency_key: str,
+    ) -> SealedStandardBackupJob | None:
+        job_id = self.idempotency_keys.get(idempotency_key)
+        if job_id is None:
+            return None
+        return self.jobs[job_id]
+
+
+class _FixedStandardBackupJobIdFactory(StandardBackupJobIdFactory):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def new_standard_backup_job_ids(self) -> StandardBackupJobIds:
+        self.calls += 1
+        return StandardBackupJobIds(
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            filter_set_id="filter-a",
+        )
 
 
 def _client(
@@ -241,6 +292,147 @@ def test_create_standard_backup_job_command_records_rejected_receipt() -> None:
         "state": "REJECTED",
         "rejection_reason": IpcReason.MUTATING_COMMANDS_DISABLED.value,
     }
+
+
+def test_enabled_create_standard_backup_job_persists_job_and_succeeds_receipt() -> None:
+    drafts = _InMemoryJobDraftStore()
+    catalog = _InMemoryStandardBackupJobCatalog()
+    receipts = _InMemoryCommandReceiptStore()
+    id_factory = _FixedStandardBackupJobIdFactory()
+    draft = (
+        StandardBackupJobDraft.new("draft-a")
+        .with_source(name="Pictures", path_label="C:/Users/Ada/Pictures")
+        .with_added_target(name="USB 1", path_label="E:/Backup")
+    )
+    drafts.save_standard_backup_draft(draft)
+    service = _service(mutations_enabled=True)
+    service.job_draft_store = drafts
+    service.standard_backup_job_catalog = catalog
+    service.standard_backup_job_id_factory = id_factory
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"draft_id": "draft-a"},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+
+    receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
+    assert response.status is IpcStatus.ACCEPTED
+    assert response.reason is None
+    assert response.payload["created"] is True
+    assert response.payload["idempotent_replay"] is False
+    assert response.payload["job"] == {
+        "job_id": "job-a",
+        "job_revision_id": "job-rev-a",
+        "filter_set_id": "filter-a",
+    }
+    assert response.payload["receipt"]["state"] == CommandReceiptState.SUCCEEDED.value
+    assert response.payload["receipt"]["result_entity_type"] == "standard_backup_job"
+    assert response.payload["receipt"]["result_entity_id"] == "job-a"
+    assert receipt is not None
+    assert receipt.state is CommandReceiptState.SUCCEEDED
+    assert catalog.load_standard_backup_job("job-a") is not None
+    assert id_factory.calls == 1
+
+
+def test_enabled_create_standard_backup_job_replay_returns_existing_success_receipt() -> None:
+    drafts = _InMemoryJobDraftStore()
+    catalog = _InMemoryStandardBackupJobCatalog()
+    receipts = _InMemoryCommandReceiptStore()
+    id_factory = _FixedStandardBackupJobIdFactory()
+    draft = (
+        StandardBackupJobDraft.new("draft-a")
+        .with_source(name="Pictures", path_label="C:/Users/Ada/Pictures")
+        .with_added_target(name="USB 1", path_label="E:/Backup")
+    )
+    drafts.save_standard_backup_draft(draft)
+    service = _service(mutations_enabled=True)
+    service.job_draft_store = drafts
+    service.standard_backup_job_catalog = catalog
+    service.standard_backup_job_id_factory = id_factory
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    first = ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"draft_id": "draft-a"},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+    second = ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        request_id=REQUEST_ID_B,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"draft_id": "draft-a"},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+
+    assert first.status is IpcStatus.ACCEPTED
+    assert second.status is IpcStatus.ACCEPTED
+    assert len(receipts.receipts) == 1
+    assert id_factory.calls == 1
+    assert second.payload["created"] is False
+    assert second.payload["idempotent_replay"] is True
+    assert second.payload["receipt"]["request_id"] == REQUEST_ID_A
+    assert second.payload["job"]["job_id"] == "job-a"
+
+
+def test_enabled_create_standard_backup_job_rejects_invalid_draft_before_effect() -> None:
+    drafts = _InMemoryJobDraftStore()
+    catalog = _InMemoryStandardBackupJobCatalog()
+    receipts = _InMemoryCommandReceiptStore()
+    id_factory = _FixedStandardBackupJobIdFactory()
+    service = _service(mutations_enabled=True)
+    service.job_draft_store = drafts
+    service.standard_backup_job_catalog = catalog
+    service.standard_backup_job_id_factory = id_factory
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"draft_id": "draft-a"},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+
+    receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.COMMAND_PRECONDITION_FAILED
+    assert response.payload["readiness"]["validation_codes"] == ["DRAFT_NOT_FOUND"]
+    assert response.payload["receipt"]["state"] == CommandReceiptState.REJECTED.value
+    assert receipt is not None
+    assert receipt.rejection_reason == IpcReason.COMMAND_PRECONDITION_FAILED.value
+    assert catalog.jobs == {}
+    assert id_factory.calls == 0
+
+
+def test_enabled_create_standard_backup_job_requires_dispatcher_dependencies() -> None:
+    service = _service(mutations_enabled=True)
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"draft_id": "draft-a"},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED
+    assert response.payload["recognized"] is True
+    assert response.payload["mutations_enabled"] is True
 
 
 def test_command_receipt_replay_returns_existing_terminal_receipt() -> None:

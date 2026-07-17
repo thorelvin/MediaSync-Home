@@ -12,8 +12,14 @@ from mediasync_home.application.command_receipts import (
     transition_command_receipt,
 )
 from mediasync_home.application.job_creation import (
+    CreateStandardBackupJobCommand,
+    JobCreationOutcome,
     JobCreationCommandName,
     JobCreationPayloadError,
+    SealedStandardBackupJob,
+    StandardBackupJobCatalog,
+    StandardBackupJobIdFactory,
+    create_standard_backup_job_from_draft,
     evaluate_standard_backup_job_creation,
     parse_create_standard_backup_job_command,
 )
@@ -37,6 +43,8 @@ class EngineHostIpcService:
     authorization: ClientAuthorizationPolicy
     status: RuntimeStatus = field(default_factory=lambda: startup_status(ProcessRole.ENGINE_HOST))
     job_draft_store: JobDraftStore | None = None
+    standard_backup_job_catalog: StandardBackupJobCatalog | None = None
+    standard_backup_job_id_factory: StandardBackupJobIdFactory | None = None
     command_receipt_store: CommandReceiptStore | None = None
     _accepted_clients: dict[str, VerifiedClientIdentity] = field(default_factory=dict)
 
@@ -90,7 +98,7 @@ class EngineHostIpcService:
         if identity is None:
             return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
         if command.command_name == JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value:
-            return self._reject_create_standard_backup_job(command, identity)
+            return self._handle_create_standard_backup_job(command, identity)
         receipt_response = self._record_terminal_rejected_receipt(
             command,
             identity,
@@ -105,7 +113,7 @@ class EngineHostIpcService:
             response_payload,
         )
 
-    def _reject_create_standard_backup_job(
+    def _handle_create_standard_backup_job(
         self,
         envelope: IpcCommandEnvelope,
         identity: VerifiedClientIdentity,
@@ -118,6 +126,9 @@ class EngineHostIpcService:
             )
         except JobCreationPayloadError:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+
+        if self.status.mutations_enabled:
+            return self._dispatch_create_standard_backup_job(envelope, identity, command)
 
         receipt_response = self._record_terminal_rejected_receipt(
             envelope,
@@ -139,6 +150,148 @@ class EngineHostIpcService:
                 drafts=self.job_draft_store,
             ).to_dict()
         return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, response_payload)
+
+    def _dispatch_create_standard_backup_job(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: CreateStandardBackupJobCommand,
+    ) -> IpcResponse:
+        if (
+            self.command_receipt_store is None
+            or self.job_draft_store is None
+            or self.standard_backup_job_catalog is None
+            or self.standard_backup_job_id_factory is None
+        ):
+            return self._reject_config_missing_standard_backup_job(envelope, identity, command)
+
+        receipt, conflict_response = self._record_received_receipt(envelope, identity)
+        if conflict_response is not None:
+            return conflict_response
+        if receipt is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+
+        replay = self._standard_backup_job_replay_response(envelope, command, receipt)
+        if replay is not None:
+            return replay
+
+        receipt = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        outcome = create_standard_backup_job_from_draft(
+            command=command,
+            drafts=self.job_draft_store,
+            catalog=self.standard_backup_job_catalog,
+            id_factory=self.standard_backup_job_id_factory,
+        )
+        if outcome.job is None:
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.REJECTED,
+                rejection_reason=IpcReason.COMMAND_PRECONDITION_FAILED.value,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+            payload = _create_standard_backup_job_response_payload(
+                envelope=envelope,
+                draft_id=command.draft_id,
+                mutations_enabled=True,
+                recognized=True,
+                outcome=outcome,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(IpcReason.COMMAND_PRECONDITION_FAILED, payload)
+
+        receipt = transition_command_receipt(
+            receipt,
+            CommandReceiptState.EFFECT_PREPARED,
+            result_entity_type="standard_backup_job",
+            result_entity_id=outcome.job.job_id,
+        )
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.ACCEPTED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.SUCCEEDED)
+        self.command_receipt_store.update_command_receipt(receipt)
+
+        payload = _create_standard_backup_job_response_payload(
+            envelope=envelope,
+            draft_id=command.draft_id,
+            mutations_enabled=True,
+            recognized=True,
+            outcome=outcome,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.accepted(payload)
+
+    def _reject_config_missing_standard_backup_job(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: CreateStandardBackupJobCommand,
+    ) -> IpcResponse:
+        receipt_response = self._record_terminal_rejected_receipt(
+            envelope,
+            identity,
+            rejection_reason=IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED.value,
+        )
+        if receipt_response is not None:
+            return receipt_response
+        payload = {
+            "command_name": envelope.command_name,
+            "draft_id": command.draft_id,
+            "recognized": True,
+            "mutations_enabled": True,
+        }
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload)
+
+    def _standard_backup_job_replay_response(
+        self,
+        envelope: IpcCommandEnvelope,
+        command: CreateStandardBackupJobCommand,
+        receipt: CommandReceipt,
+    ) -> IpcResponse | None:
+        if receipt.state is CommandReceiptState.RECEIVED:
+            return None
+        if self.standard_backup_job_catalog is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+        job = self.standard_backup_job_catalog.load_standard_backup_job_by_idempotency_key(
+            envelope.idempotency_key
+        )
+        payload = _create_standard_backup_job_response_payload(
+            envelope=envelope,
+            draft_id=command.draft_id,
+            mutations_enabled=True,
+            recognized=True,
+            outcome=None,
+            job=job,
+        )
+        payload["created"] = False
+        payload["idempotent_replay"] = True
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        if receipt.state is CommandReceiptState.SUCCEEDED:
+            return IpcResponse.accepted(payload)
+        if receipt.state is CommandReceiptState.REJECTED:
+            return IpcResponse.rejected(_receipt_rejection_reason(receipt), payload)
+        return IpcResponse.accepted(payload)
+
+    def _record_received_receipt(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+    ) -> tuple[CommandReceipt | None, IpcResponse | None]:
+        if self.command_receipt_store is None:
+            return None, None
+        incoming = _receipt_from_envelope(envelope, identity)
+        try:
+            return self.command_receipt_store.record_received(incoming), None
+        except CommandReceiptConflict as exc:
+            return None, IpcResponse.rejected(
+                IpcReason.COMMAND_IDEMPOTENCY_CONFLICT,
+                {
+                    "conflict": str(exc),
+                    "idempotency_key": envelope.idempotency_key,
+                },
+            )
 
     def _record_terminal_rejected_receipt(
         self,
@@ -211,3 +364,41 @@ def _receipt_payload(receipt: CommandReceipt) -> dict[str, object]:
     if receipt.rejection_reason is not None:
         payload["rejection_reason"] = receipt.rejection_reason
     return payload
+
+
+def _create_standard_backup_job_response_payload(
+    *,
+    envelope: IpcCommandEnvelope,
+    draft_id: str,
+    mutations_enabled: bool,
+    recognized: bool,
+    outcome: JobCreationOutcome | None,
+    job: SealedStandardBackupJob | None = None,
+) -> dict[str, Any]:
+    result = {
+        "command_name": envelope.command_name,
+        "draft_id": draft_id,
+        "recognized": recognized,
+        "mutations_enabled": mutations_enabled,
+    }
+    if outcome is not None:
+        result["created"] = outcome.created
+        result["idempotent_replay"] = outcome.idempotent_replay
+        result["readiness"] = outcome.readiness.to_dict()
+        job = outcome.job
+    if job is not None:
+        result["job"] = {
+            "job_id": job.job_id,
+            "job_revision_id": job.job_revision_id,
+            "filter_set_id": job.filter_set_id,
+        }
+    return result
+
+
+def _receipt_rejection_reason(receipt: CommandReceipt) -> IpcReason:
+    if receipt.rejection_reason is None:
+        return IpcReason.COMMAND_PRECONDITION_FAILED
+    try:
+        return IpcReason(receipt.rejection_reason)
+    except ValueError:
+        return IpcReason.COMMAND_PRECONDITION_FAILED
