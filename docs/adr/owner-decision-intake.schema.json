@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Non-binding owner decision intake for MediaSync Home 0A. This file shape is for validation before a human-approved ADR catalog update.",
+  "properties": {
+    "decisions": {
+      "additionalProperties": false,
+      "properties": {
+        "open_0b": {
+          "enum": [
+            "B1",
+            "B2",
+            "UNDECIDED"
+          ],
+          "type": "string"
+        },
+        "packaging_scope": {
+          "enum": [
+            "P1",
+            "P2",
+            "P3",
+            "UNDECIDED"
+          ],
+          "type": "string"
+        },
+        "ready_adrs": {
+          "additionalProperties": false,
+          "properties": {
+            "ADR-003": {
+              "$ref": "#/$defs/ownerDecision"
+            },
+            "ADR-007": {
+              "$ref": "#/$defs/ownerDecision"
+            },
+            "ADR-010": {
+              "$ref": "#/$defs/ownerDecision"
+            },
+            "ADR-011": {
+              "$ref": "#/$defs/ownerDecision"
+            },
+            "ADR-018": {
+              "$ref": "#/$defs/ownerDecision"
+            },
+            "ADR-020": {
+              "$ref": "#/$defs/ownerDecision"
+            },
+            "ADR-023": {
+              "$ref": "#/$defs/ownerDecision"
+            },
+            "ADR-024": {
+              "$ref": "#/$defs/ownerDecision"
+            },
+            "ADR-027": {
+              "$ref": "#/$defs/ownerDecision"
+            }
+          },
+          "required": [
+            "ADR-003",
+            "ADR-011",
+            "ADR-018",
+            "ADR-020",
+            "ADR-024",
+            "ADR-027"
+          ],
+          "type": "object"
+        },
+        "scheduler_scope": {
+          "enum": [
+            "T1",
+            "T2",
+            "T3",
+            "UNDECIDED"
+          ],
+          "type": "string"
+        },
+        "smb_scope": {
+          "enum": [
+            "S1",
+            "S2",
+            "S3",
+            "UNDECIDED"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "packaging_scope",
+        "smb_scope",
+        "scheduler_scope",
+        "ready_adrs",
+        "open_0b"
+      ],
+      "type": "object"
+    },
+    "effective_only_after_owner_confirms": {
+      "const": true,
+      "type": "boolean"
+    },
+    "notes": {
+      "type": "string"
+    },
+    "version": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "effective_only_after_owner_confirms",
+    "decisions"
+  ],
+  "title": "MediaSync Home 0A Owner Decision Intake",
+  "type": "object",
+  "$defs": {
+    "ownerDecision": {
+      "enum": [
+        "PENDING",
+        "OWNER_ACCEPTED",
+        "REJECTED",
+        "DEFERRED_WITH_SCOPE_REDUCTION"
+      ],
+      "type": "string"
+    }
+  }
+}

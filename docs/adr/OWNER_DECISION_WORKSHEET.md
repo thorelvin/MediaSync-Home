@@ -15,6 +15,21 @@ Ready ADRs: approve Codex recommended set
 0B: wait
 ```
 
+For a machine-readable version, copy
+[`owner-decision-intake.example.json`](owner-decision-intake.example.json),
+edit the copy, and check it with:
+
+```powershell
+python tools\validate_owner_decision_intake.py path\to\your-intake.json
+```
+
+The shape is documented in
+[`owner-decision-intake.schema.json`](owner-decision-intake.schema.json).
+
+The 2026-07-17 owner choices are recorded in
+[`owner-decision-intake.current.json`](owner-decision-intake.current.json) and
+applied to [`catalog.yaml`](catalog.yaml).
+
 ## Decision Order
 
 The safest order is:

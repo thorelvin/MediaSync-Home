@@ -1,0 +1,22 @@
+{
+  "decisions": {
+    "open_0b": "UNDECIDED",
+    "packaging_scope": "UNDECIDED",
+    "ready_adrs": {
+      "ADR-003": "PENDING",
+      "ADR-007": "PENDING",
+      "ADR-010": "PENDING",
+      "ADR-011": "PENDING",
+      "ADR-018": "PENDING",
+      "ADR-020": "PENDING",
+      "ADR-023": "PENDING",
+      "ADR-024": "PENDING",
+      "ADR-027": "PENDING"
+    },
+    "scheduler_scope": "UNDECIDED",
+    "smb_scope": "UNDECIDED"
+  },
+  "effective_only_after_owner_confirms": true,
+  "notes": "Example only. Editing this file does not change docs/adr/catalog.yaml.",
+  "version": 1
+}

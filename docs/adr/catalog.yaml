@@ -16,8 +16,8 @@ adrs:
   title: Headless Engine Host er eneste muterende tilstandseier
   evidence_package: 0A.1
   evidence_status: PROPOSED
-  owner_decision: PENDING
-  owner_decision_date: null
+  owner_decision: DEFERRED_WITH_SCOPE_REDUCTION
+  owner_decision_date: '2026-07-17'
   supersedes: []
   codex_recommendation: null
   rationale: Samme motor for GUI og Task Scheduler; færre races
@@ -26,8 +26,8 @@ adrs:
   title: Lokale named pipes med ACL og versjonert JSON-protokoll
   evidence_package: 0A.1
   evidence_status: PROPOSED
-  owner_decision: PENDING
-  owner_decision_date: null
+  owner_decision: DEFERRED_WITH_SCOPE_REDUCTION
+  owner_decision_date: '2026-07-17'
   supersedes: []
   codex_recommendation: null
   rationale: Windows-native, reconnect og tydelig sikkerhetsgrense
@@ -36,8 +36,8 @@ adrs:
   title: Én eller to lokale SQLite-databaser fryses etter Milepæl 0A
   evidence_package: 0A.4
   evidence_status: RECOMMENDED
-  owner_decision: PENDING
-  owner_decision_date: null
+  owner_decision: OWNER_ACCEPTED
+  owner_decision_date: '2026-07-17'
   supersedes: []
   codex_recommendation: Behold to lokale SQLite-databaser med eksplisitte handoffs; kostnaden er flere recoverytilstander, men recovery.sqlite forblir liten og skrivbar når katalogvekst treffer SQLITE_FULL.
   rationale: Målt avveining mellom enkel atomisitet og isolasjon av bulk/read model fra varig recovery
@@ -66,8 +66,8 @@ adrs:
   title: OS-håndtak er leaseautoritet; DB-rad er diagnostikk
   evidence_package: 0A.2
   evidence_status: PROPOSED
-  owner_decision: PENDING
-  owner_decision_date: null
+  owner_decision: DEFERRED_WITH_SCOPE_REDUCTION
+  owner_decision_date: '2026-07-17'
   supersedes: []
   codex_recommendation: null
   rationale: Tåler prosesskrasj og kan sperre over SMB
@@ -76,8 +76,8 @@ adrs:
   title: Targetmutasjon bruker compare-and-swap-preconditions
   evidence_package: 0A.3
   evidence_status: PROPOSED
-  owner_decision: PENDING
-  owner_decision_date: null
+  owner_decision: OWNER_ACCEPTED
+  owner_decision_date: '2026-07-17'
   supersedes: []
   codex_recommendation: null
   rationale: Hindrer overskriving av eksterne endringer etter analyse
@@ -106,8 +106,8 @@ adrs:
   title: Live snapshot er eksplisitt best-effort, ikke VSS
   evidence_package: 0A.3
   evidence_status: PROPOSED
-  owner_decision: PENDING
-  owner_decision_date: null
+  owner_decision: OWNER_ACCEPTED
+  owner_decision_date: '2026-07-17'
   supersedes: []
   codex_recommendation: null
   rationale: Ærlig semantikk og korrekt revalidering
@@ -116,8 +116,8 @@ adrs:
   title: Catalog/recovery/filsystem koordineres som saga med durable handoffs
   evidence_package: 0A.3 + 0A.4
   evidence_status: EVIDENCE_COMPLETE
-  owner_decision: PENDING
-  owner_decision_date: null
+  owner_decision: OWNER_ACCEPTED
+  owner_decision_date: '2026-07-17'
   supersedes: []
   codex_recommendation: Lokal 0A.3 og 0A.4 viser restartbare filsystem- og databasehandoffs uten skjult cross-store-atomisitet.
   rationale: Ingen falsk cross-store-atomisitet; restartbar avstemming
@@ -166,8 +166,8 @@ adrs:
   title: Endpointleaser bruker monotone fencing tokens
   evidence_package: 0A.2
   evidence_status: PROPOSED
-  owner_decision: PENDING
-  owner_decision_date: null
+  owner_decision: DEFERRED_WITH_SCOPE_REDUCTION
+  owner_decision_date: '2026-07-17'
   supersedes: []
   codex_recommendation: null
   rationale: Avviser stale workers/recovery etter lease loss/reacquire
@@ -186,8 +186,8 @@ adrs:
   title: Catalog/recovery backup og restore bruker ett manifestert epoch-sett
   evidence_package: 0A.4
   evidence_status: EVIDENCE_COMPLETE
-  owner_decision: PENDING
-  owner_decision_date: null
+  owner_decision: OWNER_ACCEPTED
+  owner_decision_date: '2026-07-17'
   supersedes: []
   codex_recommendation: 0A.4 verifiserer manifestert backup-sett og avviser blandede catalog/recovery-epoker.
   rationale: Hindrer blandet intern sannhet etter crash/restore
@@ -196,8 +196,8 @@ adrs:
   title: Ett skrivbart endpoint har én writer-installasjon per eierskapsepoke
   evidence_package: 0A.2
   evidence_status: PROPOSED
-  owner_decision: PENDING
-  owner_decision_date: null
+  owner_decision: DEFERRED_WITH_SCOPE_REDUCTION
+  owner_decision_date: '2026-07-17'
   supersedes: []
   codex_recommendation: null
   rationale: Unngår distribuert multi-writer-synkronisering i hjemmeproduktet
@@ -206,8 +206,8 @@ adrs:
   title: '`.mediasync` klassifiseres før ekskludering/adoption'
   evidence_package: 0A.2
   evidence_status: EVIDENCE_COMPLETE
-  owner_decision: PENDING
-  owner_decision_date: null
+  owner_decision: OWNER_ACCEPTED
+  owner_decision_date: '2026-07-17'
   supersedes: []
   codex_recommendation: 0A.2 validerer alle kontrollområdeklassifikasjoner og endelig BLAKE3/JCS-markerchecksum mot draftschemaet; aksepter klassifiser-først-regelen.
   rationale: Hindrer tap av legitim brukerdata med samme navn
@@ -236,8 +236,8 @@ adrs:
   title: Kilden bindes med `SourceReadGuard` eller post-transfer current hash
   evidence_package: 0A.3
   evidence_status: PROPOSED
-  owner_decision: PENDING
-  owner_decision_date: null
+  owner_decision: OWNER_ACCEPTED
+  owner_decision_date: '2026-07-17'
   supersedes: []
   codex_recommendation: null
   rationale: Lukker source-TOCTOU så langt endepunktet tillater
@@ -246,8 +246,8 @@ adrs:
   title: Kontrollområdet bruker korte objektstier med manifester
   evidence_package: 0A.3
   evidence_status: PROPOSED
-  owner_decision: PENDING
-  owner_decision_date: null
+  owner_decision: OWNER_ACCEPTED
+  owner_decision_date: '2026-07-17'
   supersedes: []
   codex_recommendation: null
   rationale: Unngår path-length-feil i staging/versions/quarantine
@@ -276,8 +276,8 @@ adrs:
   title: Windows-argumentserialisering og sikker systemprogram-resolusjon
   evidence_package: 0A.5
   evidence_status: EVIDENCE_COMPLETE
-  owner_decision: PENDING
-  owner_decision_date: null
+  owner_decision: OWNER_ACCEPTED
+  owner_decision_date: '2026-07-17'
   supersedes: []
   codex_recommendation: Behold én kanonisk Windows argv-builder og GetSystemDirectoryW-basert Robocopy-resolver; lokal round-trip og flaggvalidering er bevist i 0A.5.
   rationale: Unngår PATH-hijacking, quotingfeil og avvik mellom Python-argumenter og Windows-parsing
@@ -286,8 +286,8 @@ adrs:
   title: Reproduserbar Python/PySide6-pakkestrategi for Windows
   evidence_package: 0A.5
   evidence_status: BLOCKED
-  owner_decision: PENDING
-  owner_decision_date: null
+  owner_decision: DEFERRED_WITH_SCOPE_REDUCTION
+  owner_decision_date: '2026-07-17'
   supersedes: []
   codex_recommendation: Pakkestrategi kan ikke anbefales for release før signeringssertifikat/-policy og ren Windows-VM er tilgjengelig og smoke-testet; minimal PySide6/BLAKE3/Nuitka-runtime, lokal Nuitka standalone exe-smoke, SDK/signing-tool inventory og release-signing-plan er bevist.
   rationale: Gir en reproducerbar, offline-brukbar Windows-build med kontrollert Python/Qt-kompatibilitet

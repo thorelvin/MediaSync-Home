@@ -5,12 +5,12 @@
 | Arbeidspakke | Status | Branch/commit | Rapport-/artefaktsti | Blocker |
 |---|---|---|---|---|
 | 0A.0 — Miljøpreflight | passed | `spike/0a0-environment-preflight` / baseline `d3282ef` | `docs/ARCHITECTURE_SPIKE_REPORT.md` | Ingen 0A.0-blocker |
-| 0A.1 — Prosess og IPC | blocked | `spike/0a1-task-scheduler-trigger` | `spikes/0a1_process_ipc/`, `tests/spikes/0a1_process_ipc/`, `artifacts/0a1/` | Lokal IPC/Job Object og Task Scheduler same-SID trigger består; ekte wrong-SID/remote og non-interactive/session-policy mangler |
-| 0A.2 — Endpoint-eierskap | blocked | `spike/0a2-blake3-marker-evidence` | `spikes/0a2_endpoint_ownership/`, `tests/spikes/0a2_endpoint_ownership/`, `artifacts/0a2/` | Lokal klassifisering/lock/takeover og endelig BLAKE3-marker bestått; to-klient SMB-lab mangler |
+| 0A.1 — Prosess og IPC | blocked | `spike/0a1-task-scheduler-trigger` | `spikes/0a1_process_ipc/`, `tests/spikes/0a1_process_ipc/`, `artifacts/0a1/` | Lokal IPC/Job Object og Task Scheduler same-SID trigger består; ekte wrong-SID/remote og non-interactive/session-policy er utsatt; scope-reduced for 0B |
+| 0A.2 — Endpoint-eierskap | blocked | `spike/0a2-blake3-marker-evidence` | `spikes/0a2_endpoint_ownership/`, `tests/spikes/0a2_endpoint_ownership/`, `artifacts/0a2/` | Lokal klassifisering/lock/takeover og endelig BLAKE3-marker bestått; to-klient SMB-lab er utsatt; scope-reduced for 0B |
 | 0A.3 — Recovery og stier | passed | `spike/0a3-recovery-and-paths` | `spikes/0a3_recovery_paths/`, `tests/spikes/0a3_recovery_paths/`, `artifacts/0a3/` | Lokal NTFS/path/recovery bestått; SMB SourceReadGuard ikke kjørt uten SMB-lab |
-| 0A.4 — SQLite og kapasitet | passed | `spike/0a4-sqlite-capacity` | `spikes/0a4_sqlite_capacity/`, `tests/spikes/0a4_sqlite_capacity/`, `artifacts/0a4/` | Lokal 1M SQLite-/kapasitetsmåling bestått; ADR-003 anbefales, men eiergodkjenning gjenstår |
-| 0A.5 — Windows argv/pakking | blocked | `spike/0a5-sdk-signing-inventory` | `spikes/0a5_windows_packaging/`, `tests/spikes/0a5_windows_packaging/`, `artifacts/0a5/` | `GetSystemDirectoryW`/argv, minimal runtime, lokal Nuitka exe-smoke og SDK-tool-inventory bestått; signeringssertifikat/signert release og ren Windows-VM mangler |
-| 0A.6 — Beslutningsreview | blocked | `spike/0a6-decision-review` | `docs/adr/0A_DECISION_REVIEW.md` | Eierbeslutninger, SMB-/Task Scheduler-lab og pakkemiljø mangler; 0B forblir blokkert |
+| 0A.4 — SQLite og kapasitet | passed | `spike/0a4-sqlite-capacity` | `spikes/0a4_sqlite_capacity/`, `tests/spikes/0a4_sqlite_capacity/`, `artifacts/0a4/` | Lokal 1M SQLite-/kapasitetsmåling bestått; ADR-003 eiergodkjent 2026-07-17 |
+| 0A.5 — Windows argv/pakking | blocked | `spike/0a5-sdk-signing-inventory` | `spikes/0a5_windows_packaging/`, `tests/spikes/0a5_windows_packaging/`, `artifacts/0a5/` | `GetSystemDirectoryW`/argv, minimal runtime, lokal Nuitka exe-smoke og SDK-tool-inventory bestått; signeringssertifikat/signert release og ren Windows-VM er utsatt; scope-reduced for 0B |
+| 0A.6 — Beslutningsreview | passed | `spike/0a6-owner-decision-intake` | `docs/adr/0A_DECISION_REVIEW.md`, `docs/adr/owner-decision-intake.current.json` | Eierbeslutninger registrert 2026-07-17; 0B er åpnet for scoped local-preview path |
 
 ## Miljøpreflight
 
@@ -180,9 +180,9 @@ Baseline ble kontrollert med streng hashverifisering før Git-initialisering og 
 | PASS/BLOCKED/INCONCLUSIVE skilt tydelig | `PASS` | 0A.1, 0A.2 og 0A.5 er delvis/lab-blokkert; 0A.3/0A.4 er lokale pass med SMB-caveats |
 | Hver blocker har produktkonsekvens | `PASS` | Blockertabellen og `docs/adr/0A_DECISION_REVIEW.md` |
 | Hver ADR har alternativ/risiko/anbefaling/eierhandling | `PASS` | `docs/adr/0A_DECISION_REVIEW.md` |
-| Ingen eierbeslutning forfalsket | `PASS` | Alle ADR-er har fortsatt `owner_decision: PENDING` |
+| Ingen eierbeslutning forfalsket | `PASS` | Før 2026-07-17 forble alle ADR-er `PENDING`; etter eierens chatvalg er bare de eksplisitte valgene registrert i `catalog.yaml` |
 | Ingen kontrakt frosset | `PASS` | `schema/contracts-manifest.yaml` forblir draft/blocked |
-| 0B åpnet automatisk | `PASS` | Ikke åpnet; status forblir blokkert |
+| 0B åpnet automatisk | `PASS` | Ikke automatisk; eier åpnet 0B 2026-07-17 med lokal usignert, lokal-only og same-user startup scope |
 
 ### Kommandojournal
 
@@ -417,16 +417,16 @@ Tallene er lokale spike-målinger på syntetiske metadata, ikke en produksjons-S
 
 ## Beslutninger
 
-ADR-003 er satt til `RECOMMENDED` med Codex-anbefaling om to lokale SQLite-databaser og eksplisitte handoffs. ADR-011, ADR-018, ADR-020 og ADR-027 er satt til `EVIDENCE_COMPLETE`. ADR-028 er satt til `BLOCKED` fordi signeringssertifikat/signert artefakt og ren Windows-VM-smoke mangler selv om minimal PySide6/BLAKE3/Nuitka-runtime, lokal Nuitka standalone exe-smoke og SDK-tool-inventory er bevist. ADR-006, ADR-016 og ADR-019 forblir `PROPOSED` til to-klient SMB-bevis finnes eller eier godkjenner scope-reduksjon. Alle `owner_decision`-felt forblir `PENDING`; bare eier kan akseptere, avvise eller godkjenne scope-reduksjon. ADR-001 og ADR-002 har nå real Task Scheduler same-SID triggerbevis, men bør forbli `PROPOSED` til feil-SID/remote og non-interactive/session-policy er bevist eller eier eksplisitt godkjenner scope-reduksjon. ADR-013 bør forbli `PROPOSED` til eier vurderer integrasjonscaveat for faktisk transferchild.
+ADR-003, ADR-007, ADR-010, ADR-011, ADR-018, ADR-020, ADR-023, ADR-024 og ADR-027 er eiergodkjent 2026-07-17 for den lokale første leveransen. ADR-001, ADR-002, ADR-006, ADR-016, ADR-019 og ADR-028 er `DEFERRED_WITH_SCOPE_REDUCTION`: same-user startup, local-only writable targets og lokal usignert preview er tillatt, men full non-interactive automasjon, writable SMB og signed/clean-VM release er ikke påstått. ADR-004, ADR-013, ADR-026 og øvrige integrasjons-/kontrakt-ADR-er forblir `PENDING` til 0B eller senere milepæler gir sterkere bevis.
 
-`docs/adr/0A_DECISION_REVIEW.md` er eierens beslutningsliste. Den viser også mulige scope-reduksjoner for lokal-only første release, ingen non-interactive trigger i første omgang, lokal usignert exe-preview uten releaseclaim, og utsatt endpoint-marker-contract-freeze.
+`docs/adr/0A_DECISION_REVIEW.md` er eierens beslutningsliste. `docs/adr/owner-decision-intake.current.json` fanger chatvalgene som ble brukt til å oppdatere `docs/adr/catalog.yaml`.
 
 ## Anbefalt rekkefølge
 
-1. Fullfør de blokkerte 0A.1-identitetsradene med dedikert Task Scheduler-session og feil-SID/remote klient, eller få eksplisitt eiergodkjent scope-reduksjon.
-2. Forbered dedikert to-klient SMB-lab før `0A.2` skal bestå cross-machine writer ownership og før SMB SourceReadGuard kan oppgraderes fra fallback.
-3. Forbered signeringssertifikat/-policy og en ren Windows-VM før ADR-028 kan få full releasepakke-evidens.
-4. Bruk `docs/adr/0A_DECISION_REVIEW.md` til å fatte eksplisitte ADR-beslutninger eller scope-reduksjoner. 0B skal ikke starte før de nødvendige ADR-ene har eierbeslutning.
+1. Start 0B med de eiergodkjente lokale begrensningene: local-only writable targets, same-user startup og lokal usignert preview.
+2. Hold ADR-026 og kontrakter draft til 0B validerer SQL/JSON Schema/YAML-kontraktene.
+3. Forbered dedikert to-klient SMB-lab før writable SMB og SMB SourceReadGuard kan oppgraderes fra fallback.
+4. Forbered signeringssertifikat/-policy, signert artefakt og ren Windows-VM før ADR-028 kan få full releasepakke-evidens.
 
 ## Bevisst ikke implementert
 

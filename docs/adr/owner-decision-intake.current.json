@@ -1,0 +1,22 @@
+{
+  "decisions": {
+    "open_0b": "B1",
+    "packaging_scope": "P2",
+    "ready_adrs": {
+      "ADR-003": "OWNER_ACCEPTED",
+      "ADR-007": "OWNER_ACCEPTED",
+      "ADR-010": "OWNER_ACCEPTED",
+      "ADR-011": "OWNER_ACCEPTED",
+      "ADR-018": "OWNER_ACCEPTED",
+      "ADR-020": "OWNER_ACCEPTED",
+      "ADR-023": "OWNER_ACCEPTED",
+      "ADR-024": "OWNER_ACCEPTED",
+      "ADR-027": "OWNER_ACCEPTED"
+    },
+    "scheduler_scope": "T2",
+    "smb_scope": "S2"
+  },
+  "effective_only_after_owner_confirms": true,
+  "notes": "Owner choices received in chat on 2026-07-17: local unsigned for now; local-only for now; same-user startup for now; Codex chooses the best ready ADR decisions; move on.",
+  "version": 1
+}
