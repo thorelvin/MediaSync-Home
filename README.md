@@ -121,6 +121,7 @@ python tools/build_master.py --check
 python -m pip install -r requirements-dev.txt
 python -m mypy src
 python tools/check_imports.py
+python tools/audit_dependencies.py
 ```
 
 ## Repositoryet i korte trekk

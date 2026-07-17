@@ -20,6 +20,7 @@ REQUIRED_COMMANDS = {
     "python -m ruff check .",
     "python -m mypy src",
     "python tools\\check_imports.py",
+    "python tools\\audit_dependencies.py",
 }
 
 

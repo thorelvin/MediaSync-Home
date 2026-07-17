@@ -1,0 +1,306 @@
+{
+  "dependencies": [
+    {
+      "canonical_name": "ast-serialize",
+      "license": "MIT",
+      "name": "ast_serialize",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "0.6.0"
+    },
+    {
+      "canonical_name": "attrs",
+      "license": "MIT",
+      "name": "attrs",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "26.1.0"
+    },
+    {
+      "canonical_name": "click",
+      "license": "BSD-3-Clause",
+      "name": "click",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "8.4.2"
+    },
+    {
+      "canonical_name": "colorama",
+      "license": "BSD-3-Clause",
+      "name": "colorama",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "0.4.6"
+    },
+    {
+      "canonical_name": "exceptiongroup",
+      "license": "MIT",
+      "name": "exceptiongroup",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "1.3.1"
+    },
+    {
+      "canonical_name": "grimp",
+      "license": "BSD 2-Clause License",
+      "name": "grimp",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "3.15"
+    },
+    {
+      "canonical_name": "import-linter",
+      "license": "BSD 2-Clause License",
+      "name": "import-linter",
+      "notice_required": false,
+      "root_requirement": true,
+      "version": "2.13"
+    },
+    {
+      "canonical_name": "iniconfig",
+      "license": "MIT",
+      "name": "iniconfig",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "2.3.0"
+    },
+    {
+      "canonical_name": "jsonschema",
+      "license": "MIT",
+      "name": "jsonschema",
+      "notice_required": false,
+      "root_requirement": true,
+      "version": "4.26.0"
+    },
+    {
+      "canonical_name": "jsonschema-specifications",
+      "license": "MIT",
+      "name": "jsonschema-specifications",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "2025.9.1"
+    },
+    {
+      "canonical_name": "librt",
+      "license": "MIT",
+      "name": "librt",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "0.13.0"
+    },
+    {
+      "canonical_name": "markdown-it-py",
+      "license": "MIT",
+      "name": "markdown-it-py",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "4.2.0"
+    },
+    {
+      "canonical_name": "mdurl",
+      "license": "MIT",
+      "name": "mdurl",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "0.1.2"
+    },
+    {
+      "canonical_name": "mypy",
+      "license": "MIT",
+      "name": "mypy",
+      "notice_required": false,
+      "root_requirement": true,
+      "version": "2.3.0"
+    },
+    {
+      "canonical_name": "mypy-extensions",
+      "license": "MIT",
+      "name": "mypy_extensions",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "1.1.0"
+    },
+    {
+      "canonical_name": "packaging",
+      "license": "Apache-2.0 OR BSD-2-Clause",
+      "name": "packaging",
+      "notice_required": true,
+      "root_requirement": true,
+      "version": "26.2"
+    },
+    {
+      "canonical_name": "pathspec",
+      "license": "MPL-2.0",
+      "name": "pathspec",
+      "notice_required": true,
+      "root_requirement": false,
+      "version": "1.1.1"
+    },
+    {
+      "canonical_name": "pluggy",
+      "license": "MIT",
+      "name": "pluggy",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "1.6.0"
+    },
+    {
+      "canonical_name": "pygments",
+      "license": "BSD-2-Clause",
+      "name": "Pygments",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "2.20.0"
+    },
+    {
+      "canonical_name": "pyside6",
+      "license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only",
+      "name": "PySide6",
+      "notice_required": true,
+      "root_requirement": true,
+      "version": "6.11.1"
+    },
+    {
+      "canonical_name": "pyside6-addons",
+      "license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only",
+      "name": "PySide6_Addons",
+      "notice_required": true,
+      "root_requirement": false,
+      "version": "6.11.1"
+    },
+    {
+      "canonical_name": "pyside6-essentials",
+      "license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only",
+      "name": "PySide6_Essentials",
+      "notice_required": true,
+      "root_requirement": false,
+      "version": "6.11.1"
+    },
+    {
+      "canonical_name": "pytest",
+      "license": "MIT",
+      "name": "pytest",
+      "notice_required": false,
+      "root_requirement": true,
+      "version": "9.1.1"
+    },
+    {
+      "canonical_name": "pyyaml",
+      "license": "MIT",
+      "name": "PyYAML",
+      "notice_required": false,
+      "root_requirement": true,
+      "version": "6.0.3"
+    },
+    {
+      "canonical_name": "referencing",
+      "license": "MIT",
+      "name": "referencing",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "0.37.0"
+    },
+    {
+      "canonical_name": "rich",
+      "license": "MIT",
+      "name": "rich",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "15.0.0"
+    },
+    {
+      "canonical_name": "rpds-py",
+      "license": "MIT",
+      "name": "rpds-py",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "0.30.0"
+    },
+    {
+      "canonical_name": "ruff",
+      "license": "MIT",
+      "name": "ruff",
+      "notice_required": false,
+      "root_requirement": true,
+      "version": "0.14.6"
+    },
+    {
+      "canonical_name": "shiboken6",
+      "license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only",
+      "name": "shiboken6",
+      "notice_required": true,
+      "root_requirement": false,
+      "version": "6.11.1"
+    },
+    {
+      "canonical_name": "tomli",
+      "license": "MIT",
+      "name": "tomli",
+      "notice_required": false,
+      "root_requirement": false,
+      "version": "2.4.1"
+    },
+    {
+      "canonical_name": "typing-extensions",
+      "license": "PSF-2.0",
+      "name": "typing_extensions",
+      "notice_required": true,
+      "root_requirement": false,
+      "version": "4.16.0"
+    }
+  ],
+  "missing_roots": [],
+  "notice_required": [
+    "packaging",
+    "pathspec",
+    "pyside6",
+    "pyside6-addons",
+    "pyside6-essentials",
+    "shiboken6",
+    "typing-extensions"
+  ],
+  "passed": true,
+  "root_requirements": [
+    {
+      "name": "jsonschema",
+      "source": "requirements-handoff.txt",
+      "version": "4.26.0"
+    },
+    {
+      "name": "PyYAML",
+      "source": "requirements-handoff.txt",
+      "version": "6.0.3"
+    },
+    {
+      "name": "import-linter",
+      "source": "requirements-dev.txt",
+      "version": "2.13"
+    },
+    {
+      "name": "mypy",
+      "source": "requirements-dev.txt",
+      "version": "2.3.0"
+    },
+    {
+      "name": "packaging",
+      "source": "requirements-dev.txt",
+      "version": "26.2"
+    },
+    {
+      "name": "PySide6",
+      "source": "requirements-dev.txt",
+      "version": "6.11.1"
+    },
+    {
+      "name": "pytest",
+      "source": "requirements-dev.txt",
+      "version": "9.1.1"
+    },
+    {
+      "name": "ruff",
+      "source": "requirements-dev.txt",
+      "version": "0.14.6"
+    }
+  ],
+  "unapproved_licenses": []
+}
