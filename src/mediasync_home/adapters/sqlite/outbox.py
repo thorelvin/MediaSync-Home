@@ -196,6 +196,46 @@ class SqliteOutboxStore(OutboxStore):
                 raise
             raise SqliteOutboxStoreError("OUTBOX_DELIVERY_FAILED") from exc
 
+    def mark_dead_letter(
+        self,
+        *,
+        message_id: str,
+        claim_token: str,
+        error_code: str,
+    ) -> OutboxMessage:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            cursor = self._connection.execute(
+                """
+                UPDATE outbox_messages
+                SET
+                    state = 'DEAD_LETTER',
+                    last_error_code = ?,
+                    updated_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    row_version = row_version + 1
+                WHERE id = ?
+                    AND state = 'CLAIMED'
+                    AND claim_token = ?
+                """,
+                (error_code, message_id, claim_token),
+            )
+            if cursor.rowcount != 1:
+                raise SqliteOutboxStoreError("OUTBOX_DEAD_LETTER_CLAIM_MISMATCH")
+            dead_lettered = self.load_outbox_message(message_id)
+            if dead_lettered is None:
+                raise SqliteOutboxStoreError("OUTBOX_DEAD_LETTER_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return dead_lettered
+        except (sqlite3.Error, SqliteOutboxStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteOutboxStoreError):
+                raise
+            raise SqliteOutboxStoreError("OUTBOX_DEAD_LETTER_FAILED") from exc
+
     def _load_by_idempotency_key(self, idempotency_key: str) -> OutboxMessage | None:
         return self._load_one("WHERE idempotency_key = ?", (idempotency_key,))
 

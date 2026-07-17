@@ -24,6 +24,11 @@ class OutboxMessageType(str, Enum):
     COMMAND_EFFECT_ACCEPTED = "COMMAND_EFFECT_ACCEPTED"
 
 
+class OutboxDeliveryOutcome(str, Enum):
+    DELIVERED = "DELIVERED"
+    DEAD_LETTER = "DEAD_LETTER"
+
+
 @dataclass(frozen=True)
 class OutboxMessage:
     message_id: str
@@ -40,6 +45,21 @@ class OutboxMessage:
     attempt_count: int = 0
     terminal_effect_hash: str | None = None
     last_error_code: str | None = None
+
+
+@dataclass(frozen=True)
+class OutboxDeliveryResult:
+    outcome: OutboxDeliveryOutcome
+    terminal_effect_hash: str | None = None
+    error_code: str | None = None
+
+
+@dataclass(frozen=True)
+class OutboxDispatchResult:
+    claimed: bool
+    delivered: bool
+    dead_lettered: bool
+    message_id: str | None = None
 
 
 class OutboxStore(Protocol):
@@ -61,6 +81,68 @@ class OutboxStore(Protocol):
         claim_token: str,
         terminal_effect_hash: str,
     ) -> OutboxMessage: ...
+
+    def mark_dead_letter(
+        self,
+        *,
+        message_id: str,
+        claim_token: str,
+        error_code: str,
+    ) -> OutboxMessage: ...
+
+
+class OutboxDeliveryPort(Protocol):
+    def deliver_outbox_message(self, message: OutboxMessage) -> OutboxDeliveryResult: ...
+
+
+class OutboxClaimTokenFactory(Protocol):
+    def new_claim_token(self) -> str: ...
+
+
+def dispatch_one_outbox_message(
+    *,
+    store: OutboxStore,
+    delivery: OutboxDeliveryPort,
+    owner_instance_id: str,
+    claim_tokens: OutboxClaimTokenFactory,
+) -> OutboxDispatchResult:
+    claim_token = claim_tokens.new_claim_token()
+    message = store.claim_next_pending(
+        owner_instance_id=owner_instance_id,
+        claim_token=claim_token,
+    )
+    if message is None:
+        return OutboxDispatchResult(claimed=False, delivered=False, dead_lettered=False)
+
+    result = delivery.deliver_outbox_message(message)
+    if result.outcome is OutboxDeliveryOutcome.DELIVERED:
+        if result.terminal_effect_hash is None:
+            raise OutboxViolation("OUTBOX_DELIVERY_REQUIRES_TERMINAL_EFFECT_HASH")
+        store.mark_delivered(
+            message_id=message.message_id,
+            claim_token=claim_token,
+            terminal_effect_hash=result.terminal_effect_hash,
+        )
+        return OutboxDispatchResult(
+            claimed=True,
+            delivered=True,
+            dead_lettered=False,
+            message_id=message.message_id,
+        )
+
+    if result.error_code is None or not result.error_code.strip():
+        raise OutboxViolation("OUTBOX_DEAD_LETTER_REQUIRES_ERROR_CODE")
+    store.mark_dead_letter(
+        message_id=message.message_id,
+        claim_token=claim_token,
+        error_code=result.error_code,
+    )
+    return OutboxDispatchResult(
+        claimed=True,
+        delivered=False,
+        dead_lettered=True,
+        message_id=message.message_id,
+    )
 
 
 def command_effect_outbox_message(receipt: CommandReceipt) -> OutboxMessage:
@@ -115,6 +197,22 @@ def delivered_message(
         message,
         state=OutboxMessageState.DELIVERED,
         terminal_effect_hash=terminal_effect_hash,
+    )
+
+
+def dead_letter_message(
+    message: OutboxMessage,
+    *,
+    error_code: str,
+) -> OutboxMessage:
+    if message.state is not OutboxMessageState.CLAIMED:
+        raise OutboxViolation("OUTBOX_DEAD_LETTER_REQUIRES_CLAIMED_MESSAGE")
+    if not error_code.strip():
+        raise OutboxViolation("OUTBOX_DEAD_LETTER_REQUIRES_ERROR_CODE")
+    return replace(
+        message,
+        state=OutboxMessageState.DEAD_LETTER,
+        last_error_code=error_code,
     )
 
 

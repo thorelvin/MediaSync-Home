@@ -6,11 +6,19 @@ import pytest
 
 from mediasync_home.application.command_receipts import CommandReceipt, CommandReceiptState
 from mediasync_home.application.outbox import (
+    OutboxClaimTokenFactory,
+    OutboxDeliveryOutcome,
+    OutboxDeliveryPort,
+    OutboxDeliveryResult,
+    OutboxMessage,
     OutboxMessageState,
+    OutboxStore,
     OutboxViolation,
     claimed_message,
     command_effect_outbox_message,
+    dead_letter_message,
     delivered_message,
+    dispatch_one_outbox_message,
 )
 
 
@@ -57,6 +65,151 @@ def test_delivery_requires_claimed_message() -> None:
 
     with pytest.raises(OutboxViolation, match="OUTBOX_DELIVERY_REQUIRES_CLAIMED_MESSAGE"):
         delivered_message(message, terminal_effect_hash="a" * 64)
+
+
+def test_dead_letter_requires_claimed_message_and_error_code() -> None:
+    message = command_effect_outbox_message(_succeeded_receipt())
+
+    with pytest.raises(OutboxViolation, match="OUTBOX_DEAD_LETTER_REQUIRES_CLAIMED_MESSAGE"):
+        dead_letter_message(message, error_code="PERMANENT_FAILURE")
+    with pytest.raises(OutboxViolation, match="OUTBOX_DEAD_LETTER_REQUIRES_ERROR_CODE"):
+        dead_letter_message(
+            claimed_message(message, owner_instance_id="host-a", claim_token="claim-a"),
+            error_code=" ",
+        )
+
+
+def test_outbox_dispatcher_delivers_claimed_message() -> None:
+    store = _MemoryOutboxStore(command_effect_outbox_message(_succeeded_receipt()))
+    delivery = _DeliveryPort(OutboxDeliveryResult(OutboxDeliveryOutcome.DELIVERED, "b" * 64))
+
+    result = dispatch_one_outbox_message(
+        store=store,
+        delivery=delivery,
+        owner_instance_id="host-a",
+        claim_tokens=_FixedClaimTokenFactory("claim-a"),
+    )
+
+    assert result.claimed is True
+    assert result.delivered is True
+    assert result.dead_lettered is False
+    assert store.message is not None
+    assert store.message.state is OutboxMessageState.DELIVERED
+    assert store.message.claim_token == "claim-a"
+    assert store.message.terminal_effect_hash == "b" * 64
+    assert delivery.delivered_messages == (store.message.message_id,)
+
+
+def test_outbox_dispatcher_dead_letters_permanent_failure() -> None:
+    store = _MemoryOutboxStore(command_effect_outbox_message(_succeeded_receipt()))
+    delivery = _DeliveryPort(
+        OutboxDeliveryResult(
+            OutboxDeliveryOutcome.DEAD_LETTER,
+            error_code="PERMANENT_FAILURE",
+        )
+    )
+
+    result = dispatch_one_outbox_message(
+        store=store,
+        delivery=delivery,
+        owner_instance_id="host-a",
+        claim_tokens=_FixedClaimTokenFactory("claim-a"),
+    )
+
+    assert result.claimed is True
+    assert result.delivered is False
+    assert result.dead_lettered is True
+    assert store.message is not None
+    assert store.message.state is OutboxMessageState.DEAD_LETTER
+    assert store.message.last_error_code == "PERMANENT_FAILURE"
+
+
+def test_outbox_dispatcher_returns_idle_when_no_pending_message() -> None:
+    store = _MemoryOutboxStore(None)
+    delivery = _DeliveryPort(OutboxDeliveryResult(OutboxDeliveryOutcome.DELIVERED, "b" * 64))
+
+    result = dispatch_one_outbox_message(
+        store=store,
+        delivery=delivery,
+        owner_instance_id="host-a",
+        claim_tokens=_FixedClaimTokenFactory("claim-a"),
+    )
+
+    assert result.claimed is False
+    assert delivery.delivered_messages == ()
+
+
+class _FixedClaimTokenFactory(OutboxClaimTokenFactory):
+    def __init__(self, claim_token: str) -> None:
+        self._claim_token = claim_token
+
+    def new_claim_token(self) -> str:
+        return self._claim_token
+
+
+class _DeliveryPort(OutboxDeliveryPort):
+    def __init__(self, result: OutboxDeliveryResult) -> None:
+        self._result = result
+        self.delivered_messages: tuple[str, ...] = ()
+
+    def deliver_outbox_message(self, message: OutboxMessage) -> OutboxDeliveryResult:
+        self.delivered_messages = (*self.delivered_messages, message.message_id)
+        return self._result
+
+
+class _MemoryOutboxStore(OutboxStore):
+    def __init__(self, message: OutboxMessage | None) -> None:
+        self.message = message
+
+    def enqueue_outbox_message(self, message: OutboxMessage) -> OutboxMessage:
+        self.message = message
+        return message
+
+    def load_outbox_message(self, message_id: str) -> OutboxMessage | None:
+        if self.message is not None and self.message.message_id == message_id:
+            return self.message
+        return None
+
+    def claim_next_pending(
+        self,
+        *,
+        owner_instance_id: str,
+        claim_token: str,
+    ) -> OutboxMessage | None:
+        if self.message is None or self.message.state is not OutboxMessageState.PENDING:
+            return None
+        self.message = claimed_message(
+            self.message,
+            owner_instance_id=owner_instance_id,
+            claim_token=claim_token,
+        )
+        return self.message
+
+    def mark_delivered(
+        self,
+        *,
+        message_id: str,
+        claim_token: str,
+        terminal_effect_hash: str,
+    ) -> OutboxMessage:
+        message = self.load_outbox_message(message_id)
+        assert message is not None
+        assert message.claim_token == claim_token
+        self.message = delivered_message(message, terminal_effect_hash=terminal_effect_hash)
+        return self.message
+
+    def mark_dead_letter(
+        self,
+        *,
+        message_id: str,
+        claim_token: str,
+        error_code: str,
+    ) -> OutboxMessage:
+        message = self.load_outbox_message(message_id)
+        assert message is not None
+        assert message.claim_token == claim_token
+        self.message = dead_letter_message(message, error_code=error_code)
+        return self.message
 
 
 def _succeeded_receipt() -> CommandReceipt:
