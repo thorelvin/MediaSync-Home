@@ -80,6 +80,11 @@ def recovery_migration_plan() -> SqliteMigrationPlan:
                 name="recovery_journal_skeleton",
                 statements=RECOVERY_JOURNAL_SKELETON,
             ),
+            SqliteMigration(
+                version=2,
+                name="recovery_lease_counters",
+                statements=RECOVERY_LEASE_COUNTERS,
+            ),
         ),
     )
 
@@ -883,6 +888,17 @@ RECOVERY_JOURNAL_SKELETON = (
         FOREIGN KEY (epoch_id, intent_id)
             REFERENCES recovery_intents (epoch_id, id)
             ON DELETE RESTRICT
+    )
+    """,
+)
+
+RECOVERY_LEASE_COUNTERS = (
+    """
+    CREATE TABLE lease_counters (
+        resource_key TEXT PRIMARY KEY,
+        ownership_epoch INTEGER NOT NULL CHECK (ownership_epoch >= 1),
+        last_fencing_token INTEGER NOT NULL CHECK (last_fencing_token >= 0),
+        updated_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     )
     """,
 )
