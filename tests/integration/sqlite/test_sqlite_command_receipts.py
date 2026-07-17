@@ -21,6 +21,12 @@ from mediasync_home.application.command_receipts import (
     CommandReceiptState,
     transition_command_receipt,
 )
+from mediasync_home.application.job_creation import JobCreationCommandName
+from mediasync_home.domain.process_roles import ProcessRole
+from mediasync_home.ipc.client import InProcessIpcClient
+from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
+from mediasync_home.ipc.protocol import IpcReason, IpcStatus
+from mediasync_home.ipc.server import EngineHostIpcService
 
 
 def test_sqlite_command_receipts_roundtrip_received_receipt(tmp_path: Path) -> None:
@@ -93,6 +99,48 @@ def test_sqlite_command_receipts_update_requires_existing_row(tmp_path: Path) ->
 
         with pytest.raises(SqliteCommandReceiptStoreError, match="COMMAND_RECEIPT_NOT_FOUND"):
             store.update_command_receipt(_receipt())
+
+
+def test_sqlite_command_receipts_persist_from_ipc_command(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        store = SqliteCommandReceiptStore(connection)
+        service = EngineHostIpcService(
+            ClientAuthorizationPolicy(
+                expected_user_sid_hash="same-user",
+                expected_session_id=42,
+            ),
+            command_receipt_store=store,
+        )
+        ipc_client = InProcessIpcClient(
+            service=service,
+            identity=VerifiedClientIdentity(
+                user_sid_hash="same-user",
+                session_id=42,
+                is_remote=False,
+                transport="sqlite-ipc-test",
+            ),
+            role=ProcessRole.GUI,
+            client_instance_id="55555555-5555-4555-8555-555555555555",
+        )
+        ipc_client.connect()
+
+        response = ipc_client.submit_command(
+            JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+            request_id="44444444-4444-4444-8444-444444444444",
+            idempotency_key="66666666-6666-4666-8666-666666666666",
+            payload={"draft_id": "draft-a"},
+            payload_hash="98cdbb1f712331be51355f90ab8c193c5c6f681d33d5c052cd38fe94820f3d02",
+        )
+
+        loaded = store.load_command_receipt("66666666-6666-4666-8666-666666666666")
+        assert response.status is IpcStatus.REJECTED
+        assert response.reason is IpcReason.MUTATING_COMMANDS_DISABLED
+        assert response.payload["receipt"]["state"] == CommandReceiptState.REJECTED.value
+        assert loaded is not None
+        assert loaded.state is CommandReceiptState.REJECTED
+        assert loaded.principal_fingerprint == "same-user"
 
 
 def _prepare_catalog(connection: sqlite3.Connection, database: Path) -> None:

@@ -437,6 +437,8 @@ class Win32NamedPipeClient:
         self,
         command_name: str,
         *,
+        request_id: str | None = None,
+        idempotency_key: str | None = None,
         payload: dict[str, object] | None = None,
         payload_hash: str | None = None,
     ) -> IpcResponse:
@@ -448,9 +450,9 @@ class Win32NamedPipeClient:
         envelope = IpcCommandEnvelope(
             protocol_version=PROTOCOL_VERSION,
             schema_version=SCHEMA_VERSION,
-            request_id=str(uuid4()),
+            request_id=request_id or str(uuid4()),
             client_instance_id=self.client_instance_id,
-            idempotency_key=str(uuid4()),
+            idempotency_key=idempotency_key or str(uuid4()),
             command_name=command_name,
             payload=command_payload,
             payload_hash=payload_hash,

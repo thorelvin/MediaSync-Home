@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import pytest
 
+from mediasync_home.application.command_receipts import (
+    CommandReceipt,
+    CommandReceiptStore,
+    ensure_idempotency_compatible,
+)
 from mediasync_home.application.job_creation import JobCreationCommandName
 from mediasync_home.application.job_drafts import JobDraftStore, StandardBackupJobDraft
 from mediasync_home.domain.process_roles import ProcessRole
@@ -24,6 +29,11 @@ from mediasync_home.presentation.engine_client import EngineClient
 
 EXPECTED_USER = "same-user-sid-hash"
 EXPECTED_SESSION = 42
+REQUEST_ID_A = "44444444-4444-4444-8444-444444444444"
+REQUEST_ID_B = "77777777-7777-4777-8777-777777777777"
+IDEMPOTENCY_KEY_A = "66666666-6666-4666-8666-666666666666"
+PAYLOAD_HASH_A = "98cdbb1f712331be51355f90ab8c193c5c6f681d33d5c052cd38fe94820f3d02"
+PAYLOAD_HASH_B = "a" * 64
 
 
 def _identity(
@@ -58,6 +68,24 @@ class _InMemoryJobDraftStore(JobDraftStore):
 
     def load_standard_backup_draft(self, draft_id: str) -> StandardBackupJobDraft | None:
         return self._drafts.get(draft_id)
+
+
+class _InMemoryCommandReceiptStore(CommandReceiptStore):
+    def __init__(self) -> None:
+        self.receipts: dict[str, CommandReceipt] = {}
+
+    def record_received(self, receipt: CommandReceipt) -> CommandReceipt:
+        existing = self.receipts.get(receipt.idempotency_key)
+        if existing is not None:
+            return ensure_idempotency_compatible(existing, receipt)
+        self.receipts[receipt.idempotency_key] = receipt
+        return receipt
+
+    def load_command_receipt(self, idempotency_key: str) -> CommandReceipt | None:
+        return self.receipts.get(idempotency_key)
+
+    def update_command_receipt(self, receipt: CommandReceipt) -> None:
+        self.receipts[receipt.idempotency_key] = receipt
 
 
 def _client(
@@ -184,6 +212,112 @@ def test_create_standard_backup_job_command_is_recognized_but_rejected_in_0b() -
     }
 
 
+def test_create_standard_backup_job_command_records_rejected_receipt() -> None:
+    receipts = _InMemoryCommandReceiptStore()
+    service = _service()
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"draft_id": "draft-a"},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+
+    receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
+    assert receipt is not None
+    assert receipt.state.value == "REJECTED"
+    assert receipt.principal_fingerprint == EXPECTED_USER
+    assert receipt.rejection_reason == IpcReason.MUTATING_COMMANDS_DISABLED.value
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.MUTATING_COMMANDS_DISABLED
+    assert response.payload["receipt"] == {
+        "request_id": REQUEST_ID_A,
+        "idempotency_key": IDEMPOTENCY_KEY_A,
+        "command_name": JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        "state": "REJECTED",
+        "rejection_reason": IpcReason.MUTATING_COMMANDS_DISABLED.value,
+    }
+
+
+def test_command_receipt_replay_returns_existing_terminal_receipt() -> None:
+    receipts = _InMemoryCommandReceiptStore()
+    service = _service()
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    first = ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"draft_id": "draft-a"},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+    second = ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        request_id=REQUEST_ID_B,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"draft_id": "draft-a"},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+
+    assert len(receipts.receipts) == 1
+    assert first.payload["receipt"] == second.payload["receipt"]
+    assert second.payload["receipt"]["request_id"] == REQUEST_ID_A
+
+
+def test_command_receipt_conflict_rejects_same_key_with_different_payload_hash() -> None:
+    receipts = _InMemoryCommandReceiptStore()
+    service = _service()
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"draft_id": "draft-a"},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+
+    response = ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        request_id=REQUEST_ID_B,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"draft_id": "draft-a"},
+        payload_hash=PAYLOAD_HASH_B,
+    )
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.COMMAND_IDEMPOTENCY_CONFLICT
+    assert response.payload["idempotency_key"] == IDEMPOTENCY_KEY_A
+    assert response.payload["conflict"] == "COMMAND_IDEMPOTENCY_CONFLICT:payload_hash"
+    assert len(receipts.receipts) == 1
+
+
+def test_invalid_create_standard_backup_payload_does_not_record_receipt() -> None:
+    receipts = _InMemoryCommandReceiptStore()
+    service = _service()
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={},
+    )
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.INVALID_FRAME
+    assert receipts.receipts == {}
+
+
 def test_client_requires_payload_hash_for_non_empty_command_payload() -> None:
     ipc_client = _client()
     ipc_client.connect()
@@ -210,13 +344,13 @@ def test_command_envelope_requires_versioned_hash_metadata() -> None:
             "message_type": "COMMAND",
             "request_id": "44444444-4444-4444-8444-444444444444",
             "client_instance_id": "55555555-5555-4555-8555-555555555555",
-            "idempotency_key": "66666666-6666-4666-8666-666666666666",
+            "idempotency_key": IDEMPOTENCY_KEY_A,
             "command_name": JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
             "payload": {"draft_id": "draft-a"},
             "payload_hash_scope": "PAYLOAD_ONLY",
             "payload_canonicalization_algorithm": "JCS-RFC8785",
             "payload_hash_algorithm": "BLAKE3-256",
-            "payload_hash": "98cdbb1f712331be51355f90ab8c193c5c6f681d33d5c052cd38fe94820f3d02",
+            "payload_hash": PAYLOAD_HASH_A,
         }
     )
 
