@@ -37,6 +37,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_standard_backup_drafts",
                 statements=CATALOG_STANDARD_BACKUP_DRAFTS,
             ),
+            SqliteMigration(
+                version=3,
+                name="catalog_standard_backup_job_revisions",
+                statements=CATALOG_STANDARD_BACKUP_JOB_REVISIONS,
+            ),
         ),
     )
 
@@ -346,6 +351,31 @@ CATALOG_STANDARD_BACKUP_DRAFTS = (
         defaults_json TEXT NOT NULL,
         targets_json TEXT NOT NULL,
         updated_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )
+    """,
+)
+
+CATALOG_STANDARD_BACKUP_JOB_REVISIONS = (
+    """
+    CREATE TABLE standard_backup_job_revision_details (
+        job_id TEXT NOT NULL,
+        job_revision_id TEXT NOT NULL,
+        draft_id TEXT NOT NULL,
+        command_request_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        source_name TEXT NOT NULL,
+        source_path_label TEXT NOT NULL,
+        defaults_json TEXT NOT NULL,
+        targets_json TEXT NOT NULL,
+        created_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        PRIMARY KEY (job_id, job_revision_id),
+        UNIQUE (idempotency_key),
+        FOREIGN KEY (job_id, job_revision_id)
+            REFERENCES job_revisions (job_id, id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (draft_id)
+            REFERENCES standard_backup_job_drafts (draft_id)
+            ON DELETE RESTRICT
     )
     """,
 )

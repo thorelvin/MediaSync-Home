@@ -19,10 +19,11 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
 
     assert catalog.store is SqliteStore.CATALOG
     assert recovery.store is SqliteStore.RECOVERY
-    assert [migration.version for migration in catalog.migrations] == [1, 2]
+    assert [migration.version for migration in catalog.migrations] == [1, 2, 3]
     assert [migration.version for migration in recovery.migrations] == [1]
     assert catalog.migrations[0].name == "catalog_core_contract_skeleton"
     assert catalog.migrations[1].name == "catalog_standard_backup_drafts"
+    assert catalog.migrations[2].name == "catalog_standard_backup_job_revisions"
     assert recovery.migrations[0].name == "recovery_journal_skeleton"
 
 
