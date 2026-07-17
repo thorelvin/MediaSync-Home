@@ -1,6 +1,7 @@
 {
-  "canonicalization_algorithm": "JCS-RFC8785-SPIKE",
-  "checksum_algorithm": "SHA256-0A2-SPIKE",
+  "blake3_dependency_version": "1.0.9",
+  "canonicalization_algorithm": "JCS-RFC8785",
+  "checksum_algorithm": "BLAKE3-256",
   "classification_states": {
     "absent": "ABSENT",
     "case_alias_collision": "CASE_ALIAS_COLLISION",

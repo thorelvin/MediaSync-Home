@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-import hashlib
+import importlib.metadata
 import json
 import os
 import shutil
@@ -16,8 +16,8 @@ from typing import Any
 
 PURPOSE = "MEDIASYNC_ARCHITECTURE_SPIKE"
 SUPPORTED_CONTROL_SCHEMA = 4
-CANONICALIZATION_ALGORITHM = "JCS-RFC8785-SPIKE"
-CHECKSUM_ALGORITHM = "SHA256-0A2-SPIKE"
+CANONICALIZATION_ALGORITHM = "JCS-RFC8785"
+CHECKSUM_ALGORITHM = "BLAKE3-256"
 APPLICATION = "MediaSync Home"
 
 CLASSIFICATION_STATES = (
@@ -39,6 +39,12 @@ class EndpointOwnershipError(RuntimeError):
 
 class LabRootError(EndpointOwnershipError):
     pass
+
+
+try:
+    from blake3 import blake3 as _blake3
+except ImportError:  # pragma: no cover - exercised by environment preflight, not unit tests
+    _blake3 = None
 
 
 @dataclass(frozen=True)
@@ -73,16 +79,29 @@ def canonical_json_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
+def blake3_256_hex(data: bytes) -> str:
+    if _blake3 is None:
+        raise EndpointOwnershipError("blake3 package is required for final endpoint marker evidence")
+    return _blake3(data).hexdigest()
+
+
+def blake3_dependency_version() -> str:
+    try:
+        return importlib.metadata.version("blake3")
+    except importlib.metadata.PackageNotFoundError:
+        return "MISSING"
+
+
 def checksum_payload(payload: dict[str, Any]) -> str:
     material = dict(payload)
     material.pop("marker_checksum", None)
-    return hashlib.sha256(canonical_json_bytes(material)).hexdigest()
+    return blake3_256_hex(canonical_json_bytes(material))
 
 
 def root_identity(root: Path) -> str:
     resolved = root.resolve()
     material = f"{resolved.drive.lower()}|{resolved.as_posix().lower()}"
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return blake3_256_hex(material.encode("utf-8"))
 
 
 def create_lab_root(parent: Path | None = None, run_id: str | None = None) -> LabRoot:
@@ -459,6 +478,7 @@ def run_demo(output: Path) -> int:
             "old_permit_current_after_takeover": permit_is_current(old_permit, new_marker),
             "checksum_algorithm": CHECKSUM_ALGORITHM,
             "canonicalization_algorithm": CANONICALIZATION_ALGORITHM,
+            "blake3_dependency_version": blake3_dependency_version(),
             "smb_cross_machine": "BLOCKED_BY_ENVIRONMENT",
         }
         output.parent.mkdir(parents=True, exist_ok=True)

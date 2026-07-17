@@ -4,9 +4,10 @@ test_cleanup_refuses_foreign_namespace_and_checks_lab_marker (test_endpoint_owne
 test_demo_writes_sanitized_summary (test_endpoint_ownership.EndpointOwnershipLocalSpikeTests) ... ok
 test_foreign_owner_takeover_increments_epoch_and_stales_old_permit (test_endpoint_ownership.EndpointOwnershipLocalSpikeTests) ... ok
 test_local_mutation_lock_is_exclusive_until_handle_close (test_endpoint_ownership.EndpointOwnershipLocalSpikeTests) ... ok
+test_marker_uses_final_blake3_contract_and_validates_schema (test_endpoint_ownership.EndpointOwnershipLocalSpikeTests) ... ok
 test_unknown_nonempty_control_name_is_not_excluded (test_endpoint_ownership.EndpointOwnershipLocalSpikeTests) ... ok
 
 ----------------------------------------------------------------------
-Ran 7 tests in 0.262s
+Ran 8 tests in 0.251s
 
 OK

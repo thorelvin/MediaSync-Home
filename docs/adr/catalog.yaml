@@ -205,11 +205,11 @@ adrs:
 - id: ADR-020
   title: '`.mediasync` klassifiseres før ekskludering/adoption'
   evidence_package: 0A.2
-  evidence_status: PROPOSED
+  evidence_status: EVIDENCE_COMPLETE
   owner_decision: PENDING
   owner_decision_date: null
   supersedes: []
-  codex_recommendation: null
+  codex_recommendation: 0A.2 validerer alle kontrollområdeklassifikasjoner og endelig BLAKE3/JCS-markerchecksum mot draftschemaet; aksepter klassifiser-først-regelen.
   rationale: Hindrer tap av legitim brukerdata med samme navn
   consequence: Flere kontrolltilstander og recovery-UI
 - id: ADR-021
@@ -289,6 +289,6 @@ adrs:
   owner_decision: PENDING
   owner_decision_date: null
   supersedes: []
-  codex_recommendation: Pakkestrategi kan ikke anbefales før PySide6/BLAKE3/Nuitka/Windows SDK/signing tools og ren Windows-VM er tilgjengelig og smoke-testet.
+  codex_recommendation: Pakkestrategi kan ikke anbefales før PySide6/Nuitka/Windows SDK/signing tools, låst dependency-sett og ren Windows-VM er tilgjengelig og smoke-testet.
   rationale: Gir en reproducerbar, offline-brukbar Windows-build med kontrollert Python/Qt-kompatibilitet
   consequence: Toolchain låses etter 0A.5 og smoke-testes på ren Windows-VM

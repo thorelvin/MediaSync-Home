@@ -10,10 +10,10 @@ an owner decision record. Every ADR still requires an explicit owner decision in
 |---|---|---|---|
 | 0A.0 Environment preflight | Passed | `docs/ARCHITECTURE_SPIKE_REPORT.md` | None for preflight |
 | 0A.1 Process and IPC | Blocked | `spikes/0a1_process_ipc/`, `artifacts/0a1/` | Task Scheduler-like session and wrong-SID/remote-client proof |
-| 0A.2 Endpoint ownership | Blocked | `spikes/0a2_endpoint_ownership/`, `artifacts/0a2/` | Two-client SMB lab and final BLAKE3 marker checksum |
+| 0A.2 Endpoint ownership | Blocked | `spikes/0a2_endpoint_ownership/`, `artifacts/0a2/` | Two-client SMB lab |
 | 0A.3 Recovery and paths | Passed locally | `spikes/0a3_recovery_paths/`, `artifacts/0a3/` | SMB SourceReadGuard proof |
 | 0A.4 SQLite and capacity | Passed locally | `spikes/0a4_sqlite_capacity/`, `artifacts/0a4/` | Owner decision on ADR-003 |
-| 0A.5 Windows argv and packaging | Blocked | `spikes/0a5_windows_packaging/`, `artifacts/0a5/` | PySide6/BLAKE3/Nuitka/SDK/signing tools and clean Windows VM |
+| 0A.5 Windows argv and packaging | Blocked | `spikes/0a5_windows_packaging/`, `artifacts/0a5/` | PySide6/Nuitka/SDK/signing tools, locked dependency set, and clean Windows VM |
 
 ## Owner Decision List
 
@@ -42,7 +42,7 @@ chooses explicitly.
 | ADR-017 Permanent tombstones | `PROPOSED` | Not in 0A scope | Retain full receipts forever or delete details unsafely | Reversal is medium after retention | Keep proposed for 0B/Milestone 1 | Defer |
 | ADR-018 Manifested backup epoch | `EVIDENCE_COMPLETE` | 0A.4 backup set rejects mixed catalog/recovery epochs | Per-file ad hoc restore | Reversal is high after migration/backup tools | Accept backup-set epoch model | Owner can accept now |
 | ADR-019 One writer per ownership epoch | `PROPOSED` | Local classification/takeover passed; two-client SMB writer proof missing | Multi-writer coordination or DB-only ownership | Reversal is very high after endpoint design | Defer until SMB lab or reduce scope to read-only SMB writes | Decide after 0A.2 blockers |
-| ADR-020 `.mediasync` classified first | `PROPOSED` | All nine local classification states passed; final BLAKE3 marker checksum missing | Blind exclude or automatic adoption | Reversal is low now, high after scanner | Accept classification rule after BLAKE3 marker validation | Decide after BLAKE3 blocker |
+| ADR-020 `.mediasync` classified first | `EVIDENCE_COMPLETE` | All nine local classification states passed; final BLAKE3/JCS marker validates against the draft schema | Blind exclude or automatic adoption | Reversal is low now, high after scanner | Accept the classification-first rule | Owner can accept now |
 | ADR-021 Head tables and DB constraints | `PROPOSED` | Not in 0A scope | Python-only validation or mutable active pointers | Reversal is high after schema | Keep proposed for Milestone 1 | Defer |
 | ADR-022 Hash evidence levels | `PROPOSED` | 0A.3 touched source evidence/fallback; full hash lattice not built | Treat metadata cache as current content proof | Reversal is high after scanner/cache | Keep proposed for Milestone 3 | Defer |
 | ADR-023 SourceReadGuard or current hash | `PROPOSED` | Local NTFS guard passed; SMB guard missing | Trust source metadata from analysis time | Reversal is medium-high after transfer adapter | Accept fallback principle, require SMB capability profile | Owner can accept with SMB caveat |
@@ -50,7 +50,7 @@ chooses explicitly.
 | ADR-025 Monotonic live claims | `PROPOSED` | Not in 0A scope | UTC-only live claim expiry | Reversal is medium after scheduler/outbox | Keep proposed for 0B/Milestone 1 | Defer |
 | ADR-026 Exact contracts | `PROPOSED` | Handoff validators exist; contracts remain draft/blocked | Markdown-only contracts | Reversal is medium before codegen, high after codegen | Keep proposed; do not freeze contracts yet | Defer |
 | ADR-027 Windows argv/resolver | `EVIDENCE_COMPLETE` | `GetSystemDirectoryW`, final-path validation, argv round-trip, forbidden flag rejection passed | PATH lookup, shell command string, ad hoc quoting | Reversal is medium after process adapter | Accept canonical resolver/argv builder | Owner can accept now |
-| ADR-028 Windows packaging | `BLOCKED` | Packaging preflight shows missing PySide6/BLAKE3/Nuitka/SDK/signing tools and no clean VM | Zip-only Python runtime or alternate packager | Reversal is medium before dependencies lock, high after release tooling | Keep blocked until toolchain and clean VM smoke pass | Provide toolchain/VM or defer scope |
+| ADR-028 Windows packaging | `BLOCKED` | Packaging preflight shows missing PySide6/Nuitka/SDK/signing tools, locked dependency set, and no clean VM | Zip-only Python runtime or alternate packager | Reversal is medium before dependencies lock, high after release tooling | Keep blocked until toolchain and clean VM smoke pass | Provide toolchain/VM or defer scope |
 
 ## Scope Reduction Options
 
@@ -59,7 +59,7 @@ chooses explicitly.
 | Local-only first release | SMB writable targets remain read-only or manual-only | Avoids unproven cross-machine locking while preserving local backup path | ADR-006, ADR-016, ADR-019, ADR-023 |
 | No scheduled non-interactive trigger initially | Only interactive GUI/agent starts Engine Host | Avoids unproven Task Scheduler session class but weakens automation | ADR-001, ADR-002 |
 | Zip/dev-run preview only | No packaged exe claim | Avoids false packaging promise; not a user-ready release | ADR-028 |
-| Defer final BLAKE3 marker freeze | Keep endpoint marker schema draft until dependency is locked | Avoids claiming final checksum compatibility too early | ADR-020, ADR-026 |
+| Defer endpoint marker contract freeze | Keep endpoint marker schema draft until owner decisions and 0B validation tests | Avoids claiming contract authority before the owner gate | ADR-019, ADR-020, ADR-026 |
 
 ## Contract Gate
 

@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_VERSION = "2.9.2"
 REQUIRED_PACKAGES = {"jsonschema": "4.26.0", "PyYAML": "6.0.3"}
 TEXT_SUFFIXES = {".md", ".json", ".yaml", ".yml", ".sql", ".py", ".txt"}
+IGNORED_SCAN_DIRS = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 ADR_PATTERN = re.compile(r"ADR-\d{3}")
 REQ_PATTERN = re.compile(
     r"(?:SAF|REC|SYNC|DB|END|META|AUTO|PERF|ARC|DUR|SEC|OWN|CTRL|CASE|HASH|SRC|PATH|DUP|VER|TIME|LOCK|OPS|FILTER|PROC|DOC|UX|OBS)-\d{3}"
@@ -78,8 +79,20 @@ def read_text(path: Path) -> str:
     raise AssertionError("unreachable")
 
 
-def check_text_hygiene() -> None:
+def iter_repo_files() -> list[Path]:
+    result: list[Path] = []
     for path in sorted(ROOT.rglob("*")):
+        if not path.is_file():
+            continue
+        relative_parts = path.relative_to(ROOT).parts
+        if any(part in IGNORED_SCAN_DIRS for part in relative_parts):
+            continue
+        result.append(path)
+    return result
+
+
+def check_text_hygiene() -> None:
+    for path in iter_repo_files():
         if not path.is_file() or path.suffix.lower() not in TEXT_SUFFIXES:
             continue
         text = read_text(path)
@@ -209,7 +222,7 @@ def parse_link_target(raw_target: str) -> str:
 
 
 def check_markdown() -> None:
-    paths = sorted(ROOT.rglob("*.md"))
+    paths = [path for path in iter_repo_files() if path.suffix.lower() == ".md"]
     anchors = {path.resolve(): markdown_anchors(path) for path in paths}
     link_pattern = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 
@@ -304,7 +317,7 @@ def check_adr_governance(yaml_documents: dict[Path, Any]) -> set[str]:
         fail("docs/DECISION_REGISTER.md is not synchronized with ADR catalog")
 
     known = set(expected_ids)
-    for path in sorted(ROOT.rglob("*")):
+    for path in iter_repo_files():
         if not path.is_file() or path.suffix.lower() not in TEXT_SUFFIXES:
             continue
         unknown = set(ADR_PATTERN.findall(read_text(path))) - known
@@ -318,7 +331,7 @@ def check_adr_governance(yaml_documents: dict[Path, Any]) -> set[str]:
             fail(f"contract {contract.get('path')} references unknown ADRs: {sorted(unknown)}")
 
     forbidden = {"DEFER_WITH_SCOPE_REDUCTION", "`ACCEPT`", "`REJECT`"}
-    for path in sorted(ROOT.rglob("*.md")):
+    for path in [repo_path for repo_path in iter_repo_files() if repo_path.suffix.lower() == ".md"]:
         text = read_text(path)
         for term in forbidden:
             if term in text:
@@ -354,7 +367,7 @@ def check_requirements() -> set[str]:
             if canonical_rows[requirement_id] != traceability_rows[requirement_id]
         )
         fail(f"requirement traceability drift; missing={missing}, extra={extra}, changed={drift}")
-    for path in sorted(ROOT.rglob("*")):
+    for path in iter_repo_files():
         if not path.is_file() or path.suffix.lower() not in TEXT_SUFFIXES:
             continue
         unknown = set(REQ_PATTERN.findall(read_text(path))) - known
@@ -509,9 +522,7 @@ def check_bundle_rules() -> None:
 def manifest_files() -> set[str]:
     excluded = {"BUNDLE_MANIFEST.sha256"}
     files: set[str] = set()
-    for path in ROOT.rglob("*"):
-        if not path.is_file() or "__pycache__" in path.parts:
-            continue
+    for path in iter_repo_files():
         relative = path.relative_to(ROOT).as_posix()
         if relative not in excluded:
             files.add(relative)

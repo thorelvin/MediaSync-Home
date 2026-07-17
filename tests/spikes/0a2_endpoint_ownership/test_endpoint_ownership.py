@@ -9,6 +9,12 @@ import unittest
 import uuid
 from pathlib import Path
 
+try:
+    from jsonschema import Draft202012Validator, FormatChecker
+except ImportError:  # pragma: no cover - optional outside the 0A.2 BLAKE3 evidence venv
+    Draft202012Validator = None
+    FormatChecker = None
+
 
 ROOT = Path(__file__).resolve().parents[3]
 HARNESS_DIR = ROOT / "spikes" / "0a2_endpoint_ownership"
@@ -16,6 +22,10 @@ sys.path.insert(0, str(HARNESS_DIR))
 import endpoint_ownership  # noqa: E402
 
 
+@unittest.skipUnless(
+    endpoint_ownership.blake3_dependency_version() != "MISSING",
+    "0A.2 final endpoint marker evidence requires the blake3 package",
+)
 class EndpointOwnershipLocalSpikeTests(unittest.TestCase):
     def make_lab(self) -> endpoint_ownership.LabRoot:
         return endpoint_ownership.create_lab_root()
@@ -128,6 +138,26 @@ class EndpointOwnershipLocalSpikeTests(unittest.TestCase):
         finally:
             self.cleanup_lab(lab)
 
+    def test_marker_uses_final_blake3_contract_and_validates_schema(self) -> None:
+        if Draft202012Validator is None or FormatChecker is None:
+            self.skipTest("jsonschema package is required for draft marker schema validation")
+
+        lab = self.make_lab()
+        try:
+            owner = str(uuid.uuid4())
+            marker = endpoint_ownership.write_endpoint_control_area(lab, owner)
+            schema = json.loads((ROOT / "schema" / "endpoint-marker.schema.json").read_text(encoding="utf-8"))
+            Draft202012Validator(schema, format_checker=FormatChecker()).validate(marker)
+
+            self.assertEqual(marker["root_identity_hash_algorithm"], "BLAKE3-256")
+            self.assertEqual(marker["marker_checksum_algorithm"], "BLAKE3-256")
+            self.assertEqual(marker["canonicalization_algorithm"], "JCS-RFC8785")
+            self.assertEqual(marker["marker_checksum"], endpoint_ownership.checksum_payload(marker))
+            self.assertEqual(len(marker["marker_checksum"]), 64)
+            self.assertEqual(len(marker["root_identity_hash"]), 64)
+        finally:
+            self.cleanup_lab(lab)
+
         lab = self.make_lab()
         try:
             owner = str(uuid.uuid4())
@@ -229,6 +259,9 @@ class EndpointOwnershipLocalSpikeTests(unittest.TestCase):
             self.assertEqual(summary["smb_cross_machine"], "BLOCKED_BY_ENVIRONMENT")
             self.assertFalse(summary["old_permit_current_after_takeover"])
             self.assertTrue(summary["local_lock_second_open_blocked"])
+            self.assertEqual(summary["checksum_algorithm"], "BLAKE3-256")
+            self.assertEqual(summary["canonicalization_algorithm"], "JCS-RFC8785")
+            self.assertNotEqual(summary["blake3_dependency_version"], "MISSING")
             self.assertNotIn("C:\\Users\\", text)
 
 

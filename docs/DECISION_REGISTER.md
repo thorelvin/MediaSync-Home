@@ -23,7 +23,7 @@
 | `ADR-017` | Idempotency- og deliverynøkler komprimeres til permanente tombstones | `0B + Milepæl 1` | `PROPOSED` |  | `PENDING` |  |  |
 | `ADR-018` | Catalog/recovery backup og restore bruker ett manifestert epoch-sett | `0A.4` | `EVIDENCE_COMPLETE` | 0A.4 verifiserer manifestert backup-sett og avviser blandede catalog/recovery-epoker. | `PENDING` |  |  |
 | `ADR-019` | Ett skrivbart endpoint har én writer-installasjon per eierskapsepoke | `0A.2` | `PROPOSED` |  | `PENDING` |  |  |
-| `ADR-020` | `.mediasync` klassifiseres før ekskludering/adoption | `0A.2` | `PROPOSED` |  | `PENDING` |  |  |
+| `ADR-020` | `.mediasync` klassifiseres før ekskludering/adoption | `0A.2` | `EVIDENCE_COMPLETE` | 0A.2 validerer alle kontrollområdeklassifikasjoner og endelig BLAKE3/JCS-markerchecksum mot draftschemaet; aksepter klassifiser-først-regelen. | `PENDING` |  |  |
 | `ADR-021` | Aktive revisjoner lagres i separate head-tabeller og alle parent-scope-relasjoner har DB-constraints | `0B + Milepæl 1` | `PROPOSED` |  | `PENDING` |  |  |
 | `ADR-022` | Hashes bærer evidensnivå; metadatarevalidert cache er ikke nåværende innholdsbevis | `0A.3 + Milepæl 3` | `PROPOSED` |  | `PENDING` |  |  |
 | `ADR-023` | Kilden bindes med `SourceReadGuard` eller post-transfer current hash | `0A.3` | `PROPOSED` |  | `PENDING` |  |  |
@@ -31,7 +31,7 @@
 | `ADR-025` | Live claims bruker monoton klokke; persistent UTC er diagnostikk | `0B + Milepæl 1` | `PROPOSED` |  | `PENDING` |  |  |
 | `ADR-026` | Eksakte kontrakter ligger i SQL/JSON Schema/YAML og valideres i CI | `0B` | `PROPOSED` |  | `PENDING` |  |  |
 | `ADR-027` | Windows-argumentserialisering og sikker systemprogram-resolusjon | `0A.5` | `EVIDENCE_COMPLETE` | Behold én kanonisk Windows argv-builder og GetSystemDirectoryW-basert Robocopy-resolver; lokal round-trip og flaggvalidering er bevist i 0A.5. | `PENDING` |  |  |
-| `ADR-028` | Reproduserbar Python/PySide6-pakkestrategi for Windows | `0A.5` | `BLOCKED` | Pakkestrategi kan ikke anbefales før PySide6/BLAKE3/Nuitka/Windows SDK/signing tools og ren Windows-VM er tilgjengelig og smoke-testet. | `PENDING` |  |  |
+| `ADR-028` | Reproduserbar Python/PySide6-pakkestrategi for Windows | `0A.5` | `BLOCKED` | Pakkestrategi kan ikke anbefales før PySide6/Nuitka/Windows SDK/signing tools, låst dependency-sett og ren Windows-VM er tilgjengelig og smoke-testet. | `PENDING` |  |  |
 
 ## Statusmodell
 
