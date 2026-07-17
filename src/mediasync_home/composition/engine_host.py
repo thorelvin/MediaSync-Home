@@ -5,11 +5,16 @@ import json
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
+from mediasync_home.adapters.runtime_policy import current_process_runtime_policy
 from mediasync_home.application.runtime_status import startup_status
 from mediasync_home.composition._role_runner import Emit, run_role
 from mediasync_home.domain.process_roles import ProcessRole
+
+
+ROOT = Path(__file__).resolve().parents[3]
 
 
 class PipeServer(Protocol):
@@ -39,23 +44,31 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
     if os.name != "nt":
         raise RuntimeError("named-pipe Engine Host mode is Windows-only")
 
+    from mediasync_home.ipc.server import EngineHostIpcService
     from mediasync_home.ipc.win32_named_pipe import Win32NamedPipeServer
+    from mediasync_home.ipc.win32_named_pipe import current_user_policy
 
     output = emit or print
-    service_status = startup_status(ProcessRole.ENGINE_HOST).to_dict()
+    service_status = startup_status(
+        ProcessRole.ENGINE_HOST,
+        runtime_policy=current_process_runtime_policy(ROOT),
+    )
     output(
         json.dumps(
             {
                 "event": "ENGINE_HOST_PIPE_STARTING",
                 "pipe_name": args.pipe_name,
                 "serve_requests": args.serve_requests,
-                "host_status": service_status,
+                "host_status": service_status.to_dict(),
             },
             sort_keys=True,
             separators=(",", ":"),
         )
     )
-    server = Win32NamedPipeServer(pipe_name=args.pipe_name)
+    server = Win32NamedPipeServer(
+        pipe_name=args.pipe_name,
+        service=EngineHostIpcService(current_user_policy(), status=service_status),
+    )
     result = serve_bounded_pipe_requests(server, request_limit=args.serve_requests)
     if result.completed:
         output(

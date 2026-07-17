@@ -22,3 +22,4 @@ def test_local_dev_runner_starts_engine_host_role() -> None:
     assert payload["role"] == "engine-host"
     assert payload["ready"] is True
     assert payload["mutations_enabled"] is False
+    assert payload["runtime_policy"]["evaluated"] is True

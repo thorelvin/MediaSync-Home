@@ -17,15 +17,18 @@ def test_bootstrap_dispatches_each_process_role(role: ProcessRole) -> None:
     assert exit_code == 0
     assert len(output) == 1
     payload = json.loads(output[0])
-    assert payload == {
+    assert payload | {"runtime_policy": None} == {
         "application": "MediaSync Home",
         "mutations_enabled": False,
         "protocol_version": 1,
         "ready": True,
         "role": role.value,
+        "runtime_policy": None,
         "schema_version": 1,
         "scope": "0B_NON_MUTATING_LOCAL_PREVIEW",
     }
+    assert payload["runtime_policy"]["evaluated"] is True
+    assert isinstance(payload["runtime_policy"]["reasons"], list)
 
 
 def test_bootstrap_defaults_to_launcher_role() -> None:
