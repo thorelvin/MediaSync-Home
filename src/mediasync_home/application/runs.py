@@ -137,12 +137,31 @@ class RunStartOutcome:
     run: StartedRun | None = None
 
 
+@dataclass(frozen=True)
+class RunTargetPreflightOutcome:
+    claimed: bool
+    run_id: str
+    run_target_id: str | None
+    target: StartedRunTarget | None
+    validation_codes: tuple[str, ...]
+    next_action: str
+
+
 class RunStore(Protocol):
     def save_started_run(self, run: StartedRun) -> None: ...
 
     def load_started_run(self, run_id: str) -> StartedRun | None: ...
 
     def load_started_run_by_idempotency_key(self, idempotency_key: str) -> StartedRun | None: ...
+
+    def load_next_pending_run_target(self, run_id: str) -> StartedRunTarget | None: ...
+
+    def begin_run_target_preflight(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+    ) -> StartedRunTarget | None: ...
 
 
 class RunIdFactory(Protocol):
@@ -223,6 +242,74 @@ def start_run_from_sealed_plan(
         idempotent_replay=False,
         readiness=readiness,
         run=run,
+    )
+
+
+def begin_next_run_target_preflight(
+    *,
+    run_id: str,
+    runs: RunStore,
+) -> RunTargetPreflightOutcome:
+    run = runs.load_started_run(run_id)
+    if run is None:
+        return RunTargetPreflightOutcome(
+            claimed=False,
+            run_id=run_id,
+            run_target_id=None,
+            target=None,
+            validation_codes=("RUN_NOT_FOUND",),
+            next_action="Create a queued run before target preflight.",
+        )
+    if run.state not in {RunState.QUEUED, RunState.PREFLIGHT}:
+        return RunTargetPreflightOutcome(
+            claimed=False,
+            run_id=run_id,
+            run_target_id=None,
+            target=None,
+            validation_codes=("RUN_NOT_READY_FOR_TARGET_PREFLIGHT",),
+            next_action="Only queued or preflight runs can acquire target work.",
+        )
+
+    target = runs.load_next_pending_run_target(run_id)
+    if target is None:
+        return RunTargetPreflightOutcome(
+            claimed=False,
+            run_id=run_id,
+            run_target_id=None,
+            target=None,
+            validation_codes=("RUN_HAS_NO_PENDING_TARGETS",),
+            next_action="No pending run targets are available for lease preflight.",
+        )
+    if target.lease_resource_key is None or not target.lease_resource_key.strip():
+        return RunTargetPreflightOutcome(
+            claimed=False,
+            run_id=run_id,
+            run_target_id=target.run_target_id,
+            target=target,
+            validation_codes=("RUN_TARGET_REQUIRES_LEASE_RESOURCE_KEY",),
+            next_action="Refresh the sealed plan so each writable target has a lease resource key.",
+        )
+
+    claimed = runs.begin_run_target_preflight(
+        run_id=run_id,
+        run_target_id=target.run_target_id,
+    )
+    if claimed is None:
+        return RunTargetPreflightOutcome(
+            claimed=False,
+            run_id=run_id,
+            run_target_id=target.run_target_id,
+            target=None,
+            validation_codes=("RUN_TARGET_PREFLIGHT_CLAIM_CONFLICT",),
+            next_action="Reload run state and retry target preflight.",
+        )
+    return RunTargetPreflightOutcome(
+        claimed=True,
+        run_id=run_id,
+        run_target_id=claimed.run_target_id,
+        target=claimed,
+        validation_codes=(),
+        next_action="Target is ready for the lease adapter to acquire the endpoint lock.",
     )
 
 

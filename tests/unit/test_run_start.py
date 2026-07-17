@@ -22,7 +22,9 @@ from mediasync_home.application.runs import (
     RunStartViolation,
     RunStore,
     RunState,
+    RunTargetState,
     StartedRun,
+    StartedRunTarget,
     parse_start_run_command,
     start_run_from_sealed_plan,
 )
@@ -58,6 +60,34 @@ class InMemoryRunStore(RunStore):
         if run_id is None:
             return None
         return self.runs[run_id]
+
+    def load_next_pending_run_target(self, run_id: str) -> StartedRunTarget | None:
+        run = self.load_started_run(run_id)
+        if run is None:
+            return None
+        return next((target for target in run.targets if target.state is RunTargetState.PENDING), None)
+
+    def begin_run_target_preflight(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+    ) -> StartedRunTarget | None:
+        run = self.load_started_run(run_id)
+        if run is None or run.state not in {RunState.QUEUED, RunState.PREFLIGHT}:
+            return None
+        updated_targets: list[StartedRunTarget] = []
+        claimed: StartedRunTarget | None = None
+        for target in run.targets:
+            if target.run_target_id == run_target_id and target.state is RunTargetState.PENDING:
+                claimed = replace(target, state=RunTargetState.ACQUIRING_LEASE)
+                updated_targets.append(claimed)
+            else:
+                updated_targets.append(target)
+        if claimed is None:
+            return None
+        self.runs[run_id] = replace(run, state=RunState.PREFLIGHT, targets=tuple(updated_targets))
+        return claimed
 
 
 class FixedRunIdFactory(RunIdFactory):

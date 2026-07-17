@@ -169,6 +169,85 @@ class SqliteRunStore(RunStore):
             (idempotency_key,),
         )
 
+    def load_next_pending_run_target(self, run_id: str) -> StartedRunTarget | None:
+        row = self._connection.execute(
+            """
+            SELECT id
+            FROM run_targets
+            WHERE run_id = ?
+                AND state = 'PENDING'
+            ORDER BY id
+            LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._load_target(run_id=run_id, run_target_id=str(row[0]))
+
+    def begin_run_target_preflight(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+    ) -> StartedRunTarget | None:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            target_cursor = self._connection.execute(
+                """
+                UPDATE run_targets
+                SET
+                    state = 'ACQUIRING_LEASE',
+                    started_utc = COALESCE(started_utc, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    row_version = row_version + 1
+                WHERE run_id = ?
+                    AND id = ?
+                    AND state = 'PENDING'
+                    AND lease_resource_key IS NOT NULL
+                    AND trim(lease_resource_key) != ''
+                    AND EXISTS (
+                        SELECT 1
+                        FROM runs
+                        WHERE runs.id = run_targets.run_id
+                            AND runs.state IN ('QUEUED', 'PREFLIGHT')
+                    )
+                """,
+                (run_id, run_target_id),
+            )
+            if target_cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            run_cursor = self._connection.execute(
+                """
+                UPDATE runs
+                SET
+                    state = 'PREFLIGHT',
+                    row_version = row_version + 1
+                WHERE id = ?
+                    AND state IN ('QUEUED', 'PREFLIGHT')
+                """,
+                (run_id,),
+            )
+            if run_cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            target = self._load_target(run_id=run_id, run_target_id=run_target_id)
+            if target is None:
+                raise SqliteRunStoreError("RUN_TARGET_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return target
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_TARGET_PREFLIGHT_FAILED") from exc
+
     def _load_one(
         self,
         query: str,
@@ -201,8 +280,31 @@ class SqliteRunStore(RunStore):
             targets=self._load_targets(run_id),
         )
 
+    def _load_target(self, *, run_id: str, run_target_id: str) -> StartedRunTarget | None:
+        rows = self._load_targets_by_query(
+            """
+            SELECT
+                id,
+                endpoint_id,
+                endpoint_revision_id,
+                required_owner_installation_id,
+                required_ownership_epoch,
+                state,
+                lease_resource_key,
+                planned_operations,
+                planned_bytes
+            FROM run_targets
+            WHERE run_id = ?
+                AND id = ?
+            """,
+            (run_id, run_target_id),
+        )
+        if not rows:
+            return None
+        return rows[0]
+
     def _load_targets(self, run_id: str) -> tuple[StartedRunTarget, ...]:
-        rows = self._connection.execute(
+        return self._load_targets_by_query(
             """
             SELECT
                 id,
@@ -219,7 +321,14 @@ class SqliteRunStore(RunStore):
             ORDER BY id
             """,
             (run_id,),
-        ).fetchall()
+        )
+
+    def _load_targets_by_query(
+        self,
+        query: str,
+        parameters: tuple[object, ...],
+    ) -> tuple[StartedRunTarget, ...]:
+        rows = self._connection.execute(query, parameters).fetchall()
         return tuple(
             StartedRunTarget(
                 run_target_id=str(row[0]),
