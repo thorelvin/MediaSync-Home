@@ -42,6 +42,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_standard_backup_job_revisions",
                 statements=CATALOG_STANDARD_BACKUP_JOB_REVISIONS,
             ),
+            SqliteMigration(
+                version=4,
+                name="catalog_command_receipts",
+                statements=CATALOG_COMMAND_RECEIPTS,
+            ),
         ),
     )
 
@@ -377,6 +382,47 @@ CATALOG_STANDARD_BACKUP_JOB_REVISIONS = (
             REFERENCES standard_backup_job_drafts (draft_id)
             ON DELETE RESTRICT
     )
+    """,
+)
+
+CATALOG_COMMAND_RECEIPTS = (
+    """
+    CREATE TABLE command_receipts (
+        idempotency_key TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        client_instance_id TEXT NOT NULL,
+        principal_fingerprint TEXT NOT NULL,
+        command_name TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        protocol_version INTEGER NOT NULL,
+        schema_version INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (
+            state IN (
+                'RECEIVED',
+                'VALIDATED',
+                'EFFECT_PREPARED',
+                'ACCEPTED',
+                'RUNNING',
+                'SUCCEEDED',
+                'REJECTED',
+                'FAILED',
+                'CANCELLED'
+            )
+        ),
+        expected_entity_revision INTEGER,
+        payload_hash_scope TEXT NOT NULL,
+        payload_canonicalization_algorithm TEXT NOT NULL,
+        payload_hash_algorithm TEXT NOT NULL,
+        result_entity_type TEXT,
+        result_entity_id TEXT,
+        rejection_reason TEXT,
+        created_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )
+    """,
+    """
+    CREATE INDEX idx_command_receipts_state
+        ON command_receipts (state)
     """,
 )
 
