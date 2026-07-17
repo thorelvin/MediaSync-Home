@@ -10,7 +10,7 @@
 | 0A.5 — Windows argv/pakking | blocked | `spikes/0a5_windows_packaging/`; `tests/spikes/0a5_windows_packaging/`; `artifacts/0a5/` | `GetSystemDirectoryW`/argv, minimal runtime, lokal Nuitka exe-smoke, SDK-tool-inventory og release-signing-plan bestått; signeringssertifikat/signert release og ren Windows-VM mangler | Scope-reduksjon valgt 2026-07-17: lokal usignert preview først; full release krever signering og ren VM senere |
 | 0A.6 — Beslutningsreview | passed | `docs/adr/0A_DECISION_REVIEW.md`; `docs/adr/owner-decision-intake.current.json` | Eierbeslutninger registrert 2026-07-17; full SMB-/Task Scheduler-/signeringsevidens er eksplisitt utsatt | Åpne 0B med lokale scope-begrensninger |
 | 0A — Samlet arkitekturbevis | passed | 0A.0–0A.6 evidence/status docs | 0A owner gate passert for scoped local-preview path; full SMB/signering/non-interactive automasjon er utsatt | Fortsett 0B uten å påstå utsatte garantier |
-| 0B — Repository og kontrakter | in_progress | | Åpnet av eier 2026-07-17 for scoped local-preview path | Start repository- og kontraktarbeid |
+| 0B — Repository og kontrakter | in_progress | `AGENTS.md`; `docs/CODEX_START_PROMPT.md`; `tools/validate_contracts.py`; `tests/architecture/test_contract_validation.py` | 0B-work order og draft contract validation er etablert; ingen kontrakt er frosset, og app-/IPC-ramme er ikke implementert ennå | Neste slice: repositorystruktur og minimal ikke-muterende app-/IPC-ramme |
 
 Tillatte milepælstatuser: `not_started`, `in_progress`, `blocked`, `passed`, `failed`.
 

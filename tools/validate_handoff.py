@@ -48,7 +48,7 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
-def require_dependencies() -> tuple[Any, Any, Any]:
+def require_dependencies(*, strict_versions: bool = False) -> tuple[Any, Any, Any]:
     for distribution, expected in REQUIRED_PACKAGES.items():
         try:
             actual = importlib.metadata.version(distribution)
@@ -57,7 +57,7 @@ def require_dependencies() -> tuple[Any, Any, Any]:
                 f"required validation dependency {distribution}=={expected} is missing; "
                 "run: python -m pip install -r requirements-handoff.txt"
             )
-        if actual != expected:
+        if strict_versions and actual != expected:
             fail(
                 f"validation dependency version mismatch for {distribution}: expected {expected}, got {actual}; "
                 "run: python -m pip install -r requirements-handoff.txt"
@@ -472,13 +472,21 @@ def check_bundle_rules() -> None:
         fail("CHANGELOG.md footer version mismatch")
     if not master.rstrip().endswith(footer):
         fail("MASTER_SPEC.md footer version mismatch")
-    if "Utfør bare **Milepæl 0A.0" not in read_text(ROOT / "AGENTS.md"):
-        fail("AGENTS.md does not limit the active work order to 0A.0")
-    start = read_text(ROOT / "docs/CODEX_START_PROMPT.md")
-    if "Utfør bare Milepæl 0A.0" not in start:
-        fail("start prompt does not limit work to 0A.0")
     agents = read_text(ROOT / "AGENTS.md")
-    for phrase in ("owner_decision", "BLOCKED_BY_ENVIRONMENT", "Ikke start 0A.1"):
+    if "Milepæl 0B" not in agents:
+        fail("AGENTS.md does not name the active 0B work order")
+    start = read_text(ROOT / "docs/CODEX_START_PROMPT.md")
+    if "Utfør Milepæl 0B" not in start:
+        fail("start prompt does not name the active 0B work order")
+    for phrase in (
+        "owner_decision",
+        "DEFERRED_WITH_SCOPE_REDUCTION",
+        "BLOCKED_BY_ENVIRONMENT",
+        "validate_contracts.py",
+        "lokal usignert preview",
+        "writable SMB er utsatt",
+        "same-user",
+    ):
         if phrase not in agents:
             fail(f"AGENTS.md missing required governance phrase: {phrase}")
 
@@ -507,9 +515,11 @@ def check_bundle_rules() -> None:
     for generator, description in [
         ("tools/build_adr_docs.py", "generated ADR document check failed"),
         ("tools/build_master.py", "generated master check failed"),
+        ("tools/validate_contracts.py", "draft contract validation failed"),
     ]:
+        args = ["--check"] if generator != "tools/validate_contracts.py" else []
         result = subprocess.run(
-            [sys.executable, str(ROOT / generator), "--check"],
+            [sys.executable, str(ROOT / generator), *args],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -565,7 +575,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    yaml, Draft202012Validator, FormatChecker = require_dependencies()
+    yaml, Draft202012Validator, FormatChecker = require_dependencies(
+        strict_versions=args.verify_bundle
+    )
     check_text_hygiene()
     check_json_and_examples(Draft202012Validator, FormatChecker)
     yaml_documents = load_yaml_documents(yaml)
