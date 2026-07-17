@@ -1,0 +1,48 @@
+{
+  "client_is_elevated": false,
+  "client_session_id": 1,
+  "client_sid_hash": "29d2a0dceb7b2d24",
+  "create": {
+    "returncode": 0,
+    "stderr_lines": [],
+    "stdout_lines": [
+      "SUCCESS: The scheduled task \"\\MediaSyncHome-Spike\\e1e3bf4adb464e94a27bc013cc2d9a5e\\TriggerProbe\" has successfully been created."
+    ]
+  },
+  "delete_folder": {
+    "returncode": 0,
+    "stderr_lines": [],
+    "stdout_lines": []
+  },
+  "delete_task": {
+    "returncode": 0,
+    "stderr_lines": [],
+    "stdout_lines": [
+      "SUCCESS: The scheduled task \"\\MediaSyncHome-Spike\\e1e3bf4adb464e94a27bc013cc2d9a5e\\TriggerProbe\" was successfully deleted."
+    ]
+  },
+  "host_client_same_sid": true,
+  "host_returncode": 0,
+  "host_sid_hash": "29d2a0dceb7b2d24",
+  "host_stderr_lines": [],
+  "host_stdout_lines": [],
+  "response": {
+    "deduplicated": false,
+    "receipt_id": "39172ea6-fc9d-4cc4-b751-4c3fe128c3a7",
+    "status": "ACCEPTED"
+  },
+  "run": {
+    "returncode": 0,
+    "stderr_lines": [],
+    "stdout_lines": [
+      "SUCCESS: Attempted to run the scheduled task \"\\MediaSyncHome-Spike\\e1e3bf4adb464e94a27bc013cc2d9a5e\\TriggerProbe\"."
+    ]
+  },
+  "scheduler_action_kind": "schtasks_once_run",
+  "scheduler_action_length": 105,
+  "status": "PASS",
+  "task_created": true,
+  "task_deleted": true,
+  "task_folder_deleted": true,
+  "task_name": "\\MediaSyncHome-Spike\\e1e3bf4adb464e94a27bc013cc2d9a5e\\TriggerProbe"
+}

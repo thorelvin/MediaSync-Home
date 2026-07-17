@@ -5,7 +5,7 @@
 | Arbeidspakke | Status | Branch/commit | Rapport-/artefaktsti | Blocker |
 |---|---|---|---|---|
 | 0A.0 — Miljøpreflight | passed | `spike/0a0-environment-preflight` / baseline `d3282ef` | `docs/ARCHITECTURE_SPIKE_REPORT.md` | Ingen 0A.0-blocker |
-| 0A.1 — Prosess og IPC | blocked | `spike/0a1-process-and-ipc` | `spikes/0a1_process_ipc/`, `tests/spikes/0a1_process_ipc/`, `artifacts/0a1/unittest-output.txt` | Lokal IPC/Job Object-fixture består; ekte wrong-SID/remote og non-interactive Task Scheduler-kontekst mangler |
+| 0A.1 — Prosess og IPC | blocked | `spike/0a1-task-scheduler-trigger` | `spikes/0a1_process_ipc/`, `tests/spikes/0a1_process_ipc/`, `artifacts/0a1/` | Lokal IPC/Job Object og Task Scheduler same-SID trigger består; ekte wrong-SID/remote og non-interactive/session-policy mangler |
 | 0A.2 — Endpoint-eierskap | blocked | `spike/0a2-blake3-marker-evidence` | `spikes/0a2_endpoint_ownership/`, `tests/spikes/0a2_endpoint_ownership/`, `artifacts/0a2/` | Lokal klassifisering/lock/takeover og endelig BLAKE3-marker bestått; to-klient SMB-lab mangler |
 | 0A.3 — Recovery og stier | passed | `spike/0a3-recovery-and-paths` | `spikes/0a3_recovery_paths/`, `tests/spikes/0a3_recovery_paths/`, `artifacts/0a3/` | Lokal NTFS/path/recovery bestått; SMB SourceReadGuard ikke kjørt uten SMB-lab |
 | 0A.4 — SQLite og kapasitet | passed | `spike/0a4-sqlite-capacity` | `spikes/0a4_sqlite_capacity/`, `tests/spikes/0a4_sqlite_capacity/`, `artifacts/0a4/` | Lokal 1M SQLite-/kapasitetsmåling bestått; ADR-003 anbefales, men eiergodkjenning gjenstår |
@@ -56,6 +56,7 @@ Tillatte klassifiseringer: `RUNNABLE_NOW`, `RUNNABLE_WITH_LOCAL_FIXTURE`, `REQUI
 | Bevis | Arbeidspakke | Miljø | Kommando/test | Resultat | Artefakt/logg | ADR |
 |---|---|---|---|---|---|---|
 | Engine Host discovery/IPC | 0A.1 | Lokal Windows-fixture | `python -m unittest discover -s tests\spikes\0a1_process_ipc -v` | `PASS` | `artifacts/0a1/unittest-output.txt` | ADR-001, ADR-002 |
+| Task Scheduler same-SID trigger client | 0A.1 | Lokal Windows Task Scheduler via `schtasks` | `python spikes\0a1_process_ipc\win32_ipc_job.py prove-scheduler-trigger --work-dir artifacts\0a1\scheduler-trigger-work --output artifacts\0a1\scheduler-trigger-summary.json` | `PASS` | `artifacts/0a1/scheduler-trigger-summary.json` | ADR-001, ADR-002 |
 | Suspended child → Job Object → resume | 0A.1 | Lokal Windows-fixture | `python -m unittest discover -s tests\spikes\0a1_process_ipc -v` | `PASS` | `artifacts/0a1/unittest-output.txt` | ADR-013 |
 | To-klient SMB writer ownership | 0A.2 | `REQUIRES_USER_LAB_ACTION` | Ikke kjørt i 0A.0 | `BLOCKED` | Mangler to-klient SMB-lab | ADR-006, ADR-016, ADR-019 |
 | `.mediasync`-klassifisering | 0A.2 | Marker-validert lokal NTFS-labrot | `python -m unittest discover -s tests\spikes\0a2_endpoint_ownership -v` | `PASS` | `artifacts/0a2/unittest-output.txt`, `artifacts/0a2/demo-summary.json` | ADR-020 |
@@ -75,7 +76,7 @@ Resultatverdier: `PASS`, `FAIL`, `BLOCKED`, `INCONCLUSIVE`.
 
 Baseline ble kontrollert med streng hashverifisering før Git-initialisering og før første dokumentendring. Prosjektet ble deretter flyttet til `C:\claude\mediasynch` etter brukeravklaring om plassering.
 
-0A.1 ble kjørt som en spike-fixture under `spikes/0a1_process_ipc/` og `tests/spikes/0a1_process_ipc/`. Den oppretter bare lokale, midlertidige named pipes, childprosesser og testkvitteringsfiler. Den oppretter ingen produktdatabase, syncmotor, GUI, Robocopy-prosess, Task Scheduler-oppgave eller filsystemfixture med brukerdata.
+0A.1 ble kjørt som en spike-fixture under `spikes/0a1_process_ipc/` og `tests/spikes/0a1_process_ipc/`. Den oppretter bare lokale, midlertidige named pipes, childprosesser og testkvitteringsfiler. Den opprettet i `spike/0a1-task-scheduler-trigger` én dedikert midlertidig Task Scheduler-oppgave under `\MediaSyncHome-Spike\<run-id>\TriggerProbe`, kjørte den én gang og slettet både oppgaven og run-mappen. Den oppretter ingen produktdatabase, syncmotor, GUI, Robocopy-prosess eller filsystemfixture med brukerdata.
 
 ### 0A.1 lokal evidens
 
@@ -90,7 +91,8 @@ Baseline ble kontrollert med streng hashverifisering før Git-initialisering og 
 | `CREATE_SUSPENDED` før brukerkode | `PASS` | Instrumentert child skriver ikke marker før assignment/resume |
 | Job Object assignment + kill-on-close | `PASS` | Child legges i Job Object med `KILL_ON_JOB_CLOSE`; close terminerer child |
 | Engine Host close/crash stopper child | `PASS` for Job Object-close-scenariet | `test_suspended_child_is_contained_before_resume_and_killed_on_job_close` |
-| Task Scheduler-lignende non-interactive sesjon | `BLOCKED_BY_ENVIRONMENT` | Krever opprettet task/credential/session-policy som ikke ble etablert i denne økten |
+| Task Scheduler same-SID trigger client | `PASS` | `schtasks /Create` + `/Run` startet en trigger client med samme SID-hash som host, role `trigger` ble akseptert som idempotent command, actionlengde 105 tegn, task og run-mappe ble slettet |
+| Ekte non-interactive/session-policy | `BLOCKED_BY_ENVIRONMENT` | Scheduler-proben kjørte som same-SID trigger i sesjon 1; credential/logontype og ekte ikke-interaktiv policy er fortsatt ikke bevist |
 | Remote eller feil-SID klient | `BLOCKED_BY_ENVIRONMENT` | Krever separat Windows-bruker, remote client eller lab som kan forsøke faktisk feil principal |
 
 0A.2 ble kjørt som en marker-validert lokal endpoint-ownership-spike under `spikes/0a2_endpoint_ownership/` og `tests/spikes/0a2_endpoint_ownership/`. Harnesset muterer bare temp-labrøtter med `.mediasync_test_root`; to prosesser på samme maskin brukes bare som lokal lockharness, ikke som SMB-bevis.
@@ -228,6 +230,20 @@ python -m importlinter --version
 & "C:\claude\witchery\tmp\mediasync-handoff-venv\Scripts\python.exe" tools\build_adr_docs.py --check
 & "C:\claude\witchery\tmp\mediasync-handoff-venv\Scripts\python.exe" tools\build_master.py --check
 
+git switch -c spike/0a1-task-scheduler-trigger
+python -m py_compile spikes\0a1_process_ipc\win32_ipc_job.py tests\spikes\0a1_process_ipc\test_win32_ipc_job.py
+python -m pytest tests\spikes\0a1_process_ipc -q
+python -m ruff check spikes\0a1_process_ipc tests\spikes\0a1_process_ipc
+python spikes\0a1_process_ipc\win32_ipc_job.py prove-scheduler-trigger --work-dir artifacts\0a1\scheduler-trigger-work --output artifacts\0a1\scheduler-trigger-summary.json
+cmd.exe /c "set MEDIASYNC_RUN_TASKSCHEDULER_SPIKE=1&& python -m unittest discover -s tests\spikes\0a1_process_ipc -v > artifacts\0a1\unittest-output.txt 2>&1"
+python tools\build_master.py --check
+python tools\build_adr_docs.py --check
+git diff --check
+python -m ruff check .
+python -m pytest tests\spikes -q
+.\.venv\Scripts\python.exe -m pytest tests\spikes -q
+& "C:\claude\witchery\tmp\mediasync-handoff-venv\Scripts\python.exe" tools\validate_handoff.py
+
 git switch -c spike/0a2-endpoint-ownership-local
 python -m py_compile spikes\0a2_endpoint_ownership\endpoint_ownership.py tests\spikes\0a2_endpoint_ownership\test_endpoint_ownership.py
 python -m unittest discover -s tests\spikes\0a2_endpoint_ownership -v
@@ -302,11 +318,14 @@ Notater:
 - Målrettet scan for personlige brukersti-/konto-/epoststrenger fant ingen treff. Den lokale kontomarkøren er redigert bort fra rapporten.
 - En bredere sikkerhetsord-scan fant bare forventede fagtermer i spesifikasjonen, som `token`, `credential` og eksempel-UNC.
 - `python -m pytest tests\spikes\0a1_process_ipc -q` besto med `5 passed`.
+- `python spikes\0a1_process_ipc\win32_ipc_job.py prove-scheduler-trigger ...` besto med `status=PASS`; `schtasks` opprettet og kjørte én dedikert task, host/client hadde samme SID-hash, commandresponse var `ACCEPTED`, og cleanup slettet task og run-mappe.
+- Første schedulerforsøk traff `schtasks` sin `/TR`-grense på 261 tegn; proben bruker derfor en kort, generert wrapper i artefaktarbeidsmappen. Den endelige task action var 105 tegn.
 - `python -m ruff check .` besto.
 - `python -m mypy --version` og `python -m importlinter --version` feilet fordi modulene ikke er installert i aktiv Python. De er ikke registrert som bestått.
 - `python -m pytest tests\spikes -q` besto med `23 passed` etter 0A.4 og `32 passed` etter 0A.5.
 - `python -m pytest tests\spikes -q` besto med `39 passed` etter 0A.2/0A.6-review.
 - `.\.venv\Scripts\python.exe -m pytest tests\spikes -q` besto med `40 passed, 22 subtests passed` etter 0A.2 BLAKE3-markerbevis. Default Python har fortsatt ikke `blake3` og rapporterte derfor `32 passed, 8 skipped`.
+- Etter 0A.1 Task Scheduler-triggerbevis besto default `python -m pytest tests\spikes -q` med `32 passed, 9 skipped`; repo-lokal venv med `blake3` besto med `40 passed, 1 skipped, 22 subtests passed`.
 - `tools\validate_handoff.py` ignorerer nå lokale miljø-/cachemapper som `.venv`, `venv`, `.pytest_cache`, `.ruff_cache` og `__pycache__`, slik at valideringen fortsatt gjelder repositoryets handoff-filer selv når 0A-prober bruker lokal venv.
 - Sikkerhetsord-scan etter 0A.5 fant bare de forventede negative-test-/avvisningsforekomstene av de forbudte Robocopy-flaggene.
 - `python -m unittest discover -s tests\spikes` fant ingen tester på grunn av nested discover-layout; de reproduserbare unittest-kommandoene er per spikekatalog.
@@ -336,7 +355,7 @@ Tallene er lokale spike-målinger på syntetiske metadata, ikke en produksjons-S
 | 0A0-BLK-001 | 0A.2 | Ingen andre Windows-klient/VM og ingen dedikert SMB-lab med `.mediasync_test_root` er tilgjengelig | Cross-machine writer ownership, fremmed owner, takeover og stale epoch kan ikke bestås | Lever lokal harness og marker SMB-radene `BLOCKED` til eier stiller lab | Eier |
 | 0A0-BLK-002 | 0A.5 | PySide6, Nuitka, Windows SDK build/signing tools, låst dependency-sett og ren Windows-VM mangler | Reproduserbar pakking kan ikke bevises i nåværende miljø | Kjør argv/systemsti-delen separat; utsett pakkebevis til toolchain/VM finnes | Eier |
 | 0A0-BLK-003 | 0A.2/0A.5 | Hypervisor er present, men `Get-VM` mangler og valgfri Windows-feature-query krever elevation | Codex kan ikke selv inventere eller orkestrere lokal VM-lab | Eier må bekrefte VM-oppsett eller gi eksplisitt labinstruks | Eier |
-| 0A1-BLK-001 | 0A.1 | Ekte non-interactive Task Scheduler-session under samme bruker er ikke etablert | 0A.1 kan ikke bevise registrert trigger-client/session-policy fullt ut | Eier må tillate/opprette dedikert `\MediaSyncHome-Spike\<run-id>` task eller gi testcredential/sessionoppsett | Eier |
+| 0A1-BLK-001 | 0A.1 | Ekte non-interactive Task Scheduler-session/logontype-policy under samme bruker er ikke etablert | Same-SID scheduled trigger er bevist, men 0A.1 kan ikke bevise registrert trigger-client/session-policy fullt ut | Eier må gi testcredential/sessionoppsett for ikke-interaktiv logontype eller godkjenne scope-reduksjon til interaktiv/same-session trigger | Eier |
 | 0A1-BLK-002 | 0A.1 | Feil-SID eller remote pipe-klient er ikke tilgjengelig | DACL/local-only-policy er konfigurert, men faktisk avvisning av annen principal er ikke demonstrert | Kjør 0A.1-identitetstesten fra separat Windows-bruker/VM eller remote klient | Eier |
 | 0A2-BLK-001 | 0A.2 | To-klient SMB-lab er ikke tilgjengelig | Global writer ownership, fremmed owner fra annen maskin, stale reconnect og SMB-lock kan ikke bestås | Still dedikert SMB-share og to ekte Windows-klienter/VM-er til rådighet | Eier |
 | 0A3-BLK-001 | 0A.3 | SMB SourceReadGuard-lab er ikke tilgjengelig | SMB guard kan ikke påstå `DENY_WRITE_AND_DELETE`; uprovede SMB-endepunkter må bruke fallbackpolicy | Kjør samme source-guard-probe mot dedikert SMB-lab eller behold `POST_TRANSFER_HASH_ONLY`/`DEFER_UNSTABLE_SOURCE` for uprovede SMB | Eier |
@@ -344,7 +363,7 @@ Tallene er lokale spike-målinger på syntetiske metadata, ikke en produksjons-S
 
 ## Beslutninger
 
-ADR-003 er satt til `RECOMMENDED` med Codex-anbefaling om to lokale SQLite-databaser og eksplisitte handoffs. ADR-011, ADR-018, ADR-020 og ADR-027 er satt til `EVIDENCE_COMPLETE`. ADR-028 er satt til `BLOCKED` fordi pakkebeviset mangler toolchain og ren Windows-VM. ADR-006, ADR-016 og ADR-019 forblir `PROPOSED` til to-klient SMB-bevis finnes eller eier godkjenner scope-reduksjon. Alle `owner_decision`-felt forblir `PENDING`; bare eier kan akseptere, avvise eller godkjenne scope-reduksjon. ADR-001, ADR-002 og ADR-013 bør forbli `PROPOSED` til de blokkerte identitets-/Task Scheduler-radene er bevist eller eier eksplisitt godkjenner en scope-reduksjon.
+ADR-003 er satt til `RECOMMENDED` med Codex-anbefaling om to lokale SQLite-databaser og eksplisitte handoffs. ADR-011, ADR-018, ADR-020 og ADR-027 er satt til `EVIDENCE_COMPLETE`. ADR-028 er satt til `BLOCKED` fordi pakkebeviset mangler toolchain og ren Windows-VM. ADR-006, ADR-016 og ADR-019 forblir `PROPOSED` til to-klient SMB-bevis finnes eller eier godkjenner scope-reduksjon. Alle `owner_decision`-felt forblir `PENDING`; bare eier kan akseptere, avvise eller godkjenne scope-reduksjon. ADR-001 og ADR-002 har nå real Task Scheduler same-SID triggerbevis, men bør forbli `PROPOSED` til feil-SID/remote og non-interactive/session-policy er bevist eller eier eksplisitt godkjenner scope-reduksjon. ADR-013 bør forbli `PROPOSED` til eier vurderer integrasjonscaveat for faktisk transferchild.
 
 `docs/adr/0A_DECISION_REVIEW.md` er eierens beslutningsliste. Den viser også mulige scope-reduksjoner for lokal-only første release, ingen non-interactive trigger i første omgang, zip/dev-run preview uten pakket `.exe`, og utsatt endpoint-marker-contract-freeze.
 
@@ -357,4 +376,4 @@ ADR-003 er satt til `RECOMMENDED` med Codex-anbefaling om to lokale SQLite-datab
 
 ## Bevisst ikke implementert
 
-0A.0, 0A.1, 0A.2, 0A.3, 0A.4 og 0A.5 opprettet ikke produktkode under `src/`, endelig produktdatabase, migrasjon, GUI, syncmotor, Robocopy-adapter, Task Scheduler-oppgave eller SMB-lock. 0A.1 opprettet bare spikehost, spikeklient, instrumentert childprosess og midlertidige receipt-/markerfiler under testens tempområde. 0A.2 opprettet bare marker-validerte lokale labrøtter under temp og en spike-local `.mediasync`-fixture inne i dem. 0A.3 opprettet bare marker-validerte lokale labrøtter under temp og muterte filer inne i disse røttene. 0A.4 opprettet bare syntetiske SQLite-kandidatdatabaser i temp og lagret kompakte JSON-/testartefakter. 0A.5 startet bare en instrumentert Python-child for argv-verifikasjon og startet aldri Robocopy eller et pakket produkt. Ingen reelle brukerdata, produksjons-NAS, Bilder-/Dokumenter-/Skrivebord-stier eller diskrot ble brukt som testgrunnlag.
+0A.0, 0A.1, 0A.2, 0A.3, 0A.4 og 0A.5 opprettet ikke produktkode under `src/`, endelig produktdatabase, migrasjon, GUI, syncmotor, Robocopy-adapter eller SMB-lock. 0A.1 opprettet bare spikehost, spikeklient, instrumentert childprosess, midlertidige receipt-/markerfiler under testens tempområde og én dedikert Task Scheduler-testoppgave som ble slettet i samme probe. 0A.2 opprettet bare marker-validerte lokale labrøtter under temp og en spike-local `.mediasync`-fixture inne i dem. 0A.3 opprettet bare marker-validerte lokale labrøtter under temp og muterte filer inne i disse røttene. 0A.4 opprettet bare syntetiske SQLite-kandidatdatabaser i temp og lagret kompakte JSON-/testartefakter. 0A.5 startet bare en instrumentert Python-child for argv-verifikasjon og startet aldri Robocopy eller et pakket produkt. Ingen reelle brukerdata, produksjons-NAS, Bilder-/Dokumenter-/Skrivebord-stier eller diskrot ble brukt som testgrunnlag.

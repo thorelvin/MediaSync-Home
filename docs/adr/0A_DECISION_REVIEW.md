@@ -9,7 +9,7 @@ an owner decision record. Every ADR still requires an explicit owner decision in
 | Package | Result | Evidence | Remaining blocker |
 |---|---|---|---|
 | 0A.0 Environment preflight | Passed | `docs/ARCHITECTURE_SPIKE_REPORT.md` | None for preflight |
-| 0A.1 Process and IPC | Blocked | `spikes/0a1_process_ipc/`, `artifacts/0a1/` | Task Scheduler-like session and wrong-SID/remote-client proof |
+| 0A.1 Process and IPC | Blocked | `spikes/0a1_process_ipc/`, `artifacts/0a1/` | True non-interactive/session-policy and wrong-SID/remote-client proof |
 | 0A.2 Endpoint ownership | Blocked | `spikes/0a2_endpoint_ownership/`, `artifacts/0a2/` | Two-client SMB lab |
 | 0A.3 Recovery and paths | Passed locally | `spikes/0a3_recovery_paths/`, `artifacts/0a3/` | SMB SourceReadGuard proof |
 | 0A.4 SQLite and capacity | Passed locally | `spikes/0a4_sqlite_capacity/`, `artifacts/0a4/` | Owner decision on ADR-003 |
@@ -23,8 +23,8 @@ chooses explicitly.
 
 | ADR | Evidence status | 0A evidence | Alternatives | Risk and reversal cost | Codex recommendation | Owner action |
 |---|---|---|---|---|---|---|
-| ADR-001 Headless Engine Host | `PROPOSED` | Local host/client and receipt behavior passed; non-interactive Task Scheduler context is missing | GUI-owned engine, per-trigger engine, or headless singleton | Reversal is high after IPC, scheduler, and DB ownership land | Defer until Task Scheduler/session proof or scope reduction | Decide after 0A.1 blockers |
-| ADR-002 Local named pipes | `PROPOSED` | Same-SID pipe, protocol mismatch, local-only flag, and idempotency passed; wrong-SID/remote proof missing | TCP loopback, COM, files, or direct GUI DB access | Reversal is medium-high after clients depend on IPC protocol | Defer until wrong-SID/remote test, or accept local-only scope reduction | Decide after 0A.1 blockers |
+| ADR-001 Headless Engine Host | `PROPOSED` | Local host/client, receipts, Job Object, and a real same-SID Task Scheduler trigger passed; true non-interactive/session-policy proof is missing | GUI-owned engine, per-trigger engine, or headless singleton | Reversal is high after IPC, scheduler, and DB ownership land | Defer until non-interactive/session proof or scope reduction | Decide after 0A.1 blockers |
+| ADR-002 Local named pipes | `PROPOSED` | Same-SID pipe, scheduled trigger client, protocol mismatch, local-only flag, and idempotency passed; wrong-SID/remote proof missing | TCP loopback, COM, files, or direct GUI DB access | Reversal is medium-high after clients depend on IPC protocol | Defer until wrong-SID/remote test, or accept local-only scope reduction | Decide after 0A.1 blockers |
 | ADR-003 One or two SQLite DBs | `RECOMMENDED` | 1M rows passed; two DB keeps recovery tiny and survives catalog `SQLITE_FULL` probe | One DB with differentiated durability | Reversal is very high after schema/migrations | Accept two DBs with explicit handoffs, unless owner prioritizes simplicity over isolation | Owner can accept/reject now |
 | ADR-004 Robocopy only to staging | `PROPOSED` | Recovery/staging paths and argv hardening passed; no real Robocopy transfer run | Let Robocopy write final tree | Reversal is high after transfer adapter design | Keep design, but require later Robocopy integration proof | Defer to integration milestone |
 | ADR-005 Immutable job/endpoint/plan revisions | `PROPOSED` | Not in 0A scope | Mutable config rows | Reversal is high after schema/UI | Keep proposed for 0B/Milestone 1 | Defer |

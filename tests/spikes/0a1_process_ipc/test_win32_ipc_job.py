@@ -135,6 +135,21 @@ class Win32IpcJobSpikeTests(unittest.TestCase):
         self.assertTrue(result["marker_seen_after_resume"])
         self.assertTrue(result["kill_on_close_observed"])
 
+    @unittest.skipUnless(
+        os.environ.get("MEDIASYNC_RUN_TASKSCHEDULER_SPIKE") == "1",
+        "real Task Scheduler probe is opt-in because it creates a dedicated temporary task",
+    )
+    def test_task_scheduler_trigger_client_reaches_same_sid_host(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="msh-0a1-scheduler-") as raw:
+            output = Path(raw) / "summary.json"
+            result = win32_ipc_job.prove_task_scheduler_trigger(Path(raw), output)
+
+        self.assertEqual(result["status"], "PASS")
+        self.assertTrue(result["task_deleted"])
+        self.assertTrue(result["task_folder_deleted"])
+        self.assertTrue(result["host_client_same_sid"])
+        self.assertEqual(result["response"]["status"], "ACCEPTED")
+
 
 if __name__ == "__main__":
     unittest.main()

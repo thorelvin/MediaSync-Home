@@ -12,6 +12,7 @@ import sys
 import time
 import uuid
 from ctypes import wintypes
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,7 @@ ERROR_PIPE_BUSY = 231
 WAIT_TIMEOUT = 258
 WAIT_OBJECT_0 = 0
 STILL_ACTIVE = 259
+TASK_SCHEDULER_ROOT = r"\MediaSyncHome-Spike"
 
 TOKEN_QUERY = 0x0008
 TOKEN_USER = 1
@@ -476,6 +478,11 @@ def _save_receipts(path: Path, receipts: dict[str, dict[str, Any]]) -> None:
     path.write_text(json.dumps(receipts, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def _client_identity_from_pipe(pipe: HANDLE) -> dict[str, Any]:
     if not advapi32.ImpersonateNamedPipeClient(pipe):
         _raise_last_error("ImpersonateNamedPipeClient")
@@ -681,6 +688,277 @@ def run_child(marker: Path, hold_seconds: float) -> None:
     time.sleep(hold_seconds)
 
 
+def _system32_executable(name: str) -> Path:
+    system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    return system_root / "System32" / name
+
+
+def _windows_executable(name: str) -> Path:
+    system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    return system_root / name
+
+
+def _sanitize_completed_process(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+    return {
+        "returncode": result.returncode,
+        "stdout_lines": [line.strip() for line in result.stdout.splitlines() if line.strip()],
+        "stderr_lines": [line.strip() for line in result.stderr.splitlines() if line.strip()],
+    }
+
+
+def run_scheduler_client(pipe_name: str, message_file: Path, output: Path) -> None:
+    message = json.loads(message_file.read_text(encoding="utf-8"))
+    token = current_token_snapshot()
+    response = send_client_message(pipe_name, message)
+    write_json(
+        output,
+        {
+            "status": "CLIENT_COMPLETED",
+            "process_id": os.getpid(),
+            "hostname": socket.gethostname(),
+            "token": token,
+            "response": response,
+        },
+    )
+
+
+def _delete_scheduler_task(task_name: str) -> subprocess.CompletedProcess[str]:
+    schtasks = _system32_executable("schtasks.exe")
+    return subprocess.run(
+        [str(schtasks), "/Delete", "/TN", task_name, "/F"],
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+
+
+def _delete_scheduler_run_folder(run_id: str) -> subprocess.CompletedProcess[str]:
+    script = (
+        "$service = New-Object -ComObject Schedule.Service; "
+        "$service.Connect(); "
+        "$root = $service.GetFolder('\\MediaSyncHome-Spike'); "
+        f"$root.DeleteFolder('{run_id}', 0)"
+    )
+    return subprocess.run(
+        [
+            str(_system32_executable("WindowsPowerShell\\v1.0\\powershell.exe")),
+            "-NoProfile",
+            "-Command",
+            script,
+        ],
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+
+
+def prove_task_scheduler_trigger(work_dir: Path, output: Path | None = None) -> dict[str, Any]:
+    work_dir = work_dir.resolve()
+    output = output.resolve() if output else None
+    work_dir.mkdir(parents=True, exist_ok=True)
+    run_id = uuid.uuid4().hex
+    task_name = rf"{TASK_SCHEDULER_ROOT}\{run_id}\TriggerProbe"
+    pipe_name = make_pipe_name(run_id)
+    ready_file = work_dir / "host-ready.json"
+    receipt_store = work_dir / "receipts.json"
+    message_file = work_dir / "scheduler-message.json"
+    client_output = work_dir / "scheduler-client-output.json"
+    wrapper_config = work_dir / "scheduler-client-config.json"
+    wrapper_script = work_dir / "run_scheduler_client.py"
+    for stale in (ready_file, receipt_store, client_output):
+        if stale.exists():
+            stale.unlink()
+    message = build_message(message_type="COMMAND", role="trigger")
+    write_json(message_file, message)
+    write_json(
+        wrapper_config,
+        {
+            "harness_dir": str(Path(__file__).resolve().parent),
+            "pipe_name": pipe_name,
+            "message_file": str(message_file),
+            "output": str(client_output),
+        },
+    )
+    wrapper_script.write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "import json",
+                "import sys",
+                "from pathlib import Path",
+                "",
+                "config = json.loads(Path(__file__).with_name('scheduler-client-config.json').read_text(encoding='utf-8'))",
+                "sys.path.insert(0, config['harness_dir'])",
+                "import win32_ipc_job",
+                "",
+                "win32_ipc_job.run_scheduler_client(",
+                "    config['pipe_name'],",
+                "    Path(config['message_file']),",
+                "    Path(config['output']),",
+                ")",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    host = subprocess.Popen(
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "host",
+            "--pipe-name",
+            pipe_name,
+            "--receipt-store",
+            str(receipt_store),
+            "--ready-file",
+            str(ready_file),
+            "--connections",
+            "1",
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    task_created = False
+    delete_task_result: dict[str, Any] | None = None
+    delete_folder_result: dict[str, Any] | None = None
+    summary: dict[str, Any] | None = None
+    try:
+        deadline = time.monotonic() + 8
+        while not ready_file.exists() and time.monotonic() < deadline:
+            if host.poll() is not None:
+                stdout, stderr = host.communicate(timeout=1)
+                raise RuntimeError(f"host exited before readiness stdout={stdout!r} stderr={stderr!r}")
+            time.sleep(0.05)
+        if not ready_file.exists():
+            raise TimeoutError("host did not publish readiness")
+
+        py_launcher = _windows_executable("py.exe")
+        scheduler_action = subprocess.list2cmdline([str(py_launcher), "-3.10", str(wrapper_script)])
+        start_time = (datetime.now() + timedelta(minutes=5)).strftime("%H:%M")
+        schtasks = _system32_executable("schtasks.exe")
+        create_result = subprocess.run(
+            [
+                str(schtasks),
+                "/Create",
+                "/TN",
+                task_name,
+                "/SC",
+                "ONCE",
+                "/ST",
+                start_time,
+                "/TR",
+                scheduler_action,
+                "/F",
+                "/RL",
+                "LIMITED",
+            ],
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+        if create_result.returncode != 0:
+            summary = {
+                "status": "BLOCKED_BY_ENVIRONMENT",
+                "reason": "TASK_CREATE_FAILED",
+                "task_name": task_name,
+                "scheduler_action_length": len(scheduler_action),
+                "create": _sanitize_completed_process(create_result),
+            }
+            if output:
+                write_json(output, summary)
+            return summary
+        task_created = True
+
+        run_result = subprocess.run(
+            [str(schtasks), "/Run", "/TN", task_name],
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+        if run_result.returncode != 0:
+            summary = {
+                "status": "BLOCKED_BY_ENVIRONMENT",
+                "reason": "TASK_RUN_FAILED",
+                "task_name": task_name,
+                "scheduler_action_length": len(scheduler_action),
+                "create": _sanitize_completed_process(create_result),
+                "run": _sanitize_completed_process(run_result),
+            }
+            if output:
+                write_json(output, summary)
+            return summary
+
+        deadline = time.monotonic() + 30
+        while not client_output.exists() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if not client_output.exists():
+            summary = {
+                "status": "BLOCKED_BY_ENVIRONMENT",
+                "reason": "TASK_CLIENT_OUTPUT_TIMEOUT",
+                "task_name": task_name,
+                "scheduler_action_length": len(scheduler_action),
+                "create": _sanitize_completed_process(create_result),
+                "run": _sanitize_completed_process(run_result),
+            }
+            if output:
+                write_json(output, summary)
+            return summary
+
+        stdout, stderr = host.communicate(timeout=10)
+        client = json.loads(client_output.read_text(encoding="utf-8"))
+        ready = json.loads(ready_file.read_text(encoding="utf-8"))
+        response = client["response"]
+        same_sid_as_host = client["token"]["sid_hash"] == ready["host_sid_hash"]
+        passed = response.get("status") == "ACCEPTED" and same_sid_as_host and host.returncode == 0
+        summary = {
+            "status": "PASS" if passed else "FAIL",
+            "task_name": task_name,
+            "task_created": task_created,
+            "task_deleted": False,
+            "task_folder_deleted": False,
+            "scheduler_action_kind": "schtasks_once_run",
+            "scheduler_action_length": len(scheduler_action),
+            "host_returncode": host.returncode,
+            "host_stdout_lines": [line.strip() for line in stdout.splitlines() if line.strip()],
+            "host_stderr_lines": [line.strip() for line in stderr.splitlines() if line.strip()],
+            "host_sid_hash": ready["host_sid_hash"],
+            "client_sid_hash": client["token"]["sid_hash"],
+            "client_session_id": client["token"]["session_id"],
+            "host_client_same_sid": same_sid_as_host,
+            "client_is_elevated": client["token"]["is_elevated"],
+            "response": response,
+            "create": _sanitize_completed_process(create_result),
+            "run": _sanitize_completed_process(run_result),
+        }
+        if output:
+            write_json(output, summary)
+        return summary
+    finally:
+        if task_created:
+            delete_task_result = _sanitize_completed_process(_delete_scheduler_task(task_name))
+            delete_folder_result = _sanitize_completed_process(_delete_scheduler_run_folder(run_id))
+        if host.poll() is None:
+            host.kill()
+            host.communicate(timeout=5)
+        if summary is not None:
+            if delete_task_result is not None:
+                summary["task_deleted"] = delete_task_result["returncode"] == 0
+                summary["delete_task"] = delete_task_result
+            if delete_folder_result is not None:
+                summary["task_folder_deleted"] = delete_folder_result["returncode"] == 0
+                summary["delete_folder"] = delete_folder_result
+            if output:
+                write_json(output, summary)
+
+
 def build_message(
     *,
     message_type: str = "COMMAND",
@@ -724,6 +1002,15 @@ def main(argv: list[str] | None = None) -> int:
     job = sub.add_parser("prove-job")
     job.add_argument("--work-dir", required=True)
 
+    scheduler_client = sub.add_parser("scheduler-client")
+    scheduler_client.add_argument("--pipe-name", required=True)
+    scheduler_client.add_argument("--message-file", required=True)
+    scheduler_client.add_argument("--output", required=True)
+
+    scheduler = sub.add_parser("prove-scheduler-trigger")
+    scheduler.add_argument("--work-dir", required=True)
+    scheduler.add_argument("--output", required=True)
+
     args = parser.parse_args(argv)
     if args.command == "host":
         run_host(
@@ -743,6 +1030,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "prove-job":
         print(json.dumps(prove_job_object_containment(Path(args.work_dir)), sort_keys=True))
         return 0
+    if args.command == "scheduler-client":
+        run_scheduler_client(
+            pipe_name=args.pipe_name,
+            message_file=Path(args.message_file),
+            output=Path(args.output),
+        )
+        return 0
+    if args.command == "prove-scheduler-trigger":
+        summary = prove_task_scheduler_trigger(Path(args.work_dir), Path(args.output))
+        print(json.dumps(summary, sort_keys=True))
+        return 0 if summary["status"] == "PASS" else 2
     raise AssertionError(args.command)
 
 
