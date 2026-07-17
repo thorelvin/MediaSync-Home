@@ -4,6 +4,9 @@ This review summarizes the available 0A evidence for owner decisions. It is not
 an owner decision record. Every ADR still requires an explicit owner decision in
 `docs/adr/catalog.yaml` before it becomes binding.
 
+For a short owner-facing choice sheet, use
+[`OWNER_DECISION_WORKSHEET.md`](OWNER_DECISION_WORKSHEET.md).
+
 ## Evidence Summary
 
 | Package | Result | Evidence | Remaining blocker |
