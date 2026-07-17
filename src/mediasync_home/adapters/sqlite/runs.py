@@ -248,6 +248,68 @@ class SqliteRunStore(RunStore):
                 raise
             raise SqliteRunStoreError("RUN_TARGET_PREFLIGHT_FAILED") from exc
 
+    def record_run_target_lease_acquired(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        lease_id: str,
+        owner_installation_id: str,
+        ownership_epoch: int,
+        fencing_token: int,
+    ) -> StartedRunTarget | None:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            cursor = self._connection.execute(
+                """
+                UPDATE run_targets
+                SET
+                    state = 'REVALIDATING',
+                    last_lease_id = ?,
+                    last_ownership_epoch = ?,
+                    last_fencing_token = ?,
+                    row_version = row_version + 1
+                WHERE run_id = ?
+                    AND id = ?
+                    AND state = 'ACQUIRING_LEASE'
+                    AND (required_owner_installation_id IS NULL OR required_owner_installation_id = ?)
+                    AND (required_ownership_epoch IS NULL OR required_ownership_epoch = ?)
+                    AND EXISTS (
+                        SELECT 1
+                        FROM runs
+                        WHERE runs.id = run_targets.run_id
+                            AND runs.state = 'PREFLIGHT'
+                    )
+                """,
+                (
+                    lease_id,
+                    ownership_epoch,
+                    fencing_token,
+                    run_id,
+                    run_target_id,
+                    owner_installation_id,
+                    ownership_epoch,
+                ),
+            )
+            if cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            target = self._load_target(run_id=run_id, run_target_id=run_target_id)
+            if target is None:
+                raise SqliteRunStoreError("RUN_TARGET_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return target
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_TARGET_LEASE_RECORD_FAILED") from exc
+
     def _load_one(
         self,
         query: str,
@@ -291,6 +353,9 @@ class SqliteRunStore(RunStore):
                 required_ownership_epoch,
                 state,
                 lease_resource_key,
+                last_lease_id,
+                last_ownership_epoch,
+                last_fencing_token,
                 planned_operations,
                 planned_bytes
             FROM run_targets
@@ -314,6 +379,9 @@ class SqliteRunStore(RunStore):
                 required_ownership_epoch,
                 state,
                 lease_resource_key,
+                last_lease_id,
+                last_ownership_epoch,
+                last_fencing_token,
                 planned_operations,
                 planned_bytes
             FROM run_targets
@@ -338,8 +406,11 @@ class SqliteRunStore(RunStore):
                 required_ownership_epoch=None if row[4] is None else int(row[4]),
                 state=RunTargetState(str(row[5])),
                 lease_resource_key=None if row[6] is None else str(row[6]),
-                planned_operations=int(row[7]),
-                planned_bytes=int(row[8]),
+                last_lease_id=None if row[7] is None else str(row[7]),
+                last_ownership_epoch=None if row[8] is None else int(row[8]),
+                last_fencing_token=None if row[9] is None else int(row[9]),
+                planned_operations=int(row[10]),
+                planned_bytes=int(row[11]),
             )
             for row in rows
         )

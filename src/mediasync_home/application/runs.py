@@ -79,6 +79,9 @@ class StartedRunTarget:
     required_owner_installation_id: str | None = None
     required_ownership_epoch: int | None = None
     lease_resource_key: str | None = None
+    last_lease_id: str | None = None
+    last_ownership_epoch: int | None = None
+    last_fencing_token: int | None = None
     planned_operations: int = 0
     planned_bytes: int = 0
 
@@ -147,6 +150,56 @@ class RunTargetPreflightOutcome:
     next_action: str
 
 
+@dataclass(frozen=True)
+class EndpointLeaseRequest:
+    run_id: str
+    run_target_id: str
+    endpoint_id: str
+    endpoint_revision_id: str
+    resource_key: str
+    required_owner_installation_id: str | None
+    required_ownership_epoch: int | None
+
+
+class LiveEndpointLease(Protocol):
+    @property
+    def lease_id(self) -> str: ...
+
+    @property
+    def owner_installation_id(self) -> str: ...
+
+    @property
+    def ownership_epoch(self) -> int: ...
+
+    @property
+    def fencing_token(self) -> int: ...
+
+    def release(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class EndpointLeaseAttempt:
+    acquired: bool
+    lease: LiveEndpointLease | None
+    validation_codes: tuple[str, ...]
+    next_action: str
+
+
+class EndpointLeaseAuthority(Protocol):
+    def acquire_endpoint_lease(self, request: EndpointLeaseRequest) -> EndpointLeaseAttempt: ...
+
+
+@dataclass(frozen=True)
+class RunTargetLeaseOutcome:
+    acquired: bool
+    run_id: str
+    run_target_id: str
+    target: StartedRunTarget | None
+    lease: LiveEndpointLease | None
+    validation_codes: tuple[str, ...]
+    next_action: str
+
+
 class RunStore(Protocol):
     def save_started_run(self, run: StartedRun) -> None: ...
 
@@ -161,6 +214,17 @@ class RunStore(Protocol):
         *,
         run_id: str,
         run_target_id: str,
+    ) -> StartedRunTarget | None: ...
+
+    def record_run_target_lease_acquired(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        lease_id: str,
+        owner_installation_id: str,
+        ownership_epoch: int,
+        fencing_token: int,
     ) -> StartedRunTarget | None: ...
 
 
@@ -313,6 +377,130 @@ def begin_next_run_target_preflight(
     )
 
 
+def acquire_run_target_lease(
+    *,
+    run_id: str,
+    run_target_id: str,
+    runs: RunStore,
+    leases: EndpointLeaseAuthority,
+) -> RunTargetLeaseOutcome:
+    run = runs.load_started_run(run_id)
+    if run is None:
+        return RunTargetLeaseOutcome(
+            acquired=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=None,
+            lease=None,
+            validation_codes=("RUN_NOT_FOUND",),
+            next_action="Create a queued run before acquiring an endpoint lease.",
+        )
+    if run.state is not RunState.PREFLIGHT:
+        return RunTargetLeaseOutcome(
+            acquired=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=None,
+            lease=None,
+            validation_codes=("RUN_NOT_IN_PREFLIGHT",),
+            next_action="Begin target preflight before acquiring an endpoint lease.",
+        )
+
+    target = _target_by_id(run, run_target_id)
+    if target is None:
+        return RunTargetLeaseOutcome(
+            acquired=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=None,
+            lease=None,
+            validation_codes=("RUN_TARGET_NOT_FOUND",),
+            next_action="Reload run targets before acquiring an endpoint lease.",
+        )
+    if target.state is not RunTargetState.ACQUIRING_LEASE:
+        return RunTargetLeaseOutcome(
+            acquired=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=target,
+            lease=None,
+            validation_codes=("RUN_TARGET_NOT_ACQUIRING_LEASE",),
+            next_action="Only targets in lease acquisition can request an endpoint lock.",
+        )
+    if target.lease_resource_key is None or not target.lease_resource_key.strip():
+        return RunTargetLeaseOutcome(
+            acquired=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=target,
+            lease=None,
+            validation_codes=("RUN_TARGET_REQUIRES_LEASE_RESOURCE_KEY",),
+            next_action="Refresh the sealed plan so the target has a lease resource key.",
+        )
+
+    attempt = leases.acquire_endpoint_lease(
+        EndpointLeaseRequest(
+            run_id=run_id,
+            run_target_id=run_target_id,
+            endpoint_id=target.endpoint_id,
+            endpoint_revision_id=target.endpoint_revision_id,
+            resource_key=target.lease_resource_key,
+            required_owner_installation_id=target.required_owner_installation_id,
+            required_ownership_epoch=target.required_ownership_epoch,
+        )
+    )
+    if not attempt.acquired:
+        return RunTargetLeaseOutcome(
+            acquired=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=target,
+            lease=None,
+            validation_codes=attempt.validation_codes or ("RUN_TARGET_ENDPOINT_LEASE_UNAVAILABLE",),
+            next_action=attempt.next_action,
+        )
+    lease = attempt.lease
+    if lease is None:
+        return RunTargetLeaseOutcome(
+            acquired=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=target,
+            lease=None,
+            validation_codes=("RUN_TARGET_ENDPOINT_LEASE_INVALID",),
+            next_action="The lease adapter reported success without a live lease handle.",
+        )
+
+    updated = runs.record_run_target_lease_acquired(
+        run_id=run_id,
+        run_target_id=run_target_id,
+        lease_id=lease.lease_id,
+        owner_installation_id=lease.owner_installation_id,
+        ownership_epoch=lease.ownership_epoch,
+        fencing_token=lease.fencing_token,
+    )
+    if updated is None:
+        lease.release()
+        return RunTargetLeaseOutcome(
+            acquired=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=None,
+            lease=None,
+            validation_codes=("RUN_TARGET_LEASE_RECORD_CONFLICT",),
+            next_action="Released the endpoint lease because run-target state changed during persistence.",
+        )
+    return RunTargetLeaseOutcome(
+        acquired=True,
+        run_id=run_id,
+        run_target_id=run_target_id,
+        target=updated,
+        lease=lease,
+        validation_codes=(),
+        next_action="Target has a live endpoint lease and is ready for revalidation.",
+    )
+
+
 def _readiness_for_plan(*, command: StartRunCommand, plan: SealedPlan) -> RunStartReadiness:
     validation_codes: list[str] = []
     checksum_matches = plan.plan_checksum == command.plan_checksum
@@ -386,6 +574,10 @@ def _target_endpoints(plan: SealedPlan) -> tuple[PlanEndpoint, ...]:
             ),
         )
     )
+
+
+def _target_by_id(run: StartedRun, run_target_id: str) -> StartedRunTarget | None:
+    return next((target for target in run.targets if target.run_target_id == run_target_id), None)
 
 
 def _started_run_target(run_id: str, endpoint: PlanEndpoint) -> StartedRunTarget:

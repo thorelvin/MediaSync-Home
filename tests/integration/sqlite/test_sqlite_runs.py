@@ -28,12 +28,16 @@ from mediasync_home.application.plans import (
     seal_plan,
 )
 from mediasync_home.application.runs import (
+    EndpointLeaseAttempt,
+    EndpointLeaseAuthority,
+    EndpointLeaseRequest,
     RunIdFactory,
     RunIds,
     RunCommandName,
     RunState,
     RunTargetState,
     StartedRun,
+    acquire_run_target_lease,
     begin_next_run_target_preflight,
     parse_start_run_command,
     start_run_from_sealed_plan,
@@ -53,6 +57,34 @@ class FixedRunIdFactory(RunIdFactory):
     def new_run_ids(self) -> RunIds:
         self.calls += 1
         return RunIds(run_id="run-a", logical_run_group_id="run-group-a")
+
+
+class FixedLeaseAuthority(EndpointLeaseAuthority):
+    def __init__(self, lease: FixedLiveLease) -> None:
+        self.lease = lease
+        self.requests: list[EndpointLeaseRequest] = []
+
+    def acquire_endpoint_lease(self, request: EndpointLeaseRequest) -> EndpointLeaseAttempt:
+        self.requests.append(request)
+        return EndpointLeaseAttempt(
+            acquired=True,
+            lease=self.lease,
+            validation_codes=(),
+            next_action="Lease acquired.",
+        )
+
+
+class FixedLiveLease:
+    lease_id = "lease-a"
+    owner_installation_id = "owner-a"
+    ownership_epoch = 1
+    fencing_token = 42
+
+    def __init__(self) -> None:
+        self.released = False
+
+    def release(self) -> None:
+        self.released = True
 
 
 def test_sqlite_run_store_persists_started_run_from_sealed_plan(tmp_path: Path) -> None:
@@ -198,6 +230,63 @@ def test_sqlite_run_target_preflight_requires_lease_key_without_mutating(tmp_pat
         assert loaded.state is RunState.QUEUED
         assert loaded.targets[0].state is RunTargetState.PENDING
         assert _run_target_started_utc(connection, "run-a-target-0000") is None
+
+
+def test_sqlite_run_store_records_acquired_run_target_lease(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        plans = SqlitePlanStore(connection)
+        runs = SqliteRunStore(connection)
+        plan = _sealed_plan()
+        lease = FixedLiveLease()
+        leases = FixedLeaseAuthority(lease)
+        plans.save_sealed_plan(plan)
+        start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        begin_next_run_target_preflight(run_id="run-a", runs=runs)
+
+        outcome = acquire_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            runs=runs,
+            leases=leases,
+        )
+
+        loaded = runs.load_started_run("run-a")
+        assert outcome.acquired is True
+        assert outcome.validation_codes == ()
+        assert outcome.lease is lease
+        assert outcome.target is not None
+        assert outcome.target.state is RunTargetState.REVALIDATING
+        assert outcome.target.last_lease_id == "lease-a"
+        assert outcome.target.last_ownership_epoch == 1
+        assert outcome.target.last_fencing_token == 42
+        assert loaded is not None
+        assert loaded.state is RunState.PREFLIGHT
+        assert loaded.targets[0] == outcome.target
+        assert lease.released is False
+        assert leases.requests == [
+            EndpointLeaseRequest(
+                run_id="run-a",
+                run_target_id="run-a-target-0000",
+                endpoint_id="target-a",
+                endpoint_revision_id="target-rev-a",
+                resource_key="endpoint:target-a",
+                required_owner_installation_id="owner-a",
+                required_ownership_epoch=1,
+            )
+        ]
 
 
 def test_sqlite_run_store_requires_sealed_plan_binding(tmp_path: Path) -> None:

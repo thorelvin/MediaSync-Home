@@ -219,6 +219,38 @@ class _InMemoryRunStore(RunStore):
         self.runs[run_id] = replace(run, state=RunState.PREFLIGHT, targets=tuple(updated_targets))
         return claimed
 
+    def record_run_target_lease_acquired(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        lease_id: str,
+        owner_installation_id: str,
+        ownership_epoch: int,
+        fencing_token: int,
+    ) -> StartedRunTarget | None:
+        run = self.load_started_run(run_id)
+        if run is None or run.state is not RunState.PREFLIGHT:
+            return None
+        updated_targets: list[StartedRunTarget] = []
+        recorded: StartedRunTarget | None = None
+        for target in run.targets:
+            if target.run_target_id == run_target_id and target.state is RunTargetState.ACQUIRING_LEASE:
+                recorded = replace(
+                    target,
+                    state=RunTargetState.REVALIDATING,
+                    last_lease_id=lease_id,
+                    last_ownership_epoch=ownership_epoch,
+                    last_fencing_token=fencing_token,
+                )
+                updated_targets.append(recorded)
+            else:
+                updated_targets.append(target)
+        if recorded is None:
+            return None
+        self.runs[run_id] = replace(run, targets=tuple(updated_targets))
+        return recorded
+
 
 class _FixedRunIdFactory(RunIdFactory):
     def __init__(self) -> None:
