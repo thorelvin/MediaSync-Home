@@ -17,6 +17,9 @@ Generated on 2026-07-17 for branch `spike/0a5-local-nuitka-exe`.
   discovery. `cl.exe`, `rc.exe`, and `signtool.exe` were found off PATH and
   could start; the current-user certificate store had no code-signing
   certificate.
+- `release-signing-plan.json` records the exact placeholder command templates,
+  required owner inputs, clean-VM smoke checks, and evidence references needed
+  to turn the local unsigned probe into signed release evidence later.
 - `runtime-freeze.txt` records the exact local runtime/package versions used
   for this evidence.
 - `unittest-output.txt` records:

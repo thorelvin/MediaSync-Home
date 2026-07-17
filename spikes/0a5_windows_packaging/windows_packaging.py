@@ -700,6 +700,134 @@ def run_sdk_signing_inventory(output: Path) -> int:
     return 0 if result["status"] == "PASS" else 2
 
 
+def read_json_file(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        document = json.load(handle)
+    if not isinstance(document, dict):
+        raise WindowsPackagingError(f"expected JSON object in {path}")
+    return document
+
+
+def artifact_relative(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(Path(__file__).resolve().parents[2]).as_posix()
+    except ValueError:
+        return "<external-artifact>"
+
+
+def release_signing_plan(nuitka_summary_path: Path, sdk_inventory_path: Path) -> dict[str, Any]:
+    nuitka = read_json_file(nuitka_summary_path)
+    sdk = read_json_file(sdk_inventory_path)
+    exe = nuitka.get("executable") or {}
+    smoke = nuitka.get("smoke") or {}
+    tools = sdk.get("tools") or {}
+    signtool = tools.get("signtool") or {}
+    signtool_preferred = signtool.get("preferred") or {}
+    smoke_json = smoke.get("stdout_json") if isinstance(smoke.get("stdout_json"), dict) else {}
+    required_inputs = [
+        "code-signing certificate policy: cert-store thumbprint or PFX handoff; do not commit certificate material",
+        "RFC3161 timestamp server URL approved by owner",
+        "clean Windows VM image/snapshot with no repo .venv, Python, Visual Studio, or Windows SDK dependency claim",
+        "transfer path for the complete Nuitka dist directory, not just the .exe",
+    ]
+    return {
+        "created_utc": utc_now(),
+        "status": "READY_FOR_OWNER_INPUT",
+        "source_artifacts": {
+            "nuitka_build_summary": artifact_relative(nuitka_summary_path),
+            "sdk_signing_inventory": artifact_relative(sdk_inventory_path),
+        },
+        "current_evidence": {
+            "unsigned_probe_exe_sha256": exe.get("sha256"),
+            "unsigned_probe_exe_size_bytes": exe.get("size_bytes"),
+            "unsigned_dist_file_count": exe.get("dist_file_count"),
+            "unsigned_dist_size_bytes": exe.get("dist_size_bytes"),
+            "local_packaged_smoke_status": smoke_json.get("status"),
+            "sdk_inventory_status": sdk.get("sdk_inventory_status"),
+            "signtool_file_version": signtool_preferred.get("file_version"),
+            "code_signing_certificate_count": (sdk.get("signing_certificate") or {}).get("count"),
+            "clean_windows_vm": sdk.get("clean_windows_vm"),
+        },
+        "required_owner_inputs": required_inputs,
+        "signing_command_templates": {
+            "cert_store_thumbprint": [
+                "<signtool.exe>",
+                "sign",
+                "/fd",
+                "SHA256",
+                "/tr",
+                "<rfc3161-timestamp-url>",
+                "/td",
+                "SHA256",
+                "/sha1",
+                "<cert-thumbprint>",
+                "/d",
+                "MediaSync Home 0A.5 Probe",
+                "<unsigned-probe-exe>",
+            ],
+            "pfx_file": [
+                "<signtool.exe>",
+                "sign",
+                "/fd",
+                "SHA256",
+                "/tr",
+                "<rfc3161-timestamp-url>",
+                "/td",
+                "SHA256",
+                "/f",
+                "<code-signing-cert.pfx>",
+                "/p",
+                "<secret-password-from-secure-channel>",
+                "/d",
+                "MediaSync Home 0A.5 Probe",
+                "<unsigned-probe-exe>",
+            ],
+            "verify_signed_exe": [
+                "<signtool.exe>",
+                "verify",
+                "/pa",
+                "/v",
+                "<signed-probe-exe>",
+            ],
+        },
+        "clean_vm_smoke_steps": [
+            "Start from a clean Windows VM snapshot with no repository-local .venv and no development-environment claim.",
+            "Copy the complete signed Nuitka dist directory to the VM; do not copy only the executable.",
+            "Run signtool verify /pa /v against the signed probe executable on the VM.",
+            "Launch MediaSync0A5Probe.exe from the copied dist directory.",
+            "Capture stdout JSON and require status=PASS, BLAKE3-256 digest length 64, PySide6/Qt/blake3 versions matching the local artifact, and win32_get_system_directory_basename=system32.",
+            "Record VM OS version/build, signing verification output, smoke stdout JSON, and signed executable SHA-256 in a new artifact.",
+        ],
+        "expected_smoke_subset": {
+            "status": "PASS",
+            "probe_digest_algorithm": "BLAKE3-256",
+            "pyside6_version": smoke_json.get("pyside6_version"),
+            "qt_version": smoke_json.get("qt_version"),
+            "blake3_version": smoke_json.get("blake3_version"),
+            "win32_get_system_directory_basename": "system32",
+        },
+        "must_not_record": [
+            "PFX bytes",
+            "certificate private key material",
+            "certificate password",
+            "personal user profile paths",
+            "certificate subject or thumbprint unless owner explicitly approves recording it",
+        ],
+        "remaining_blockers": [
+            "No owner-approved signing certificate or signing policy has been provided.",
+            "No signed probe executable has been produced.",
+            "No clean Windows VM smoke has been run.",
+        ],
+    }
+
+
+def run_release_signing_plan(output: Path, nuitka_summary: Path, sdk_inventory: Path) -> int:
+    result = release_signing_plan(nuitka_summary, sdk_inventory)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return 0
+
+
 def directory_size(root: Path) -> tuple[int, int]:
     file_count = 0
     total_bytes = 0
@@ -977,6 +1105,10 @@ def main(argv: list[str] | None = None) -> int:
     nuitka.add_argument("--timeout-seconds", type=int, default=600)
     sdk_inventory = sub.add_parser("sdk-signing-inventory")
     sdk_inventory.add_argument("--output", required=True)
+    signing_plan = sub.add_parser("release-signing-plan")
+    signing_plan.add_argument("--output", required=True)
+    signing_plan.add_argument("--nuitka-summary", default="artifacts/0a5/nuitka-build-summary.json")
+    signing_plan.add_argument("--sdk-inventory", default="artifacts/0a5/sdk-signing-inventory.json")
     sub.add_parser("echo-argv-json")
     args, rest = parser.parse_known_args(argv)
     if args.command == "echo-argv-json":
@@ -998,6 +1130,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "sdk-signing-inventory":
         return run_sdk_signing_inventory(Path(args.output))
+    if args.command == "release-signing-plan":
+        return run_release_signing_plan(
+            Path(args.output),
+            Path(args.nuitka_summary),
+            Path(args.sdk_inventory),
+        )
     if args.command == "demo":
         return run_demo(Path(args.output))
     raise AssertionError(args.command)

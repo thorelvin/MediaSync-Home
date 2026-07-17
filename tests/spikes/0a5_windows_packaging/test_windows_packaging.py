@@ -271,6 +271,69 @@ class WindowsPackagingSpikeTests(unittest.TestCase):
                     self.assertEqual(result["tools"][tool_name]["candidate_count"], 1)
                     self.assertTrue(result["tools"][tool_name]["launch_probe"]["can_start"])
 
+    def test_release_signing_plan_uses_placeholders_and_existing_evidence(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="msh-0a5-signing-plan-") as raw:
+            root = Path(raw)
+            nuitka_summary = root / "nuitka-build-summary.json"
+            sdk_inventory = root / "sdk-signing-inventory.json"
+            output = root / "release-signing-plan.json"
+            nuitka_summary.write_text(
+                json.dumps(
+                    {
+                        "executable": {
+                            "sha256": "b" * 64,
+                            "size_bytes": 123,
+                            "dist_file_count": 3,
+                            "dist_size_bytes": 456,
+                        },
+                        "smoke": {
+                            "stdout_json": {
+                                "status": "PASS",
+                                "probe_digest_algorithm": "BLAKE3-256",
+                                "pyside6_version": "6.11.1",
+                                "qt_version": "6.11.1",
+                                "blake3_version": "1.0.9",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            sdk_inventory.write_text(
+                json.dumps(
+                    {
+                        "sdk_inventory_status": "PASS",
+                        "clean_windows_vm": "BLOCKED_BY_ENVIRONMENT",
+                        "signing_certificate": {"count": 0},
+                        "tools": {
+                            "signtool": {
+                                "preferred": {
+                                    "file_version": "10.0.22000.832",
+                                }
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                windows_packaging.run_release_signing_plan(output, nuitka_summary, sdk_inventory),
+                0,
+            )
+            raw_plan = output.read_text(encoding="utf-8")
+            plan = json.loads(raw_plan)
+            self.assertEqual(plan["status"], "READY_FOR_OWNER_INPUT")
+            self.assertEqual(plan["current_evidence"]["unsigned_probe_exe_sha256"], "b" * 64)
+            self.assertEqual(plan["current_evidence"]["code_signing_certificate_count"], 0)
+            self.assertIn("<cert-thumbprint>", plan["signing_command_templates"]["cert_store_thumbprint"])
+            self.assertIn("<secret-password-from-secure-channel>", plan["signing_command_templates"]["pfx_file"])
+            self.assertEqual(plan["expected_smoke_subset"]["qt_version"], "6.11.1")
+            self.assertTrue(plan["remaining_blockers"])
+            self.assertNotIn("C:\\Users\\", raw_plan)
+            self.assertNotIn("BEGIN PRIVATE KEY", raw_plan.upper())
+            self.assertNotIn("BEGIN CERTIFICATE", raw_plan.upper())
+
     def test_demo_writes_sanitized_summary_without_running_robocopy(self) -> None:
         with tempfile.TemporaryDirectory(prefix="msh-0a5-artifact-") as raw:
             output = Path(raw) / "summary.json"

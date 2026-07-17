@@ -1,0 +1,94 @@
+{
+  "clean_vm_smoke_steps": [
+    "Start from a clean Windows VM snapshot with no repository-local .venv and no development-environment claim.",
+    "Copy the complete signed Nuitka dist directory to the VM; do not copy only the executable.",
+    "Run signtool verify /pa /v against the signed probe executable on the VM.",
+    "Launch MediaSync0A5Probe.exe from the copied dist directory.",
+    "Capture stdout JSON and require status=PASS, BLAKE3-256 digest length 64, PySide6/Qt/blake3 versions matching the local artifact, and win32_get_system_directory_basename=system32.",
+    "Record VM OS version/build, signing verification output, smoke stdout JSON, and signed executable SHA-256 in a new artifact."
+  ],
+  "created_utc": "2026-07-17T14:13:02Z",
+  "current_evidence": {
+    "clean_windows_vm": "BLOCKED_BY_ENVIRONMENT",
+    "code_signing_certificate_count": 0,
+    "local_packaged_smoke_status": "PASS",
+    "sdk_inventory_status": "PASS",
+    "signtool_file_version": "10.0.22000.832",
+    "unsigned_dist_file_count": 52,
+    "unsigned_dist_size_bytes": 60140688,
+    "unsigned_probe_exe_sha256": "2a24999d2bb1a6a13d5da0791073ca4be1c3a853092cff6d2f2ba06b1fd80ae0",
+    "unsigned_probe_exe_size_bytes": 4054016
+  },
+  "expected_smoke_subset": {
+    "blake3_version": "1.0.9",
+    "probe_digest_algorithm": "BLAKE3-256",
+    "pyside6_version": "6.11.1",
+    "qt_version": "6.11.1",
+    "status": "PASS",
+    "win32_get_system_directory_basename": "system32"
+  },
+  "must_not_record": [
+    "PFX bytes",
+    "certificate private key material",
+    "certificate password",
+    "personal user profile paths",
+    "certificate subject or thumbprint unless owner explicitly approves recording it"
+  ],
+  "remaining_blockers": [
+    "No owner-approved signing certificate or signing policy has been provided.",
+    "No signed probe executable has been produced.",
+    "No clean Windows VM smoke has been run."
+  ],
+  "required_owner_inputs": [
+    "code-signing certificate policy: cert-store thumbprint or PFX handoff; do not commit certificate material",
+    "RFC3161 timestamp server URL approved by owner",
+    "clean Windows VM image/snapshot with no repo .venv, Python, Visual Studio, or Windows SDK dependency claim",
+    "transfer path for the complete Nuitka dist directory, not just the .exe"
+  ],
+  "signing_command_templates": {
+    "cert_store_thumbprint": [
+      "<signtool.exe>",
+      "sign",
+      "/fd",
+      "SHA256",
+      "/tr",
+      "<rfc3161-timestamp-url>",
+      "/td",
+      "SHA256",
+      "/sha1",
+      "<cert-thumbprint>",
+      "/d",
+      "MediaSync Home 0A.5 Probe",
+      "<unsigned-probe-exe>"
+    ],
+    "pfx_file": [
+      "<signtool.exe>",
+      "sign",
+      "/fd",
+      "SHA256",
+      "/tr",
+      "<rfc3161-timestamp-url>",
+      "/td",
+      "SHA256",
+      "/f",
+      "<code-signing-cert.pfx>",
+      "/p",
+      "<secret-password-from-secure-channel>",
+      "/d",
+      "MediaSync Home 0A.5 Probe",
+      "<unsigned-probe-exe>"
+    ],
+    "verify_signed_exe": [
+      "<signtool.exe>",
+      "verify",
+      "/pa",
+      "/v",
+      "<signed-probe-exe>"
+    ]
+  },
+  "source_artifacts": {
+    "nuitka_build_summary": "artifacts/0a5/nuitka-build-summary.json",
+    "sdk_signing_inventory": "artifacts/0a5/sdk-signing-inventory.json"
+  },
+  "status": "READY_FOR_OWNER_INPUT"
+}

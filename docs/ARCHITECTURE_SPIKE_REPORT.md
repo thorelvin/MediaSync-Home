@@ -70,6 +70,7 @@ Tillatte klassifiseringer: `RUNNABLE_NOW`, `RUNNABLE_WITH_LOCAL_FIXTURE`, `REQUI
 | Minimal Python/PySide6/BLAKE3/Win32 runtime | 0A.5 | Repo-lokal `.venv` | `.\.venv\Scripts\python.exe spikes\0a5_windows_packaging\windows_packaging.py minimal-runtime-probe --output artifacts\0a5\minimal-runtime-summary.json` | `PASS` | `artifacts/0a5/minimal-runtime-summary.json`, `artifacts/0a5/runtime-freeze.txt` | ADR-028 |
 | Lokal Nuitka standalone exe-smoke | 0A.5 | Repo-lokal `.venv` | `.\.venv\Scripts\python.exe spikes\0a5_windows_packaging\windows_packaging.py nuitka-build-probe --output artifacts\0a5\nuitka-build-summary.json --timeout-seconds 900` | `PASS` | `artifacts/0a5/nuitka-build-summary.json` | ADR-028 |
 | SDK/signing-tool inventory | 0A.5 | Lokal installasjon | `.\.venv\Scripts\python.exe spikes\0a5_windows_packaging\windows_packaging.py sdk-signing-inventory --output artifacts\0a5\sdk-signing-inventory.json` | `PASS` | `artifacts/0a5/sdk-signing-inventory.json` | ADR-028 |
+| Release-signering og ren VM-plan | 0A.5 | Generert fra lokal exe- og SDK-evidens | `.\.venv\Scripts\python.exe spikes\0a5_windows_packaging\windows_packaging.py release-signing-plan --output artifacts\0a5\release-signing-plan.json` | `READY_FOR_OWNER_INPUT` | `artifacts/0a5/release-signing-plan.json` | ADR-028 |
 | Signert releasebuild og ren Windows-VM smoke | 0A.5 | `BLOCKED_BY_ENVIRONMENT` | Ikke kjørt | `BLOCKED` | Mangler signeringssertifikat/signert artefakt og ren VM | ADR-028 |
 
 Resultatverdier: `PASS`, `FAIL`, `BLOCKED`, `INCONCLUSIVE`.
@@ -166,6 +167,7 @@ Baseline ble kontrollert med streng hashverifisering før Git-initialisering og 
 | Lokal pakkeskript-preflight | `PASS` | `pyside6-deploy` og `nuitka` finnes i `.venv\Scripts`; `runtime-freeze.txt` låser evidensversjonene |
 | Lokal Nuitka standalone exe-smoke | `PASS` | `nuitka-build-summary.json` viser `MediaSync0A5Probe.exe` med SHA-256 `2a24999d2bb1a6a13d5da0791073ca4be1c3a853092cff6d2f2ba06b1fd80ae0`; disten hadde 52 filer / 60,140,688 bytes og smoke-output bekreftet PySide6 `6.11.1`, Qt `6.11.1`, BLAKE3 `1.0.9` og `GetSystemDirectoryW` |
 | SDK/signing-tool inventory | `PASS` | `sdk-signing-inventory.json` fant `cl.exe` `19.42.34435.0`, `rc.exe` `10.0.22000.832` og `signtool.exe` `10.0.22000.832` off-PATH; alle kunne starte; current-user code-signing cert count var `0` |
+| Release-signering og ren VM-plan | `READY_FOR_OWNER_INPUT` | `release-signing-plan.json` binder unsigned exe-SHA, signtool-versjon, placeholder-signingkommandoer, ren-VM-smokesteg og eksplisitte hemmelighetsforbud til eksisterende evidens |
 | Signert releasebuild og ren VM-smoke | `BLOCKED_BY_ENVIRONMENT` | Ingen signeringssertifikat/-policy, ingen signert artefakt og ingen ren Windows-VM-smoke er kjørt |
 
 0A.6 ble kjørt som ren evidenssyntese uten nye tekniske prober. `docs/adr/0A_DECISION_REVIEW.md` oppsummerer alle ADR-ene med tilgjengelig 0A-bevis, alternativer, risiko/reverseringskostnad, Codex-anbefaling og konkret eierhandling.
@@ -342,6 +344,13 @@ python -m pytest tests\spikes\0a5_windows_packaging -q
 python -m ruff check spikes\0a5_windows_packaging tests\spikes\0a5_windows_packaging
 .\.venv\Scripts\python.exe spikes\0a5_windows_packaging\windows_packaging.py sdk-signing-inventory --output artifacts\0a5\sdk-signing-inventory.json
 
+git switch -c spike/0a5-release-signing-plan
+python -m py_compile spikes\0a5_windows_packaging\windows_packaging.py tests\spikes\0a5_windows_packaging\test_windows_packaging.py
+python -m pytest tests\spikes\0a5_windows_packaging -q
+.\.venv\Scripts\python.exe -m pytest tests\spikes\0a5_windows_packaging -q
+python -m ruff check spikes\0a5_windows_packaging tests\spikes\0a5_windows_packaging
+.\.venv\Scripts\python.exe spikes\0a5_windows_packaging\windows_packaging.py release-signing-plan --output artifacts\0a5\release-signing-plan.json
+
 git switch -c spike/0a6-decision-review
 python tools\build_adr_docs.py --check
 python tools\build_master.py --check
@@ -365,11 +374,12 @@ Notater:
 - `python -m pytest tests\spikes -q` besto med `39 passed` etter 0A.2/0A.6-review.
 - `.\.venv\Scripts\python.exe -m pytest tests\spikes -q` besto med `40 passed, 22 subtests passed` etter 0A.2 BLAKE3-markerbevis. Default Python har fortsatt ikke `blake3` og rapporterte derfor `32 passed, 8 skipped`.
 - Etter 0A.1 Task Scheduler-triggerbevis besto default `python -m pytest tests\spikes -q` med `32 passed, 9 skipped`; repo-lokal venv med `blake3` besto med `40 passed, 1 skipped, 22 subtests passed`.
-- Etter 0A.5 SDK/signing-inventory besto default `python -m pytest tests\spikes\0a5_windows_packaging -q` med `11 passed, 2 skipped`; repo-lokal venv besto med `13 passed, 18 subtests passed`.
+- Etter 0A.5 release-signing-plan besto default `python -m pytest tests\spikes\0a5_windows_packaging -q` med `12 passed, 2 skipped`; repo-lokal venv besto med `14 passed, 18 subtests passed`.
 - Etter 0A.5 SDK/signing-inventory besto samlet default `python -m pytest tests\spikes -q` med `34 passed, 11 skipped`; repo-lokal venv besto med `44 passed, 1 skipped, 25 subtests passed`.
 - 0A.5 venv-evidensen brukte `PySide6==6.11.1`, `PySide6_Addons==6.11.1`, `PySide6_Essentials==6.11.1`, `shiboken6==6.11.1`, `blake3==1.0.9` og `Nuitka==4.1.3`.
 - Første lokale Nuitka build-forsøk feilet raskt fordi Nuitka `4.1.3` krever `--output-dir=<path>`-syntaks; harnesset ble rettet og endelig `nuitka-build-summary.json` viser `status=PASS`.
 - 0A.5 SDK-inventory fant `cl`, `rc` og `signtool` installert off-PATH og startbare; current-user code-signing certificate count var `0`.
+- `release-signing-plan.json` inneholder bare placeholderkommandoer og eksplisitt forbud mot å logge PFX, sertifikatpassord, private keys, personlige stier og sertifikatidentitet uten eiergodkjenning.
 - `tools\validate_handoff.py` ignorerer nå lokale miljø-/cachemapper som `.venv`, `venv`, `.pytest_cache`, `.ruff_cache` og `__pycache__`, slik at valideringen fortsatt gjelder repositoryets handoff-filer selv når 0A-prober bruker lokal venv.
 - Sikkerhetsord-scan etter 0A.5 fant bare de forventede negative-test-/avvisningsforekomstene av de forbudte Robocopy-flaggene.
 - `python -m unittest discover -s tests\spikes` fant ingen tester på grunn av nested discover-layout; de reproduserbare unittest-kommandoene er per spikekatalog.
