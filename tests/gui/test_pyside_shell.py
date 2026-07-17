@@ -7,7 +7,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QLabel, QListWidget, QPushButton, QWidget  # noqa: E402
+from PySide6.QtWidgets import QLabel, QListWidget, QPushButton, QToolButton, QWidget  # noqa: E402
 
 from mediasync_home.application.runtime_status import startup_status  # noqa: E402
 from mediasync_home.domain.process_roles import ProcessRole  # noqa: E402
@@ -53,6 +53,7 @@ def test_main_window_displays_engine_status(qapp) -> None:
         nav = window.findChild(QListWidget, "navigationRail")
         chip = window.findChild(QLabel, "engineStatusChip")
         refresh = window.findChild(QPushButton, "refreshEngineButton")
+        language = window.findChild(QToolButton, "languageSelectorButton")
         setup_panel = window.findChild(QWidget, "standardBackupPanel")
         setup_steps = window.findChildren(QLabel, "setupStepLabel")
         create_backup = window.findChild(QPushButton, "createBackupButton")
@@ -64,6 +65,16 @@ def test_main_window_displays_engine_status(qapp) -> None:
         assert chip.property("statusKind") == "ready"
         assert refresh is not None
         assert refresh.isEnabled() is False
+        assert language is not None
+        assert language.text() == ""
+        assert not language.icon().isNull()
+        assert language.toolTip() == "Language: Norsk"
+        assert language.menu() is not None
+        assert [action.text() for action in language.menu().actions()] == [
+            "Norsk",
+            "English",
+        ]
+        assert all(not action.icon().isNull() for action in language.menu().actions())
         assert setup_panel is not None
         assert [step.text() for step in setup_steps] == [
             "1. Hva vil du beskytte?",
@@ -75,6 +86,24 @@ def test_main_window_displays_engine_status(qapp) -> None:
         assert create_backup is not None
         assert create_backup.text() == "Fortsett"
         assert create_backup.isEnabled() is False
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_language_selector_updates_selected_flag(qapp) -> None:
+    window = build_main_window(initial_state=_ready_state(), theme_mode=ThemeMode.LIGHT)
+
+    try:
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert language is not None
+        assert language.menu() is not None
+        language.menu().actions()[1].trigger()
+
+        assert language.text() == ""
+        assert not language.icon().isNull()
+        assert language.toolTip() == "Language: English"
     finally:
         window.close()
         window.deleteLater()

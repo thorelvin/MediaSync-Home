@@ -141,6 +141,39 @@ QPushButton#refreshEngineButton {{
     background: {tokens.surface_alt};
 }}
 
+QToolButton#languageSelectorButton {{
+    min-width: 36px;
+    max-width: 36px;
+    min-height: 32px;
+    max-height: 32px;
+    border-radius: {tokens.radius_sm}px;
+    border: {tokens.border_hairline}px solid {tokens.border};
+    background: {tokens.surface_alt};
+    padding: 0;
+}}
+
+QToolButton#languageSelectorButton:hover {{
+    border-color: {tokens.accent};
+}}
+
+QToolButton#languageSelectorButton:focus {{
+    border: {tokens.border_focus}px solid {tokens.focus};
+}}
+
+QMenu#languageSelectorMenu {{
+    background: {tokens.surface};
+    border: {tokens.border_hairline}px solid {tokens.border};
+}}
+
+QMenu#languageSelectorMenu::item {{
+    min-height: 28px;
+    padding: {tokens.space_2}px {tokens.space_6}px {tokens.space_2}px {tokens.space_3}px;
+}}
+
+QMenu#languageSelectorMenu::item:selected {{
+    background: {tokens.selection};
+}}
+
 QPushButton#createBackupButton {{
     min-height: 32px;
     border-radius: {tokens.radius_sm}px;

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -11,9 +12,11 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QPushButton,
     QSizePolicy,
     QSpacerItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -48,6 +51,11 @@ class MediaSyncWindow(QMainWindow):
         self._connected = False
         self._setup_state = build_standard_backup_setup_state(BackupSetupDraft.empty())
         self._job_status_state = empty_backup_job_status_state()
+        self._language_options = (
+            ("nb", "Norsk"),
+            ("en", "English"),
+        )
+        self._selected_language_code = "nb"
         self._show_component_gallery = (
             os.environ.get("MEDIASYNC_DEV_COMPONENT_GALLERY") == "1"
             if show_component_gallery is None
@@ -85,6 +93,15 @@ class MediaSyncWindow(QMainWindow):
         self._refresh_button.setToolTip("Refresh engine status")
         self._refresh_button.setEnabled(engine_client is not None)
         self._refresh_button.clicked.connect(self.refresh_engine_status)
+
+        self._language_button = QToolButton()
+        self._language_button.setObjectName("languageSelectorButton")
+        self._language_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._language_button.setMenu(self._build_language_menu())
+        self._language_button.setFixedSize(QSize(36, 32))
+        self._language_button.setIconSize(QSize(22, 16))
+        self._language_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self._apply_selected_language()
 
         self._build_layout()
         self.apply_engine_status(initial_state)
@@ -140,6 +157,7 @@ class MediaSyncWindow(QMainWindow):
 
         layout.addLayout(title_group)
         layout.addSpacerItem(QSpacerItem(20, 20, QSizePolicy.Policy.Expanding))
+        layout.addWidget(self._language_button)
         layout.addWidget(self._engine_chip)
         layout.addWidget(self._refresh_button)
         return bar
@@ -298,6 +316,33 @@ class MediaSyncWindow(QMainWindow):
         layout.addWidget(ready)
         return gallery
 
+    def _build_language_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.setObjectName("languageSelectorMenu")
+        for code, label in self._language_options:
+            action = QAction(_flag_icon(code), label, self)
+            action.setObjectName(f"languageAction_{code}")
+            action.triggered.connect(
+                lambda checked=False, language_code=code: self._select_language(language_code)
+            )
+            menu.addAction(action)
+        return menu
+
+    def _select_language(self, language_code: str) -> None:
+        if language_code not in {code for code, _ in self._language_options}:
+            return
+        self._selected_language_code = language_code
+        self._apply_selected_language()
+
+    def _apply_selected_language(self) -> None:
+        for code, label in self._language_options:
+            if code == self._selected_language_code:
+                self._language_button.setIcon(_flag_icon(code))
+                self._language_button.setText("")
+                self._language_button.setToolTip(f"Language: {label}")
+                self._language_button.setAccessibleName(f"Language: {label}")
+                return
+
 
 def _add_key_value(layout: QGridLayout, row: int, label_text: str, value: QLabel) -> None:
     label = QLabel(label_text)
@@ -326,3 +371,40 @@ def _refresh_style(widget: QWidget) -> None:
     widget.style().unpolish(widget)
     widget.style().polish(widget)
     widget.update()
+
+
+def _flag_icon(language_code: str) -> QIcon:
+    pixmap = QPixmap(44, 32)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        if language_code == "en":
+            _paint_union_jack(painter)
+        else:
+            _paint_norwegian_flag(painter)
+    finally:
+        painter.end()
+    return QIcon(pixmap)
+
+
+def _paint_norwegian_flag(painter: QPainter) -> None:
+    painter.fillRect(0, 0, 44, 32, QColor("#ba0c2f"))
+    painter.fillRect(12, 0, 8, 32, QColor("#ffffff"))
+    painter.fillRect(0, 12, 44, 8, QColor("#ffffff"))
+    painter.fillRect(14, 0, 4, 32, QColor("#00205b"))
+    painter.fillRect(0, 14, 44, 4, QColor("#00205b"))
+
+
+def _paint_union_jack(painter: QPainter) -> None:
+    painter.fillRect(0, 0, 44, 32, QColor("#012169"))
+    painter.setPen(QColor("#ffffff"))
+    painter.drawLine(0, 0, 44, 32)
+    painter.drawLine(44, 0, 0, 32)
+    painter.setPen(QColor("#c8102e"))
+    painter.drawLine(0, 2, 42, 32)
+    painter.drawLine(44, 2, 2, 32)
+    painter.fillRect(18, 0, 8, 32, QColor("#ffffff"))
+    painter.fillRect(0, 12, 44, 8, QColor("#ffffff"))
+    painter.fillRect(20, 0, 4, 32, QColor("#c8102e"))
+    painter.fillRect(0, 14, 44, 4, QColor("#c8102e"))
