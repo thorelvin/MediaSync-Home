@@ -57,6 +57,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_run_start_skeleton",
                 statements=CATALOG_RUN_START_SKELETON,
             ),
+            SqliteMigration(
+                version=7,
+                name="catalog_plan_endpoint_bindings",
+                statements=CATALOG_PLAN_ENDPOINT_BINDINGS,
+            ),
         ),
     )
 
@@ -701,6 +706,79 @@ CATALOG_RUN_START_SKELETON = (
     """
     CREATE INDEX idx_run_targets_state
         ON run_targets (state)
+    """,
+)
+
+CATALOG_PLAN_ENDPOINT_BINDINGS = (
+    """
+    CREATE TABLE plan_endpoints (
+        plan_id TEXT NOT NULL,
+        analysis_id TEXT NOT NULL,
+        endpoint_id TEXT NOT NULL,
+        endpoint_revision_id TEXT NOT NULL,
+        snapshot_id TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('SOURCE', 'TARGET_WRITABLE', 'TARGET_READONLY')),
+        target_ordinal INTEGER CHECK (target_ordinal IS NULL OR target_ordinal >= 0),
+        capabilities_hash TEXT NOT NULL,
+        root_case_context_hash TEXT NOT NULL,
+        required_owner_installation_id TEXT,
+        required_ownership_epoch INTEGER CHECK (
+            required_ownership_epoch IS NULL OR required_ownership_epoch >= 1
+        ),
+        control_schema_version INTEGER CHECK (
+            control_schema_version IS NULL OR control_schema_version >= 1
+        ),
+        planned_operations INTEGER NOT NULL DEFAULT 0 CHECK (planned_operations >= 0),
+        planned_bytes INTEGER NOT NULL DEFAULT 0 CHECK (planned_bytes >= 0),
+        PRIMARY KEY (plan_id, endpoint_id, role),
+        UNIQUE (plan_id, endpoint_id),
+        UNIQUE (plan_id, snapshot_id),
+        FOREIGN KEY (plan_id)
+            REFERENCES plans (id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (analysis_id, endpoint_id)
+            REFERENCES analysis_targets (analysis_id, endpoint_id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (endpoint_id, endpoint_revision_id)
+            REFERENCES endpoint_revisions (endpoint_id, id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (snapshot_id, endpoint_id)
+            REFERENCES snapshots (id, endpoint_id)
+            ON DELETE RESTRICT,
+        CHECK (
+            role <> 'TARGET_WRITABLE'
+            OR (
+                target_ordinal IS NOT NULL
+                AND required_owner_installation_id IS NOT NULL
+                AND required_ownership_epoch IS NOT NULL
+                AND control_schema_version IS NOT NULL
+            )
+        )
+    )
+    """,
+    """
+    CREATE TRIGGER trg_plan_endpoints_no_insert_after_seal
+    BEFORE INSERT ON plan_endpoints
+    WHEN EXISTS (SELECT 1 FROM plan_seal_details WHERE plan_id = NEW.plan_id)
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_plan_endpoints_no_update_after_seal
+    BEFORE UPDATE ON plan_endpoints
+    WHEN EXISTS (SELECT 1 FROM plan_seal_details WHERE plan_id = OLD.plan_id)
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_plan_endpoints_no_delete_after_seal
+    BEFORE DELETE ON plan_endpoints
+    WHEN EXISTS (SELECT 1 FROM plan_seal_details WHERE plan_id = OLD.plan_id)
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
     """,
 )
 

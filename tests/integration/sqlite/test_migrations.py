@@ -28,7 +28,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 6
+        assert current_schema_version(connection, plan.store) == 7
         assert _table_names(connection) >= {
             "endpoint_heads",
             "job_heads",
@@ -40,12 +40,13 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "command_receipts",
             "plan_seal_details",
             "plan_operation_seal_details",
+            "plan_endpoints",
             "runs",
             "run_targets",
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 6
+        assert _row_count(connection, "schema_migrations") == 7
         assert _foreign_key(
             connection,
             "endpoint_heads",
@@ -88,6 +89,20 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             ("command_receipt_id",),
             ("idempotency_key",),
         )
+        assert _foreign_key(
+            connection,
+            "plan_endpoints",
+            "analysis_targets",
+            ("analysis_id", "endpoint_id"),
+            ("analysis_id", "endpoint_id"),
+        )
+        assert _foreign_key(
+            connection,
+            "plan_endpoints",
+            "snapshots",
+            ("snapshot_id", "endpoint_id"),
+            ("id", "endpoint_id"),
+        )
         assert _index_is_unique(connection, "file_entries", ("snapshot_id", "comparison_key")) is False
         assert _index_is_unique(connection, "command_receipts", ("state",)) is False
         assert _index_is_unique(connection, "runs", ("state",)) is False
@@ -95,6 +110,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "trg_plans_no_update_after_seal",
             "trg_planned_operations_no_insert_after_seal",
             "trg_plan_operation_seal_details_no_insert",
+            "trg_plan_endpoints_no_update_after_seal",
             "trg_plan_seal_details_no_update",
         }
 

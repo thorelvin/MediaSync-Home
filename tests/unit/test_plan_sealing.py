@@ -6,6 +6,8 @@ import pytest
 
 from mediasync_home.application.plans import (
     PlanDependency,
+    PlanEndpoint,
+    PlanEndpointRole,
     PlanOperation,
     PlanOperationType,
     PlanRiskLevel,
@@ -60,6 +62,27 @@ def test_plan_checksum_changes_when_operation_payload_changes() -> None:
         job_id="job-a",
         job_revision_id="job-rev-a",
         operations=(replace(_copy_operation(), target_relative_path="Pictures/Other.jpg"),),
+    )
+
+    assert changed.plan_checksum != base.plan_checksum
+
+
+def test_plan_checksum_changes_when_endpoint_binding_changes() -> None:
+    base = seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(_target_endpoint(),),
+        operations=(_copy_operation(),),
+    )
+    changed = seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(replace(_target_endpoint(), required_ownership_epoch=2),),
+        operations=(_copy_operation(),),
     )
 
     assert changed.plan_checksum != base.plan_checksum
@@ -134,6 +157,36 @@ def test_plan_dependencies_must_be_acyclic() -> None:
         )
 
 
+def test_writable_plan_target_requires_owner_epoch_and_control_schema() -> None:
+    with pytest.raises(PlanSealViolation, match="WRITABLE_PLAN_TARGET_REQUIRES_OWNER"):
+        seal_plan(
+            plan_id="plan-a",
+            analysis_id="analysis-a",
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            endpoints=(replace(_target_endpoint(), required_owner_installation_id=None),),
+            operations=(_copy_operation(),),
+        )
+    with pytest.raises(PlanSealViolation, match="WRITABLE_PLAN_TARGET_REQUIRES_OWNERSHIP_EPOCH"):
+        seal_plan(
+            plan_id="plan-a",
+            analysis_id="analysis-a",
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            endpoints=(replace(_target_endpoint(), required_ownership_epoch=0),),
+            operations=(_copy_operation(),),
+        )
+    with pytest.raises(PlanSealViolation, match="WRITABLE_PLAN_TARGET_REQUIRES_CONTROL_SCHEMA_VERSION"):
+        seal_plan(
+            plan_id="plan-a",
+            analysis_id="analysis-a",
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            endpoints=(replace(_target_endpoint(), control_schema_version=None),),
+            operations=(_copy_operation(),),
+        )
+
+
 def _copy_operation() -> PlanOperation:
     return PlanOperation(
         operation_id="op-copy",
@@ -146,6 +199,23 @@ def _copy_operation() -> PlanOperation:
         planned_bytes=128,
         reason_code="COPY_NEW",
         risk_level=PlanRiskLevel.LOW,
+    )
+
+
+def _target_endpoint() -> PlanEndpoint:
+    return PlanEndpoint(
+        endpoint_id="target-a",
+        endpoint_revision_id="target-rev-a",
+        snapshot_id="target-snapshot-a",
+        role=PlanEndpointRole.TARGET_WRITABLE,
+        target_ordinal=0,
+        capabilities_hash="capabilities-a",
+        root_case_context_hash="case-a",
+        required_owner_installation_id="owner-a",
+        required_ownership_epoch=1,
+        control_schema_version=1,
+        planned_operations=1,
+        planned_bytes=128,
     )
 
 

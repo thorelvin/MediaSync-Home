@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Protocol
 
-from mediasync_home.application.plans import PlanStore, SealedPlan, verify_plan_checksum
+from mediasync_home.application.plans import PlanEndpoint, PlanEndpointRole, PlanStore, SealedPlan, verify_plan_checksum
 
 
 APP_VERSION = "0B-dev"
@@ -76,6 +76,9 @@ class StartedRunTarget:
     endpoint_id: str
     endpoint_revision_id: str
     state: RunTargetState
+    required_owner_installation_id: str | None = None
+    required_ownership_epoch: int | None = None
+    lease_resource_key: str | None = None
     planned_operations: int = 0
     planned_bytes: int = 0
 
@@ -237,6 +240,8 @@ def _readiness_for_plan(*, command: StartRunCommand, plan: SealedPlan) -> RunSta
         validation_codes.append("PLAN_BLOCKED")
     if plan.operation_count < 1:
         validation_codes.append("PLAN_REQUIRES_OPERATIONS")
+    if not _target_endpoints(plan):
+        validation_codes.append("PLAN_REQUIRES_TARGET_ENDPOINT")
 
     if validation_codes:
         return RunStartReadiness(
@@ -272,10 +277,42 @@ def _started_run_from_plan(
         plan_checksum=plan.plan_checksum,
         planned_operations=plan.operation_count,
         planned_bytes=plan.planned_bytes,
+        targets=tuple(_started_run_target(ids.run_id, endpoint) for endpoint in _target_endpoints(plan)),
         summary={
             "executor_pending": True,
             "scope": "0B_RUN_START_SKELETON",
         },
+    )
+
+
+def _target_endpoints(plan: SealedPlan) -> tuple[PlanEndpoint, ...]:
+    return tuple(
+        sorted(
+            (
+                endpoint
+                for endpoint in plan.endpoints
+                if endpoint.role is PlanEndpointRole.TARGET_WRITABLE
+            ),
+            key=lambda endpoint: (
+                -1 if endpoint.target_ordinal is None else endpoint.target_ordinal,
+                endpoint.endpoint_id,
+            ),
+        )
+    )
+
+
+def _started_run_target(run_id: str, endpoint: PlanEndpoint) -> StartedRunTarget:
+    target_ordinal = 0 if endpoint.target_ordinal is None else endpoint.target_ordinal
+    return StartedRunTarget(
+        run_target_id=f"{run_id}-target-{target_ordinal:04d}",
+        endpoint_id=endpoint.endpoint_id,
+        endpoint_revision_id=endpoint.endpoint_revision_id,
+        state=RunTargetState.PENDING,
+        required_owner_installation_id=endpoint.required_owner_installation_id,
+        required_ownership_epoch=endpoint.required_ownership_epoch,
+        lease_resource_key=f"endpoint:{endpoint.endpoint_id}",
+        planned_operations=endpoint.planned_operations,
+        planned_bytes=endpoint.planned_bytes,
     )
 
 

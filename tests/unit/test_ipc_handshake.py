@@ -19,6 +19,8 @@ from mediasync_home.application.job_creation import (
 )
 from mediasync_home.application.job_drafts import JobDraftStore, StandardBackupJobDraft
 from mediasync_home.application.plans import (
+    PlanEndpoint,
+    PlanEndpointRole,
     PlanOperation,
     PlanOperationType,
     PlanRiskLevel,
@@ -787,6 +789,7 @@ def _sealed_plan() -> SealedPlan:
         analysis_id="analysis-a",
         job_id="job-a",
         job_revision_id="job-rev-a",
+        endpoints=(_target_endpoint(),),
         operations=(
             PlanOperation(
                 operation_id="op-copy",
@@ -801,4 +804,21 @@ def _sealed_plan() -> SealedPlan:
                 risk_level=PlanRiskLevel.LOW,
             ),
         ),
+    )
+
+
+def _target_endpoint() -> PlanEndpoint:
+    return PlanEndpoint(
+        endpoint_id="target-a",
+        endpoint_revision_id="target-rev-a",
+        snapshot_id="target-snapshot-a",
+        role=PlanEndpointRole.TARGET_WRITABLE,
+        target_ordinal=0,
+        capabilities_hash="capabilities-a",
+        root_case_context_hash="case-a",
+        required_owner_installation_id="owner-a",
+        required_ownership_epoch=1,
+        control_schema_version=1,
+        planned_operations=1,
+        planned_bytes=128,
     )

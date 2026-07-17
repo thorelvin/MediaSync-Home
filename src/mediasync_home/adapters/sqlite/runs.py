@@ -80,18 +80,24 @@ class SqliteRunStore(RunStore):
                         run_id,
                         endpoint_id,
                         endpoint_revision_id,
+                        required_owner_installation_id,
+                        required_ownership_epoch,
                         state,
+                        lease_resource_key,
                         planned_operations,
                         planned_bytes
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         target.run_target_id,
                         run.run_id,
                         target.endpoint_id,
                         target.endpoint_revision_id,
+                        target.required_owner_installation_id,
+                        target.required_ownership_epoch,
                         target.state.value,
+                        target.lease_resource_key,
                         target.planned_operations,
                         target.planned_bytes,
                     ),
@@ -199,7 +205,10 @@ class SqliteRunStore(RunStore):
                 id,
                 endpoint_id,
                 endpoint_revision_id,
+                required_owner_installation_id,
+                required_ownership_epoch,
                 state,
+                lease_resource_key,
                 planned_operations,
                 planned_bytes
             FROM run_targets
@@ -213,9 +222,12 @@ class SqliteRunStore(RunStore):
                 run_target_id=str(row[0]),
                 endpoint_id=str(row[1]),
                 endpoint_revision_id=str(row[2]),
-                state=RunTargetState(str(row[3])),
-                planned_operations=int(row[4]),
-                planned_bytes=int(row[5]),
+                required_owner_installation_id=None if row[3] is None else str(row[3]),
+                required_ownership_epoch=None if row[4] is None else int(row[4]),
+                state=RunTargetState(str(row[5])),
+                lease_resource_key=None if row[6] is None else str(row[6]),
+                planned_operations=int(row[7]),
+                planned_bytes=int(row[8]),
             )
             for row in rows
         )

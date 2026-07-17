@@ -16,6 +16,8 @@ from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
 from mediasync_home.adapters.sqlite.runs import SqliteRunStore, SqliteRunStoreError
 from mediasync_home.application.command_receipts import CommandReceipt
 from mediasync_home.application.plans import (
+    PlanEndpoint,
+    PlanEndpointRole,
     PlanOperation,
     PlanOperationType,
     PlanRiskLevel,
@@ -79,8 +81,16 @@ def test_sqlite_run_store_persists_started_run_from_sealed_plan(tmp_path: Path) 
         assert loaded.plan_checksum == plan.plan_checksum
         assert loaded.planned_operations == 1
         assert loaded.planned_bytes == 128
+        assert len(loaded.targets) == 1
+        assert loaded.targets[0].endpoint_id == "target-a"
+        assert loaded.targets[0].endpoint_revision_id == "target-rev-a"
+        assert loaded.targets[0].required_owner_installation_id == "owner-a"
+        assert loaded.targets[0].required_ownership_epoch == 1
+        assert loaded.targets[0].lease_resource_key == "endpoint:target-a"
+        assert loaded.targets[0].planned_operations == 1
+        assert loaded.targets[0].planned_bytes == 128
         assert _row_count(connection, "runs") == 1
-        assert _row_count(connection, "run_targets") == 0
+        assert _row_count(connection, "run_targets") == 1
 
 
 def test_sqlite_run_store_replays_run_idempotency_key(tmp_path: Path) -> None:
@@ -230,6 +240,25 @@ def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
             VALUES ('analysis-a', 'job-a', 'job-rev-a')
         """
     )
+    connection.execute("INSERT INTO endpoints (id) VALUES ('target-a')")
+    connection.execute(
+        """
+        INSERT INTO endpoint_revisions (endpoint_id, id, display_name, root_uri)
+            VALUES ('target-a', 'target-rev-a', 'USB', 'file:///E:/Backup')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO analysis_targets (analysis_id, endpoint_id, endpoint_revision_id)
+            VALUES ('analysis-a', 'target-a', 'target-rev-a')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO snapshots (id, analysis_id, endpoint_id, endpoint_revision_id)
+            VALUES ('target-snapshot-a', 'analysis-a', 'target-a', 'target-rev-a')
+        """
+    )
     connection.commit()
 
 
@@ -294,6 +323,7 @@ def _sealed_plan() -> SealedPlan:
         analysis_id="analysis-a",
         job_id="job-a",
         job_revision_id="job-rev-a",
+        endpoints=(_target_endpoint(),),
         operations=(
             PlanOperation(
                 operation_id="op-copy",
@@ -308,6 +338,23 @@ def _sealed_plan() -> SealedPlan:
                 risk_level=PlanRiskLevel.LOW,
             ),
         ),
+    )
+
+
+def _target_endpoint() -> PlanEndpoint:
+    return PlanEndpoint(
+        endpoint_id="target-a",
+        endpoint_revision_id="target-rev-a",
+        snapshot_id="target-snapshot-a",
+        role=PlanEndpointRole.TARGET_WRITABLE,
+        target_ordinal=0,
+        capabilities_hash="capabilities-a",
+        root_case_context_hash="case-a",
+        required_owner_installation_id="owner-a",
+        required_ownership_epoch=1,
+        control_schema_version=1,
+        planned_operations=1,
+        planned_bytes=128,
     )
 
 

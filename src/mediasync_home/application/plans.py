@@ -40,6 +40,12 @@ class PlanRiskLevel(str, Enum):
     BLOCKED = "BLOCKED"
 
 
+class PlanEndpointRole(str, Enum):
+    SOURCE = "SOURCE"
+    TARGET_WRITABLE = "TARGET_WRITABLE"
+    TARGET_READONLY = "TARGET_READONLY"
+
+
 MUTATING_OPERATION_TYPES = {
     PlanOperationType.COPY_NEW,
     PlanOperationType.CREATE_DIRECTORY,
@@ -67,11 +73,28 @@ class PlanDependency:
 
 
 @dataclass(frozen=True)
+class PlanEndpoint:
+    endpoint_id: str
+    endpoint_revision_id: str
+    snapshot_id: str
+    role: PlanEndpointRole
+    capabilities_hash: str
+    root_case_context_hash: str
+    target_ordinal: int | None = None
+    required_owner_installation_id: str | None = None
+    required_ownership_epoch: int | None = None
+    control_schema_version: int | None = None
+    planned_operations: int = 0
+    planned_bytes: int = 0
+
+
+@dataclass(frozen=True)
 class SealedPlan:
     plan_id: str
     analysis_id: str
     job_id: str
     job_revision_id: str
+    endpoints: tuple[PlanEndpoint, ...]
     operations: tuple[PlanOperation, ...]
     dependencies: tuple[PlanDependency, ...]
     planner_version: str
@@ -101,6 +124,7 @@ def seal_plan(
     job_id: str,
     job_revision_id: str,
     operations: tuple[PlanOperation, ...],
+    endpoints: tuple[PlanEndpoint, ...] = (),
     dependencies: tuple[PlanDependency, ...] = (),
     parent_plan_id: str | None = None,
     execution_policy: str = "MANUAL_LOCAL_PREVIEW",
@@ -113,6 +137,16 @@ def seal_plan(
         job_revision_id=job_revision_id,
         execution_policy=execution_policy,
     )
+    ordered_endpoints = tuple(
+        sorted(
+            endpoints,
+            key=lambda endpoint: (
+                endpoint.role.value,
+                -1 if endpoint.target_ordinal is None else endpoint.target_ordinal,
+                endpoint.endpoint_id,
+            ),
+        )
+    )
     ordered_operations = tuple(sorted(operations, key=lambda operation: operation.sequence_no))
     ordered_dependencies = tuple(
         sorted(
@@ -123,6 +157,7 @@ def seal_plan(
             ),
         )
     )
+    _validate_endpoints(ordered_endpoints)
     _validate_operations(ordered_operations)
     _validate_dependencies(ordered_operations, ordered_dependencies)
     plan_risk_summary = dict(risk_summary or _risk_summary(ordered_operations))
@@ -142,6 +177,7 @@ def seal_plan(
         serializer_version=PLAN_SERIALIZER_VERSION,
         immutable=True,
         risk_summary=plan_risk_summary,
+        endpoints=ordered_endpoints,
         operations=ordered_operations,
         dependencies=ordered_dependencies,
         operation_count=operation_count,
@@ -153,6 +189,7 @@ def seal_plan(
         job_id=job_id,
         job_revision_id=job_revision_id,
         parent_plan_id=parent_plan_id,
+        endpoints=ordered_endpoints,
         operations=ordered_operations,
         dependencies=ordered_dependencies,
         planner_version=PLANNER_VERSION,
@@ -183,6 +220,7 @@ def verify_plan_checksum(plan: SealedPlan) -> bool:
         serializer_version=plan.serializer_version,
         immutable=plan.immutable,
         risk_summary=plan.risk_summary,
+        endpoints=plan.endpoints,
         operations=plan.operations,
         dependencies=plan.dependencies,
         operation_count=plan.operation_count,
@@ -235,6 +273,52 @@ def _validate_operations(operations: tuple[PlanOperation, ...]) -> None:
         if operation.planned_bytes < 0:
             raise PlanSealViolation("PLAN_OPERATION_BYTES_MUST_BE_NON_NEGATIVE")
         _validate_target_precondition(operation)
+
+
+def _validate_endpoints(endpoints: tuple[PlanEndpoint, ...]) -> None:
+    endpoint_ids: set[str] = set()
+    target_ordinals: set[int] = set()
+    for endpoint in endpoints:
+        _validate_endpoint_text(endpoint.endpoint_id, "PLAN_ENDPOINT_REQUIRES_ID")
+        _validate_endpoint_text(endpoint.endpoint_revision_id, "PLAN_ENDPOINT_REQUIRES_REVISION_ID")
+        _validate_endpoint_text(endpoint.snapshot_id, "PLAN_ENDPOINT_REQUIRES_SNAPSHOT_ID")
+        _validate_endpoint_text(endpoint.capabilities_hash, "PLAN_ENDPOINT_REQUIRES_CAPABILITIES_HASH")
+        _validate_endpoint_text(endpoint.root_case_context_hash, "PLAN_ENDPOINT_REQUIRES_CASE_CONTEXT_HASH")
+        if endpoint.endpoint_id in endpoint_ids:
+            raise PlanSealViolation("PLAN_ENDPOINT_IDS_MUST_BE_UNIQUE")
+        endpoint_ids.add(endpoint.endpoint_id)
+        if endpoint.planned_operations < 0:
+            raise PlanSealViolation("PLAN_ENDPOINT_OPERATIONS_MUST_BE_NON_NEGATIVE")
+        if endpoint.planned_bytes < 0:
+            raise PlanSealViolation("PLAN_ENDPOINT_BYTES_MUST_BE_NON_NEGATIVE")
+        if endpoint.role is PlanEndpointRole.TARGET_WRITABLE:
+            _validate_writable_target_endpoint(endpoint, target_ordinals)
+        elif endpoint.target_ordinal is not None and endpoint.target_ordinal < 0:
+            raise PlanSealViolation("PLAN_ENDPOINT_TARGET_ORDINAL_MUST_BE_NON_NEGATIVE")
+
+
+def _validate_writable_target_endpoint(
+    endpoint: PlanEndpoint,
+    target_ordinals: set[int],
+) -> None:
+    if endpoint.target_ordinal is None or endpoint.target_ordinal < 0:
+        raise PlanSealViolation("WRITABLE_PLAN_TARGET_REQUIRES_TARGET_ORDINAL")
+    if endpoint.target_ordinal in target_ordinals:
+        raise PlanSealViolation("PLAN_TARGET_ORDINALS_MUST_BE_UNIQUE")
+    target_ordinals.add(endpoint.target_ordinal)
+    _validate_endpoint_text(
+        endpoint.required_owner_installation_id,
+        "WRITABLE_PLAN_TARGET_REQUIRES_OWNER",
+    )
+    if endpoint.required_ownership_epoch is None or endpoint.required_ownership_epoch < 1:
+        raise PlanSealViolation("WRITABLE_PLAN_TARGET_REQUIRES_OWNERSHIP_EPOCH")
+    if endpoint.control_schema_version is None or endpoint.control_schema_version < 1:
+        raise PlanSealViolation("WRITABLE_PLAN_TARGET_REQUIRES_CONTROL_SCHEMA_VERSION")
+
+
+def _validate_endpoint_text(value: str | None, reason: str) -> None:
+    if value is None or not value.strip():
+        raise PlanSealViolation(reason)
 
 
 def _validate_target_precondition(operation: PlanOperation) -> None:
@@ -318,6 +402,7 @@ def _canonical_payload(
     serializer_version: str,
     immutable: bool,
     risk_summary: Mapping[str, object],
+    endpoints: tuple[PlanEndpoint, ...],
     operations: tuple[PlanOperation, ...],
     dependencies: tuple[PlanDependency, ...],
     operation_count: int,
@@ -339,6 +424,7 @@ def _canonical_payload(
         "job_revision_id": job_revision_id,
         "operation_count": operation_count,
         "operation_schema_version": operation_schema_version,
+        "endpoints": [_endpoint_payload(endpoint) for endpoint in endpoints],
         "operations": [_operation_payload(operation) for operation in operations],
         "parent_plan_id": parent_plan_id,
         "planned_bytes": planned_bytes,
@@ -362,6 +448,23 @@ def _operation_payload(operation: PlanOperation) -> dict[str, object]:
         "stable_order_key": operation.stable_order_key,
         "target_precondition_kind": operation.target_precondition_kind.value,
         "target_relative_path": operation.target_relative_path,
+    }
+
+
+def _endpoint_payload(endpoint: PlanEndpoint) -> dict[str, object]:
+    return {
+        "capabilities_hash": endpoint.capabilities_hash,
+        "control_schema_version": endpoint.control_schema_version,
+        "endpoint_id": endpoint.endpoint_id,
+        "endpoint_revision_id": endpoint.endpoint_revision_id,
+        "planned_bytes": endpoint.planned_bytes,
+        "planned_operations": endpoint.planned_operations,
+        "required_owner_installation_id": endpoint.required_owner_installation_id,
+        "required_ownership_epoch": endpoint.required_ownership_epoch,
+        "role": endpoint.role.value,
+        "root_case_context_hash": endpoint.root_case_context_hash,
+        "snapshot_id": endpoint.snapshot_id,
+        "target_ordinal": endpoint.target_ordinal,
     }
 
 

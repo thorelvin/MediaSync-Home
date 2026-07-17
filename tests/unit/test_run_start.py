@@ -5,6 +5,8 @@ from dataclasses import replace
 import pytest
 
 from mediasync_home.application.plans import (
+    PlanEndpoint,
+    PlanEndpointRole,
     PlanOperation,
     PlanOperationType,
     PlanRiskLevel,
@@ -107,6 +109,11 @@ def test_start_run_from_sealed_plan_queues_checksum_bound_run() -> None:
     assert outcome.run.plan_checksum == plan.plan_checksum
     assert outcome.run.planned_operations == 1
     assert outcome.run.planned_bytes == 128
+    assert len(outcome.run.targets) == 1
+    assert outcome.run.targets[0].run_target_id == "run-a-target-0000"
+    assert outcome.run.targets[0].endpoint_id == "target-a"
+    assert outcome.run.targets[0].planned_operations == 1
+    assert outcome.run.targets[0].planned_bytes == 128
     assert outcome.run.summary["executor_pending"] is True
     assert runs.load_started_run("run-a") == outcome.run
     assert ids.calls == 1
@@ -160,6 +167,26 @@ def test_start_run_requires_existing_plan() -> None:
     assert ids.calls == 0
 
 
+def test_start_run_requires_target_endpoint_binding() -> None:
+    plan = seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        operations=(_copy_operation(),),
+    )
+
+    outcome = start_run_from_sealed_plan(
+        command=_start_command(plan),
+        plans=InMemoryPlanStore(plan),
+        runs=InMemoryRunStore(),
+        id_factory=FixedRunIdFactory(),
+    )
+
+    assert outcome.created is False
+    assert outcome.readiness.validation_codes == ("PLAN_REQUIRES_TARGET_ENDPOINT",)
+
+
 def test_start_run_blocks_checksum_mismatch() -> None:
     plan = _sealed_plan()
     command = parse_start_run_command(
@@ -200,6 +227,7 @@ def test_start_run_blocks_plan_with_blocked_risk() -> None:
         analysis_id="analysis-a",
         job_id="job-a",
         job_revision_id="job-rev-a",
+        endpoints=(_target_endpoint(),),
         operations=(
             PlanOperation(
                 operation_id="op-blocked",
@@ -231,20 +259,40 @@ def _sealed_plan() -> SealedPlan:
         analysis_id="analysis-a",
         job_id="job-a",
         job_revision_id="job-rev-a",
-        operations=(
-            PlanOperation(
-                operation_id="op-copy",
-                operation_type=PlanOperationType.COPY_NEW,
-                sequence_no=10,
-                execution_phase=20,
-                stable_order_key="020:Pictures/A.jpg",
-                target_precondition_kind=TargetPreconditionKind.ABSENT,
-                target_relative_path="Pictures/A.jpg",
-                planned_bytes=128,
-                reason_code="COPY_NEW",
-                risk_level=PlanRiskLevel.LOW,
-            ),
-        ),
+        endpoints=(_target_endpoint(),),
+        operations=(_copy_operation(),),
+    )
+
+
+def _copy_operation() -> PlanOperation:
+    return PlanOperation(
+        operation_id="op-copy",
+        operation_type=PlanOperationType.COPY_NEW,
+        sequence_no=10,
+        execution_phase=20,
+        stable_order_key="020:Pictures/A.jpg",
+        target_precondition_kind=TargetPreconditionKind.ABSENT,
+        target_relative_path="Pictures/A.jpg",
+        planned_bytes=128,
+        reason_code="COPY_NEW",
+        risk_level=PlanRiskLevel.LOW,
+    )
+
+
+def _target_endpoint() -> PlanEndpoint:
+    return PlanEndpoint(
+        endpoint_id="target-a",
+        endpoint_revision_id="target-rev-a",
+        snapshot_id="target-snapshot-a",
+        role=PlanEndpointRole.TARGET_WRITABLE,
+        target_ordinal=0,
+        capabilities_hash="capabilities-a",
+        root_case_context_hash="case-a",
+        required_owner_installation_id="owner-a",
+        required_ownership_epoch=1,
+        control_schema_version=1,
+        planned_operations=1,
+        planned_bytes=128,
     )
 
 

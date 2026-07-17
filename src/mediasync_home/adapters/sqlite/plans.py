@@ -6,6 +6,8 @@ from typing import Any
 
 from mediasync_home.application.plans import (
     PlanDependency,
+    PlanEndpoint,
+    PlanEndpointRole,
     PlanOperation,
     PlanOperationType,
     PlanRiskLevel,
@@ -56,6 +58,44 @@ class SqlitePlanStore(PlanStore):
                         plan.plan_id,
                         dependency.before_operation_id,
                         dependency.after_operation_id,
+                    ),
+                )
+            for endpoint in plan.endpoints:
+                self._connection.execute(
+                    """
+                    INSERT INTO plan_endpoints (
+                        plan_id,
+                        analysis_id,
+                        endpoint_id,
+                        endpoint_revision_id,
+                        snapshot_id,
+                        role,
+                        target_ordinal,
+                        capabilities_hash,
+                        root_case_context_hash,
+                        required_owner_installation_id,
+                        required_ownership_epoch,
+                        control_schema_version,
+                        planned_operations,
+                        planned_bytes
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        plan.plan_id,
+                        plan.analysis_id,
+                        endpoint.endpoint_id,
+                        endpoint.endpoint_revision_id,
+                        endpoint.snapshot_id,
+                        endpoint.role.value,
+                        endpoint.target_ordinal,
+                        endpoint.capabilities_hash,
+                        endpoint.root_case_context_hash,
+                        endpoint.required_owner_installation_id,
+                        endpoint.required_ownership_epoch,
+                        endpoint.control_schema_version,
+                        endpoint.planned_operations,
+                        endpoint.planned_bytes,
                     ),
                 )
             for operation in plan.operations:
@@ -178,8 +218,49 @@ class SqlitePlanStore(PlanStore):
             operation_count=int(row[13]),
             planned_bytes=int(row[14]),
             immutable=bool(row[15]),
+            endpoints=self._load_endpoints(plan_id),
             operations=self._load_operations(plan_id),
             dependencies=self._load_dependencies(plan_id),
+        )
+
+    def _load_endpoints(self, plan_id: str) -> tuple[PlanEndpoint, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                endpoint_id,
+                endpoint_revision_id,
+                snapshot_id,
+                role,
+                target_ordinal,
+                capabilities_hash,
+                root_case_context_hash,
+                required_owner_installation_id,
+                required_ownership_epoch,
+                control_schema_version,
+                planned_operations,
+                planned_bytes
+            FROM plan_endpoints
+            WHERE plan_id = ?
+            ORDER BY role, target_ordinal, endpoint_id
+            """,
+            (plan_id,),
+        ).fetchall()
+        return tuple(
+            PlanEndpoint(
+                endpoint_id=str(row[0]),
+                endpoint_revision_id=str(row[1]),
+                snapshot_id=str(row[2]),
+                role=PlanEndpointRole(str(row[3])),
+                target_ordinal=None if row[4] is None else int(row[4]),
+                capabilities_hash=str(row[5]),
+                root_case_context_hash=str(row[6]),
+                required_owner_installation_id=None if row[7] is None else str(row[7]),
+                required_ownership_epoch=None if row[8] is None else int(row[8]),
+                control_schema_version=None if row[9] is None else int(row[9]),
+                planned_operations=int(row[10]),
+                planned_bytes=int(row[11]),
+            )
+            for row in rows
         )
 
     def _load_operations(self, plan_id: str) -> tuple[PlanOperation, ...]:
