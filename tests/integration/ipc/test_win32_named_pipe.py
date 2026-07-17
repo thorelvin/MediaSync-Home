@@ -123,7 +123,7 @@ def test_named_pipe_mutating_commands_are_disabled_after_handshake() -> None:
     server, client = _server_and_client()
 
     handshake = _roundtrip(server, client.connect)
-    command = _roundtrip(server, lambda: client.submit_command("START_RUN"))
+    command = _roundtrip(server, lambda: client.submit_command("UNKNOWN_MUTATION"))
 
     assert handshake.status is IpcStatus.ACCEPTED
     assert command.status is IpcStatus.REJECTED

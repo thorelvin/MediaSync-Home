@@ -18,6 +18,23 @@ from mediasync_home.application.job_creation import (
     StandardBackupJobIds,
 )
 from mediasync_home.application.job_drafts import JobDraftStore, StandardBackupJobDraft
+from mediasync_home.application.plans import (
+    PlanOperation,
+    PlanOperationType,
+    PlanRiskLevel,
+    PlanStore,
+    SealedPlan,
+    TargetPreconditionKind,
+    seal_plan,
+)
+from mediasync_home.application.runs import (
+    RunCommandName,
+    RunIdFactory,
+    RunIds,
+    RunState,
+    RunStore,
+    StartedRun,
+)
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
@@ -139,6 +156,47 @@ class _FixedStandardBackupJobIdFactory(StandardBackupJobIdFactory):
         )
 
 
+class _InMemoryPlanStore(PlanStore):
+    def __init__(self, plan: SealedPlan | None = None) -> None:
+        self.plan = plan
+
+    def save_sealed_plan(self, plan: SealedPlan) -> None:
+        self.plan = plan
+
+    def load_sealed_plan(self, plan_id: str) -> SealedPlan | None:
+        if self.plan is not None and self.plan.plan_id == plan_id:
+            return self.plan
+        return None
+
+
+class _InMemoryRunStore(RunStore):
+    def __init__(self) -> None:
+        self.runs: dict[str, StartedRun] = {}
+        self.idempotency_keys: dict[str, str] = {}
+
+    def save_started_run(self, run: StartedRun) -> None:
+        self.runs[run.run_id] = run
+        self.idempotency_keys[run.idempotency_key] = run.run_id
+
+    def load_started_run(self, run_id: str) -> StartedRun | None:
+        return self.runs.get(run_id)
+
+    def load_started_run_by_idempotency_key(self, idempotency_key: str) -> StartedRun | None:
+        run_id = self.idempotency_keys.get(idempotency_key)
+        if run_id is None:
+            return None
+        return self.runs[run_id]
+
+
+class _FixedRunIdFactory(RunIdFactory):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def new_run_ids(self) -> RunIds:
+        self.calls += 1
+        return RunIds(run_id="run-a", logical_run_group_id="run-group-a")
+
+
 def _client(
     *,
     role: ProcessRole = ProcessRole.GUI,
@@ -224,7 +282,7 @@ def test_mutating_commands_are_disabled_in_0b_ipc_slice() -> None:
     ipc_client = _client()
     ipc_client.connect()
 
-    response = ipc_client.submit_command("START_RUN")
+    response = ipc_client.submit_command("UNKNOWN_MUTATION")
 
     assert response.status is IpcStatus.REJECTED
     assert response.reason is IpcReason.MUTATING_COMMANDS_DISABLED
@@ -435,6 +493,169 @@ def test_enabled_create_standard_backup_job_requires_dispatcher_dependencies() -
     assert response.payload["mutations_enabled"] is True
 
 
+def test_start_run_command_is_recognized_but_rejected_when_mutations_disabled() -> None:
+    plan = _sealed_plan()
+    receipts = _InMemoryCommandReceiptStore()
+    service = _service()
+    service.plan_store = _InMemoryPlanStore(plan)
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.submit_command(
+        RunCommandName.START_RUN.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.MUTATING_COMMANDS_DISABLED
+    assert response.payload["recognized"] is True
+    assert response.payload["mutations_enabled"] is False
+    assert response.payload["readiness"]["plan_runnable"] is True
+    assert response.payload["receipt"]["state"] == CommandReceiptState.REJECTED.value
+
+
+def test_enabled_start_run_persists_queued_run_and_succeeds_receipt() -> None:
+    plan = _sealed_plan()
+    receipts = _InMemoryCommandReceiptStore()
+    runs = _InMemoryRunStore()
+    id_factory = _FixedRunIdFactory()
+    service = _service(mutations_enabled=True)
+    service.plan_store = _InMemoryPlanStore(plan)
+    service.run_store = runs
+    service.run_id_factory = id_factory
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.submit_command(
+        RunCommandName.START_RUN.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+
+    receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
+    run = runs.load_started_run("run-a")
+    assert response.status is IpcStatus.ACCEPTED
+    assert response.reason is None
+    assert response.payload["created"] is True
+    assert response.payload["idempotent_replay"] is False
+    assert response.payload["run"] == {
+        "run_id": "run-a",
+        "job_id": "job-a",
+        "job_revision_id": "job-rev-a",
+        "plan_id": "plan-a",
+        "state": RunState.QUEUED.value,
+        "plan_checksum": plan.plan_checksum,
+        "planned_operations": 1,
+        "planned_bytes": 128,
+    }
+    assert response.payload["receipt"]["state"] == CommandReceiptState.SUCCEEDED.value
+    assert response.payload["receipt"]["result_entity_type"] == "run"
+    assert response.payload["receipt"]["result_entity_id"] == "run-a"
+    assert receipt is not None
+    assert receipt.state is CommandReceiptState.SUCCEEDED
+    assert run is not None
+    assert run.state is RunState.QUEUED
+    assert id_factory.calls == 1
+
+
+def test_enabled_start_run_replay_returns_existing_success_receipt() -> None:
+    plan = _sealed_plan()
+    receipts = _InMemoryCommandReceiptStore()
+    runs = _InMemoryRunStore()
+    id_factory = _FixedRunIdFactory()
+    service = _service(mutations_enabled=True)
+    service.plan_store = _InMemoryPlanStore(plan)
+    service.run_store = runs
+    service.run_id_factory = id_factory
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    first = ipc_client.submit_command(
+        RunCommandName.START_RUN.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+    second = ipc_client.submit_command(
+        RunCommandName.START_RUN.value,
+        request_id=REQUEST_ID_B,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+
+    assert first.status is IpcStatus.ACCEPTED
+    assert second.status is IpcStatus.ACCEPTED
+    assert len(receipts.receipts) == 1
+    assert len(runs.runs) == 1
+    assert id_factory.calls == 1
+    assert second.payload["created"] is False
+    assert second.payload["idempotent_replay"] is True
+    assert second.payload["receipt"]["request_id"] == REQUEST_ID_A
+    assert second.payload["run"]["run_id"] == "run-a"
+
+
+def test_enabled_start_run_rejects_checksum_mismatch_before_effect() -> None:
+    plan = _sealed_plan()
+    receipts = _InMemoryCommandReceiptStore()
+    runs = _InMemoryRunStore()
+    id_factory = _FixedRunIdFactory()
+    service = _service(mutations_enabled=True)
+    service.plan_store = _InMemoryPlanStore(plan)
+    service.run_store = runs
+    service.run_id_factory = id_factory
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.submit_command(
+        RunCommandName.START_RUN.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"plan_id": plan.plan_id, "plan_checksum": "a" * 64},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+
+    receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.COMMAND_PRECONDITION_FAILED
+    assert response.payload["readiness"]["validation_codes"] == ["PLAN_CHECKSUM_MISMATCH"]
+    assert response.payload["receipt"]["state"] == CommandReceiptState.REJECTED.value
+    assert receipt is not None
+    assert receipt.rejection_reason == IpcReason.COMMAND_PRECONDITION_FAILED.value
+    assert runs.runs == {}
+    assert id_factory.calls == 0
+
+
+def test_enabled_start_run_requires_dispatcher_dependencies() -> None:
+    plan = _sealed_plan()
+    service = _service(mutations_enabled=True)
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.submit_command(
+        RunCommandName.START_RUN.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED
+    assert response.payload["recognized"] is True
+    assert response.payload["mutations_enabled"] is True
+
+
 def test_command_receipt_replay_returns_existing_terminal_receipt() -> None:
     receipts = _InMemoryCommandReceiptStore()
     service = _service()
@@ -558,3 +779,26 @@ def test_frame_codec_enforces_json_object_and_size_limit() -> None:
         decode_frame(b"[]")
     with pytest.raises(IpcProtocolError, match="frame exceeds limit"):
         encode_frame({"payload": "x" * MAX_FRAME_BYTES})
+
+
+def _sealed_plan() -> SealedPlan:
+    return seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        operations=(
+            PlanOperation(
+                operation_id="op-copy",
+                operation_type=PlanOperationType.COPY_NEW,
+                sequence_no=10,
+                execution_phase=20,
+                stable_order_key="020:Pictures/A.jpg",
+                target_precondition_kind=TargetPreconditionKind.ABSENT,
+                target_relative_path="Pictures/A.jpg",
+                planned_bytes=128,
+                reason_code="COPY_NEW",
+                risk_level=PlanRiskLevel.LOW,
+            ),
+        ),
+    )

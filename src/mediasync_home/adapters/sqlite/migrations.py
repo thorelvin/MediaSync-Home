@@ -52,6 +52,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_sealed_plan_details",
                 statements=CATALOG_SEALED_PLAN_DETAILS,
             ),
+            SqliteMigration(
+                version=6,
+                name="catalog_run_start_skeleton",
+                statements=CATALOG_RUN_START_SKELETON,
+            ),
         ),
     )
 
@@ -580,6 +585,122 @@ CATALOG_SEALED_PLAN_DETAILS = (
     BEGIN
         SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
     END
+    """,
+)
+
+CATALOG_RUN_START_SKELETON = (
+    """
+    CREATE TABLE runs (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        job_revision_id TEXT NOT NULL,
+        plan_id TEXT NOT NULL,
+        command_request_id TEXT NOT NULL,
+        command_receipt_id TEXT,
+        trigger_occurrence_id TEXT,
+        logical_run_group_id TEXT NOT NULL,
+        resumed_from_run_id TEXT,
+        trigger_type TEXT NOT NULL CHECK (trigger_type IN ('MANUAL_LOCAL_PREVIEW')),
+        state TEXT NOT NULL CHECK (
+            state IN (
+                'CREATED',
+                'QUEUED',
+                'PREFLIGHT',
+                'EXECUTING',
+                'PAUSING',
+                'PAUSED',
+                'COMPLETED',
+                'COMPLETED_WITH_WARNINGS',
+                'PARTIAL_FAILURE',
+                'FAILED',
+                'CANCELLED',
+                'BLOCKED_BY_SAFETY',
+                'RECOVERY_REQUIRED'
+            )
+        ),
+        started_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        finished_utc TEXT,
+        summary_json TEXT NOT NULL,
+        warning_count INTEGER NOT NULL DEFAULT 0 CHECK (warning_count >= 0),
+        error_count INTEGER NOT NULL DEFAULT 0 CHECK (error_count >= 0),
+        app_version TEXT NOT NULL,
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+        plan_checksum TEXT NOT NULL CHECK (length(plan_checksum) = 64),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        planned_operations INTEGER NOT NULL CHECK (planned_operations >= 0),
+        planned_bytes INTEGER NOT NULL CHECK (planned_bytes >= 0),
+        UNIQUE (id, plan_id),
+        UNIQUE (id, job_id, job_revision_id),
+        FOREIGN KEY (job_id, job_revision_id)
+            REFERENCES job_revisions (job_id, id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (plan_id, job_id, job_revision_id)
+            REFERENCES plan_seal_details (plan_id, job_id, job_revision_id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (command_receipt_id)
+            REFERENCES command_receipts (idempotency_key)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (resumed_from_run_id)
+            REFERENCES runs (id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_runs_state
+        ON runs (state)
+    """,
+    """
+    CREATE TABLE run_targets (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        endpoint_id TEXT NOT NULL,
+        endpoint_revision_id TEXT NOT NULL,
+        required_owner_installation_id TEXT,
+        required_ownership_epoch INTEGER,
+        state TEXT NOT NULL CHECK (
+            state IN (
+                'PENDING',
+                'ACQUIRING_LEASE',
+                'REVALIDATING',
+                'EXECUTING',
+                'PAUSED',
+                'WAITING_FOR_ENDPOINT',
+                'NEEDS_REVIEW',
+                'SUCCEEDED',
+                'SUCCEEDED_WITH_WARNINGS',
+                'FAILED',
+                'CANCELLED',
+                'BLOCKED',
+                'RECOVERY_REQUIRED'
+            )
+        ),
+        lease_resource_key TEXT,
+        last_lease_id TEXT,
+        last_ownership_epoch INTEGER,
+        last_fencing_token INTEGER,
+        started_utc TEXT,
+        finished_utc TEXT,
+        planned_operations INTEGER NOT NULL DEFAULT 0 CHECK (planned_operations >= 0),
+        completed_operations INTEGER NOT NULL DEFAULT 0 CHECK (completed_operations >= 0),
+        planned_bytes INTEGER NOT NULL DEFAULT 0 CHECK (planned_bytes >= 0),
+        completed_bytes INTEGER NOT NULL DEFAULT 0 CHECK (completed_bytes >= 0),
+        warning_count INTEGER NOT NULL DEFAULT 0 CHECK (warning_count >= 0),
+        error_count INTEGER NOT NULL DEFAULT 0 CHECK (error_count >= 0),
+        result_json TEXT,
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+        UNIQUE (run_id, endpoint_id),
+        UNIQUE (run_id, id),
+        FOREIGN KEY (run_id)
+            REFERENCES runs (id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (endpoint_id, endpoint_revision_id)
+            REFERENCES endpoint_revisions (endpoint_id, id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_run_targets_state
+        ON run_targets (state)
     """,
 )
 

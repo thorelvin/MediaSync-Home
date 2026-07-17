@@ -24,7 +24,20 @@ from mediasync_home.application.job_creation import (
     parse_create_standard_backup_job_command,
 )
 from mediasync_home.application.job_drafts import JobDraftStore
+from mediasync_home.application.plans import PlanStore
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
+from mediasync_home.application.runs import (
+    RunCommandName,
+    RunIdFactory,
+    RunStartOutcome,
+    RunStartViolation,
+    RunStore,
+    StartRunCommand,
+    StartedRun,
+    evaluate_start_run,
+    parse_start_run_command,
+    start_run_from_sealed_plan,
+)
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
 from mediasync_home.ipc.protocol import (
@@ -45,6 +58,9 @@ class EngineHostIpcService:
     job_draft_store: JobDraftStore | None = None
     standard_backup_job_catalog: StandardBackupJobCatalog | None = None
     standard_backup_job_id_factory: StandardBackupJobIdFactory | None = None
+    plan_store: PlanStore | None = None
+    run_store: RunStore | None = None
+    run_id_factory: RunIdFactory | None = None
     command_receipt_store: CommandReceiptStore | None = None
     _accepted_clients: dict[str, VerifiedClientIdentity] = field(default_factory=dict)
 
@@ -99,6 +115,8 @@ class EngineHostIpcService:
             return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
         if command.command_name == JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value:
             return self._handle_create_standard_backup_job(command, identity)
+        if command.command_name == RunCommandName.START_RUN.value:
+            return self._handle_start_run(command, identity)
         receipt_response = self._record_terminal_rejected_receipt(
             command,
             identity,
@@ -150,6 +168,165 @@ class EngineHostIpcService:
                 drafts=self.job_draft_store,
             ).to_dict()
         return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, response_payload)
+
+    def _handle_start_run(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+    ) -> IpcResponse:
+        try:
+            command = parse_start_run_command(
+                request_id=envelope.request_id,
+                idempotency_key=envelope.idempotency_key,
+                payload=envelope.payload,
+            )
+        except RunStartViolation:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+
+        if self.status.mutations_enabled:
+            return self._dispatch_start_run(envelope, identity, command)
+
+        receipt_response = self._record_terminal_rejected_receipt(
+            envelope,
+            identity,
+            rejection_reason=IpcReason.MUTATING_COMMANDS_DISABLED.value,
+        )
+        if receipt_response is not None:
+            return receipt_response
+        response_payload: dict[str, Any] = {
+            "command_name": envelope.command_name,
+            "plan_id": command.plan_id,
+            "recognized": True,
+            "mutations_enabled": self.status.mutations_enabled,
+        }
+        self._add_receipt_payload(response_payload, envelope.idempotency_key)
+        if self.plan_store is not None:
+            response_payload["readiness"] = evaluate_start_run(
+                command=command,
+                plans=self.plan_store,
+            ).to_dict()
+        return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, response_payload)
+
+    def _dispatch_start_run(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: StartRunCommand,
+    ) -> IpcResponse:
+        if (
+            self.command_receipt_store is None
+            or self.plan_store is None
+            or self.run_store is None
+            or self.run_id_factory is None
+        ):
+            return self._reject_config_missing_start_run(envelope, identity, command)
+
+        receipt, conflict_response = self._record_received_receipt(envelope, identity)
+        if conflict_response is not None:
+            return conflict_response
+        if receipt is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+
+        replay = self._start_run_replay_response(envelope, command, receipt)
+        if replay is not None:
+            return replay
+
+        receipt = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        outcome = start_run_from_sealed_plan(
+            command=command,
+            plans=self.plan_store,
+            runs=self.run_store,
+            id_factory=self.run_id_factory,
+        )
+        if outcome.run is None:
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.REJECTED,
+                rejection_reason=IpcReason.COMMAND_PRECONDITION_FAILED.value,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+            payload = _start_run_response_payload(
+                envelope=envelope,
+                plan_id=command.plan_id,
+                mutations_enabled=True,
+                recognized=True,
+                outcome=outcome,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(IpcReason.COMMAND_PRECONDITION_FAILED, payload)
+
+        receipt = transition_command_receipt(
+            receipt,
+            CommandReceiptState.EFFECT_PREPARED,
+            result_entity_type="run",
+            result_entity_id=outcome.run.run_id,
+        )
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.ACCEPTED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.SUCCEEDED)
+        self.command_receipt_store.update_command_receipt(receipt)
+
+        payload = _start_run_response_payload(
+            envelope=envelope,
+            plan_id=command.plan_id,
+            mutations_enabled=True,
+            recognized=True,
+            outcome=outcome,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.accepted(payload)
+
+    def _reject_config_missing_start_run(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: StartRunCommand,
+    ) -> IpcResponse:
+        receipt_response = self._record_terminal_rejected_receipt(
+            envelope,
+            identity,
+            rejection_reason=IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED.value,
+        )
+        if receipt_response is not None:
+            return receipt_response
+        payload = {
+            "command_name": envelope.command_name,
+            "plan_id": command.plan_id,
+            "recognized": True,
+            "mutations_enabled": True,
+        }
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload)
+
+    def _start_run_replay_response(
+        self,
+        envelope: IpcCommandEnvelope,
+        command: StartRunCommand,
+        receipt: CommandReceipt,
+    ) -> IpcResponse | None:
+        if receipt.state is CommandReceiptState.RECEIVED:
+            return None
+        if self.run_store is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+        run = self.run_store.load_started_run_by_idempotency_key(envelope.idempotency_key)
+        payload = _start_run_response_payload(
+            envelope=envelope,
+            plan_id=command.plan_id,
+            mutations_enabled=True,
+            recognized=True,
+            outcome=None,
+            run=run,
+        )
+        payload["created"] = False
+        payload["idempotent_replay"] = True
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        if receipt.state is CommandReceiptState.SUCCEEDED:
+            return IpcResponse.accepted(payload)
+        if receipt.state is CommandReceiptState.REJECTED:
+            return IpcResponse.rejected(_receipt_rejection_reason(receipt), payload)
+        return IpcResponse.accepted(payload)
 
     def _dispatch_create_standard_backup_job(
         self,
@@ -391,6 +568,40 @@ def _create_standard_backup_job_response_payload(
             "job_id": job.job_id,
             "job_revision_id": job.job_revision_id,
             "filter_set_id": job.filter_set_id,
+        }
+    return result
+
+
+def _start_run_response_payload(
+    *,
+    envelope: IpcCommandEnvelope,
+    plan_id: str,
+    mutations_enabled: bool,
+    recognized: bool,
+    outcome: RunStartOutcome | None,
+    run: StartedRun | None = None,
+) -> dict[str, Any]:
+    result = {
+        "command_name": envelope.command_name,
+        "plan_id": plan_id,
+        "recognized": recognized,
+        "mutations_enabled": mutations_enabled,
+    }
+    if outcome is not None:
+        result["created"] = outcome.created
+        result["idempotent_replay"] = outcome.idempotent_replay
+        result["readiness"] = outcome.readiness.to_dict()
+        run = outcome.run
+    if run is not None:
+        result["run"] = {
+            "run_id": run.run_id,
+            "job_id": run.job_id,
+            "job_revision_id": run.job_revision_id,
+            "plan_id": run.plan_id,
+            "state": run.state.value,
+            "plan_checksum": run.plan_checksum,
+            "planned_operations": run.planned_operations,
+            "planned_bytes": run.planned_bytes,
         }
     return result
 
