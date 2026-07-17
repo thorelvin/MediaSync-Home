@@ -2,7 +2,9 @@
 
 Alle filer i denne katalogen er utkast eller blokkerte plassholdere. Status og eierport finnes i `contracts-manifest.yaml`.
 
-`catalog.sql` og `recovery.sql` er bevisst ikke implementert. 0A.4 skal først måle én eller to databaser; Milepæl 1 produserer deretter faktiske migrasjoner, composite constraints og negative tester. Kommentarplassholderne må aldri brukes som produktdatabase.
+`database-contract.yaml` er en 0B-invariantkontrakt for databaseskjemaet. Den er ikke kjørbar DDL, men validerer de første bindende reglene for case-kollisjoner, separate head-tabeller og sammensatte parent-scope-relasjoner.
+
+`catalog.sql` og `recovery.sql` er bevisst ikke implementert som kjørbar schema ennå. ADR-003 har valgt to lokale SQLite-databaser, men Milepæl 1 produserer faktiske migrasjoner, composite constraints og negative tester etter at gjenværende styrende ADR-er er klare. Kommentarplassholderne må aldri brukes som produktdatabase.
 
 ## Autoritetsregel
 

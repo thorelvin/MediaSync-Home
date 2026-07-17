@@ -15,8 +15,9 @@ def _yaml_loader():
 def test_repository_contracts_validate() -> None:
     summary = validate_contracts.validate_repository()
 
-    assert summary.contracts == 8
+    assert summary.contracts == 9
     assert summary.json_schemas == 4
+    assert summary.database_invariants >= 4
     assert summary.examples == 5
     assert summary.reason_codes >= 1
     assert summary.state_machines >= 1
@@ -72,3 +73,54 @@ def test_unknown_state_transition_target_is_rejected() -> None:
         match="unknown transition target",
     ):
         validate_contracts.validate_state_machines(document)
+
+
+def test_database_contract_rejects_unique_file_entry_comparison_key() -> None:
+    yaml = _yaml_loader()
+    document = validate_contracts.load_yaml(
+        validate_contracts.ROOT / "schema/database-contract.yaml",
+        yaml,
+    )
+    document = copy.deepcopy(document)
+    invariant = _database_invariant(
+        document,
+        "DB-001_FILE_ENTRIES_COMPARISON_KEY_IS_NON_UNIQUE",
+    )
+    invariant["must_have_unique_keys"].append(["snapshot_id", "comparison_key"])
+
+    with pytest.raises(
+        validate_contracts.ContractValidationError,
+        match="forbids unique file_entries",
+    ):
+        validate_contracts.validate_database_contract(document)
+
+
+def test_database_contract_rejects_missing_parent_scope_foreign_key() -> None:
+    yaml = _yaml_loader()
+    document = validate_contracts.load_yaml(
+        validate_contracts.ROOT / "schema/database-contract.yaml",
+        yaml,
+    )
+    document = copy.deepcopy(document)
+    invariant = _database_invariant(document, "DB-007_PARENT_SCOPE_COMPOSITE_KEYS")
+    invariant["required_composite_foreign_keys"] = [
+        item
+        for item in invariant["required_composite_foreign_keys"]
+        if item["child_table"] != "file_entries"
+    ]
+
+    with pytest.raises(
+        validate_contracts.ContractValidationError,
+        match="missing required composite foreign key",
+    ):
+        validate_contracts.validate_database_contract(document)
+
+
+def _database_invariant(document: dict[str, object], invariant_id: str) -> dict[str, object]:
+    invariants = document["invariants"]
+    assert isinstance(invariants, list)
+    for invariant in invariants:
+        assert isinstance(invariant, dict)
+        if invariant["id"] == invariant_id:
+            return invariant
+    raise AssertionError(f"missing invariant {invariant_id}")

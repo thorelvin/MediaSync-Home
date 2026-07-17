@@ -1,0 +1,100 @@
+schema_version: 1
+status: draft_non_authoritative_0b
+authority_note: >
+  Draft invariant contract for the catalog/recovery schema. This file is not
+  executable DDL and does not replace catalog.sql or recovery.sql. Milestone 1
+  must turn the accepted invariants into migrations and negative database tests.
+stores:
+  catalog:
+    selected_by: ADR-003
+    writable_owner: engine_host
+    sql_contract: catalog.sql
+  recovery:
+    selected_by: ADR-003
+    writable_owner: engine_host
+    sql_contract: recovery.sql
+invariants:
+  - id: DB-001_FILE_ENTRIES_COMPARISON_KEY_IS_NON_UNIQUE
+    requirement_id: DB-001
+    table: file_entries
+    assertion: Case collisions are stored completely; comparison_key is never unique per snapshot.
+    must_have_unique_keys:
+      - [snapshot_id, relative_path]
+      - [snapshot_id, id]
+    must_have_non_unique_indexes:
+      - [snapshot_id, comparison_key]
+    must_not_have_unique_keys:
+      - [snapshot_id, comparison_key]
+    collision_tables:
+      groups: case_collision_groups
+      members: case_collision_members
+  - id: DB-006_ENDPOINT_HEADS_ARE_SEPARATE
+    requirement_id: DB-006
+    stable_table: endpoints
+    revision_table: endpoint_revisions
+    head_table: endpoint_heads
+    head_fk:
+      child_columns: [endpoint_id, active_revision_id]
+      parent_table: endpoint_revisions
+      parent_columns: [endpoint_id, id]
+  - id: DB-006_JOB_HEADS_ARE_SEPARATE
+    requirement_id: DB-006
+    stable_table: jobs
+    revision_table: job_revisions
+    head_table: job_heads
+    head_fk:
+      child_columns: [job_id, active_revision_id]
+      parent_table: job_revisions
+      parent_columns: [job_id, id]
+  - id: DB-007_PARENT_SCOPE_COMPOSITE_KEYS
+    requirement_id: DB-007
+    assertion: Security-relevant child rows are bound to their parent scope with composite keys.
+    required_composite_foreign_keys:
+      - child_table: endpoint_heads
+        child_columns: [endpoint_id, active_revision_id]
+        parent_table: endpoint_revisions
+        parent_columns: [endpoint_id, id]
+      - child_table: job_heads
+        child_columns: [job_id, active_revision_id]
+        parent_table: job_revisions
+        parent_columns: [job_id, id]
+      - child_table: job_revisions
+        child_columns: [job_id, filter_set_id]
+        parent_table: filter_sets
+        parent_columns: [job_id, id]
+      - child_table: analyses
+        child_columns: [job_id, job_revision_id]
+        parent_table: job_revisions
+        parent_columns: [job_id, id]
+      - child_table: analysis_targets
+        child_columns: [endpoint_id, endpoint_revision_id]
+        parent_table: endpoint_revisions
+        parent_columns: [endpoint_id, id]
+      - child_table: snapshots
+        child_columns: [analysis_id, endpoint_id]
+        parent_table: analysis_targets
+        parent_columns: [analysis_id, endpoint_id]
+      - child_table: snapshots
+        child_columns: [endpoint_id, endpoint_revision_id]
+        parent_table: endpoint_revisions
+        parent_columns: [endpoint_id, id]
+      - child_table: file_entries
+        child_columns: [snapshot_id, endpoint_id]
+        parent_table: snapshots
+        parent_columns: [id, endpoint_id]
+      - child_table: case_collision_members
+        child_columns: [snapshot_id, file_entry_id]
+        parent_table: file_entries
+        parent_columns: [snapshot_id, id]
+      - child_table: case_collision_members
+        child_columns: [snapshot_id, group_id]
+        parent_table: case_collision_groups
+        parent_columns: [snapshot_id, id]
+      - child_table: operation_dependencies
+        child_columns: [plan_id, before_operation_id]
+        parent_table: planned_operations
+        parent_columns: [plan_id, id]
+      - child_table: operation_dependencies
+        child_columns: [plan_id, after_operation_id]
+        parent_table: planned_operations
+        parent_columns: [plan_id, id]

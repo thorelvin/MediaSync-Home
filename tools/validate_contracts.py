@@ -22,6 +22,7 @@ JSON_SCHEMA_EXAMPLES = {
 }
 EXPECTED_CONTRACT_PATHS = {
     "catalog.sql",
+    "database-contract.yaml",
     "recovery.sql",
     "endpoint-marker.schema.json",
     "ipc-command.schema.json",
@@ -49,6 +50,55 @@ COMMAND_RECEIPT_TRANSITIONS = {
     "ACCEPTED": ["RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"],
     "RUNNING": ["SUCCEEDED", "FAILED", "CANCELLED"],
 }
+REQUIRED_DATABASE_PARENT_SCOPE_FKS = {
+    (
+        "endpoint_heads",
+        ("endpoint_id", "active_revision_id"),
+        "endpoint_revisions",
+        ("endpoint_id", "id"),
+    ),
+    ("job_heads", ("job_id", "active_revision_id"), "job_revisions", ("job_id", "id")),
+    ("job_revisions", ("job_id", "filter_set_id"), "filter_sets", ("job_id", "id")),
+    ("analyses", ("job_id", "job_revision_id"), "job_revisions", ("job_id", "id")),
+    (
+        "analysis_targets",
+        ("endpoint_id", "endpoint_revision_id"),
+        "endpoint_revisions",
+        ("endpoint_id", "id"),
+    ),
+    ("snapshots", ("analysis_id", "endpoint_id"), "analysis_targets", ("analysis_id", "endpoint_id")),
+    (
+        "snapshots",
+        ("endpoint_id", "endpoint_revision_id"),
+        "endpoint_revisions",
+        ("endpoint_id", "id"),
+    ),
+    ("file_entries", ("snapshot_id", "endpoint_id"), "snapshots", ("id", "endpoint_id")),
+    (
+        "case_collision_members",
+        ("snapshot_id", "file_entry_id"),
+        "file_entries",
+        ("snapshot_id", "id"),
+    ),
+    (
+        "case_collision_members",
+        ("snapshot_id", "group_id"),
+        "case_collision_groups",
+        ("snapshot_id", "id"),
+    ),
+    (
+        "operation_dependencies",
+        ("plan_id", "before_operation_id"),
+        "planned_operations",
+        ("plan_id", "id"),
+    ),
+    (
+        "operation_dependencies",
+        ("plan_id", "after_operation_id"),
+        "planned_operations",
+        ("plan_id", "id"),
+    ),
+}
 
 
 class ContractValidationError(ValueError):
@@ -59,6 +109,7 @@ class ContractValidationError(ValueError):
 class ValidationSummary:
     contracts: int
     json_schemas: int
+    database_invariants: int
     examples: int
     reason_codes: int
     state_machines: int
@@ -263,6 +314,126 @@ def _state_set(machine: dict[str, Any]) -> set[str]:
     return states
 
 
+def _indexed_mappings(values: list[Any], label: str) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for item in values:
+        if not isinstance(item, dict):
+            fail(f"{label} entries must be mappings")
+        item_id = item.get("id")
+        if not isinstance(item_id, str) or not item_id:
+            fail(f"{label} entries must have non-empty id")
+        if item_id in result:
+            fail(f"duplicate id in {label}: {item_id}")
+        result[item_id] = item
+    return result
+
+
+def _column_tuple(value: Any, label: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        fail(f"{label} must be a non-empty column list")
+    if not all(isinstance(item, str) and item for item in value):
+        fail(f"{label} must contain only non-empty column names")
+    return tuple(value)
+
+
+def _column_tuple_set(value: Any, label: str) -> set[tuple[str, ...]]:
+    if not isinstance(value, list):
+        fail(f"{label} must be a list")
+    return {_column_tuple(item, f"{label}[]") for item in value}
+
+
+def _foreign_key_tuple(value: Any, label: str) -> tuple[str, tuple[str, ...], str, tuple[str, ...]]:
+    mapping = require_mapping(value, label)
+    child_table = mapping.get("child_table")
+    parent_table = mapping.get("parent_table")
+    if not isinstance(child_table, str) or not child_table:
+        fail(f"{label}.child_table must be a non-empty string")
+    if not isinstance(parent_table, str) or not parent_table:
+        fail(f"{label}.parent_table must be a non-empty string")
+    child_columns = _column_tuple(mapping.get("child_columns"), f"{label}.child_columns")
+    parent_columns = _column_tuple(mapping.get("parent_columns"), f"{label}.parent_columns")
+    if len(child_columns) < 2 or len(parent_columns) < 2:
+        fail(f"{label} must be a composite foreign key")
+    if len(child_columns) != len(parent_columns):
+        fail(f"{label} child and parent column counts must match")
+    return child_table, child_columns, parent_table, parent_columns
+
+
+def _validate_case_collision_invariant(invariant: dict[str, Any]) -> None:
+    if invariant.get("requirement_id") != "DB-001":
+        fail("DB-001 invariant must reference DB-001")
+    if invariant.get("table") != "file_entries":
+        fail("DB-001 invariant must apply to file_entries")
+    unique_keys = _column_tuple_set(invariant.get("must_have_unique_keys"), "DB-001 must_have_unique_keys")
+    non_unique_indexes = _column_tuple_set(
+        invariant.get("must_have_non_unique_indexes"),
+        "DB-001 must_have_non_unique_indexes",
+    )
+    forbidden_unique_keys = _column_tuple_set(
+        invariant.get("must_not_have_unique_keys"),
+        "DB-001 must_not_have_unique_keys",
+    )
+    comparison_key = ("snapshot_id", "comparison_key")
+    if comparison_key in unique_keys:
+        fail("DB-001 forbids unique file_entries(snapshot_id, comparison_key)")
+    if comparison_key not in non_unique_indexes:
+        fail("DB-001 requires non-unique file_entries(snapshot_id, comparison_key) index")
+    if comparison_key not in forbidden_unique_keys:
+        fail("DB-001 must explicitly forbid unique file_entries(snapshot_id, comparison_key)")
+    required_unique = {("snapshot_id", "relative_path"), ("snapshot_id", "id")}
+    missing_unique = sorted(required_unique - unique_keys)
+    if missing_unique:
+        fail(f"DB-001 missing required file_entries unique key(s): {missing_unique}")
+
+    collision_tables = require_mapping(invariant.get("collision_tables"), "DB-001 collision_tables")
+    if collision_tables.get("groups") != "case_collision_groups":
+        fail("DB-001 must keep case_collision_groups")
+    if collision_tables.get("members") != "case_collision_members":
+        fail("DB-001 must keep case_collision_members")
+
+
+def _validate_head_table_invariant(
+    invariant: dict[str, Any],
+    *,
+    stable_table: str,
+    revision_table: str,
+    head_table: str,
+    child_columns: tuple[str, ...],
+    parent_columns: tuple[str, ...],
+) -> None:
+    if invariant.get("requirement_id") != "DB-006":
+        fail(f"{head_table} invariant must reference DB-006")
+    if invariant.get("stable_table") != stable_table:
+        fail(f"{head_table} invariant must keep stable table {stable_table}")
+    if invariant.get("revision_table") != revision_table:
+        fail(f"{head_table} invariant must keep revision table {revision_table}")
+    if invariant.get("head_table") != head_table:
+        fail(f"{head_table} invariant must keep separate head table {head_table}")
+
+    head_fk = require_mapping(invariant.get("head_fk"), f"{head_table}.head_fk")
+    if _column_tuple(head_fk.get("child_columns"), f"{head_table}.head_fk.child_columns") != child_columns:
+        fail(f"{head_table} active head FK child columns drifted")
+    if head_fk.get("parent_table") != revision_table:
+        fail(f"{head_table} active head FK parent table drifted")
+    if _column_tuple(head_fk.get("parent_columns"), f"{head_table}.head_fk.parent_columns") != parent_columns:
+        fail(f"{head_table} active head FK parent columns drifted")
+
+
+def _validate_parent_scope_invariant(invariant: dict[str, Any]) -> None:
+    if invariant.get("requirement_id") != "DB-007":
+        fail("DB-007 invariant must reference DB-007")
+    raw_foreign_keys = invariant.get("required_composite_foreign_keys")
+    if not isinstance(raw_foreign_keys, list):
+        fail("DB-007 required_composite_foreign_keys must be a list")
+    actual = {
+        _foreign_key_tuple(item, "DB-007 required_composite_foreign_keys[]")
+        for item in raw_foreign_keys
+    }
+    missing = sorted(REQUIRED_DATABASE_PARENT_SCOPE_FKS - actual)
+    if missing:
+        fail(f"DB-007 missing required composite foreign key(s): {missing}")
+
+
 def validate_state_machines(document: dict[str, Any]) -> int:
     if document.get("schema_version") != 1:
         fail("state-machines.yaml schema_version must be 1")
@@ -318,6 +489,57 @@ def validate_state_machines(document: dict[str, Any]) -> int:
     return len(machines)
 
 
+def validate_database_contract(document: dict[str, Any]) -> int:
+    if document.get("schema_version") != 1:
+        fail("database-contract.yaml schema_version must be 1")
+    if document.get("status") != "draft_non_authoritative_0b":
+        fail("database-contract.yaml must remain draft_non_authoritative_0b in 0B")
+
+    stores = require_mapping(document.get("stores"), "database-contract.yaml stores")
+    if set(stores) != {"catalog", "recovery"}:
+        fail("database-contract.yaml must describe catalog and recovery stores")
+    for store_name, store in stores.items():
+        store_mapping = require_mapping(store, f"database-contract.yaml stores.{store_name}")
+        if store_mapping.get("writable_owner") != "engine_host":
+            fail(f"database store {store_name} must be owned by engine_host")
+
+    invariants = document.get("invariants")
+    if not isinstance(invariants, list) or not invariants:
+        fail("database-contract.yaml must contain invariants")
+    invariant_by_id = _indexed_mappings(invariants, "database-contract.yaml invariants")
+    required_ids = {
+        "DB-001_FILE_ENTRIES_COMPARISON_KEY_IS_NON_UNIQUE",
+        "DB-006_ENDPOINT_HEADS_ARE_SEPARATE",
+        "DB-006_JOB_HEADS_ARE_SEPARATE",
+        "DB-007_PARENT_SCOPE_COMPOSITE_KEYS",
+    }
+    missing = sorted(required_ids - set(invariant_by_id))
+    if missing:
+        fail(f"database-contract.yaml missing required invariant(s): {missing}")
+
+    _validate_case_collision_invariant(
+        invariant_by_id["DB-001_FILE_ENTRIES_COMPARISON_KEY_IS_NON_UNIQUE"]
+    )
+    _validate_head_table_invariant(
+        invariant_by_id["DB-006_ENDPOINT_HEADS_ARE_SEPARATE"],
+        stable_table="endpoints",
+        revision_table="endpoint_revisions",
+        head_table="endpoint_heads",
+        child_columns=("endpoint_id", "active_revision_id"),
+        parent_columns=("endpoint_id", "id"),
+    )
+    _validate_head_table_invariant(
+        invariant_by_id["DB-006_JOB_HEADS_ARE_SEPARATE"],
+        stable_table="jobs",
+        revision_table="job_revisions",
+        head_table="job_heads",
+        child_columns=("job_id", "active_revision_id"),
+        parent_columns=("job_id", "id"),
+    )
+    _validate_parent_scope_invariant(invariant_by_id["DB-007_PARENT_SCOPE_COMPOSITE_KEYS"])
+    return len(invariants)
+
+
 def validate_blocked_sql_placeholders(root: Path, manifest: dict[str, Any]) -> None:
     blocked_sql = [
         contract.get("path")
@@ -348,15 +570,21 @@ def validate_repository(root: Path = ROOT) -> ValidationSummary:
         load_yaml(root / "schema/state-machines.yaml", yaml),
         "state-machines.yaml",
     )
+    database_contract = require_mapping(
+        load_yaml(root / "schema/database-contract.yaml", yaml),
+        "database-contract.yaml",
+    )
 
     contracts = validate_manifest(root, manifest, catalog)
     json_schemas, examples = validate_json_schemas(root, Draft202012Validator, FormatChecker)
+    database_invariants = validate_database_contract(database_contract)
     reason_count = validate_reason_codes(reason_codes)
     machine_count = validate_state_machines(state_machines)
     validate_blocked_sql_placeholders(root, manifest)
     return ValidationSummary(
         contracts=contracts,
         json_schemas=json_schemas,
+        database_invariants=database_invariants,
         examples=examples,
         reason_codes=reason_count,
         state_machines=machine_count,
@@ -376,6 +604,7 @@ def main() -> int:
     print("PASS: MediaSync Home draft contract validation completed")
     print(f"INFO: contracts={summary.contracts}")
     print(f"INFO: json_schemas={summary.json_schemas}")
+    print(f"INFO: database_invariants={summary.database_invariants}")
     print(f"INFO: examples={summary.examples}")
     print(f"INFO: reason_codes={summary.reason_codes}")
     print(f"INFO: state_machines={summary.state_machines}")

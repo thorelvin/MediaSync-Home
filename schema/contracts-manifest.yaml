@@ -30,6 +30,13 @@ contracts:
   - ADR-011
   - ADR-012
   freeze_after: governing ADRs with owner_decision=OWNER_ACCEPTED + Milestone 1 migrations/tests
+- path: database-contract.yaml
+  status: draft
+  governing_adrs:
+  - ADR-003
+  - ADR-011
+  - ADR-021
+  freeze_after: governing ADRs with owner_decision=OWNER_ACCEPTED + Milestone 1 migrations/tests
 - path: endpoint-marker.schema.json
   status: draft
   governing_adrs:
