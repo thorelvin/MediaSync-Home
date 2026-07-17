@@ -209,6 +209,68 @@ class WindowsPackagingSpikeTests(unittest.TestCase):
             self.assertNotIn(fake_home, raw_summary)
             self.assertNotIn("C:\\Users\\", raw_summary)
 
+    def test_sdk_signing_inventory_discovers_off_path_tools_without_cert(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="msh-0a5-sdk-") as raw:
+            root = Path(raw)
+            vs_root = root / "Microsoft Visual Studio"
+            kits_root = root / "Windows Kits" / "10" / "bin"
+            cl = (
+                vs_root
+                / "2022"
+                / "BuildTools"
+                / "VC"
+                / "Tools"
+                / "MSVC"
+                / "14.42.34433"
+                / "bin"
+                / "Hostx64"
+                / "x64"
+                / "cl.exe"
+            )
+            rc = kits_root / "10.0.22000.0" / "x64" / "rc.exe"
+            signtool = kits_root / "10.0.22000.0" / "x64" / "signtool.exe"
+            for path in (cl, rc, signtool):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"fake exe")
+
+            def fake_launch(tool_name: str, path: Path) -> dict[str, object]:
+                return {
+                    "can_start": True,
+                    "returncode": 0,
+                    "banner": f"{tool_name} started from {path.name}",
+                    "error": None,
+                }
+
+            with (
+                mock.patch.object(windows_packaging.shutil, "which", return_value=None),
+                mock.patch.object(windows_packaging, "get_file_version", return_value="1.2.3.4"),
+                mock.patch.object(windows_packaging, "launch_tool_probe", side_effect=fake_launch),
+                mock.patch.object(
+                    windows_packaging,
+                    "current_user_code_signing_certificate_count",
+                    return_value={
+                        "status": "BLOCKED_BY_ENVIRONMENT",
+                        "count": 0,
+                        "reason": "NO_CURRENT_USER_CODE_SIGNING_CERTIFICATE",
+                    },
+                ),
+            ):
+                result = windows_packaging.sdk_signing_inventory(
+                    visual_studio_root=vs_root,
+                    windows_kits_root=kits_root,
+                )
+
+            self.assertEqual(result["status"], "PASS")
+            self.assertFalse(result["all_tools_on_path"])
+            self.assertEqual(result["signing_status"], "BLOCKED_BY_ENVIRONMENT")
+            self.assertEqual(result["signing_certificate"]["count"], 0)
+            for tool_name in windows_packaging.SDK_TOOL_NAMES:
+                with self.subTest(tool_name=tool_name):
+                    self.assertEqual(result["tools"][tool_name]["status"], "PASS")
+                    self.assertFalse(result["tools"][tool_name]["on_path"])
+                    self.assertEqual(result["tools"][tool_name]["candidate_count"], 1)
+                    self.assertTrue(result["tools"][tool_name]["launch_probe"]["can_start"])
+
     def test_demo_writes_sanitized_summary_without_running_robocopy(self) -> None:
         with tempfile.TemporaryDirectory(prefix="msh-0a5-artifact-") as raw:
             output = Path(raw) / "summary.json"

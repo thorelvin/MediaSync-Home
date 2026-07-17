@@ -1,0 +1,72 @@
+{
+  "all_tools_on_path": false,
+  "clean_windows_vm": "BLOCKED_BY_ENVIRONMENT",
+  "created_utc": "2026-07-17T14:08:33Z",
+  "sdk_inventory_status": "PASS",
+  "signing_certificate": {
+    "count": 0,
+    "reason": "NO_CURRENT_USER_CODE_SIGNING_CERTIFICATE",
+    "status": "BLOCKED_BY_ENVIRONMENT"
+  },
+  "signing_status": "BLOCKED_BY_ENVIRONMENT",
+  "status": "PASS",
+  "tools": {
+    "cl": {
+      "candidate_count": 8,
+      "launch_probe": {
+        "banner": "usage: cl [ option... ] filename... [ /link linkoption... ]",
+        "can_start": true,
+        "error": null,
+        "returncode": 0
+      },
+      "on_path": false,
+      "on_path_path": null,
+      "preferred": {
+        "architecture": "x64",
+        "basename": "cl.exe",
+        "file_version": "19.42.34435.0",
+        "path": "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.42.34433\\bin\\Hostx64\\x64\\cl.exe",
+        "path_version": "14.42.34433"
+      },
+      "status": "PASS"
+    },
+    "rc": {
+      "candidate_count": 6,
+      "launch_probe": {
+        "banner": "Microsoft (R) Windows (R) Resource Compiler Version 10.0.10011.16384",
+        "can_start": true,
+        "error": null,
+        "returncode": 0
+      },
+      "on_path": false,
+      "on_path_path": null,
+      "preferred": {
+        "architecture": "x64",
+        "basename": "rc.exe",
+        "file_version": "10.0.22000.832",
+        "path": "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.22000.0\\x64\\rc.exe",
+        "path_version": "10.0.22000.0"
+      },
+      "status": "PASS"
+    },
+    "signtool": {
+      "candidate_count": 8,
+      "launch_probe": {
+        "banner": "Usage: signtool <command> [options]",
+        "can_start": true,
+        "error": null,
+        "returncode": 0
+      },
+      "on_path": false,
+      "on_path_path": null,
+      "preferred": {
+        "architecture": "x64",
+        "basename": "signtool.exe",
+        "file_version": "10.0.22000.832",
+        "path": "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.22000.0\\x64\\signtool.exe",
+        "path_version": "10.0.22000.0"
+      },
+      "status": "PASS"
+    }
+  }
+}

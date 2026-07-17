@@ -13,6 +13,10 @@ Generated on 2026-07-17 for branch `spike/0a5-local-nuitka-exe`.
   smoke run of `MediaSync0A5Probe.exe`; the packaged probe launched locally,
   created `QCoreApplication`, computed a BLAKE3 digest, and called
   `GetSystemDirectoryW`.
+- `sdk-signing-inventory.json` records local Visual Studio/Windows SDK tool
+  discovery. `cl.exe`, `rc.exe`, and `signtool.exe` were found off PATH and
+  could start; the current-user certificate store had no code-signing
+  certificate.
 - `runtime-freeze.txt` records the exact local runtime/package versions used
   for this evidence.
 - `unittest-output.txt` records:
@@ -21,4 +25,5 @@ Generated on 2026-07-17 for branch `spike/0a5-local-nuitka-exe`.
 No real Robocopy process, backup run, production adapter, signed release
 installer, or clean-VM smoke test was created by this spike. The packaged
 executable evidence is a local temp-built Nuitka probe only; the executable and
-distribution directory are not committed.
+distribution directory are not committed. No certificate subject, thumbprint or
+private key material is recorded.

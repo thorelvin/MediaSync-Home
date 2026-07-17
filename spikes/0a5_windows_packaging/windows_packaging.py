@@ -34,6 +34,7 @@ DEFAULT_ROBOCOPY_SWITCHES = (
 )
 NUITKA_PROBE_EXE_NAME = "MediaSync0A5Probe.exe"
 TEXT_TAIL_LIMIT = 4000
+SDK_TOOL_NAMES = ("cl", "rc", "signtool")
 
 
 class WindowsPackagingError(RuntimeError):
@@ -506,6 +507,199 @@ def find_nuitka_probe_executable(work_dir: Path) -> Path | None:
     return matches[0] if matches else None
 
 
+def version_sort_key(version: str | None) -> tuple[int, ...]:
+    if not version:
+        return ()
+    return tuple(int(part) for part in re.findall(r"\d+", version))
+
+
+def version_from_path(path: Path) -> str | None:
+    for part in reversed(path.parts):
+        if re.fullmatch(r"\d+(?:\.\d+)+", part):
+            return part
+    return None
+
+
+def candidate_tool_record(path: Path) -> dict[str, Any]:
+    path = path.resolve()
+    return {
+        "path": str(path),
+        "basename": path.name,
+        "path_version": version_from_path(path),
+        "file_version": get_file_version(path) if os.name == "nt" else None,
+        "architecture": path.parent.name,
+    }
+
+
+def discover_visual_studio_cl_candidates(visual_studio_root: Path | None = None) -> list[Path]:
+    root = visual_studio_root or Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / "Microsoft Visual Studio"
+    if not root.exists():
+        return []
+    return sorted(root.glob("*/*/VC/Tools/MSVC/*/bin/Host*/*/cl.exe"))
+
+
+def discover_windows_kit_tool_candidates(tool_name: str, windows_kits_root: Path | None = None) -> list[Path]:
+    if tool_name not in {"rc", "signtool"}:
+        raise ValueError(f"unsupported Windows Kit tool: {tool_name}")
+    root = windows_kits_root or Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / "Windows Kits" / "10" / "bin"
+    if not root.exists():
+        return []
+    return sorted(root.glob(f"*/*/{tool_name}.exe"))
+
+
+def discover_sdk_tool_candidates(
+    tool_name: str,
+    *,
+    visual_studio_root: Path | None = None,
+    windows_kits_root: Path | None = None,
+) -> list[Path]:
+    if tool_name == "cl":
+        return discover_visual_studio_cl_candidates(visual_studio_root)
+    if tool_name in {"rc", "signtool"}:
+        return discover_windows_kit_tool_candidates(tool_name, windows_kits_root)
+    raise ValueError(f"unsupported SDK tool: {tool_name}")
+
+
+def preferred_tool_candidate(candidates: list[Path]) -> Path | None:
+    if not candidates:
+        return None
+    return sorted(
+        candidates,
+        key=lambda path: (
+            path.parent.name.lower() == "x64",
+            "hostx64" in str(path).lower(),
+            version_sort_key(version_from_path(path)),
+            str(path).lower(),
+        ),
+    )[-1]
+
+
+def launch_probe_command(tool_name: str, path: Path) -> list[str]:
+    if tool_name == "cl":
+        return [str(path)]
+    if tool_name in {"rc", "signtool"}:
+        return [str(path), "/?"]
+    raise ValueError(f"unsupported SDK tool: {tool_name}")
+
+
+def launch_tool_probe(tool_name: str, path: Path) -> dict[str, Any]:
+    command = launch_probe_command(tool_name, path)
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+    except OSError as exc:
+        return {
+            "can_start": False,
+            "returncode": None,
+            "banner": "",
+            "error": type(exc).__name__,
+        }
+    combined = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
+    banner = next((line.strip() for line in combined.splitlines() if line.strip()), "")
+    return {
+        "can_start": bool(banner) or completed.returncode == 0,
+        "returncode": completed.returncode,
+        "banner": banner[:300],
+        "error": None,
+    }
+
+
+def current_user_code_signing_certificate_count() -> dict[str, Any]:
+    if os.name != "nt":
+        return {
+            "status": "BLOCKED_BY_ENVIRONMENT",
+            "count": None,
+            "reason": "NOT_WINDOWS",
+        }
+    command = [
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        "(Get-ChildItem Cert:\\CurrentUser\\My -CodeSigningCert -ErrorAction SilentlyContinue | Measure-Object).Count",
+    ]
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        return {
+            "status": "BLOCKED_BY_ENVIRONMENT",
+            "count": None,
+            "reason": "CERT_STORE_QUERY_FAILED",
+        }
+    try:
+        count = int(completed.stdout.strip())
+    except ValueError:
+        return {
+            "status": "BLOCKED_BY_ENVIRONMENT",
+            "count": None,
+            "reason": "CERT_STORE_QUERY_UNPARSEABLE",
+        }
+    return {
+        "status": "PRESENT_UNVERIFIED" if count > 0 else "BLOCKED_BY_ENVIRONMENT",
+        "count": count,
+        "reason": None if count > 0 else "NO_CURRENT_USER_CODE_SIGNING_CERTIFICATE",
+    }
+
+
+def sdk_signing_inventory(
+    *,
+    visual_studio_root: Path | None = None,
+    windows_kits_root: Path | None = None,
+) -> dict[str, Any]:
+    tools: dict[str, Any] = {}
+    for tool_name in SDK_TOOL_NAMES:
+        on_path = shutil.which(tool_name)
+        candidates = discover_sdk_tool_candidates(
+            tool_name,
+            visual_studio_root=visual_studio_root,
+            windows_kits_root=windows_kits_root,
+        )
+        preferred = preferred_tool_candidate(candidates)
+        launch = launch_tool_probe(tool_name, preferred) if preferred is not None else None
+        tools[tool_name] = {
+            "on_path": on_path is not None,
+            "on_path_path": on_path,
+            "candidate_count": len(candidates),
+            "preferred": candidate_tool_record(preferred) if preferred is not None else None,
+            "launch_probe": launch,
+            "status": "PASS" if preferred is not None and launch is not None and launch["can_start"] else "BLOCKED_BY_ENVIRONMENT",
+        }
+    cert = current_user_code_signing_certificate_count()
+    all_tools_start = all(item["status"] == "PASS" for item in tools.values())
+    return {
+        "created_utc": utc_now(),
+        "status": "PASS" if all_tools_start else "BLOCKED_BY_ENVIRONMENT",
+        "tools": tools,
+        "all_tools_on_path": all(item["on_path"] for item in tools.values()),
+        "sdk_inventory_status": "PASS" if all_tools_start else "BLOCKED_BY_ENVIRONMENT",
+        "signing_certificate": cert,
+        "signing_status": "BLOCKED_BY_ENVIRONMENT"
+        if cert["status"] == "BLOCKED_BY_ENVIRONMENT"
+        else "CERTIFICATE_PRESENT_UNVERIFIED",
+        "clean_windows_vm": "BLOCKED_BY_ENVIRONMENT",
+    }
+
+
+def run_sdk_signing_inventory(output: Path) -> int:
+    result = sdk_signing_inventory()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return 0 if result["status"] == "PASS" else 2
+
+
 def directory_size(root: Path) -> tuple[int, int]:
     file_count = 0
     total_bytes = 0
@@ -781,6 +975,8 @@ def main(argv: list[str] | None = None) -> int:
     nuitka.add_argument("--work-dir")
     nuitka.add_argument("--python-executable")
     nuitka.add_argument("--timeout-seconds", type=int, default=600)
+    sdk_inventory = sub.add_parser("sdk-signing-inventory")
+    sdk_inventory.add_argument("--output", required=True)
     sub.add_parser("echo-argv-json")
     args, rest = parser.parse_known_args(argv)
     if args.command == "echo-argv-json":
@@ -800,6 +996,8 @@ def main(argv: list[str] | None = None) -> int:
             python_executable=Path(args.python_executable) if args.python_executable else None,
             timeout_seconds=args.timeout_seconds,
         )
+    if args.command == "sdk-signing-inventory":
+        return run_sdk_signing_inventory(Path(args.output))
     if args.command == "demo":
         return run_demo(Path(args.output))
     raise AssertionError(args.command)

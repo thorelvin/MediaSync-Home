@@ -289,6 +289,6 @@ adrs:
   owner_decision: PENDING
   owner_decision_date: null
   supersedes: []
-  codex_recommendation: Pakkestrategi kan ikke anbefales for release før signering/SDK-inventory og ren Windows-VM er tilgjengelig og smoke-testet; minimal PySide6/BLAKE3/Nuitka-runtime og lokal Nuitka standalone exe-smoke er bevist.
+  codex_recommendation: Pakkestrategi kan ikke anbefales for release før signeringssertifikat/-policy og ren Windows-VM er tilgjengelig og smoke-testet; minimal PySide6/BLAKE3/Nuitka-runtime, lokal Nuitka standalone exe-smoke og SDK/signing-tool inventory er bevist.
   rationale: Gir en reproducerbar, offline-brukbar Windows-build med kontrollert Python/Qt-kompatibilitet
   consequence: Toolchain låses etter 0A.5 og smoke-testes på ren Windows-VM

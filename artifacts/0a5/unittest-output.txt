@@ -8,10 +8,11 @@ test_packaging_probe_reports_pass_or_environment_blocker (test_windows_packaging
 test_relative_roots_are_rejected (test_windows_packaging.WindowsPackagingSpikeTests) ... ok
 test_resolver_uses_windows_system_directory_not_path (test_windows_packaging.WindowsPackagingSpikeTests) ... ok
 test_robocopy_plan_validates_final_parsed_switches (test_windows_packaging.WindowsPackagingSpikeTests) ... ok
+test_sdk_signing_inventory_discovers_off_path_tools_without_cert (test_windows_packaging.WindowsPackagingSpikeTests) ... ok
 test_typed_forbidden_flags_are_rejected_before_launch_plan (test_windows_packaging.WindowsPackagingSpikeTests) ... ok
 test_windows_argv_builder_round_trips_command_line_corpus (test_windows_packaging.WindowsPackagingSpikeTests) ... ok
 
 ----------------------------------------------------------------------
-Ran 12 tests in 1.284s
+Ran 13 tests in 1.294s
 
 OK
