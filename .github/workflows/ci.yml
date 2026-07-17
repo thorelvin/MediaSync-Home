@@ -1,0 +1,41 @@
+name: 0B Quality Gates
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows 0B gates
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install development dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Validate contracts and generated docs
+        run: |
+          python tools\validate_contracts.py
+          python tools\validate_handoff.py
+          python tools\build_adr_docs.py --check
+          python tools\build_master.py --check
+
+      - name: Run tests and static gates
+        run: |
+          python -m pytest -q
+          python -m ruff check .
+          python -m mypy src
+          python tools\check_imports.py
