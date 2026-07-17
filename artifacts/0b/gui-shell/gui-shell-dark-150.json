@@ -1,0 +1,11 @@
+{
+  "height": 1050,
+  "image_path": "gui-shell-dark-150.png",
+  "manifest_path": "gui-shell-dark-150.json",
+  "non_background_ratio": 0.5673314339981007,
+  "sampled_pixels": 10530,
+  "scale_percent": 150,
+  "theme": "dark",
+  "unique_sampled_colors": 78,
+  "width": 1680
+}
