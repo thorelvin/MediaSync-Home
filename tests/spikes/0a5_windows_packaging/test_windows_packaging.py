@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -123,6 +124,90 @@ class WindowsPackagingSpikeTests(unittest.TestCase):
         self.assertTrue(result["blake3_version"])
         self.assertTrue(result["nuitka_version"])
         self.assertEqual(result["win32_get_system_directory_basename"].lower(), "system32")
+
+    @unittest.skipUnless(
+        all(windows_packaging.importlib.util.find_spec(name) is not None for name in ("PySide6", "blake3")),
+        "minimal runtime app requires PySide6 and blake3 in the active Python",
+    )
+    def test_minimal_runtime_app_emits_sanitized_json(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, str(windows_packaging.minimal_runtime_app_path())],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["status"], "PASS")
+        self.assertEqual(payload["probe_digest_algorithm"], "BLAKE3-256")
+        self.assertEqual(len(payload["probe_digest"]), 64)
+        self.assertNotIn("C:\\Users\\", completed.stdout)
+
+    def test_nuitka_build_probe_writes_sanitized_smoke_summary(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="msh-0a5-nuitka-") as raw:
+            work = Path(raw) / "work with spaces"
+            output = Path(raw) / "summary.json"
+            fake_python = Path(raw) / "fake-python.exe"
+            fake_home = str(Path.home())
+            smoke_payload = {
+                "status": "PASS",
+                "probe_digest_algorithm": "BLAKE3-256",
+                "probe_digest": "a" * 64,
+                "pyside6_version": "6.11.1",
+                "qt_version": "6.11.1",
+                "blake3_version": "1.0.9",
+                "win32_get_system_directory_basename": "system32",
+            }
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                if "-m" in command and "nuitka" in command:
+                    exe_dir = work / "minimal_runtime_app.dist"
+                    exe_dir.mkdir(parents=True, exist_ok=True)
+                    (exe_dir / windows_packaging.NUITKA_PROBE_EXE_NAME).write_bytes(b"fake packaged exe")
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout=f"built under {work} for {fake_home}",
+                        stderr="",
+                    )
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps(smoke_payload) + "\n",
+                    stderr=f"smoked under {work}",
+                )
+
+            prereq = {
+                "status": "PASS",
+                "missing_required": [],
+                "module_versions": {"PySide6": "6.11.1", "blake3": "1.0.9", "nuitka": "4.1.3"},
+                "packaging_tools": {"pyside6-deploy": True, "nuitka": True},
+                "sdk_tools": {"cl": False, "rc": False, "signtool": False},
+                "windows_sdk_status": "BLOCKED_BY_ENVIRONMENT",
+            }
+            with (
+                mock.patch.object(windows_packaging, "nuitka_build_prerequisites", return_value=prereq),
+                mock.patch.object(windows_packaging.subprocess, "run", side_effect=fake_run),
+            ):
+                self.assertEqual(
+                    windows_packaging.run_nuitka_build_probe(
+                        output,
+                        work_dir=work,
+                        python_executable=fake_python,
+                    ),
+                    0,
+                )
+
+            raw_summary = output.read_text(encoding="utf-8")
+            summary = json.loads(raw_summary)
+            self.assertEqual(summary["status"], "PASS")
+            self.assertEqual(summary["executable"]["sha256"], windows_packaging.sha256_file(work / "minimal_runtime_app.dist" / windows_packaging.NUITKA_PROBE_EXE_NAME))
+            self.assertEqual(summary["smoke"]["stdout_json"]["status"], "PASS")
+            self.assertNotIn(str(work), raw_summary)
+            self.assertNotIn(fake_home, raw_summary)
+            self.assertNotIn("C:\\Users\\", raw_summary)
 
     def test_demo_writes_sanitized_summary_without_running_robocopy(self) -> None:
         with tempfile.TemporaryDirectory(prefix="msh-0a5-artifact-") as raw:

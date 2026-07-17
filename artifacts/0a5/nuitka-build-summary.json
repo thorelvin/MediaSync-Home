@@ -1,0 +1,71 @@
+{
+  "build": {
+    "command_shape": [
+      "<python-executable>",
+      "-m",
+      "nuitka",
+      "--standalone",
+      "--enable-plugin=pyside6",
+      "--assume-yes-for-downloads",
+      "--output-dir=<nuitka-work-dir>",
+      "--output-filename=MediaSync0A5Probe.exe",
+      "spikes/0a5_windows_packaging/minimal_runtime_app.py"
+    ],
+    "returncode": 0,
+    "stderr_tail": "Nuitka-Options: Used command line options:\nNuitka-Options:   --standalone --enable-plugin=pyside6 --assume-yes-for-downloads --output-dir=<nuitka-work-dir> --output-filename=MediaSync0A5Probe.exe <repo-root>\\spikes\\0a5_windows_packaging\\minimal_runtime_app.py\nNuitka: Starting Python compilation with:\nNuitka:   Version '4.1.3' on Python 3.10 (flavor 'CPython Official') commercial grade 'not installed'.\nNuitka-Plugins:anti-bloat: Not including 'socket' automatically in order to avoid bloat, but this may cause: can break calls of 'email.utils.make_msgid()'.\nNuitka-Plugins:pyside6: Including Qt plugins 'iconengines,imageformats,platforms,styles,tls' below 'PySide6\\qt-plugins'.\nNuitka-Plugins:dll-files: Found 4 files DLLs from shiboken6 installation.\nNuitka-Inclusion: Including Windows Runtime DLLs, which increases distribution size. Use '--include-windows-runtime-dlls=no' to disable, or make explicit with '--include-windows-runtime-dlls=yes'.\nNuitka: Completed Python level compilation and optimization.\nNuitka: Generating source code for C backend compiler.\nNuitka: Running data composer tool for optimal constant value handling.\nNuitka: Running C compilation via Scons.\nNuitka-Scons: Backend C compiler: cl (cl 14.3).\nNuitka-Scons: Backend C linking with 14 files (no progress information available for this stage).\nNuitka-Scons: Compiled 14 C files using clcache with 13 cache hits and 1 cache misses.\nNuitka: Keeping build directory '<nuitka-work-dir>\\minimal_runtime_app.build'.\nNuitka: Successfully created '<nuitka-work-dir>\\minimal_runtime_app.dist\\MediaSync0A5Probe.exe'.\n",
+    "stdout_tail": ""
+  },
+  "clean_windows_vm": "BLOCKED_BY_ENVIRONMENT",
+  "created_utc": "2026-07-17T14:05:08Z",
+  "executable": {
+    "dist_file_count": 52,
+    "dist_size_bytes": 60140688,
+    "relative_to_work_dir": "minimal_runtime_app.dist\\MediaSync0A5Probe.exe",
+    "sha256": "2a24999d2bb1a6a13d5da0791073ca4be1c3a853092cff6d2f2ba06b1fd80ae0",
+    "size_bytes": 4054016
+  },
+  "prerequisites": {
+    "missing_required": [],
+    "module_versions": {
+      "PySide6": "6.11.1",
+      "blake3": "1.0.9",
+      "nuitka": "4.1.3"
+    },
+    "packaging_tools": {
+      "nuitka": true,
+      "pyside6-deploy": true
+    },
+    "sdk_tools": {
+      "cl": false,
+      "rc": false,
+      "signtool": false
+    },
+    "status": "PASS",
+    "windows_sdk_status": "BLOCKED_BY_ENVIRONMENT"
+  },
+  "python_executable": "<python-executable>",
+  "reason": null,
+  "signing_status": "BLOCKED_BY_ENVIRONMENT",
+  "smoke": {
+    "returncode": 0,
+    "stderr_tail": "",
+    "stdout_json": {
+      "application_name": "MediaSyncHome0A5PackagedProbe",
+      "blake3_version": "1.0.9",
+      "probe_digest": "a64348c9907f6f01faf85bb3bcfb33f81c115014f46628a5afc67b06fb6a0c52",
+      "probe_digest_algorithm": "BLAKE3-256",
+      "pyside6_version": "6.11.1",
+      "python_runtime": "3.10.6",
+      "qcoreapplication_created": true,
+      "qt_prefix_path_known": true,
+      "qt_version": "6.11.1",
+      "status": "PASS",
+      "win32_get_system_directory_basename": "system32"
+    },
+    "stdout_tail": "{\"application_name\": \"MediaSyncHome0A5PackagedProbe\", \"blake3_version\": \"1.0.9\", \"probe_digest\": \"a64348c9907f6f01faf85bb3bcfb33f81c115014f46628a5afc67b06fb6a0c52\", \"probe_digest_algorithm\": \"BLAKE3-256\", \"pyside6_version\": \"6.11.1\", \"python_runtime\": \"3.10.6\", \"qcoreapplication_created\": true, \"qt_prefix_path_known\": true, \"qt_version\": \"6.11.1\", \"status\": \"PASS\", \"win32_get_system_directory_basename\": \"system32\"}\n"
+  },
+  "source": "spikes/0a5_windows_packaging/minimal_runtime_app.py",
+  "status": "PASS",
+  "strategy": "nuitka-standalone",
+  "work_dir": "<nuitka-work-dir>"
+}

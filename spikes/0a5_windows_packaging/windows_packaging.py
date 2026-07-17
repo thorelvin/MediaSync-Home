@@ -7,13 +7,16 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 MAX_WINDOWS_COMMAND_LINE = 32760
@@ -29,6 +32,8 @@ DEFAULT_ROBOCOPY_SWITCHES = (
     "/NFL",
     "/NDL",
 )
+NUITKA_PROBE_EXE_NAME = "MediaSync0A5Probe.exe"
+TEXT_TAIL_LIMIT = 4000
 
 
 class WindowsPackagingError(RuntimeError):
@@ -447,6 +452,212 @@ def minimal_runtime_probe() -> dict[str, Any]:
     return result
 
 
+def minimal_runtime_app_path() -> Path:
+    return Path(__file__).resolve().with_name("minimal_runtime_app.py")
+
+
+def nuitka_build_prerequisites() -> dict[str, Any]:
+    toolchain = package_toolchain_probe()
+    missing_required = [
+        name
+        for name, found in toolchain["modules"].items()
+        if name in {"PySide6", "blake3", "nuitka"} and not found
+    ]
+    if not toolchain["packaging_tools"]["nuitka"]:
+        missing_required.append("nuitka-script")
+    return {
+        "status": "PASS" if not missing_required else "BLOCKED_BY_ENVIRONMENT",
+        "missing_required": missing_required,
+        "module_versions": toolchain["module_versions"],
+        "packaging_tools": toolchain["packaging_tools"],
+        "sdk_tools": toolchain["sdk_tools"],
+        "windows_sdk_status": toolchain["windows_sdk_status"],
+    }
+
+
+def sanitize_probe_text(value: str, replacements: dict[str, str]) -> str:
+    sanitized = value
+    for raw, token in replacements.items():
+        if not raw:
+            continue
+        sanitized = sanitized.replace(raw, token)
+        sanitized = sanitized.replace(raw.replace("\\", "/"), token)
+    sanitized = re.sub(r"(?i)[A-Z]:[\\/]+Users[\\/][^\\/\s]+", "<user-profile>", sanitized)
+    sanitized = re.sub(
+        r"(?i)(?:~|<user-profile>)[\\/]+AppData[\\/]+Local[\\/]+Temp[\\/]+MediaSyncHome-Spike[\\/][^\\/\s]+",
+        "<nuitka-work-dir>",
+        sanitized,
+    )
+    return sanitized
+
+
+def text_tail(value: str, replacements: dict[str, str]) -> str:
+    tail = value[-TEXT_TAIL_LIMIT:]
+    return sanitize_probe_text(tail, replacements)
+
+
+def default_nuitka_work_dir() -> Path:
+    run_id = f"0a5-nuitka-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
+    return Path(tempfile.gettempdir()) / "MediaSyncHome-Spike" / run_id
+
+
+def find_nuitka_probe_executable(work_dir: Path) -> Path | None:
+    matches = sorted(work_dir.rglob(NUITKA_PROBE_EXE_NAME))
+    return matches[0] if matches else None
+
+
+def directory_size(root: Path) -> tuple[int, int]:
+    file_count = 0
+    total_bytes = 0
+    for path in root.rglob("*"):
+        if path.is_file():
+            file_count += 1
+            total_bytes += path.stat().st_size
+    return file_count, total_bytes
+
+
+def sanitized_nuitka_command_shape() -> list[str]:
+    return [
+        "<python-executable>",
+        "-m",
+        "nuitka",
+        "--standalone",
+        "--enable-plugin=pyside6",
+        "--assume-yes-for-downloads",
+        "--output-dir=<nuitka-work-dir>",
+        f"--output-filename={NUITKA_PROBE_EXE_NAME}",
+        "spikes/0a5_windows_packaging/minimal_runtime_app.py",
+    ]
+
+
+def run_nuitka_build_probe(
+    output: Path,
+    *,
+    work_dir: Path | None = None,
+    python_executable: Path | None = None,
+    timeout_seconds: int = 600,
+) -> int:
+    script = minimal_runtime_app_path()
+    work = work_dir or default_nuitka_work_dir()
+    python_path = python_executable or Path(sys.executable)
+    replacements = {
+        str(work): "<nuitka-work-dir>",
+        str(Path(__file__).resolve().parents[2]): "<repo-root>",
+        str(python_path): "<python-executable>",
+        os.environ.get("USERPROFILE", ""): "<user-profile>",
+        os.environ.get("TEMP", ""): "<temp-root>",
+        os.environ.get("TMP", ""): "<temp-root>",
+    }
+    prereq = nuitka_build_prerequisites()
+    summary: dict[str, Any] = {
+        "created_utc": utc_now(),
+        "strategy": "nuitka-standalone",
+        "status": "BLOCKED_BY_ENVIRONMENT",
+        "source": "spikes/0a5_windows_packaging/minimal_runtime_app.py",
+        "work_dir": "<nuitka-work-dir>",
+        "python_executable": "<python-executable>",
+        "prerequisites": prereq,
+        "build": {
+            "command_shape": sanitized_nuitka_command_shape(),
+            "returncode": None,
+            "stdout_tail": "",
+            "stderr_tail": "",
+        },
+        "executable": None,
+        "smoke": None,
+        "signing_status": "BLOCKED_BY_ENVIRONMENT",
+        "clean_windows_vm": "BLOCKED_BY_ENVIRONMENT",
+    }
+
+    if prereq["status"] != "PASS":
+        summary["reason"] = "MISSING_LOCAL_NUITKA_PREREQUISITES"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return 2
+
+    work.mkdir(parents=True, exist_ok=True)
+    command = [
+        str(python_path),
+        "-m",
+        "nuitka",
+        "--standalone",
+        "--enable-plugin=pyside6",
+        "--assume-yes-for-downloads",
+        f"--output-dir={work}",
+        f"--output-filename={NUITKA_PROBE_EXE_NAME}",
+        str(script),
+    ]
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout_seconds,
+    )
+    summary["build"] = {
+        "command_shape": sanitized_nuitka_command_shape(),
+        "returncode": completed.returncode,
+        "stdout_tail": text_tail(completed.stdout, replacements),
+        "stderr_tail": text_tail(completed.stderr, replacements),
+    }
+    if completed.returncode != 0:
+        summary["reason"] = "NUITKA_BUILD_NONZERO"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return 2
+
+    executable = find_nuitka_probe_executable(work)
+    if executable is None:
+        summary["status"] = "FAIL"
+        summary["reason"] = "NUITKA_EXE_NOT_FOUND"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return 1
+
+    smoke = subprocess.run(
+        [str(executable)],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+    stdout = smoke.stdout.strip()
+    try:
+        stdout_json = json.loads(stdout)
+    except json.JSONDecodeError:
+        stdout_json = None
+    dist_file_count, dist_size_bytes = directory_size(executable.parent)
+    summary["executable"] = {
+        "relative_to_work_dir": sanitize_probe_text(str(executable.relative_to(work)), replacements),
+        "sha256": sha256_file(executable),
+        "size_bytes": executable.stat().st_size,
+        "dist_file_count": dist_file_count,
+        "dist_size_bytes": dist_size_bytes,
+    }
+    summary["smoke"] = {
+        "returncode": smoke.returncode,
+        "stdout_json": stdout_json,
+        "stdout_tail": text_tail(smoke.stdout, replacements),
+        "stderr_tail": text_tail(smoke.stderr, replacements),
+    }
+    if smoke.returncode == 0 and isinstance(stdout_json, dict) and stdout_json.get("status") == "PASS":
+        summary["status"] = "PASS"
+        summary["reason"] = None
+        exit_code = 0
+    else:
+        summary["status"] = "FAIL"
+        summary["reason"] = "PACKAGED_EXE_SMOKE_FAILED"
+        exit_code = 1
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return exit_code
+
+
 def package_toolchain_probe() -> dict[str, Any]:
     module_names = ("PySide6", "blake3", "nuitka")
     modules = {name: importlib.util.find_spec(name) is not None for name in module_names}
@@ -565,6 +776,11 @@ def main(argv: list[str] | None = None) -> int:
     demo.add_argument("--output", required=True)
     runtime = sub.add_parser("minimal-runtime-probe")
     runtime.add_argument("--output", required=True)
+    nuitka = sub.add_parser("nuitka-build-probe")
+    nuitka.add_argument("--output", required=True)
+    nuitka.add_argument("--work-dir")
+    nuitka.add_argument("--python-executable")
+    nuitka.add_argument("--timeout-seconds", type=int, default=600)
     sub.add_parser("echo-argv-json")
     args, rest = parser.parse_known_args(argv)
     if args.command == "echo-argv-json":
@@ -577,6 +793,13 @@ def main(argv: list[str] | None = None) -> int:
         output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(json.dumps(result, sort_keys=True))
         return 0 if result["status"] == "PASS" else 2
+    if args.command == "nuitka-build-probe":
+        return run_nuitka_build_probe(
+            Path(args.output),
+            work_dir=Path(args.work_dir) if args.work_dir else None,
+            python_executable=Path(args.python_executable) if args.python_executable else None,
+            timeout_seconds=args.timeout_seconds,
+        )
     if args.command == "demo":
         return run_demo(Path(args.output))
     raise AssertionError(args.command)

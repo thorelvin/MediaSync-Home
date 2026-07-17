@@ -31,7 +31,7 @@
 | `ADR-025` | Live claims bruker monoton klokke; persistent UTC er diagnostikk | `0B + Milepæl 1` | `PROPOSED` |  | `PENDING` |  |  |
 | `ADR-026` | Eksakte kontrakter ligger i SQL/JSON Schema/YAML og valideres i CI | `0B` | `PROPOSED` |  | `PENDING` |  |  |
 | `ADR-027` | Windows-argumentserialisering og sikker systemprogram-resolusjon | `0A.5` | `EVIDENCE_COMPLETE` | Behold én kanonisk Windows argv-builder og GetSystemDirectoryW-basert Robocopy-resolver; lokal round-trip og flaggvalidering er bevist i 0A.5. | `PENDING` |  |  |
-| `ADR-028` | Reproduserbar Python/PySide6-pakkestrategi for Windows | `0A.5` | `BLOCKED` | Pakkestrategi kan ikke anbefales før en pakket exe, Windows SDK/signering og ren Windows-VM er tilgjengelig og smoke-testet; minimal PySide6/BLAKE3/Nuitka-runtime er bevist lokalt. | `PENDING` |  |  |
+| `ADR-028` | Reproduserbar Python/PySide6-pakkestrategi for Windows | `0A.5` | `BLOCKED` | Pakkestrategi kan ikke anbefales for release før signering/SDK-inventory og ren Windows-VM er tilgjengelig og smoke-testet; minimal PySide6/BLAKE3/Nuitka-runtime og lokal Nuitka standalone exe-smoke er bevist. | `PENDING` |  |  |
 
 ## Statusmodell
 
