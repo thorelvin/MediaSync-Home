@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from mediasync_home.application.job_drafts import StandardBackupJobDraft
+
 
 class BackupSetupStep(str, Enum):
     SOURCE = "source"
@@ -158,6 +160,32 @@ def build_standard_backup_setup_state(
         can_continue=can_continue,
         can_create=can_create,
         review_lines=_review_lines(draft, defaults),
+    )
+
+
+def setup_draft_from_job_draft(draft: StandardBackupJobDraft) -> BackupSetupDraft:
+    return BackupSetupDraft(
+        source_name=draft.source_name,
+        source_path_label=draft.source_path_label,
+        targets=tuple(
+            BackupTargetDraft(
+                name=target.name,
+                path_label=target.path_label,
+                independent_device_id=target.independent_device_id,
+            )
+            for target in draft.targets
+        ),
+    )
+
+
+def build_standard_backup_setup_state_from_job_draft(
+    draft: StandardBackupJobDraft,
+    *,
+    current_step: BackupSetupStep = BackupSetupStep.SOURCE,
+) -> StandardBackupSetupViewState:
+    return build_standard_backup_setup_state(
+        setup_draft_from_job_draft(draft),
+        current_step=current_step,
     )
 
 

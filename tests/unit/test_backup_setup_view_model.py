@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from mediasync_home.application.job_drafts import StandardBackupJobDraft
 from mediasync_home.presentation.view_models.backup_setup import (
     ActivityState,
     AttentionState,
@@ -9,6 +10,7 @@ from mediasync_home.presentation.view_models.backup_setup import (
     FreshnessState,
     build_backup_job_status_state,
     build_standard_backup_setup_state,
+    build_standard_backup_setup_state_from_job_draft,
     target_status,
 )
 
@@ -67,6 +69,24 @@ def test_standard_backup_setup_allows_review_with_one_to_three_targets() -> None
         "C:/Users/Ada/Pictures",
         "3 mål: USB 1, USB 2, NAS",
     )
+
+
+def test_standard_backup_setup_can_render_application_job_draft() -> None:
+    draft = (
+        StandardBackupJobDraft.new("draft-1")
+        .with_source(name="Pictures", path_label="C:/Users/Ada/Pictures")
+        .with_added_target(name="USB 1", path_label="E:/Backup", independent_device_id="disk-a")
+    )
+
+    state = build_standard_backup_setup_state_from_job_draft(
+        draft,
+        current_step=BackupSetupStep.REVIEW,
+    )
+
+    assert state.source_label == "C:/Users/Ada/Pictures"
+    assert state.target_label == "1 mål: USB 1"
+    assert state.can_create is True
+    assert state.review_lines[:2] == ("C:/Users/Ada/Pictures", "1 mål: USB 1")
 
 
 def test_backup_job_status_keeps_activity_attention_and_freshness_separate() -> None:
