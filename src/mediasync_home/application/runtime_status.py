@@ -16,10 +16,13 @@ class RuntimeStatus:
     schema_version: int
     scope: str
 
-    def to_json(self) -> str:
+    def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
         payload["role"] = self.role.value
-        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return payload
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
 
 
 def startup_status(role: ProcessRole) -> RuntimeStatus:
@@ -32,4 +35,3 @@ def startup_status(role: ProcessRole) -> RuntimeStatus:
         schema_version=1,
         scope="0B_NON_MUTATING_LOCAL_PREVIEW",
     )
-
