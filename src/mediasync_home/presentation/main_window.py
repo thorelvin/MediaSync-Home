@@ -19,6 +19,14 @@ from PySide6.QtWidgets import (
 )
 
 from mediasync_home.presentation.theme.icon_registry import IconRegistry
+from mediasync_home.presentation.view_models.backup_setup import (
+    BackupSetupDraft,
+    BackupSetupStepViewState,
+    BackupJobStatusViewState,
+    StandardBackupSetupViewState,
+    build_standard_backup_setup_state,
+    empty_backup_job_status_state,
+)
 from mediasync_home.presentation.view_models.engine_status import (
     EngineStatusProvider,
     EngineStatusViewState,
@@ -38,6 +46,8 @@ class MediaSyncWindow(QMainWindow):
         self._engine_client = engine_client
         self._icons = IconRegistry()
         self._connected = False
+        self._setup_state = build_standard_backup_setup_state(BackupSetupDraft.empty())
+        self._job_status_state = empty_backup_job_status_state()
         self._show_component_gallery = (
             os.environ.get("MEDIASYNC_DEV_COMPONENT_GALLERY") == "1"
             if show_component_gallery is None
@@ -169,9 +179,48 @@ class MediaSyncWindow(QMainWindow):
         heading = QLabel("Dashboard")
         heading.setObjectName("sectionTitle")
         layout.addWidget(heading)
+        layout.addWidget(self._build_backup_setup_panel(self._setup_state))
         layout.addWidget(self._build_engine_panel())
         layout.addStretch(1)
         return workspace
+
+    def _build_backup_setup_panel(self, state: StandardBackupSetupViewState) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("standardBackupPanel")
+        layout = QGridLayout(panel)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setHorizontalSpacing(18)
+        layout.setVerticalSpacing(10)
+
+        title = QLabel("Lag din første backup")
+        title.setObjectName("sectionTitle")
+        subtitle = QLabel("Velg én mappe og opptil tre mål. Sikker standard er valgt.")
+        subtitle.setObjectName("mutedLabel")
+        subtitle.setWordWrap(True)
+        layout.addWidget(title, 0, 0, 1, 3)
+        layout.addWidget(subtitle, 1, 0, 1, 3)
+
+        stepper = QWidget()
+        stepper.setObjectName("backupSetupStepper")
+        stepper_layout = QHBoxLayout(stepper)
+        stepper_layout.setContentsMargins(0, 4, 0, 4)
+        stepper_layout.setSpacing(8)
+        for step in state.steps:
+            stepper_layout.addWidget(_step_label(step))
+        layout.addWidget(stepper, 2, 0, 1, 3)
+
+        _add_text_value(layout, 3, "Kilde", state.source_label)
+        _add_text_value(layout, 4, "Mål", state.target_label)
+        _add_text_value(layout, 5, "Standard", " · ".join(state.defaults.summary()[:3]))
+        _add_text_value(layout, 6, "Bevaring", state.defaults.retention_label)
+
+        primary = QPushButton(state.primary_action_label)
+        primary.setObjectName("createBackupButton")
+        primary.setEnabled(state.can_create)
+        primary.setToolTip("Opprett backup når kilde og minst ett mål er valgt")
+        layout.addWidget(primary, 7, 2)
+        layout.setColumnStretch(1, 1)
+        return panel
 
     def _build_engine_panel(self) -> QFrame:
         panel = QFrame()
@@ -208,10 +257,31 @@ class MediaSyncWindow(QMainWindow):
         empty.setObjectName("activityEmptyLabel")
         layout.addWidget(title)
         layout.addWidget(empty)
+        layout.addSpacing(8)
+        self._add_activity_status(layout, self._job_status_state)
         if self._show_component_gallery:
             layout.addWidget(self._build_component_gallery())
         layout.addStretch(1)
         return activity
+
+    def _add_activity_status(
+        self,
+        layout: QVBoxLayout,
+        state: BackupJobStatusViewState,
+    ) -> None:
+        heading = QLabel(state.title)
+        heading.setObjectName("activityStatusTitle")
+        layout.addWidget(heading)
+        for label, value in (
+            ("Aktivitet", state.activity_label),
+            ("Oppmerksomhet", state.attention_label),
+            ("Ferskhet per mål", "Ikke konfigurert"),
+            ("Neste handling", state.recommended_action),
+        ):
+            row = QLabel(f"{label}: {value}")
+            row.setObjectName("activityDimensionLabel")
+            row.setWordWrap(True)
+            layout.addWidget(row)
 
     def _build_component_gallery(self) -> QFrame:
         gallery = QFrame()
@@ -235,6 +305,21 @@ def _add_key_value(layout: QGridLayout, row: int, label_text: str, value: QLabel
     value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     layout.addWidget(label, row, 0)
     layout.addWidget(value, row, 1, 1, 2)
+
+
+def _add_text_value(layout: QGridLayout, row: int, label_text: str, value_text: str) -> None:
+    value = QLabel(value_text)
+    value.setWordWrap(True)
+    _add_key_value(layout, row, label_text, value)
+
+
+def _step_label(step: BackupSetupStepViewState) -> QLabel:
+    label = QLabel(f"{step.number}. {step.title}")
+    label.setObjectName("setupStepLabel")
+    state = "current" if step.current else "complete" if step.complete else "upcoming"
+    label.setProperty("stepState", state)
+    label.setWordWrap(True)
+    return label
 
 
 def _refresh_style(widget: QWidget) -> None:

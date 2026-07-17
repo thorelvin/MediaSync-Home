@@ -91,10 +91,39 @@ QWidget#workspace {{
 }}
 
 QFrame#engineStatusPanel,
+QFrame#standardBackupPanel,
 QFrame#componentGallery {{
     background: {tokens.panel};
     border: {tokens.border_hairline}px solid {tokens.border};
     border-radius: {tokens.radius_lg}px;
+}}
+
+QLabel#setupStepLabel {{
+    border: {tokens.border_hairline}px solid {tokens.border};
+    border-radius: {tokens.radius_sm}px;
+    padding: {tokens.space_2}px {tokens.space_3}px;
+    color: {tokens.text_muted};
+    background: {tokens.surface_alt};
+}}
+
+QLabel#setupStepLabel[stepState="current"] {{
+    border-color: {tokens.accent};
+    color: {tokens.text};
+    background: {tokens.selection};
+}}
+
+QLabel#setupStepLabel[stepState="complete"] {{
+    border-color: {tokens.success};
+    color: {tokens.success};
+    background: {tokens.success_surface};
+}}
+
+QLabel#activityStatusTitle {{
+    font-weight: 600;
+}}
+
+QLabel#activityDimensionLabel {{
+    color: {tokens.text_muted};
 }}
 
 QFrame#activityBar {{
@@ -110,6 +139,21 @@ QPushButton#refreshEngineButton {{
     border-radius: {tokens.radius_sm}px;
     border: {tokens.border_hairline}px solid {tokens.border};
     background: {tokens.surface_alt};
+}}
+
+QPushButton#createBackupButton {{
+    min-height: 32px;
+    border-radius: {tokens.radius_sm}px;
+    border: {tokens.border_hairline}px solid {tokens.accent};
+    background: {tokens.accent};
+    color: {tokens.accent_text};
+    padding: 0 {tokens.space_4}px;
+}}
+
+QPushButton#createBackupButton:disabled {{
+    border-color: {tokens.border};
+    background: {tokens.surface_alt};
+    color: {tokens.text_muted};
 }}
 
 QPushButton#refreshEngineButton:hover {{

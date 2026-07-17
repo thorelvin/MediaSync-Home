@@ -53,6 +53,9 @@ def test_main_window_displays_engine_status(qapp) -> None:
         nav = window.findChild(QListWidget, "navigationRail")
         chip = window.findChild(QLabel, "engineStatusChip")
         refresh = window.findChild(QPushButton, "refreshEngineButton")
+        setup_panel = window.findChild(QWidget, "standardBackupPanel")
+        setup_steps = window.findChildren(QLabel, "setupStepLabel")
+        create_backup = window.findChild(QPushButton, "createBackupButton")
 
         assert nav is not None
         assert nav.count() == 4
@@ -61,6 +64,17 @@ def test_main_window_displays_engine_status(qapp) -> None:
         assert chip.property("statusKind") == "ready"
         assert refresh is not None
         assert refresh.isEnabled() is False
+        assert setup_panel is not None
+        assert [step.text() for step in setup_steps] == [
+            "1. Hva vil du beskytte?",
+            "2. Hvor vil du ha kopier?",
+            "3. Hvordan skal backupen fungere?",
+            "4. Kontroller og opprett",
+        ]
+        assert setup_steps[0].property("stepState") == "current"
+        assert create_backup is not None
+        assert create_backup.text() == "Fortsett"
+        assert create_backup.isEnabled() is False
     finally:
         window.close()
         window.deleteLater()
