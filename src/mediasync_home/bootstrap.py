@@ -30,7 +30,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None, *, emit: Emit | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    args, role_args = build_parser().parse_known_args(argv)
     role = ProcessRole(args.role)
-    return ROLE_ENTRYPOINTS[role]([], emit=emit)
-
+    return ROLE_ENTRYPOINTS[role](role_args, emit=emit)
