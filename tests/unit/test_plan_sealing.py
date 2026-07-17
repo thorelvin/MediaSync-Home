@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+from dataclasses import replace
+
+import pytest
+
+from mediasync_home.application.plans import (
+    PlanDependency,
+    PlanOperation,
+    PlanOperationType,
+    PlanRiskLevel,
+    PlanSealViolation,
+    TargetPreconditionKind,
+    seal_plan,
+    verify_plan_checksum,
+)
+
+
+def test_seal_plan_creates_deterministic_checksum_and_summary() -> None:
+    operations = (_skip_operation(), _copy_operation())
+    dependencies = (PlanDependency(before_operation_id="op-copy", after_operation_id="op-skip"),)
+
+    plan = seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        operations=operations,
+        dependencies=dependencies,
+    )
+    same = seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        operations=tuple(reversed(operations)),
+        dependencies=dependencies,
+    )
+
+    assert plan.plan_checksum == same.plan_checksum
+    assert len(plan.plan_checksum) == 64
+    assert plan.operation_count == 2
+    assert plan.planned_bytes == 128
+    assert plan.operations[0].operation_id == "op-copy"
+    assert plan.risk_summary["highest"] == "LOW"
+    assert verify_plan_checksum(plan) is True
+
+
+def test_plan_checksum_changes_when_operation_payload_changes() -> None:
+    base = seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        operations=(_copy_operation(),),
+    )
+    changed = seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        operations=(replace(_copy_operation(), target_relative_path="Pictures/Other.jpg"),),
+    )
+
+    assert changed.plan_checksum != base.plan_checksum
+
+
+def test_plan_checksum_covers_seal_metadata() -> None:
+    plan = seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        operations=(_copy_operation(),),
+    )
+
+    assert verify_plan_checksum(replace(plan, planner_version="changed")) is False
+
+
+def test_mutating_plan_operation_requires_target_precondition() -> None:
+    with pytest.raises(
+        PlanSealViolation,
+        match="MUTATING_PLAN_OPERATION_REQUIRES_TARGET_PRECONDITION",
+    ):
+        seal_plan(
+            plan_id="plan-a",
+            analysis_id="analysis-a",
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            operations=(
+                replace(
+                    _copy_operation(),
+                    target_precondition_kind=TargetPreconditionKind.NONE,
+                ),
+            ),
+        )
+
+
+def test_plan_operation_target_path_must_be_relative() -> None:
+    with pytest.raises(PlanSealViolation, match="PLAN_OPERATION_TARGET_PATH_MUST_BE_RELATIVE"):
+        seal_plan(
+            plan_id="plan-a",
+            analysis_id="analysis-a",
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            operations=(replace(_copy_operation(), target_relative_path="C:/Pictures/A.jpg"),),
+        )
+
+
+def test_plan_dependencies_must_reference_existing_operations() -> None:
+    with pytest.raises(PlanSealViolation, match="PLAN_DEPENDENCY_REQUIRES_EXISTING_OPERATIONS"):
+        seal_plan(
+            plan_id="plan-a",
+            analysis_id="analysis-a",
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            operations=(_copy_operation(),),
+            dependencies=(PlanDependency(before_operation_id="op-copy", after_operation_id="missing"),),
+        )
+
+
+def test_plan_dependencies_must_be_acyclic() -> None:
+    with pytest.raises(PlanSealViolation, match="PLAN_DEPENDENCIES_MUST_BE_ACYCLIC"):
+        seal_plan(
+            plan_id="plan-a",
+            analysis_id="analysis-a",
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            operations=(_copy_operation(), _skip_operation()),
+            dependencies=(
+                PlanDependency(before_operation_id="op-copy", after_operation_id="op-skip"),
+                PlanDependency(before_operation_id="op-skip", after_operation_id="op-copy"),
+            ),
+        )
+
+
+def _copy_operation() -> PlanOperation:
+    return PlanOperation(
+        operation_id="op-copy",
+        operation_type=PlanOperationType.COPY_NEW,
+        sequence_no=10,
+        execution_phase=20,
+        stable_order_key="020:Pictures/A.jpg",
+        target_precondition_kind=TargetPreconditionKind.ABSENT,
+        target_relative_path="Pictures/A.jpg",
+        planned_bytes=128,
+        reason_code="COPY_NEW",
+        risk_level=PlanRiskLevel.LOW,
+    )
+
+
+def _skip_operation() -> PlanOperation:
+    return PlanOperation(
+        operation_id="op-skip",
+        operation_type=PlanOperationType.SKIP_IDENTICAL,
+        sequence_no=20,
+        execution_phase=70,
+        stable_order_key="070:Pictures/B.jpg",
+        target_precondition_kind=TargetPreconditionKind.NONE,
+        target_relative_path="Pictures/B.jpg",
+        reason_code="SKIP_IDENTICAL",
+        risk_level=PlanRiskLevel.LOW,
+    )

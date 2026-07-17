@@ -47,6 +47,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_command_receipts",
                 statements=CATALOG_COMMAND_RECEIPTS,
             ),
+            SqliteMigration(
+                version=5,
+                name="catalog_sealed_plan_details",
+                statements=CATALOG_SEALED_PLAN_DETAILS,
+            ),
         ),
     )
 
@@ -423,6 +428,158 @@ CATALOG_COMMAND_RECEIPTS = (
     """
     CREATE INDEX idx_command_receipts_state
         ON command_receipts (state)
+    """,
+)
+
+CATALOG_SEALED_PLAN_DETAILS = (
+    """
+    CREATE TABLE plan_seal_details (
+        plan_id TEXT PRIMARY KEY,
+        analysis_id TEXT NOT NULL,
+        job_id TEXT NOT NULL,
+        job_revision_id TEXT NOT NULL,
+        parent_plan_id TEXT,
+        planner_version TEXT NOT NULL,
+        plan_schema_version INTEGER NOT NULL,
+        operation_schema_version INTEGER NOT NULL,
+        execution_policy TEXT NOT NULL,
+        checksum_algorithm TEXT NOT NULL,
+        serializer_version TEXT NOT NULL,
+        plan_checksum TEXT NOT NULL CHECK (length(plan_checksum) = 64),
+        risk_summary_json TEXT NOT NULL,
+        operation_count INTEGER NOT NULL CHECK (operation_count > 0),
+        planned_bytes INTEGER NOT NULL CHECK (planned_bytes >= 0),
+        immutable INTEGER NOT NULL DEFAULT 1 CHECK (immutable = 1),
+        sealed_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        UNIQUE (plan_id, analysis_id),
+        UNIQUE (plan_id, job_id, job_revision_id),
+        FOREIGN KEY (plan_id) REFERENCES plans (id) ON DELETE RESTRICT,
+        FOREIGN KEY (parent_plan_id) REFERENCES plans (id) ON DELETE RESTRICT,
+        FOREIGN KEY (job_id, job_revision_id)
+            REFERENCES job_revisions (job_id, id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TABLE plan_operation_seal_details (
+        plan_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        sequence_no INTEGER NOT NULL CHECK (sequence_no >= 0),
+        execution_phase INTEGER NOT NULL CHECK (execution_phase >= 0),
+        stable_order_key TEXT NOT NULL,
+        target_precondition_kind TEXT NOT NULL CHECK (
+            target_precondition_kind IN ('ABSENT', 'MATCH_FINGERPRINT', 'DIRECTORY_EMPTY', 'NONE')
+        ),
+        reason_code TEXT NOT NULL,
+        risk_level TEXT NOT NULL CHECK (risk_level IN ('LOW', 'MEDIUM', 'HIGH', 'BLOCKED')),
+        target_relative_path TEXT,
+        planned_bytes INTEGER NOT NULL DEFAULT 0 CHECK (planned_bytes >= 0),
+        PRIMARY KEY (plan_id, operation_id),
+        UNIQUE (plan_id, sequence_no),
+        FOREIGN KEY (plan_id, operation_id)
+            REFERENCES planned_operations (plan_id, id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TRIGGER trg_plans_no_update_after_seal
+    BEFORE UPDATE ON plans
+    WHEN EXISTS (SELECT 1 FROM plan_seal_details WHERE plan_id = OLD.id)
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_plans_no_delete_after_seal
+    BEFORE DELETE ON plans
+    WHEN EXISTS (SELECT 1 FROM plan_seal_details WHERE plan_id = OLD.id)
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_planned_operations_no_insert_after_seal
+    BEFORE INSERT ON planned_operations
+    WHEN EXISTS (SELECT 1 FROM plan_seal_details WHERE plan_id = NEW.plan_id)
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_planned_operations_no_update_after_seal
+    BEFORE UPDATE ON planned_operations
+    WHEN EXISTS (SELECT 1 FROM plan_seal_details WHERE plan_id = OLD.plan_id)
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_planned_operations_no_delete_after_seal
+    BEFORE DELETE ON planned_operations
+    WHEN EXISTS (SELECT 1 FROM plan_seal_details WHERE plan_id = OLD.plan_id)
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_operation_dependencies_no_insert_after_seal
+    BEFORE INSERT ON operation_dependencies
+    WHEN EXISTS (SELECT 1 FROM plan_seal_details WHERE plan_id = NEW.plan_id)
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_operation_dependencies_no_update_after_seal
+    BEFORE UPDATE ON operation_dependencies
+    WHEN EXISTS (SELECT 1 FROM plan_seal_details WHERE plan_id = OLD.plan_id)
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_operation_dependencies_no_delete_after_seal
+    BEFORE DELETE ON operation_dependencies
+    WHEN EXISTS (SELECT 1 FROM plan_seal_details WHERE plan_id = OLD.plan_id)
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_plan_seal_details_no_update
+    BEFORE UPDATE ON plan_seal_details
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_plan_seal_details_no_delete
+    BEFORE DELETE ON plan_seal_details
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_plan_operation_seal_details_no_insert
+    BEFORE INSERT ON plan_operation_seal_details
+    WHEN EXISTS (SELECT 1 FROM plan_seal_details WHERE plan_id = NEW.plan_id)
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_plan_operation_seal_details_no_update
+    BEFORE UPDATE ON plan_operation_seal_details
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_plan_operation_seal_details_no_delete
+    BEFORE DELETE ON plan_operation_seal_details
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
     """,
 )
 

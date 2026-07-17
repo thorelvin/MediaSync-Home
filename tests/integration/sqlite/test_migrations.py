@@ -28,7 +28,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 4
+        assert current_schema_version(connection, plan.store) == 5
         assert _table_names(connection) >= {
             "endpoint_heads",
             "job_heads",
@@ -38,10 +38,12 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "standard_backup_job_drafts",
             "standard_backup_job_revision_details",
             "command_receipts",
+            "plan_seal_details",
+            "plan_operation_seal_details",
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 4
+        assert _row_count(connection, "schema_migrations") == 5
         assert _foreign_key(
             connection,
             "endpoint_heads",
@@ -72,6 +74,12 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         )
         assert _index_is_unique(connection, "file_entries", ("snapshot_id", "comparison_key")) is False
         assert _index_is_unique(connection, "command_receipts", ("state",)) is False
+        assert _trigger_names(connection) >= {
+            "trg_plans_no_update_after_seal",
+            "trg_planned_operations_no_insert_after_seal",
+            "trg_plan_operation_seal_details_no_insert",
+            "trg_plan_seal_details_no_update",
+        }
 
 
 def test_catalog_migration_preserves_case_collision_entries(tmp_path: Path) -> None:
@@ -263,3 +271,15 @@ def _index_is_unique(
         if index_columns == columns:
             return bool(index_row[2])
     return None
+
+
+def _trigger_names(connection: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT name FROM sqlite_master
+                WHERE type = 'trigger' AND name NOT LIKE 'sqlite_%'
+            """
+        )
+    }
