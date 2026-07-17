@@ -1,11 +1,20 @@
 from __future__ import annotations
 
-from mediasync_home.ipc.client import InProcessIpcClient
+from typing import Protocol
+
 from mediasync_home.ipc.protocol import IpcResponse
 
 
+class StatusIpcClient(Protocol):
+    def connect(self) -> IpcResponse:
+        pass
+
+    def query_status(self) -> IpcResponse:
+        pass
+
+
 class EngineClient:
-    def __init__(self, ipc_client: InProcessIpcClient) -> None:
+    def __init__(self, ipc_client: StatusIpcClient) -> None:
         self._ipc_client = ipc_client
 
     def connect(self) -> IpcResponse:
