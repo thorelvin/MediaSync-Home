@@ -115,7 +115,7 @@ Når `src/`, mypy og import-linter er konfigurert, utvides minimum med:
 
 ```powershell
 python -m mypy src
-python -m importlinter
+python tools\check_imports.py
 ```
 
 En manglende eller ikke-kjørbar kontroll registreres som manglende; den omtales aldri som bestått.

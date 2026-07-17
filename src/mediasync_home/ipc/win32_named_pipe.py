@@ -180,6 +180,8 @@ def _sid_to_string(sid: LPVOID) -> str:
     if not advapi32.ConvertSidToStringSidW(sid, ctypes.byref(output)):
         _raise_last_error("ConvertSidToStringSidW")
     try:
+        if output.value is None:
+            raise Win32PipeError(0, "ConvertSidToStringSidW returned no SID")
         return output.value
     finally:
         kernel32.LocalFree(output)

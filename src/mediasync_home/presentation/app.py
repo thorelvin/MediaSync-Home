@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import cast
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
@@ -18,7 +19,7 @@ from mediasync_home.presentation.view_models.engine_status import (
 def ensure_qapplication(argv: Sequence[str] | None = None) -> QApplication:
     existing = QApplication.instance()
     if existing is not None:
-        return existing
+        return cast(QApplication, existing)
 
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough

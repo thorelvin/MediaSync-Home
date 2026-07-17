@@ -115,6 +115,14 @@ python tools/build_adr_docs.py --check
 python tools/build_master.py --check
 ```
 
+0B-utviklingskontrollene bruker de ekstra verktøyene i `requirements-dev.txt`:
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m mypy src
+python tools/check_imports.py
+```
+
 ## Repositoryet i korte trekk
 
 ```text

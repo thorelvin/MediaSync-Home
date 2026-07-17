@@ -1,0 +1,7 @@
+-r requirements-handoff.txt
+
+import-linter==2.13
+mypy==2.3.0
+PySide6==6.11.1
+pytest==9.1.1
+ruff==0.14.6

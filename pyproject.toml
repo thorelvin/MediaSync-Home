@@ -2,3 +2,65 @@
 pythonpath = ["src", "."]
 testpaths = ["tests"]
 
+[tool.mypy]
+python_version = "3.10"
+files = ["src"]
+mypy_path = "src"
+strict = true
+show_error_codes = true
+warn_unused_configs = true
+
+[tool.importlinter]
+root_packages = ["mediasync_home"]
+exclude_type_checking_imports = true
+
+[[tool.importlinter.contracts]]
+id = "mediasync-layer-direction"
+name = "MediaSync package layers flow downward"
+type = "layers"
+containers = ["mediasync_home"]
+layers = [
+    "processes",
+    "composition",
+    "presentation",
+    "ipc",
+    "adapters",
+    "application",
+    "domain",
+]
+
+[[tool.importlinter.contracts]]
+id = "domain-is-pure"
+name = "Domain cannot import outer layers"
+type = "forbidden"
+source_modules = ["mediasync_home.domain"]
+forbidden_modules = [
+    "mediasync_home.adapters",
+    "mediasync_home.application",
+    "mediasync_home.composition",
+    "mediasync_home.ipc",
+    "mediasync_home.presentation",
+    "mediasync_home.processes",
+]
+
+[[tool.importlinter.contracts]]
+id = "application-stays-inside-ports"
+name = "Application cannot import presentation or concrete adapters"
+type = "forbidden"
+source_modules = ["mediasync_home.application"]
+forbidden_modules = [
+    "mediasync_home.adapters",
+    "mediasync_home.composition",
+    "mediasync_home.presentation",
+    "mediasync_home.processes",
+]
+
+[[tool.importlinter.contracts]]
+id = "presentation-has-no-concrete-adapters"
+name = "Presentation cannot import concrete adapters or processes"
+type = "forbidden"
+source_modules = ["mediasync_home.presentation"]
+forbidden_modules = [
+    "mediasync_home.adapters",
+    "mediasync_home.processes",
+]
