@@ -18,9 +18,10 @@ REQUIRED_COMMANDS = {
     "python tools\\build_master.py --check",
     "python -m pytest -q",
     "python -m ruff check .",
-    "python -m mypy src",
+    "python -m mypy src tools\\audit_dependencies.py tools\\audit_vulnerabilities.py",
     "python tools\\check_imports.py",
     "python tools\\audit_dependencies.py",
+    "python tools\\audit_vulnerabilities.py",
 }
 
 
