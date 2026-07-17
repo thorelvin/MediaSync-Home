@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+import os
+import threading
+from collections.abc import Callable
+from uuid import uuid4
+
+import pytest
+
+from mediasync_home.domain.process_roles import ProcessRole
+from mediasync_home.ipc.protocol import PROTOCOL_VERSION, SCHEMA_VERSION, IpcReason, IpcStatus
+from mediasync_home.ipc.server import EngineHostIpcService
+
+
+pytestmark = pytest.mark.skipif(os.name != "nt", reason="Win32 named-pipe adapter is Windows-only")
+
+
+if os.name == "nt":
+    from mediasync_home.ipc import win32_named_pipe
+
+
+def _server_and_client(role: ProcessRole = ProcessRole.GUI):
+    service = EngineHostIpcService(win32_named_pipe.current_user_policy())
+    pipe_name = win32_named_pipe.make_pipe_name(
+        installation_id="integration-test",
+        suffix=uuid4().hex,
+    )
+    server = win32_named_pipe.Win32NamedPipeServer(pipe_name=pipe_name, service=service)
+    client = win32_named_pipe.Win32NamedPipeClient(pipe_name=pipe_name, role=role)
+    return server, client
+
+
+def _roundtrip(server: object, action: Callable[[], object]) -> object:
+    errors: list[BaseException] = []
+
+    def serve() -> None:
+        try:
+            server.serve_once()  # type: ignore[attr-defined]
+        except BaseException as exc:  # pragma: no cover - re-raised in test thread
+            errors.append(exc)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    response = action()
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "named-pipe server did not finish one request"
+    if errors:
+        raise errors[0]
+    return response
+
+
+def test_named_pipe_handshake_uses_impersonated_client_identity_not_payload_claim() -> None:
+    server, client = _server_and_client()
+    expected_identity = win32_named_pipe.current_process_identity()
+
+    response = _roundtrip(
+        server,
+        lambda: client.connect(claimed_user_sid_hash="payload-identity-must-not-authorize"),
+    )
+
+    assert response.status is IpcStatus.ACCEPTED
+    assert response.reason is None
+    assert response.payload["verified_user_sid_hash"] == expected_identity.user_sid_hash
+    assert response.payload["host_status"]["mutations_enabled"] is False
+
+
+def test_named_pipe_status_query_requires_successful_handshake() -> None:
+    server, client = _server_and_client()
+
+    response = _roundtrip(server, client.query_status)
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.HANDSHAKE_REQUIRED
+
+
+def test_named_pipe_status_query_succeeds_after_handshake() -> None:
+    server, client = _server_and_client()
+
+    handshake = _roundtrip(server, client.connect)
+    status = _roundtrip(server, client.query_status)
+
+    assert handshake.status is IpcStatus.ACCEPTED
+    assert status.status is IpcStatus.ACCEPTED
+    assert status.payload["host_status"]["role"] == ProcessRole.ENGINE_HOST.value
+
+
+@pytest.mark.parametrize(
+    ("protocol_version", "schema_version", "reason"),
+    [
+        (PROTOCOL_VERSION + 1, SCHEMA_VERSION, IpcReason.PROTOCOL_MISMATCH),
+        (PROTOCOL_VERSION, SCHEMA_VERSION + 1, IpcReason.SCHEMA_MISMATCH),
+    ],
+)
+def test_named_pipe_version_mismatch_is_rejected(
+    protocol_version: int,
+    schema_version: int,
+    reason: IpcReason,
+) -> None:
+    server, client = _server_and_client()
+
+    response = _roundtrip(
+        server,
+        lambda: client.connect(
+            protocol_version=protocol_version,
+            schema_version=schema_version,
+        ),
+    )
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is reason
+
+
+def test_named_pipe_engine_host_role_is_not_allowed_as_client() -> None:
+    server, client = _server_and_client(role=ProcessRole.ENGINE_HOST)
+
+    response = _roundtrip(server, client.connect)
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.ROLE_NOT_ALLOWED
+
+
+def test_named_pipe_mutating_commands_are_disabled_after_handshake() -> None:
+    server, client = _server_and_client()
+
+    handshake = _roundtrip(server, client.connect)
+    command = _roundtrip(server, lambda: client.submit_command("START_RUN"))
+
+    assert handshake.status is IpcStatus.ACCEPTED
+    assert command.status is IpcStatus.REJECTED
+    assert command.reason is IpcReason.MUTATING_COMMANDS_DISABLED
+
+
+def test_named_pipe_creation_uses_remote_client_rejection_flag() -> None:
+    assert win32_named_pipe.PIPE_MODE & win32_named_pipe.PIPE_REJECT_REMOTE_CLIENTS
