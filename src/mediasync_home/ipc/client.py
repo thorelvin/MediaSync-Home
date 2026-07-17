@@ -5,7 +5,14 @@ from uuid import uuid4
 
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client_identity import VerifiedClientIdentity
-from mediasync_home.ipc.protocol import PROTOCOL_VERSION, SCHEMA_VERSION, HandshakeRequest, IpcResponse
+from mediasync_home.ipc.protocol import (
+    PROTOCOL_VERSION,
+    SCHEMA_VERSION,
+    HandshakeRequest,
+    IpcCommandEnvelope,
+    IpcProtocolError,
+    IpcResponse,
+)
 from mediasync_home.ipc.server import EngineHostIpcService
 
 
@@ -37,5 +44,26 @@ class InProcessIpcClient:
     def query_status(self) -> IpcResponse:
         return self.service.query_status(self.client_instance_id)
 
-    def submit_command(self, command_name: str) -> IpcResponse:
-        return self.service.submit_command(self.client_instance_id, command_name)
+    def submit_command(
+        self,
+        command_name: str,
+        *,
+        payload: dict[str, object] | None = None,
+        payload_hash: str | None = None,
+    ) -> IpcResponse:
+        command_payload = payload or {}
+        if payload_hash is None:
+            if command_payload:
+                raise IpcProtocolError("payload_hash is required for non-empty command payloads")
+            payload_hash = "6e46dd10defc9b56c29a6ec56b508c21f54c08192194e4df25bf36f0c9c3c279"
+        envelope = IpcCommandEnvelope(
+            protocol_version=PROTOCOL_VERSION,
+            schema_version=SCHEMA_VERSION,
+            request_id=str(uuid4()),
+            client_instance_id=self.client_instance_id,
+            idempotency_key=str(uuid4()),
+            command_name=command_name,
+            payload=command_payload,
+            payload_hash=payload_hash,
+        )
+        return self.service.submit_command_envelope(envelope.to_dict())

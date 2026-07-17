@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from mediasync_home.application.job_creation import JobCreationCommandName
+from mediasync_home.application.job_drafts import JobDraftStore, StandardBackupJobDraft
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
@@ -9,6 +11,7 @@ from mediasync_home.ipc.protocol import (
     MAX_FRAME_BYTES,
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
+    IpcCommandEnvelope,
     IpcProtocolError,
     IpcReason,
     IpcStatus,
@@ -46,13 +49,25 @@ def _service() -> EngineHostIpcService:
     )
 
 
+class _InMemoryJobDraftStore(JobDraftStore):
+    def __init__(self) -> None:
+        self._drafts: dict[str, StandardBackupJobDraft] = {}
+
+    def save_standard_backup_draft(self, draft: StandardBackupJobDraft) -> None:
+        self._drafts[draft.draft_id] = draft
+
+    def load_standard_backup_draft(self, draft_id: str) -> StandardBackupJobDraft | None:
+        return self._drafts.get(draft_id)
+
+
 def _client(
     *,
     role: ProcessRole = ProcessRole.GUI,
     identity: VerifiedClientIdentity | None = None,
+    service: EngineHostIpcService | None = None,
 ) -> InProcessIpcClient:
     return InProcessIpcClient(
-        service=_service(),
+        service=service or _service(),
         identity=identity or _identity(),
         role=role,
     )
@@ -134,6 +149,50 @@ def test_mutating_commands_are_disabled_in_0b_ipc_slice() -> None:
 
     assert response.status is IpcStatus.REJECTED
     assert response.reason is IpcReason.MUTATING_COMMANDS_DISABLED
+    assert response.payload["recognized"] is False
+
+
+def test_create_standard_backup_job_command_is_recognized_but_rejected_in_0b() -> None:
+    store = _InMemoryJobDraftStore()
+    draft = (
+        StandardBackupJobDraft.new("draft-a")
+        .with_source(name="Pictures", path_label="C:/Users/Ada/Pictures")
+        .with_added_target(name="USB 1", path_label="E:/Backup")
+    )
+    store.save_standard_backup_draft(draft)
+    service = _service()
+    service.job_draft_store = store
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        payload={"draft_id": "draft-a"},
+        payload_hash="98cdbb1f712331be51355f90ab8c193c5c6f681d33d5c052cd38fe94820f3d02",
+    )
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.MUTATING_COMMANDS_DISABLED
+    assert response.payload["recognized"] is True
+    assert response.payload["mutations_enabled"] is False
+    assert response.payload["readiness"] == {
+        "draft_id": "draft-a",
+        "draft_found": True,
+        "draft_valid": True,
+        "validation_codes": [],
+        "next_action": "Backup job creation is recognized but disabled in the 0B local preview.",
+    }
+
+
+def test_client_requires_payload_hash_for_non_empty_command_payload() -> None:
+    ipc_client = _client()
+    ipc_client.connect()
+
+    with pytest.raises(IpcProtocolError, match="payload_hash is required"):
+        ipc_client.submit_command(
+            JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+            payload={"draft_id": "draft-a"},
+        )
 
 
 def test_query_requires_prior_handshake() -> None:
@@ -141,6 +200,28 @@ def test_query_requires_prior_handshake() -> None:
 
     assert response.status is IpcStatus.REJECTED
     assert response.reason is IpcReason.HANDSHAKE_REQUIRED
+
+
+def test_command_envelope_requires_versioned_hash_metadata() -> None:
+    command = IpcCommandEnvelope.from_dict(
+        {
+            "protocol_version": PROTOCOL_VERSION,
+            "schema_version": SCHEMA_VERSION,
+            "message_type": "COMMAND",
+            "request_id": "44444444-4444-4444-8444-444444444444",
+            "client_instance_id": "55555555-5555-4555-8555-555555555555",
+            "idempotency_key": "66666666-6666-4666-8666-666666666666",
+            "command_name": JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+            "payload": {"draft_id": "draft-a"},
+            "payload_hash_scope": "PAYLOAD_ONLY",
+            "payload_canonicalization_algorithm": "JCS-RFC8785",
+            "payload_hash_algorithm": "BLAKE3-256",
+            "payload_hash": "98cdbb1f712331be51355f90ab8c193c5c6f681d33d5c052cd38fe94820f3d02",
+        }
+    )
+
+    assert command.command_name == JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value
+    assert command.payload == {"draft_id": "draft-a"}
 
 
 def test_frame_codec_enforces_json_object_and_size_limit() -> None:

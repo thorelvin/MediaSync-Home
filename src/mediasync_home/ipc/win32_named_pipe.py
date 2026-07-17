@@ -16,6 +16,7 @@ from mediasync_home.ipc.protocol import (
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
     HandshakeRequest,
+    IpcCommandEnvelope,
     IpcProtocolError,
     IpcReason,
     IpcResponse,
@@ -394,10 +395,7 @@ class Win32NamedPipeServer:
         if message_type == "QUERY_STATUS":
             return self.service.query_status(str(request["client_instance_id"]))
         if message_type == "COMMAND":
-            return self.service.submit_command(
-                str(request["client_instance_id"]),
-                str(request.get("command_name", "")),
-            )
+            return self.service.submit_command_envelope(request)
         return IpcResponse.rejected(IpcReason.INVALID_FRAME)
 
 
@@ -435,14 +433,29 @@ class Win32NamedPipeClient:
             }
         )
 
-    def submit_command(self, command_name: str) -> IpcResponse:
-        return self._roundtrip(
-            {
-                "message_type": "COMMAND",
-                "client_instance_id": self.client_instance_id,
-                "command_name": command_name,
-            }
+    def submit_command(
+        self,
+        command_name: str,
+        *,
+        payload: dict[str, object] | None = None,
+        payload_hash: str | None = None,
+    ) -> IpcResponse:
+        command_payload = payload or {}
+        if payload_hash is None:
+            if command_payload:
+                raise IpcProtocolError("payload_hash is required for non-empty command payloads")
+            payload_hash = "6e46dd10defc9b56c29a6ec56b508c21f54c08192194e4df25bf36f0c9c3c279"
+        envelope = IpcCommandEnvelope(
+            protocol_version=PROTOCOL_VERSION,
+            schema_version=SCHEMA_VERSION,
+            request_id=str(uuid4()),
+            client_instance_id=self.client_instance_id,
+            idempotency_key=str(uuid4()),
+            command_name=command_name,
+            payload=command_payload,
+            payload_hash=payload_hash,
         )
+        return self._roundtrip(envelope.to_dict())
 
     def _roundtrip(self, request: dict[str, Any]) -> IpcResponse:
         handle = self._open()

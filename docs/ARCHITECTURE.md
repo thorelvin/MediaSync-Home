@@ -696,15 +696,15 @@ Kommandoenvelope:
   "request_id": "44444444-4444-4444-8444-444444444444",
   "client_instance_id": "55555555-5555-4555-8555-555555555555",
   "idempotency_key": "66666666-6666-4666-8666-666666666666",
-  "command_name": "START_RUN",
+  "command_name": "CREATE_STANDARD_BACKUP_JOB",
   "payload": {
-    "plan_id": "77777777-7777-4777-8777-777777777777"
+    "draft_id": "77777777-7777-4777-8777-777777777777"
   },
   "expected_entity_revision": 12,
   "payload_hash_scope": "PAYLOAD_ONLY",
   "payload_canonicalization_algorithm": "JCS-RFC8785",
   "payload_hash_algorithm": "BLAKE3-256",
-  "payload_hash": "66b16c693f8682966636065d1031c8cc6b2e602bed6ec2e60b2fe1538a196dc3"
+  "payload_hash": "7ab0d31208e5192e43abd8656d2034fa057d43b61e0966e97f764521f33e490c"
 }
 ```
 
