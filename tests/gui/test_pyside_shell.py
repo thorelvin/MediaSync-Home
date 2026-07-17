@@ -70,9 +70,17 @@ def test_main_window_displays_engine_status(qapp) -> None:
         assert not language.icon().isNull()
         assert language.toolTip() == "Language: Norsk"
         assert language.menu() is not None
+        action_bar = window.findChild(QWidget, "actionBar")
+        assert action_bar is not None
+        assert action_bar.layout() is not None
+        assert action_bar.layout().itemAt(action_bar.layout().count() - 1).widget() is language
         assert [action.text() for action in language.menu().actions()] == [
             "Norsk",
             "English",
+        ]
+        assert [action.isChecked() for action in language.menu().actions()] == [
+            True,
+            False,
         ]
         assert all(not action.icon().isNull() for action in language.menu().actions())
         assert setup_panel is not None
@@ -104,6 +112,10 @@ def test_language_selector_updates_selected_flag(qapp) -> None:
         assert language.text() == ""
         assert not language.icon().isNull()
         assert language.toolTip() == "Language: English"
+        assert [action.isChecked() for action in language.menu().actions()] == [
+            False,
+            True,
+        ]
     finally:
         window.close()
         window.deleteLater()

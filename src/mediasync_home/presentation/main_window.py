@@ -56,6 +56,7 @@ class MediaSyncWindow(QMainWindow):
             ("en", "English"),
         )
         self._selected_language_code = "nb"
+        self._language_actions: dict[str, QAction] = {}
         self._show_component_gallery = (
             os.environ.get("MEDIASYNC_DEV_COMPONENT_GALLERY") == "1"
             if show_component_gallery is None
@@ -157,9 +158,9 @@ class MediaSyncWindow(QMainWindow):
 
         layout.addLayout(title_group)
         layout.addSpacerItem(QSpacerItem(20, 20, QSizePolicy.Policy.Expanding))
-        layout.addWidget(self._language_button)
         layout.addWidget(self._engine_chip)
         layout.addWidget(self._refresh_button)
+        layout.addWidget(self._language_button)
         return bar
 
     def _build_body(self) -> QWidget:
@@ -322,10 +323,13 @@ class MediaSyncWindow(QMainWindow):
         for code, label in self._language_options:
             action = QAction(_flag_icon(code), label, self)
             action.setObjectName(f"languageAction_{code}")
+            action.setCheckable(True)
+            action.setChecked(code == self._selected_language_code)
             action.triggered.connect(
                 lambda checked=False, language_code=code: self._select_language(language_code)
             )
             menu.addAction(action)
+            self._language_actions[code] = action
         return menu
 
     def _select_language(self, language_code: str) -> None:
@@ -341,6 +345,8 @@ class MediaSyncWindow(QMainWindow):
                 self._language_button.setText("")
                 self._language_button.setToolTip(f"Language: {label}")
                 self._language_button.setAccessibleName(f"Language: {label}")
+                for action_code, action in self._language_actions.items():
+                    action.setChecked(action_code == code)
                 return
 
 

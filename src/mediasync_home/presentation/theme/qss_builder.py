@@ -152,6 +152,11 @@ QToolButton#languageSelectorButton {{
     padding: 0;
 }}
 
+QToolButton#languageSelectorButton::menu-indicator {{
+    image: none;
+    width: 0px;
+}}
+
 QToolButton#languageSelectorButton:hover {{
     border-color: {tokens.accent};
 }}
