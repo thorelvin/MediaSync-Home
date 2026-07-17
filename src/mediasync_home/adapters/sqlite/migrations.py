@@ -62,6 +62,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_plan_endpoint_bindings",
                 statements=CATALOG_PLAN_ENDPOINT_BINDINGS,
             ),
+            SqliteMigration(
+                version=8,
+                name="catalog_transactional_outbox_skeleton",
+                statements=CATALOG_TRANSACTIONAL_OUTBOX_SKELETON,
+            ),
         ),
     )
 
@@ -779,6 +784,72 @@ CATALOG_PLAN_ENDPOINT_BINDINGS = (
     BEGIN
         SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
     END
+    """,
+)
+
+CATALOG_TRANSACTIONAL_OUTBOX_SKELETON = (
+    """
+    CREATE TABLE outbox_messages (
+        id TEXT PRIMARY KEY,
+        message_type TEXT NOT NULL,
+        aggregate_type TEXT NOT NULL,
+        aggregate_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        payload_json TEXT NOT NULL,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        state TEXT NOT NULL CHECK (state IN ('PENDING', 'CLAIMED', 'DELIVERED', 'DEAD_LETTER')),
+        available_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        next_attempt_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        claim_owner_instance_id TEXT,
+        claim_generation INTEGER NOT NULL DEFAULT 0 CHECK (claim_generation >= 0),
+        claim_token TEXT,
+        claim_started_utc TEXT,
+        claim_ttl_ms INTEGER CHECK (claim_ttl_ms IS NULL OR claim_ttl_ms > 0),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        last_attempt_utc TEXT,
+        delivered_utc TEXT,
+        terminal_effect_hash TEXT CHECK (
+            terminal_effect_hash IS NULL OR length(terminal_effect_hash) = 64
+        ),
+        last_error_code TEXT,
+        created_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+        CHECK (
+            state <> 'CLAIMED'
+            OR (
+                claim_owner_instance_id IS NOT NULL
+                AND claim_token IS NOT NULL
+                AND claim_started_utc IS NOT NULL
+            )
+        ),
+        CHECK (
+            state <> 'DELIVERED'
+            OR (
+                delivered_utc IS NOT NULL
+                AND terminal_effect_hash IS NOT NULL
+            )
+        )
+    )
+    """,
+    """
+    CREATE INDEX idx_outbox_messages_state_next_attempt
+        ON outbox_messages (state, next_attempt_utc)
+    """,
+    """
+    CREATE TABLE effect_dedup_tombstones (
+        deduplication_key TEXT PRIMARY KEY,
+        effect_kind TEXT NOT NULL CHECK (effect_kind IN ('outbox', 'trigger')),
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        terminal_state TEXT NOT NULL,
+        effect_entity_type TEXT,
+        effect_entity_id TEXT,
+        terminal_effect_hash TEXT CHECK (
+            terminal_effect_hash IS NULL OR length(terminal_effect_hash) = 64
+        ),
+        first_seen_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        compacted_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )
     """,
 )
 

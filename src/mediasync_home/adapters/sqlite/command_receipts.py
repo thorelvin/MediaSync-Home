@@ -22,6 +22,7 @@ class SqliteCommandReceiptStore(CommandReceiptStore):
         existing = self.load_command_receipt(receipt.idempotency_key)
         if existing is not None:
             return ensure_idempotency_compatible(existing, receipt)
+        outer_transaction = self._connection.in_transaction
         try:
             self._connection.execute(
                 """
@@ -47,8 +48,11 @@ class SqliteCommandReceiptStore(CommandReceiptStore):
                 """,
                 _receipt_parameters(receipt),
             )
-            self._connection.commit()
+            if not outer_transaction:
+                self._connection.commit()
         except sqlite3.Error as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
             raise SqliteCommandReceiptStoreError("COMMAND_RECEIPT_RECORD_FAILED") from exc
         return receipt
 
@@ -99,6 +103,7 @@ class SqliteCommandReceiptStore(CommandReceiptStore):
         )
 
     def update_command_receipt(self, receipt: CommandReceipt) -> None:
+        outer_transaction = self._connection.in_transaction
         try:
             cursor = self._connection.execute(
                 """
@@ -143,8 +148,15 @@ class SqliteCommandReceiptStore(CommandReceiptStore):
             )
             if cursor.rowcount != 1:
                 raise SqliteCommandReceiptStoreError("COMMAND_RECEIPT_NOT_FOUND")
-            self._connection.commit()
+            if not outer_transaction:
+                self._connection.commit()
+        except SqliteCommandReceiptStoreError:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
         except sqlite3.Error as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
             raise SqliteCommandReceiptStoreError("COMMAND_RECEIPT_UPDATE_FAILED") from exc
 
 

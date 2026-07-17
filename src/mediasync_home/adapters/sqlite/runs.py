@@ -23,8 +23,10 @@ class SqliteRunStore(RunStore):
         self._connection = connection
 
     def save_started_run(self, run: StartedRun) -> None:
+        outer_transaction = self._connection.in_transaction
         try:
-            self._connection.execute("BEGIN IMMEDIATE")
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
             self._connection.execute(
                 """
                 INSERT INTO runs (
@@ -102,9 +104,10 @@ class SqliteRunStore(RunStore):
                         target.planned_bytes,
                     ),
                 )
-            self._connection.execute("COMMIT")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
         except sqlite3.Error as exc:
-            if self._connection.in_transaction:
+            if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
             raise SqliteRunStoreError("RUN_PERSISTENCE_FAILED") from exc
 

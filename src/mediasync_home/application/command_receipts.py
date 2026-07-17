@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Protocol
+from typing import Protocol, TypeVar
+
+
+_T = TypeVar("_T")
 
 
 class CommandReceiptState(str, Enum):
@@ -82,6 +86,10 @@ class CommandReceiptStore(Protocol):
     def load_command_receipt(self, idempotency_key: str) -> CommandReceipt | None: ...
 
     def update_command_receipt(self, receipt: CommandReceipt) -> None: ...
+
+
+class CommandEffectTransaction(Protocol):
+    def run(self, work: Callable[[], _T]) -> _T: ...
 
 
 def ensure_idempotency_compatible(

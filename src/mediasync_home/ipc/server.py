@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -7,6 +8,7 @@ from uuid import uuid4
 from mediasync_home.application.command_receipts import (
     CommandReceipt,
     CommandReceiptConflict,
+    CommandEffectTransaction,
     CommandReceiptState,
     CommandReceiptStore,
     transition_command_receipt,
@@ -24,6 +26,7 @@ from mediasync_home.application.job_creation import (
     parse_create_standard_backup_job_command,
 )
 from mediasync_home.application.job_drafts import JobDraftStore
+from mediasync_home.application.outbox import OutboxStore, command_effect_outbox_message
 from mediasync_home.application.plans import PlanStore
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
 from mediasync_home.application.runs import (
@@ -62,6 +65,8 @@ class EngineHostIpcService:
     run_store: RunStore | None = None
     run_id_factory: RunIdFactory | None = None
     command_receipt_store: CommandReceiptStore | None = None
+    command_effect_transaction: CommandEffectTransaction | None = None
+    outbox_store: OutboxStore | None = None
     _accepted_clients: dict[str, VerifiedClientIdentity] = field(default_factory=dict)
 
     def handshake(
@@ -213,6 +218,16 @@ class EngineHostIpcService:
         identity: VerifiedClientIdentity,
         command: StartRunCommand,
     ) -> IpcResponse:
+        return self._run_command_effect_transaction(
+            lambda: self._dispatch_start_run_in_transaction(envelope, identity, command)
+        )
+
+    def _dispatch_start_run_in_transaction(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: StartRunCommand,
+    ) -> IpcResponse:
         if (
             self.command_receipt_store is None
             or self.plan_store is None
@@ -267,6 +282,7 @@ class EngineHostIpcService:
         self.command_receipt_store.update_command_receipt(receipt)
         receipt = transition_command_receipt(receipt, CommandReceiptState.SUCCEEDED)
         self.command_receipt_store.update_command_receipt(receipt)
+        self._enqueue_command_effect_outbox(receipt)
 
         payload = _start_run_response_payload(
             envelope=envelope,
@@ -334,6 +350,16 @@ class EngineHostIpcService:
         identity: VerifiedClientIdentity,
         command: CreateStandardBackupJobCommand,
     ) -> IpcResponse:
+        return self._run_command_effect_transaction(
+            lambda: self._dispatch_create_standard_backup_job_in_transaction(envelope, identity, command)
+        )
+
+    def _dispatch_create_standard_backup_job_in_transaction(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: CreateStandardBackupJobCommand,
+    ) -> IpcResponse:
         if (
             self.command_receipt_store is None
             or self.job_draft_store is None
@@ -388,6 +414,7 @@ class EngineHostIpcService:
         self.command_receipt_store.update_command_receipt(receipt)
         receipt = transition_command_receipt(receipt, CommandReceiptState.SUCCEEDED)
         self.command_receipt_store.update_command_receipt(receipt)
+        self._enqueue_command_effect_outbox(receipt)
 
         payload = _create_standard_backup_job_response_payload(
             envelope=envelope,
@@ -505,6 +532,16 @@ class EngineHostIpcService:
         receipt = self.command_receipt_store.load_command_receipt(idempotency_key)
         if receipt is not None:
             payload["receipt"] = _receipt_payload(receipt)
+
+    def _run_command_effect_transaction(self, work: Callable[[], IpcResponse]) -> IpcResponse:
+        if self.command_effect_transaction is None:
+            return work()
+        return self.command_effect_transaction.run(work)
+
+    def _enqueue_command_effect_outbox(self, receipt: CommandReceipt) -> None:
+        if self.outbox_store is None:
+            return
+        self.outbox_store.enqueue_outbox_message(command_effect_outbox_message(receipt))
 
 
 def _receipt_from_envelope(

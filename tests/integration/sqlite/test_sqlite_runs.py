@@ -12,8 +12,10 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     catalog_critical_writer_policy,
 )
 from mediasync_home.adapters.sqlite.migrations import apply_sqlite_migrations, catalog_migration_plan
+from mediasync_home.adapters.sqlite.outbox import SqliteOutboxStore
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
 from mediasync_home.adapters.sqlite.runs import SqliteRunStore, SqliteRunStoreError
+from mediasync_home.adapters.sqlite.transactions import SqliteImmediateTransactionRunner
 from mediasync_home.application.command_receipts import CommandReceipt
 from mediasync_home.application.plans import (
     PlanEndpoint,
@@ -164,6 +166,7 @@ def test_sqlite_enabled_start_run_ipc_persists_run_and_success_receipt(tmp_path:
         plan_store = SqlitePlanStore(connection)
         run_store = SqliteRunStore(connection)
         receipt_store = SqliteCommandReceiptStore(connection)
+        outbox_store = SqliteOutboxStore(connection)
         id_factory = FixedRunIdFactory()
         plan = _sealed_plan()
         plan_store.save_sealed_plan(plan)
@@ -181,6 +184,8 @@ def test_sqlite_enabled_start_run_ipc_persists_run_and_success_receipt(tmp_path:
             run_store=run_store,
             run_id_factory=id_factory,
             command_receipt_store=receipt_store,
+            command_effect_transaction=SqliteImmediateTransactionRunner(connection),
+            outbox_store=outbox_store,
         )
         ipc_client = InProcessIpcClient(
             service=service,
@@ -205,6 +210,9 @@ def test_sqlite_enabled_start_run_ipc_persists_run_and_success_receipt(tmp_path:
 
         loaded_run = run_store.load_started_run("run-a")
         loaded_receipt = receipt_store.load_command_receipt("66666666-6666-4666-8666-666666666666")
+        loaded_outbox = outbox_store.load_outbox_message(
+            "command-effect:66666666-6666-4666-8666-666666666666"
+        )
         assert response.status is IpcStatus.ACCEPTED
         assert response.reason is None
         assert response.payload["run"]["run_id"] == "run-a"
@@ -214,8 +222,12 @@ def test_sqlite_enabled_start_run_ipc_persists_run_and_success_receipt(tmp_path:
         assert loaded_receipt is not None
         assert loaded_receipt.result_entity_type == "run"
         assert loaded_receipt.result_entity_id == "run-a"
+        assert loaded_outbox is not None
+        assert loaded_outbox.aggregate_type == "run"
+        assert loaded_outbox.aggregate_id == "run-a"
         assert _row_count(connection, "runs") == 1
         assert _row_count(connection, "command_receipts") == 1
+        assert _row_count(connection, "outbox_messages") == 1
         assert id_factory.calls == 1
 
 

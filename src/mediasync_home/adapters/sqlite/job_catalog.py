@@ -29,8 +29,10 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
         self._connection = connection
 
     def save_standard_backup_job(self, job: SealedStandardBackupJob) -> None:
+        outer_transaction = self._connection.in_transaction
         try:
-            self._connection.execute("BEGIN IMMEDIATE")
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
             self._connection.execute(
                 "INSERT INTO jobs (id, kind) VALUES (?, 'multi_target_backup')",
                 (job.job_id,),
@@ -80,9 +82,10 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                 "INSERT INTO job_heads (job_id, active_revision_id) VALUES (?, ?)",
                 (job.job_id, job.job_revision_id),
             )
-            self._connection.execute("COMMIT")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
         except sqlite3.Error as exc:
-            if self._connection.in_transaction:
+            if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
             raise SqliteJobCatalogError("STANDARD_BACKUP_JOB_PERSISTENCE_FAILED") from exc
 
