@@ -104,8 +104,25 @@ class WindowsPackagingSpikeTests(unittest.TestCase):
         result = windows_packaging.package_toolchain_probe()
         self.assertIn(result["status"], {"PASS", "BLOCKED_BY_ENVIRONMENT"})
         if result["status"] == "BLOCKED_BY_ENVIRONMENT":
-            self.assertTrue(result["missing_modules"] or result["missing_tools"])
+            self.assertTrue(result["missing_modules"] or result["missing_tools"] or result["missing_sdk_tools"])
+        self.assertIn(result["runtime_modules_status"], {"PASS", "BLOCKED_BY_ENVIRONMENT"})
+        self.assertIn(result["packaging_scripts_status"], {"PASS", "BLOCKED_BY_ENVIRONMENT"})
+        self.assertIn(result["windows_sdk_status"], {"PASS", "BLOCKED_BY_ENVIRONMENT"})
         self.assertEqual(result["clean_windows_vm"], "BLOCKED_BY_ENVIRONMENT")
+
+    @unittest.skipUnless(
+        all(windows_packaging.importlib.util.find_spec(name) is not None for name in ("PySide6", "blake3", "nuitka")),
+        "minimal runtime probe requires PySide6, blake3, and Nuitka in the active Python",
+    )
+    def test_minimal_runtime_probe_uses_pyside6_blake3_and_win32_api(self) -> None:
+        result = windows_packaging.minimal_runtime_probe()
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["probe_digest_algorithm"], "BLAKE3-256")
+        self.assertEqual(len(result["probe_digest"]), 64)
+        self.assertTrue(result["pyside6_version"])
+        self.assertTrue(result["blake3_version"])
+        self.assertTrue(result["nuitka_version"])
+        self.assertEqual(result["win32_get_system_directory_basename"].lower(), "system32")
 
     def test_demo_writes_sanitized_summary_without_running_robocopy(self) -> None:
         with tempfile.TemporaryDirectory(prefix="msh-0a5-artifact-") as raw:
@@ -114,6 +131,7 @@ class WindowsPackagingSpikeTests(unittest.TestCase):
             summary = json.loads(output.read_text(encoding="utf-8"))
             self.assertFalse(summary["real_robocopy_started"])
             self.assertTrue(summary["round_trip"]["all_passed"])
+            self.assertIn(summary["minimal_runtime_preflight"]["status"], {"PASS", "BLOCKED_BY_ENVIRONMENT"})
             self.assertNotIn("C:\\Users\\", output.read_text(encoding="utf-8"))
             self.assertEqual(
                 set(summary["forbidden_switch_validation"].values()),

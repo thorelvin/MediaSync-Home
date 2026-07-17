@@ -9,7 +9,7 @@
 | 0A.2 — Endpoint-eierskap | blocked | `spike/0a2-blake3-marker-evidence` | `spikes/0a2_endpoint_ownership/`, `tests/spikes/0a2_endpoint_ownership/`, `artifacts/0a2/` | Lokal klassifisering/lock/takeover og endelig BLAKE3-marker bestått; to-klient SMB-lab mangler |
 | 0A.3 — Recovery og stier | passed | `spike/0a3-recovery-and-paths` | `spikes/0a3_recovery_paths/`, `tests/spikes/0a3_recovery_paths/`, `artifacts/0a3/` | Lokal NTFS/path/recovery bestått; SMB SourceReadGuard ikke kjørt uten SMB-lab |
 | 0A.4 — SQLite og kapasitet | passed | `spike/0a4-sqlite-capacity` | `spikes/0a4_sqlite_capacity/`, `tests/spikes/0a4_sqlite_capacity/`, `artifacts/0a4/` | Lokal 1M SQLite-/kapasitetsmåling bestått; ADR-003 anbefales, men eiergodkjenning gjenstår |
-| 0A.5 — Windows argv/pakking | blocked | `spike/0a5-windows-argv-and-packaging` | `spikes/0a5_windows_packaging/`, `tests/spikes/0a5_windows_packaging/`, `artifacts/0a5/` | `GetSystemDirectoryW`/argv bestått; PySide6/Nuitka/SDK/signing tools og ren Windows-VM mangler |
+| 0A.5 — Windows argv/pakking | blocked | `spike/0a5-minimal-runtime-preflight` | `spikes/0a5_windows_packaging/`, `tests/spikes/0a5_windows_packaging/`, `artifacts/0a5/` | `GetSystemDirectoryW`/argv og minimal PySide6/BLAKE3/Nuitka-runtime bestått; pakket exe, SDK/signering og ren Windows-VM mangler |
 | 0A.6 — Beslutningsreview | blocked | `spike/0a6-decision-review` | `docs/adr/0A_DECISION_REVIEW.md` | Eierbeslutninger, SMB-/Task Scheduler-lab og pakkemiljø mangler; 0B forblir blokkert |
 
 ## Miljøpreflight
@@ -47,7 +47,7 @@
 | Én kontra to databaser | `RUNNABLE_WITH_LOCAL_FIXTURE` | Krever benchmarkdatabase i repo-/temp-artefaktområde; ingen produktdatabase | Start 0A.4 med generert testdata |
 | 1M state/kapasitetsmåling | `RUNNABLE_WITH_LOCAL_FIXTURE` | Krever tid, lokal diskplass og råmålinger; ingen ekstern lab nødvendig | Start 0A.4 og lagre råmålinger i artefakter |
 | GetSystemDirectoryW/argv | `RUNNABLE_NOW` | Runtime-API og Robocopy finnes; sikker serializer/harness er ikke implementert | Start 0A.5 for argv- og systemsti-harness |
-| Ren Windows-pakkebygg | `BLOCKED_BY_ENVIRONMENT` | PySide6, Nuitka, Windows SDK build/signing tools, låst dependency-sett og ren Windows-VM mangler | Installer/frys toolchain og/eller still ren VM til rådighet før 0A.5-pakkebevis |
+| Ren Windows-pakkebygg | `BLOCKED_BY_ENVIRONMENT` | Minimal runtime og lokale pakkeskript er bevist; pakket exe, Windows SDK/signering og ren Windows-VM mangler | Still SDK/signering og ren VM til rådighet før 0A.5-pakkebevis |
 
 Tillatte klassifiseringer: `RUNNABLE_NOW`, `RUNNABLE_WITH_LOCAL_FIXTURE`, `REQUIRES_USER_LAB_ACTION`, `BLOCKED_BY_ENVIRONMENT`, `OUT_OF_SCOPE`.
 
@@ -66,7 +66,8 @@ Tillatte klassifiseringer: `RUNNABLE_NOW`, `RUNNABLE_WITH_LOCAL_FIXTURE`, `REQUI
 | Én kontra to databaser | 0A.4 | Lokal SQLite-fixture i temp | `python -m unittest discover -s tests\spikes\0a4_sqlite_capacity -v` | `PASS` | `artifacts/0a4/unittest-output.txt`, `artifacts/0a4/benchmark-summary.json` | ADR-003, ADR-011, ADR-018 |
 | 1M state/kapasitetsmåling | 0A.4 | Lokal SQLite-fixture i temp | `python spikes\0a4_sqlite_capacity\sqlite_capacity.py benchmark --rows 1000000 --query-repetitions 30 --output artifacts\0a4\benchmark-summary.json` | `PASS` | 1M rader per kandidat; peak RSS ca. 100 MiB; indeksert parent-page P95 < 1 ms | ADR-003, ADR-018 |
 | GetSystemDirectoryW/argv | 0A.5 | Lokal Windows-runtime | `python -m unittest discover -s tests\spikes\0a5_windows_packaging -v` | `PASS` | `artifacts/0a5/unittest-output.txt`, `artifacts/0a5/demo-summary.json` | ADR-027 |
-| Ren Windows-pakkebygg | 0A.5 | `BLOCKED_BY_ENVIRONMENT` | Ikke kjørt i 0A.0 | `BLOCKED` | Mangler pakkeverktøy/ren VM | ADR-028 |
+| Minimal Python/PySide6/BLAKE3/Win32 runtime | 0A.5 | Repo-lokal `.venv` | `.\.venv\Scripts\python.exe spikes\0a5_windows_packaging\windows_packaging.py minimal-runtime-probe --output artifacts\0a5\minimal-runtime-summary.json` | `PASS` | `artifacts/0a5/minimal-runtime-summary.json`, `artifacts/0a5/runtime-freeze.txt` | ADR-028 |
+| Ren Windows-pakkebygg | 0A.5 | `BLOCKED_BY_ENVIRONMENT` | Ikke kjørt i 0A.0 | `BLOCKED` | Mangler pakket exe, SDK/signering og ren VM | ADR-028 |
 
 Resultatverdier: `PASS`, `FAIL`, `BLOCKED`, `INCONCLUSIVE`.
 
@@ -158,8 +159,9 @@ Baseline ble kontrollert med streng hashverifisering før Git-initialisering og 
 | Instrumentert child round-trip | `PASS` | Python-child mottok eksakt payload for syv corpuscases; maksimal command-line-lengde 30,152 tegn |
 | Forbudte Robocopy-flagg | `PASS` | `/MIR`, `/PURGE`, `/MOVE` og `/MOV` avvises både i typed switchliste og etter final serialisering/parsing |
 | Launch-plan hygiene | `PASS` | Planen bruker absolutt resolversti, sanitert argv-shape, minimal Unicode-env (`SystemRoot`, `WINDIR`, `PATH`, `TEMP`, `TMP`) og `real_robocopy_started=false` |
-| Minimal Python/PySide6/BLAKE3/Win32-app | `BLOCKED_BY_ENVIRONMENT` | `PySide6` og `nuitka` mangler; `blake3` er bare bevist i 0A.2 repo-lokal venv, ikke i en pakket app |
-| Reproduserbar pakking og ren VM-smoke | `BLOCKED_BY_ENVIRONMENT` | `pyside6-deploy`, `nuitka`, `cl`, `rc`, `signtool`, låst dependency-sett og ren Windows-VM mangler |
+| Minimal Python/PySide6/BLAKE3/Win32-app | `PASS` | Repo-lokal `.venv` kjørte `QCoreApplication`, Qt `6.11.1`, `PySide6==6.11.1`, `blake3==1.0.9`, `Nuitka==4.1.3` og `GetSystemDirectoryW` i samme prosess |
+| Lokal pakkeskript-preflight | `PASS` | `pyside6-deploy` og `nuitka` finnes i `.venv\Scripts`; `runtime-freeze.txt` låser evidensversjonene |
+| Reproduserbar pakket exe og ren VM-smoke | `BLOCKED_BY_ENVIRONMENT` | `cl`, `rc` og `signtool` er ikke på PATH; ingen pakket exe eller ren Windows-VM-smoke er kjørt |
 
 0A.6 ble kjørt som ren evidenssyntese uten nye tekniske prober. `docs/adr/0A_DECISION_REVIEW.md` oppsummerer alle ADR-ene med tilgjengelig 0A-bevis, alternativer, risiko/reverseringskostnad, Codex-anbefaling og konkret eierhandling.
 
@@ -296,6 +298,23 @@ python -m unittest discover -s tests\spikes\0a5_windows_packaging -v
 python -m ruff check spikes\0a5_windows_packaging tests\spikes\0a5_windows_packaging
 python spikes\0a5_windows_packaging\windows_packaging.py demo --output artifacts\0a5\demo-summary.json
 cmd.exe /c "python -m unittest discover -s tests\spikes\0a5_windows_packaging -v > artifacts\0a5\unittest-output.txt 2>&1"
+
+git switch -c spike/0a5-minimal-runtime-preflight
+.\.venv\Scripts\python.exe -m pip install PySide6 Nuitka
+python -m py_compile spikes\0a5_windows_packaging\windows_packaging.py tests\spikes\0a5_windows_packaging\test_windows_packaging.py
+python -m pytest tests\spikes\0a5_windows_packaging -q
+.\.venv\Scripts\python.exe -m pytest tests\spikes\0a5_windows_packaging -q
+python -m ruff check spikes\0a5_windows_packaging tests\spikes\0a5_windows_packaging
+.\.venv\Scripts\python.exe spikes\0a5_windows_packaging\windows_packaging.py minimal-runtime-probe --output artifacts\0a5\minimal-runtime-summary.json
+.\.venv\Scripts\python.exe spikes\0a5_windows_packaging\windows_packaging.py demo --output artifacts\0a5\demo-summary.json
+cmd.exe /c ".venv\Scripts\python.exe -m unittest discover -s tests\spikes\0a5_windows_packaging -v > artifacts\0a5\unittest-output.txt 2>&1"
+python tools\build_adr_docs.py --check
+python tools\build_master.py --check
+python -m pytest tests\spikes -q
+.\.venv\Scripts\python.exe -m pytest tests\spikes -q
+python -m ruff check .
+git diff --check
+& "C:\claude\witchery\tmp\mediasync-handoff-venv\Scripts\python.exe" tools\validate_handoff.py
 python -m pytest tests\spikes -q
 python -m ruff check .
 git diff --check
@@ -326,6 +345,8 @@ Notater:
 - `python -m pytest tests\spikes -q` besto med `39 passed` etter 0A.2/0A.6-review.
 - `.\.venv\Scripts\python.exe -m pytest tests\spikes -q` besto med `40 passed, 22 subtests passed` etter 0A.2 BLAKE3-markerbevis. Default Python har fortsatt ikke `blake3` og rapporterte derfor `32 passed, 8 skipped`.
 - Etter 0A.1 Task Scheduler-triggerbevis besto default `python -m pytest tests\spikes -q` med `32 passed, 9 skipped`; repo-lokal venv med `blake3` besto med `40 passed, 1 skipped, 22 subtests passed`.
+- Etter 0A.5 minimal runtime-preflight besto default `python -m pytest tests\spikes\0a5_windows_packaging -q` med `9 passed, 1 skipped`; repo-lokal venv besto med `10 passed, 15 subtests passed`.
+- 0A.5 venv-evidensen brukte `PySide6==6.11.1`, `PySide6_Addons==6.11.1`, `PySide6_Essentials==6.11.1`, `shiboken6==6.11.1`, `blake3==1.0.9` og `Nuitka==4.1.3`.
 - `tools\validate_handoff.py` ignorerer nå lokale miljø-/cachemapper som `.venv`, `venv`, `.pytest_cache`, `.ruff_cache` og `__pycache__`, slik at valideringen fortsatt gjelder repositoryets handoff-filer selv når 0A-prober bruker lokal venv.
 - Sikkerhetsord-scan etter 0A.5 fant bare de forventede negative-test-/avvisningsforekomstene av de forbudte Robocopy-flaggene.
 - `python -m unittest discover -s tests\spikes` fant ingen tester på grunn av nested discover-layout; de reproduserbare unittest-kommandoene er per spikekatalog.
@@ -353,17 +374,17 @@ Tallene er lokale spike-målinger på syntetiske metadata, ikke en produksjons-S
 | ID | Arbeidspakke | Beskrivelse | Konsekvens | Sikker midlertidig handling | Eier |
 |---|---|---|---|---|---|
 | 0A0-BLK-001 | 0A.2 | Ingen andre Windows-klient/VM og ingen dedikert SMB-lab med `.mediasync_test_root` er tilgjengelig | Cross-machine writer ownership, fremmed owner, takeover og stale epoch kan ikke bestås | Lever lokal harness og marker SMB-radene `BLOCKED` til eier stiller lab | Eier |
-| 0A0-BLK-002 | 0A.5 | PySide6, Nuitka, Windows SDK build/signing tools, låst dependency-sett og ren Windows-VM mangler | Reproduserbar pakking kan ikke bevises i nåværende miljø | Kjør argv/systemsti-delen separat; utsett pakkebevis til toolchain/VM finnes | Eier |
+| 0A0-BLK-002 | 0A.5 | Pakket exe, Windows SDK build/signing tools og ren Windows-VM mangler | Reproduserbar pakking kan ikke bevises i nåværende miljø | Behold runtime-/argv-evidens; utsett pakket exe-smoke til SDK/signering/VM finnes | Eier |
 | 0A0-BLK-003 | 0A.2/0A.5 | Hypervisor er present, men `Get-VM` mangler og valgfri Windows-feature-query krever elevation | Codex kan ikke selv inventere eller orkestrere lokal VM-lab | Eier må bekrefte VM-oppsett eller gi eksplisitt labinstruks | Eier |
 | 0A1-BLK-001 | 0A.1 | Ekte non-interactive Task Scheduler-session/logontype-policy under samme bruker er ikke etablert | Same-SID scheduled trigger er bevist, men 0A.1 kan ikke bevise registrert trigger-client/session-policy fullt ut | Eier må gi testcredential/sessionoppsett for ikke-interaktiv logontype eller godkjenne scope-reduksjon til interaktiv/same-session trigger | Eier |
 | 0A1-BLK-002 | 0A.1 | Feil-SID eller remote pipe-klient er ikke tilgjengelig | DACL/local-only-policy er konfigurert, men faktisk avvisning av annen principal er ikke demonstrert | Kjør 0A.1-identitetstesten fra separat Windows-bruker/VM eller remote klient | Eier |
 | 0A2-BLK-001 | 0A.2 | To-klient SMB-lab er ikke tilgjengelig | Global writer ownership, fremmed owner fra annen maskin, stale reconnect og SMB-lock kan ikke bestås | Still dedikert SMB-share og to ekte Windows-klienter/VM-er til rådighet | Eier |
 | 0A3-BLK-001 | 0A.3 | SMB SourceReadGuard-lab er ikke tilgjengelig | SMB guard kan ikke påstå `DENY_WRITE_AND_DELETE`; uprovede SMB-endepunkter må bruke fallbackpolicy | Kjør samme source-guard-probe mot dedikert SMB-lab eller behold `POST_TRANSFER_HASH_ONLY`/`DEFER_UNSTABLE_SOURCE` for uprovede SMB | Eier |
-| 0A5-BLK-001 | 0A.5 | PySide6/Nuitka/Windows SDK/signing tools, låst dependency-sett og ren Windows-VM er ikke tilgjengelig | Reproduserbar pakket `.exe` og ren-VM-oppstart kan ikke bevises | Installer/lås toolchain og kjør 0A.5-pakkedelen på ren VM før ADR-028 kan anbefales | Eier |
+| 0A5-BLK-001 | 0A.5 | Pakket `.exe`, Windows SDK/signering og ren Windows-VM er ikke tilgjengelig | Reproduserbar pakket `.exe` og ren-VM-oppstart kan ikke bevises | Kjør Nuitka/pyside6-deploy pakking med SDK/signering og deretter ren-VM-smoke før ADR-028 kan anbefales | Eier |
 
 ## Beslutninger
 
-ADR-003 er satt til `RECOMMENDED` med Codex-anbefaling om to lokale SQLite-databaser og eksplisitte handoffs. ADR-011, ADR-018, ADR-020 og ADR-027 er satt til `EVIDENCE_COMPLETE`. ADR-028 er satt til `BLOCKED` fordi pakkebeviset mangler toolchain og ren Windows-VM. ADR-006, ADR-016 og ADR-019 forblir `PROPOSED` til to-klient SMB-bevis finnes eller eier godkjenner scope-reduksjon. Alle `owner_decision`-felt forblir `PENDING`; bare eier kan akseptere, avvise eller godkjenne scope-reduksjon. ADR-001 og ADR-002 har nå real Task Scheduler same-SID triggerbevis, men bør forbli `PROPOSED` til feil-SID/remote og non-interactive/session-policy er bevist eller eier eksplisitt godkjenner scope-reduksjon. ADR-013 bør forbli `PROPOSED` til eier vurderer integrasjonscaveat for faktisk transferchild.
+ADR-003 er satt til `RECOMMENDED` med Codex-anbefaling om to lokale SQLite-databaser og eksplisitte handoffs. ADR-011, ADR-018, ADR-020 og ADR-027 er satt til `EVIDENCE_COMPLETE`. ADR-028 er satt til `BLOCKED` fordi pakket exe, SDK/signering og ren Windows-VM-smoke mangler selv om minimal PySide6/BLAKE3/Nuitka-runtime er bevist. ADR-006, ADR-016 og ADR-019 forblir `PROPOSED` til to-klient SMB-bevis finnes eller eier godkjenner scope-reduksjon. Alle `owner_decision`-felt forblir `PENDING`; bare eier kan akseptere, avvise eller godkjenne scope-reduksjon. ADR-001 og ADR-002 har nå real Task Scheduler same-SID triggerbevis, men bør forbli `PROPOSED` til feil-SID/remote og non-interactive/session-policy er bevist eller eier eksplisitt godkjenner scope-reduksjon. ADR-013 bør forbli `PROPOSED` til eier vurderer integrasjonscaveat for faktisk transferchild.
 
 `docs/adr/0A_DECISION_REVIEW.md` er eierens beslutningsliste. Den viser også mulige scope-reduksjoner for lokal-only første release, ingen non-interactive trigger i første omgang, zip/dev-run preview uten pakket `.exe`, og utsatt endpoint-marker-contract-freeze.
 
@@ -371,7 +392,7 @@ ADR-003 er satt til `RECOMMENDED` med Codex-anbefaling om to lokale SQLite-datab
 
 1. Fullfør de blokkerte 0A.1-identitetsradene med dedikert Task Scheduler-session og feil-SID/remote klient, eller få eksplisitt eiergodkjent scope-reduksjon.
 2. Forbered dedikert to-klient SMB-lab før `0A.2` skal bestå cross-machine writer ownership og før SMB SourceReadGuard kan oppgraderes fra fallback.
-3. Forbered PySide6/Nuitka/Windows SDK/signing tools, låst dependency-sett og en ren Windows-VM før ADR-028 kan få full pakke-evidens.
+3. Forbered Windows SDK/signering og en ren Windows-VM før ADR-028 kan få full pakket exe-evidens.
 4. Bruk `docs/adr/0A_DECISION_REVIEW.md` til å fatte eksplisitte ADR-beslutninger eller scope-reduksjoner. 0B skal ikke starte før de nødvendige ADR-ene har eierbeslutning.
 
 ## Bevisst ikke implementert

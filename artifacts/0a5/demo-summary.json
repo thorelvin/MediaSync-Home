@@ -1,6 +1,6 @@
 {
   "clean_vm_smoke_test": "BLOCKED_BY_ENVIRONMENT",
-  "created_utc": "2026-07-16T20:34:29Z",
+  "created_utc": "2026-07-17T13:51:06Z",
   "forbidden_switch_validation": {
     "/MIR": "REJECTED",
     "/MOV": "REJECTED",
@@ -42,35 +42,54 @@
     "parsed_equals_built": true,
     "working_directory": "<windows-system-directory>"
   },
+  "minimal_runtime_preflight": {
+    "blake3_version": "1.0.9",
+    "nuitka_version": "4.1.3",
+    "probe_digest": "1bf39a4714dddd792d18bbe1744d58cbae9f50a72c13e093ccb2a8058cc76de9",
+    "probe_digest_algorithm": "BLAKE3-256",
+    "pyside6_version": "6.11.1",
+    "python_executable": "<current-python>",
+    "python_version": "3.10.6",
+    "qcoreapplication_created": true,
+    "qt_prefix_path_known": true,
+    "qt_version": "6.11.1",
+    "status": "PASS",
+    "win32_get_system_directory_basename": "system32"
+  },
   "packaging_preflight": {
     "clean_windows_vm": "BLOCKED_BY_ENVIRONMENT",
-    "missing_modules": [
-      "PySide6",
-      "blake3",
-      "nuitka"
-    ],
-    "missing_tools": [
-      "pyside6-deploy",
-      "nuitka",
+    "missing_modules": [],
+    "missing_sdk_tools": [
       "cl",
       "rc",
       "signtool"
     ],
+    "missing_tools": [],
+    "module_versions": {
+      "PySide6": "6.11.1",
+      "blake3": "1.0.9",
+      "nuitka": "4.1.3"
+    },
     "modules": {
-      "PySide6": false,
-      "blake3": false,
-      "nuitka": false
+      "PySide6": true,
+      "blake3": true,
+      "nuitka": true
+    },
+    "packaging_scripts_status": "PASS",
+    "packaging_tools": {
+      "nuitka": true,
+      "pyside6-deploy": true
     },
     "python_executable": "<current-python>",
     "python_version": "3.10.6",
-    "status": "BLOCKED_BY_ENVIRONMENT",
-    "tools": {
+    "runtime_modules_status": "PASS",
+    "sdk_tools": {
       "cl": false,
-      "nuitka": false,
-      "pyside6-deploy": false,
       "rc": false,
       "signtool": false
-    }
+    },
+    "status": "BLOCKED_BY_ENVIRONMENT",
+    "windows_sdk_status": "BLOCKED_BY_ENVIRONMENT"
   },
   "real_robocopy_started": false,
   "resolved_robocopy": {
@@ -82,41 +101,41 @@
   },
   "round_trip": {
     "all_passed": true,
-    "max_command_line_length": 30152,
+    "max_command_line_length": 30132,
     "payload_count": 7,
     "results": [
       {
-        "length": 161,
+        "length": 141,
         "received_count": 2,
         "status": "PASS"
       },
       {
-        "length": 185,
+        "length": 165,
         "received_count": 2,
         "status": "PASS"
       },
       {
-        "length": 166,
+        "length": 146,
         "received_count": 2,
         "status": "PASS"
       },
       {
-        "length": 200,
+        "length": 180,
         "received_count": 2,
         "status": "PASS"
       },
       {
-        "length": 196,
+        "length": 176,
         "received_count": 2,
         "status": "PASS"
       },
       {
-        "length": 188,
+        "length": 168,
         "received_count": 2,
         "status": "PASS"
       },
       {
-        "length": 30152,
+        "length": 30132,
         "received_count": 1,
         "status": "PASS"
       }

@@ -1,0 +1,14 @@
+{
+  "blake3_version": "1.0.9",
+  "nuitka_version": "4.1.3",
+  "probe_digest": "1bf39a4714dddd792d18bbe1744d58cbae9f50a72c13e093ccb2a8058cc76de9",
+  "probe_digest_algorithm": "BLAKE3-256",
+  "pyside6_version": "6.11.1",
+  "python_executable": "<current-python>",
+  "python_version": "3.10.6",
+  "qcoreapplication_created": true,
+  "qt_prefix_path_known": true,
+  "qt_version": "6.11.1",
+  "status": "PASS",
+  "win32_get_system_directory_basename": "system32"
+}

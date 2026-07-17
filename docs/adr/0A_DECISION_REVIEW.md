@@ -13,7 +13,7 @@ an owner decision record. Every ADR still requires an explicit owner decision in
 | 0A.2 Endpoint ownership | Blocked | `spikes/0a2_endpoint_ownership/`, `artifacts/0a2/` | Two-client SMB lab |
 | 0A.3 Recovery and paths | Passed locally | `spikes/0a3_recovery_paths/`, `artifacts/0a3/` | SMB SourceReadGuard proof |
 | 0A.4 SQLite and capacity | Passed locally | `spikes/0a4_sqlite_capacity/`, `artifacts/0a4/` | Owner decision on ADR-003 |
-| 0A.5 Windows argv and packaging | Blocked | `spikes/0a5_windows_packaging/`, `artifacts/0a5/` | PySide6/Nuitka/SDK/signing tools, locked dependency set, and clean Windows VM |
+| 0A.5 Windows argv and packaging | Blocked | `spikes/0a5_windows_packaging/`, `artifacts/0a5/` | Packaged exe, Windows SDK/signing evidence, and clean Windows VM |
 
 ## Owner Decision List
 
@@ -50,7 +50,7 @@ chooses explicitly.
 | ADR-025 Monotonic live claims | `PROPOSED` | Not in 0A scope | UTC-only live claim expiry | Reversal is medium after scheduler/outbox | Keep proposed for 0B/Milestone 1 | Defer |
 | ADR-026 Exact contracts | `PROPOSED` | Handoff validators exist; contracts remain draft/blocked | Markdown-only contracts | Reversal is medium before codegen, high after codegen | Keep proposed; do not freeze contracts yet | Defer |
 | ADR-027 Windows argv/resolver | `EVIDENCE_COMPLETE` | `GetSystemDirectoryW`, final-path validation, argv round-trip, forbidden flag rejection passed | PATH lookup, shell command string, ad hoc quoting | Reversal is medium after process adapter | Accept canonical resolver/argv builder | Owner can accept now |
-| ADR-028 Windows packaging | `BLOCKED` | Packaging preflight shows missing PySide6/Nuitka/SDK/signing tools, locked dependency set, and no clean VM | Zip-only Python runtime or alternate packager | Reversal is medium before dependencies lock, high after release tooling | Keep blocked until toolchain and clean VM smoke pass | Provide toolchain/VM or defer scope |
+| ADR-028 Windows packaging | `BLOCKED` | Minimal PySide6/BLAKE3/Nuitka runtime and packaging scripts pass in repo-local venv; packaged exe, SDK/signing evidence, and clean VM smoke are missing | Zip-only Python runtime or alternate packager | Reversal is medium before dependencies lock, high after release tooling | Keep blocked until packaged executable and clean VM smoke pass | Provide SDK/signing/VM or defer scope |
 
 ## Scope Reduction Options
 

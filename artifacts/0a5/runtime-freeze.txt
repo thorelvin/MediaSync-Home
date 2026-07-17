@@ -1,0 +1,6 @@
+blake3==1.0.9
+Nuitka==4.1.3
+PySide6==6.11.1
+PySide6_Addons==6.11.1
+PySide6_Essentials==6.11.1
+shiboken6==6.11.1

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import hashlib
+import importlib.metadata
 import importlib.util
 import json
 import os
@@ -392,27 +393,94 @@ def child_round_trip(arguments: list[str]) -> dict[str, Any]:
     }
 
 
+def distribution_version(distribution: str) -> str | None:
+    try:
+        return importlib.metadata.version(distribution)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def local_script_exists(name: str) -> bool:
+    scripts_dir = Path(sys.executable).resolve().parent
+    candidates = [scripts_dir / name]
+    if os.name == "nt":
+        candidates.extend([scripts_dir / f"{name}.exe", scripts_dir / f"{name}.cmd", scripts_dir / f"{name}.bat"])
+    return any(candidate.exists() for candidate in candidates) or shutil.which(name) is not None
+
+
+def minimal_runtime_probe() -> dict[str, Any]:
+    try:
+        from blake3 import blake3
+        from PySide6.QtCore import QCoreApplication, QLibraryInfo, qVersion
+    except ImportError as exc:
+        return {
+            "status": "BLOCKED_BY_ENVIRONMENT",
+            "reason": f"MISSING_MODULE_{exc.name}",
+        }
+
+    app = QCoreApplication.instance()
+    created_app = app is None
+    if app is None:
+        app = QCoreApplication(["mediasync-0a5-minimal-runtime-probe"])
+    QCoreApplication.setApplicationName("MediaSyncHome0A5Probe")
+    system_directory = get_system_directory()
+    payload = {
+        "application_name": QCoreApplication.applicationName(),
+        "qt_version": qVersion(),
+        "system_directory_basename": Path(system_directory).name,
+    }
+    digest = blake3(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    result = {
+        "status": "PASS",
+        "python_executable": "<current-python>",
+        "python_version": ".".join(str(part) for part in sys.version_info[:3]),
+        "pyside6_version": distribution_version("PySide6"),
+        "qt_version": qVersion(),
+        "qt_prefix_path_known": bool(QLibraryInfo.path(QLibraryInfo.LibraryPath.PrefixPath)),
+        "blake3_version": distribution_version("blake3"),
+        "nuitka_version": distribution_version("Nuitka"),
+        "win32_get_system_directory_basename": Path(system_directory).name,
+        "probe_digest_algorithm": "BLAKE3-256",
+        "probe_digest": digest,
+        "qcoreapplication_created": created_app,
+    }
+    return result
+
+
 def package_toolchain_probe() -> dict[str, Any]:
     module_names = ("PySide6", "blake3", "nuitka")
     modules = {name: importlib.util.find_spec(name) is not None for name in module_names}
-    tools = {
-        "pyside6-deploy": shutil.which("pyside6-deploy") is not None,
-        "nuitka": shutil.which("nuitka") is not None,
+    module_versions = {
+        "PySide6": distribution_version("PySide6"),
+        "blake3": distribution_version("blake3"),
+        "nuitka": distribution_version("Nuitka"),
+    }
+    packaging_tools = {
+        "pyside6-deploy": local_script_exists("pyside6-deploy"),
+        "nuitka": local_script_exists("nuitka"),
+    }
+    sdk_tools = {
         "cl": shutil.which("cl") is not None,
         "rc": shutil.which("rc") is not None,
         "signtool": shutil.which("signtool") is not None,
     }
     missing_modules = [name for name, found in modules.items() if not found]
-    missing_tools = [name for name, found in tools.items() if not found]
-    status = "PASS" if not missing_modules and not missing_tools else "BLOCKED_BY_ENVIRONMENT"
+    missing_tools = [name for name, found in packaging_tools.items() if not found]
+    missing_sdk_tools = [name for name, found in sdk_tools.items() if not found]
     return {
-        "status": status,
+        "status": "PASS" if not missing_modules and not missing_tools and not missing_sdk_tools else "BLOCKED_BY_ENVIRONMENT",
         "python_executable": "<current-python>",
         "python_version": ".".join(str(part) for part in sys.version_info[:3]),
         "modules": modules,
-        "tools": tools,
+        "module_versions": module_versions,
+        "packaging_tools": packaging_tools,
+        "sdk_tools": sdk_tools,
         "missing_modules": missing_modules,
         "missing_tools": missing_tools,
+        "missing_sdk_tools": missing_sdk_tools,
+        "runtime_modules_status": "PASS" if not missing_modules else "BLOCKED_BY_ENVIRONMENT",
+        "packaging_scripts_status": "PASS" if not missing_tools else "BLOCKED_BY_ENVIRONMENT",
+        "windows_sdk_status": "PASS" if not missing_sdk_tools else "BLOCKED_BY_ENVIRONMENT",
         "clean_windows_vm": "BLOCKED_BY_ENVIRONMENT",
     }
 
@@ -481,6 +549,7 @@ def run_demo(output: Path) -> int:
         },
         "forbidden_switch_validation": negative_switches,
         "packaging_preflight": package_toolchain_probe(),
+        "minimal_runtime_preflight": minimal_runtime_probe(),
         "real_robocopy_started": False,
         "clean_vm_smoke_test": "BLOCKED_BY_ENVIRONMENT",
     }
@@ -494,11 +563,20 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     demo = sub.add_parser("demo")
     demo.add_argument("--output", required=True)
+    runtime = sub.add_parser("minimal-runtime-probe")
+    runtime.add_argument("--output", required=True)
     sub.add_parser("echo-argv-json")
     args, rest = parser.parse_known_args(argv)
     if args.command == "echo-argv-json":
         sys.stdout.write(json.dumps(rest))
         return 0
+    if args.command == "minimal-runtime-probe":
+        result = minimal_runtime_probe()
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result["status"] == "PASS" else 2
     if args.command == "demo":
         return run_demo(Path(args.output))
     raise AssertionError(args.command)
