@@ -32,6 +32,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_core_contract_skeleton",
                 statements=CATALOG_CORE_CONTRACT_SKELETON,
             ),
+            SqliteMigration(
+                version=2,
+                name="catalog_standard_backup_drafts",
+                statements=CATALOG_STANDARD_BACKUP_DRAFTS,
+            ),
         ),
     )
 
@@ -327,6 +332,20 @@ CATALOG_CORE_CONTRACT_SKELETON = (
         FOREIGN KEY (plan_id, after_operation_id)
             REFERENCES planned_operations (plan_id, id)
             ON DELETE RESTRICT
+    )
+    """,
+)
+
+CATALOG_STANDARD_BACKUP_DRAFTS = (
+    """
+    CREATE TABLE standard_backup_job_drafts (
+        draft_id TEXT PRIMARY KEY,
+        schema_version INTEGER NOT NULL,
+        source_name TEXT,
+        source_path_label TEXT,
+        defaults_json TEXT NOT NULL,
+        targets_json TEXT NOT NULL,
+        updated_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     )
     """,
 )

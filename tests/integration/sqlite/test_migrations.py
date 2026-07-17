@@ -28,17 +28,18 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 1
+        assert current_schema_version(connection, plan.store) == 2
         assert _table_names(connection) >= {
             "endpoint_heads",
             "job_heads",
             "file_entries",
             "case_collision_members",
             "operation_dependencies",
+            "standard_backup_job_drafts",
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 1
+        assert _row_count(connection, "schema_migrations") == 2
         assert _foreign_key(
             connection,
             "endpoint_heads",
