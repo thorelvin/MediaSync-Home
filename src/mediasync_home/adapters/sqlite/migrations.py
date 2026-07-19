@@ -87,6 +87,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_snapshot_coverage_issue_materialization",
                 statements=CATALOG_SNAPSHOT_COVERAGE_ISSUE_MATERIALIZATION,
             ),
+            SqliteMigration(
+                version=13,
+                name="catalog_snapshot_entry_read_model_indexes",
+                statements=CATALOG_SNAPSHOT_ENTRY_READ_MODEL_INDEXES,
+            ),
         ),
     )
 
@@ -1288,6 +1293,13 @@ CATALOG_SNAPSHOT_COVERAGE_ISSUE_MATERIALIZATION = (
     BEGIN
         SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
     END
+    """,
+)
+
+CATALOG_SNAPSHOT_ENTRY_READ_MODEL_INDEXES = (
+    """
+    CREATE INDEX idx_file_entries_snapshot_comparison_path_id
+        ON file_entries (snapshot_id, comparison_key, relative_path, id)
     """,
 )
 

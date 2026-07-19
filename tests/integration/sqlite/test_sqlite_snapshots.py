@@ -20,6 +20,7 @@ from mediasync_home.application.snapshots import (
     SnapshotBatchSummary,
     SnapshotDirectoryCoverage,
     SnapshotFileEntry,
+    SnapshotEntryPageQuery,
     SnapshotIssue,
     SnapshotSealRequest,
     snapshot_entry_batch,
@@ -70,6 +71,39 @@ def test_sqlite_snapshot_entry_batch_is_idempotent_and_preserves_case_collisions
         assert _row_count(connection, "case_collision_groups") == 1
         assert _row_count(connection, "case_collision_members") == 2
         assert _snapshot_counts(connection) == (2, 96)
+
+
+def test_sqlite_snapshot_entry_read_model_pages_by_comparison_key(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_snapshot_parent_rows(connection)
+        store = SqliteSnapshotEntryStore(connection)
+        store.commit_snapshot_entry_batch(_case_collision_batch())
+        store.commit_snapshot_entry_batch(_alpha_batch())
+
+        first_page = store.page_snapshot_entries(
+            SnapshotEntryPageQuery(snapshot_id="snapshot-a", limit=2)
+        )
+        assert [entry.relative_path for entry in first_page.entries] == [
+            "Alpha.txt",
+            "README.TXT",
+        ]
+        assert first_page.has_more is True
+        assert first_page.next_cursor is not None
+        assert first_page.entries[0].case_collision_group_id is None
+        assert first_page.entries[1].case_collision_group_id is not None
+
+        second_page = store.page_snapshot_entries(
+            SnapshotEntryPageQuery(
+                snapshot_id="snapshot-a",
+                limit=2,
+                after=first_page.next_cursor,
+            )
+        )
+        assert [entry.relative_path for entry in second_page.entries] == ["Readme.txt"]
+        assert second_page.has_more is False
+        assert second_page.next_cursor is None
 
 
 def test_sqlite_snapshot_entry_batch_rejects_sequence_hash_conflict(tmp_path: Path) -> None:
@@ -364,6 +398,22 @@ def _case_collision_batch(
         ),
         coverage_updates=_complete_root_coverage(coverage_state),
         issues=issues,
+    )
+
+
+def _alpha_batch():
+    return snapshot_entry_batch(
+        snapshot_id="snapshot-a",
+        sequence_no=1,
+        entries=(
+            SnapshotFileEntry(
+                entry_id="file-c",
+                relative_path="Alpha.txt",
+                comparison_key="alpha.txt",
+                object_type="file",
+                size_bytes=16,
+            ),
+        ),
     )
 
 

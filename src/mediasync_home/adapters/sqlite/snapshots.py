@@ -10,12 +10,18 @@ from mediasync_home.application.snapshots import (
     SnapshotBatchSummary,
     SnapshotDirectoryCoverage,
     SnapshotEntryBatch,
+    SnapshotEntryCursor,
     SnapshotEntryMaterializationStore,
+    SnapshotEntryPage,
+    SnapshotEntryPageQuery,
+    SnapshotEntryReadModel,
+    SnapshotEntryReadModelStore,
     SnapshotFileEntry,
     SnapshotIssue,
     SnapshotSealRequest,
     SnapshotSealStore,
     snapshot_seal,
+    validate_snapshot_entry_page_query,
     validate_snapshot_entry_batch,
     validate_snapshot_seal_request,
 )
@@ -25,7 +31,11 @@ class SqliteSnapshotEntryStoreError(ValueError):
     pass
 
 
-class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealStore):
+class SqliteSnapshotEntryStore(
+    SnapshotEntryMaterializationStore,
+    SnapshotSealStore,
+    SnapshotEntryReadModelStore,
+):
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
@@ -272,6 +282,33 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
                 sanitized_message=None if row[4] is None else str(row[4]),
             )
             for row in rows
+        )
+
+    def page_snapshot_entries(self, query: SnapshotEntryPageQuery) -> SnapshotEntryPage:
+        validate_snapshot_entry_page_query(query)
+        rows = self._connection.execute(
+            _snapshot_entry_page_sql(query.after),
+            (*_snapshot_entry_page_parameters(query), query.limit + 1),
+        ).fetchall()
+        page_rows = rows[: query.limit]
+        entries = tuple(
+            SnapshotEntryReadModel(
+                entry_id=str(row[0]),
+                relative_path=str(row[1]),
+                comparison_key=str(row[2]),
+                object_type=str(row[3]),
+                size_bytes=None if row[4] is None else int(row[4]),
+                case_collision_group_id=None if row[5] is None else str(row[5]),
+            )
+            for row in page_rows
+        )
+        has_more = len(rows) > query.limit
+        next_cursor = _snapshot_entry_cursor(entries[-1]) if has_more and entries else None
+        return SnapshotEntryPage(
+            snapshot_id=query.snapshot_id,
+            entries=entries,
+            next_cursor=next_cursor,
+            has_more=has_more,
         )
 
     def seal_snapshot(self, request: SnapshotSealRequest) -> SealedSnapshot:
@@ -669,3 +706,54 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
         if row is None:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_PERSISTENCE_FAILED")
         return int(row[0])
+
+
+def _snapshot_entry_page_sql(after: SnapshotEntryCursor | None) -> str:
+    cursor_clause = ""
+    if after is not None:
+        cursor_clause = """
+                AND (
+                    entry.comparison_key > ?
+                    OR (entry.comparison_key = ? AND entry.relative_path > ?)
+                    OR (entry.comparison_key = ? AND entry.relative_path = ? AND entry.id > ?)
+                )
+        """
+    return f"""
+            SELECT
+                entry.id,
+                entry.relative_path,
+                entry.comparison_key,
+                entry.object_type,
+                entry.size_bytes,
+                member.group_id
+            FROM file_entries AS entry
+            LEFT JOIN case_collision_members AS member
+                ON member.snapshot_id = entry.snapshot_id
+                AND member.file_entry_id = entry.id
+            WHERE entry.snapshot_id = ?
+            {cursor_clause}
+            ORDER BY entry.comparison_key, entry.relative_path, entry.id
+            LIMIT ?
+            """
+
+
+def _snapshot_entry_page_parameters(query: SnapshotEntryPageQuery) -> tuple[object, ...]:
+    if query.after is None:
+        return (query.snapshot_id,)
+    return (
+        query.snapshot_id,
+        query.after.comparison_key,
+        query.after.comparison_key,
+        query.after.relative_path,
+        query.after.comparison_key,
+        query.after.relative_path,
+        query.after.entry_id,
+    )
+
+
+def _snapshot_entry_cursor(entry: SnapshotEntryReadModel) -> SnapshotEntryCursor:
+    return SnapshotEntryCursor(
+        comparison_key=entry.comparison_key,
+        relative_path=entry.relative_path,
+        entry_id=entry.entry_id,
+    )

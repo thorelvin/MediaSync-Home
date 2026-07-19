@@ -3,13 +3,17 @@ from __future__ import annotations
 import pytest
 
 from mediasync_home.application.snapshots import (
+    MAX_SNAPSHOT_ENTRY_PAGE_LIMIT,
     SnapshotBatchSummary,
     SnapshotDirectoryCoverage,
+    SnapshotEntryCursor,
     SnapshotFileEntry,
+    SnapshotEntryPageQuery,
     SnapshotIssue,
     SnapshotMaterializationError,
     snapshot_entry_batch,
     snapshot_seal,
+    validate_snapshot_entry_page_query,
     verify_snapshot_checksum,
 )
 
@@ -95,6 +99,31 @@ def test_snapshot_entry_batch_rejects_duplicate_exact_paths() -> None:
                     object_type="file",
                 ),
             ),
+        )
+
+
+def test_snapshot_entry_page_query_rejects_unbounded_limits() -> None:
+    validate_snapshot_entry_page_query(
+        SnapshotEntryPageQuery(
+            snapshot_id="snapshot-a",
+            limit=MAX_SNAPSHOT_ENTRY_PAGE_LIMIT,
+            after=SnapshotEntryCursor(
+                comparison_key="readme.txt",
+                relative_path="Readme.txt",
+                entry_id="file-a",
+            ),
+        )
+    )
+
+    with pytest.raises(
+        SnapshotMaterializationError,
+        match="SNAPSHOT_READ_LIMIT_TOO_LARGE",
+    ):
+        validate_snapshot_entry_page_query(
+            SnapshotEntryPageQuery(
+                snapshot_id="snapshot-a",
+                limit=MAX_SNAPSHOT_ENTRY_PAGE_LIMIT + 1,
+            )
         )
 
 

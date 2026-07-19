@@ -13,6 +13,7 @@ SNAPSHOT_SCHEMA_VERSION = 1
 SNAPSHOT_CHECKSUM_ALGORITHM = "SHA-256"
 SNAPSHOT_SERIALIZER_VERSION = "0B-SNAPSHOT-CANONICAL-JSON-V1"
 SNAPSHOT_COMPLETE_COVERAGE_STATE = "COMPLETE"
+MAX_SNAPSHOT_ENTRY_PAGE_LIMIT = 1000
 SNAPSHOT_COVERAGE_STATES = frozenset(
     {
         "COMPLETE",
@@ -58,6 +59,38 @@ class SnapshotIssue:
     blocks_destructive_actions: bool
     error_code: str | None = None
     sanitized_message: str | None = None
+
+
+@dataclass(frozen=True)
+class SnapshotEntryCursor:
+    comparison_key: str
+    relative_path: str
+    entry_id: str
+
+
+@dataclass(frozen=True)
+class SnapshotEntryPageQuery:
+    snapshot_id: str
+    limit: int
+    after: SnapshotEntryCursor | None = None
+
+
+@dataclass(frozen=True)
+class SnapshotEntryReadModel:
+    entry_id: str
+    relative_path: str
+    comparison_key: str
+    object_type: str
+    size_bytes: int | None
+    case_collision_group_id: str | None = None
+
+
+@dataclass(frozen=True)
+class SnapshotEntryPage:
+    snapshot_id: str
+    entries: tuple[SnapshotEntryReadModel, ...]
+    next_cursor: SnapshotEntryCursor | None
+    has_more: bool
 
 
 @dataclass(frozen=True)
@@ -137,6 +170,10 @@ class SnapshotSealStore(Protocol):
     def seal_snapshot(self, request: SnapshotSealRequest) -> SealedSnapshot: ...
 
     def load_sealed_snapshot(self, snapshot_id: str) -> SealedSnapshot | None: ...
+
+
+class SnapshotEntryReadModelStore(Protocol):
+    def page_snapshot_entries(self, query: SnapshotEntryPageQuery) -> SnapshotEntryPage: ...
 
 
 def snapshot_entry_batch(
@@ -274,6 +311,23 @@ def validate_snapshot_seal_request(request: SnapshotSealRequest) -> None:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_BLOCKING_COUNT_MUST_BE_NON_NEGATIVE")
     if request.expected_case_collision_group_count < 0:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_CASE_GROUP_COUNT_MUST_BE_NON_NEGATIVE")
+
+
+def validate_snapshot_entry_page_query(query: SnapshotEntryPageQuery) -> None:
+    if not query.snapshot_id.strip():
+        raise SnapshotMaterializationError("SNAPSHOT_READ_REQUIRES_SNAPSHOT_ID")
+    if query.limit <= 0:
+        raise SnapshotMaterializationError("SNAPSHOT_READ_LIMIT_MUST_BE_POSITIVE")
+    if query.limit > MAX_SNAPSHOT_ENTRY_PAGE_LIMIT:
+        raise SnapshotMaterializationError("SNAPSHOT_READ_LIMIT_TOO_LARGE")
+    if query.after is None:
+        return
+    if not query.after.comparison_key.strip():
+        raise SnapshotMaterializationError("SNAPSHOT_READ_CURSOR_REQUIRES_COMPARISON_KEY")
+    if not _valid_relative_path(query.after.relative_path):
+        raise SnapshotMaterializationError("SNAPSHOT_READ_CURSOR_REQUIRES_RELATIVE_PATH")
+    if not query.after.entry_id.strip():
+        raise SnapshotMaterializationError("SNAPSHOT_READ_CURSOR_REQUIRES_ENTRY_ID")
 
 
 def validate_sealed_snapshot(snapshot: SealedSnapshot) -> None:
