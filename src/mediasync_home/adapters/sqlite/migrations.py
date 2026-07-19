@@ -95,6 +95,11 @@ def recovery_migration_plan() -> SqliteMigrationPlan:
                 name="recovery_intent_segments",
                 statements=RECOVERY_INTENT_SEGMENTS,
             ),
+            SqliteMigration(
+                version=5,
+                name="recovery_operation_journal",
+                statements=RECOVERY_OPERATION_JOURNAL,
+            ),
         ),
     )
 
@@ -1013,5 +1018,139 @@ RECOVERY_INTENT_SEGMENTS = (
     BEGIN
         SELECT RAISE(ABORT, 'INTENT_SEGMENT_IMMUTABLE');
     END
+    """,
+)
+
+RECOVERY_OPERATION_JOURNAL = (
+    """
+    CREATE TABLE recovery_operations (
+        run_id TEXT NOT NULL,
+        run_target_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        source_endpoint_id TEXT,
+        source_endpoint_revision_id TEXT,
+        target_endpoint_id TEXT NOT NULL,
+        target_endpoint_revision_id TEXT NOT NULL,
+        endpoint_generation INTEGER NOT NULL CHECK (endpoint_generation >= 1),
+        owner_installation_id TEXT NOT NULL,
+        ownership_epoch INTEGER NOT NULL CHECK (ownership_epoch >= 1),
+        lease_id TEXT NOT NULL,
+        lease_resource_key TEXT NOT NULL,
+        fencing_token INTEGER NOT NULL CHECK (fencing_token >= 1),
+        phase TEXT NOT NULL CHECK (
+            phase IN (
+                'PLANNED',
+                'SOURCE_VALIDATED',
+                'SOURCE_STABILITY_BOUND',
+                'TARGET_PRECONDITION_VALIDATED',
+                'STAGING_ALLOCATED',
+                'TRANSFERRED',
+                'STAGING_DURABLE',
+                'STAGING_VERIFIED',
+                'COMMIT_INTENT_RECORDED',
+                'COMMIT_PRECONDITIONS_REVALIDATED',
+                'OLD_TARGET_PRESERVED',
+                'FILESYSTEM_APPLIED',
+                'FINAL_DURABLE',
+                'FINAL_VERIFIED',
+                'CATALOG_RECORDED',
+                'CLEANED',
+                'SKIPPED',
+                'CONFLICT',
+                'DEFERRED',
+                'FAILED_RETRYABLE',
+                'FAILED_BLOCKED',
+                'CANCELLED',
+                'ROLLBACK_REQUIRED',
+                'USER_DECISION_REQUIRED'
+            )
+        ),
+        source_relative_path TEXT,
+        source_guard_kind TEXT,
+        source_guard_evidence_hash TEXT CHECK (
+            source_guard_evidence_hash IS NULL OR length(source_guard_evidence_hash) = 64
+        ),
+        source_hash_evidence_kind TEXT,
+        source_path_chain_hash TEXT CHECK (
+            source_path_chain_hash IS NULL OR length(source_path_chain_hash) = 64
+        ),
+        source_case_context_hash TEXT CHECK (
+            source_case_context_hash IS NULL OR length(source_case_context_hash) = 64
+        ),
+        staging_object_id TEXT,
+        final_relative_path TEXT NOT NULL,
+        version_object_id TEXT,
+        quarantine_object_id TEXT,
+        intent_segment_id TEXT,
+        intent_ordinal INTEGER CHECK (intent_ordinal IS NULL OR intent_ordinal >= 0),
+        target_precondition_kind TEXT NOT NULL CHECK (
+            target_precondition_kind IN ('ABSENT', 'MATCH_FINGERPRINT', 'DIRECTORY_EMPTY', 'NONE')
+        ),
+        expected_source_fingerprint_json TEXT,
+        expected_target_fingerprint_json TEXT,
+        expected_source_parent_identity_json TEXT,
+        expected_target_parent_identity_json TEXT,
+        expected_target_path_chain_hash TEXT CHECK (
+            expected_target_path_chain_hash IS NULL OR length(expected_target_path_chain_hash) = 64
+        ),
+        expected_staging_fingerprint_json TEXT,
+        expected_final_fingerprint_json TEXT,
+        observed_target_file_id TEXT,
+        transfer_state TEXT,
+        assurance_level TEXT,
+        staging_durability_state TEXT,
+        final_durability_state TEXT,
+        catalog_handoff_id TEXT,
+        last_error_code TEXT,
+        updated_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        PRIMARY KEY (run_id, operation_id),
+        FOREIGN KEY (lease_id) REFERENCES resource_leases (lease_id) ON DELETE RESTRICT,
+        FOREIGN KEY (intent_segment_id)
+            REFERENCES recovery_intent_segments (id)
+            ON DELETE RESTRICT,
+        CHECK (
+            phase NOT IN (
+                'COMMIT_INTENT_RECORDED',
+                'COMMIT_PRECONDITIONS_REVALIDATED',
+                'OLD_TARGET_PRESERVED',
+                'FILESYSTEM_APPLIED',
+                'FINAL_DURABLE',
+                'FINAL_VERIFIED',
+                'CATALOG_RECORDED',
+                'CLEANED'
+            )
+            OR (intent_segment_id IS NOT NULL AND intent_ordinal IS NOT NULL)
+        )
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX uq_recovery_operations_intent_ordinal
+        ON recovery_operations (intent_segment_id, intent_ordinal)
+        WHERE intent_segment_id IS NOT NULL AND intent_ordinal IS NOT NULL
+    """,
+    """
+    CREATE INDEX idx_recovery_operations_phase
+        ON recovery_operations (phase, updated_utc)
+    """,
+    """
+    CREATE TABLE recovery_events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        run_sequence INTEGER NOT NULL CHECK (run_sequence >= 0),
+        operation_id TEXT,
+        from_phase TEXT,
+        to_phase TEXT NOT NULL,
+        event_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        process_instance_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        previous_event_hash TEXT CHECK (
+            previous_event_hash IS NULL OR length(previous_event_hash) = 64
+        ),
+        event_hash TEXT NOT NULL CHECK (length(event_hash) = 64),
+        UNIQUE (run_id, run_sequence),
+        FOREIGN KEY (run_id, operation_id)
+            REFERENCES recovery_operations (run_id, operation_id)
+            ON DELETE RESTRICT
+    )
     """,
 )

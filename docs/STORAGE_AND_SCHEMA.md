@@ -1345,7 +1345,7 @@ Alle stier er relative til eksplisitte endpoint-/kontrollrøtter. En korrupt rec
 - primærnøkkel `(run_id, operation_id)`
 - unik `(intent_segment_id, intent_ordinal)` når begge er satt
 
-`COMMIT_INTENT_RECORDED` krever et `durable` intentsegment, gyldig ordinal og samme `lease_id`/`fencing_token` som aktiv `MutationPermit`. Alle absolutte stier rekonstrueres fra endpointrevisjon + relative path gjennom `SafePath`; de tas aldri direkte fra recoverypayload.
+`COMMIT_INTENT_RECORDED` krever et `DURABLE` intentsegment, gyldig ordinal og samme `lease_id`/`fencing_token` som aktiv `MutationPermit`. 0B-skjemaet persisterer primærnøkkel `(run_id, operation_id)`, unik `(intent_segment_id, intent_ordinal)` når begge er satt og en materialisert fase som bare kan flyttes via recoverywriterens CAS-store. Alle absolutte stier rekonstrueres fra endpointrevisjon + relative path gjennom `SafePath`; de tas aldri direkte fra recoverypayload.
 
 #### `recovery_events`
 
@@ -1362,7 +1362,7 @@ Alle stier er relative til eksplisitte endpoint-/kontrollrøtter. En korrupt rec
 - `event_hash TEXT NOT NULL`
 - unik `(run_id, run_sequence)`
 
-Hver faseovergang appendes til events og oppdaterer materialisert operation/run-state i samme recoverytransaksjon. Hashkjeden er per run: `previous_event_hash` peker til foregående `run_sequence`, og hashinput bruker canonical schema/version/payload. Kjeden er korrupsjonsdeteksjon og audit, ikke kryptografisk autentisering mot en ondsinnet lokal bruker.
+Hver faseovergang appendes til events og oppdaterer materialisert operation/run-state i samme recoverytransaksjon. Hashkjeden er per run: `previous_event_hash` peker til foregående `run_sequence`, og hashinput bruker canonical schema/version/payload. 0B-store beregner kjeden deterministisk over schema, runsekvens, operation, fase, prosessinstans, payload og forrige hash. Kjeden er korrupsjonsdeteksjon og audit, ikke kryptografisk autentisering mot en ondsinnet lokal bruker.
 
 ### 11.3 Varighet, forbindelser og writer-eierskap
 
