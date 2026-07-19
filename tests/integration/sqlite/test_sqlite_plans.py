@@ -16,6 +16,7 @@ from mediasync_home.application.plans import (
     PlanEndpoint,
     PlanEndpointRole,
     PlanOperation,
+    PlanOperationPageQuery,
     PlanOperationType,
     PlanRiskLevel,
     SealedPlan,
@@ -45,6 +46,37 @@ def test_sqlite_plan_store_persists_sealed_plan(tmp_path: Path) -> None:
         assert _row_count(connection, "plan_endpoints") == 1
         assert _row_count(connection, "plan_seal_details") == 1
         assert _row_count(connection, "plan_operation_seal_details") == 2
+
+
+def test_sqlite_plan_store_pages_operations_by_stable_order(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        store = SqlitePlanStore(connection)
+        store.save_sealed_plan(_operation_page_plan())
+
+        first_page = store.page_plan_operations(PlanOperationPageQuery(plan_id="plan-page", limit=2))
+
+        assert [operation.operation_id for operation in first_page.operations] == ["op-a", "op-b"]
+        assert [operation.sequence_no for operation in first_page.operations] == [30, 10]
+        assert first_page.has_more is True
+        assert first_page.next_cursor is not None
+        assert first_page.next_cursor.execution_phase == 10
+        assert first_page.next_cursor.stable_order_key == "010:Pictures/A.jpg"
+        assert first_page.next_cursor.operation_id == "op-b"
+
+        second_page = store.page_plan_operations(
+            PlanOperationPageQuery(
+                plan_id="plan-page",
+                limit=2,
+                after=first_page.next_cursor,
+            )
+        )
+
+        assert [operation.operation_id for operation in second_page.operations] == ["op-c"]
+        assert second_page.has_more is False
+        assert second_page.next_cursor is None
 
 
 def test_sqlite_plan_store_rejects_duplicate_plan_id(tmp_path: Path) -> None:
@@ -219,6 +251,38 @@ def _sealed_plan() -> SealedPlan:
     )
 
 
+def _operation_page_plan() -> SealedPlan:
+    return seal_plan(
+        plan_id="plan-page",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        operations=(
+            _read_model_operation(
+                operation_id="op-b",
+                sequence_no=10,
+                execution_phase=10,
+                stable_order_key="010:Pictures/A.jpg",
+                target_relative_path="Pictures/B.jpg",
+            ),
+            _read_model_operation(
+                operation_id="op-c",
+                sequence_no=20,
+                execution_phase=20,
+                stable_order_key="020:Pictures/C.jpg",
+                target_relative_path="Pictures/C.jpg",
+            ),
+            _read_model_operation(
+                operation_id="op-a",
+                sequence_no=30,
+                execution_phase=10,
+                stable_order_key="010:Pictures/A.jpg",
+                target_relative_path="Pictures/A.jpg",
+            ),
+        ),
+    )
+
+
 def _target_endpoint() -> PlanEndpoint:
     return PlanEndpoint(
         endpoint_id="target-a",
@@ -233,6 +297,27 @@ def _target_endpoint() -> PlanEndpoint:
         control_schema_version=1,
         planned_operations=1,
         planned_bytes=128,
+    )
+
+
+def _read_model_operation(
+    *,
+    operation_id: str,
+    sequence_no: int,
+    execution_phase: int,
+    stable_order_key: str,
+    target_relative_path: str,
+) -> PlanOperation:
+    return PlanOperation(
+        operation_id=operation_id,
+        operation_type=PlanOperationType.SKIP_IDENTICAL,
+        sequence_no=sequence_no,
+        execution_phase=execution_phase,
+        stable_order_key=stable_order_key,
+        target_precondition_kind=TargetPreconditionKind.NONE,
+        target_relative_path=target_relative_path,
+        reason_code="SKIP_IDENTICAL",
+        risk_level=PlanRiskLevel.LOW,
     )
 
 

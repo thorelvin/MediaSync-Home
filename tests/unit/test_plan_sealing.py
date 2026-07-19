@@ -5,15 +5,19 @@ from dataclasses import replace
 import pytest
 
 from mediasync_home.application.plans import (
+    MAX_PLAN_OPERATION_PAGE_LIMIT,
     PlanDependency,
     PlanEndpoint,
     PlanEndpointRole,
     PlanOperation,
+    PlanOperationCursor,
+    PlanOperationPageQuery,
     PlanOperationType,
     PlanRiskLevel,
     PlanSealViolation,
     TargetPreconditionKind,
     seal_plan,
+    validate_plan_operation_page_query,
     verify_plan_checksum,
 )
 
@@ -184,6 +188,62 @@ def test_writable_plan_target_requires_owner_epoch_and_control_schema() -> None:
             job_revision_id="job-rev-a",
             endpoints=(replace(_target_endpoint(), control_schema_version=None),),
             operations=(_copy_operation(),),
+        )
+
+
+def test_plan_operation_page_query_rejects_unbounded_limits() -> None:
+    validate_plan_operation_page_query(
+        PlanOperationPageQuery(
+            plan_id="plan-a",
+            limit=MAX_PLAN_OPERATION_PAGE_LIMIT,
+            after=PlanOperationCursor(
+                execution_phase=1,
+                stable_order_key="001:Pictures/A.jpg",
+                operation_id="op-a",
+            ),
+        )
+    )
+
+    with pytest.raises(PlanSealViolation, match="PLAN_OPERATION_READ_LIMIT_TOO_LARGE"):
+        validate_plan_operation_page_query(
+            PlanOperationPageQuery(
+                plan_id="plan-a",
+                limit=MAX_PLAN_OPERATION_PAGE_LIMIT + 1,
+            )
+        )
+
+
+def test_plan_operation_page_query_rejects_invalid_cursor() -> None:
+    with pytest.raises(
+        PlanSealViolation,
+        match="PLAN_OPERATION_READ_CURSOR_PHASE_MUST_BE_NON_NEGATIVE",
+    ):
+        validate_plan_operation_page_query(
+            PlanOperationPageQuery(
+                plan_id="plan-a",
+                limit=10,
+                after=PlanOperationCursor(
+                    execution_phase=-1,
+                    stable_order_key="001:Pictures/A.jpg",
+                    operation_id="op-a",
+                ),
+            )
+        )
+
+    with pytest.raises(
+        PlanSealViolation,
+        match="PLAN_OPERATION_READ_CURSOR_REQUIRES_OPERATION_ID",
+    ):
+        validate_plan_operation_page_query(
+            PlanOperationPageQuery(
+                plan_id="plan-a",
+                limit=10,
+                after=PlanOperationCursor(
+                    execution_phase=1,
+                    stable_order_key="001:Pictures/A.jpg",
+                    operation_id=" ",
+                ),
+            )
         )
 
 

@@ -12,6 +12,7 @@ OPERATION_SCHEMA_VERSION = 1
 PLANNER_VERSION = "0B-plan-sealer-skeleton"
 PLAN_CHECKSUM_ALGORITHM = "SHA-256"
 PLAN_SERIALIZER_VERSION = "0B-CANONICAL-JSON-V1"
+MAX_PLAN_OPERATION_PAGE_LIMIT = 1000
 
 
 class PlanSealViolation(ValueError):
@@ -89,6 +90,42 @@ class PlanEndpoint:
 
 
 @dataclass(frozen=True)
+class PlanOperationCursor:
+    execution_phase: int
+    stable_order_key: str
+    operation_id: str
+
+
+@dataclass(frozen=True)
+class PlanOperationPageQuery:
+    plan_id: str
+    limit: int
+    after: PlanOperationCursor | None = None
+
+
+@dataclass(frozen=True)
+class PlanOperationReadModel:
+    operation_id: str
+    operation_type: PlanOperationType
+    sequence_no: int
+    execution_phase: int
+    stable_order_key: str
+    target_precondition_kind: TargetPreconditionKind
+    reason_code: str
+    risk_level: PlanRiskLevel
+    target_relative_path: str | None
+    planned_bytes: int
+
+
+@dataclass(frozen=True)
+class PlanOperationPage:
+    plan_id: str
+    operations: tuple[PlanOperationReadModel, ...]
+    next_cursor: PlanOperationCursor | None
+    has_more: bool
+
+
+@dataclass(frozen=True)
 class SealedPlan:
     plan_id: str
     analysis_id: str
@@ -115,6 +152,10 @@ class PlanStore(Protocol):
     def save_sealed_plan(self, plan: SealedPlan) -> None: ...
 
     def load_sealed_plan(self, plan_id: str) -> SealedPlan | None: ...
+
+
+class PlanOperationReadModelStore(Protocol):
+    def page_plan_operations(self, query: PlanOperationPageQuery) -> PlanOperationPage: ...
 
 
 def seal_plan(
@@ -227,6 +268,23 @@ def verify_plan_checksum(plan: SealedPlan) -> bool:
         planned_bytes=plan.planned_bytes,
     )
     return plan.plan_checksum == _checksum(canonical_payload)
+
+
+def validate_plan_operation_page_query(query: PlanOperationPageQuery) -> None:
+    if not query.plan_id.strip():
+        raise PlanSealViolation("PLAN_OPERATION_READ_REQUIRES_PLAN_ID")
+    if query.limit < 1:
+        raise PlanSealViolation("PLAN_OPERATION_READ_LIMIT_MUST_BE_POSITIVE")
+    if query.limit > MAX_PLAN_OPERATION_PAGE_LIMIT:
+        raise PlanSealViolation("PLAN_OPERATION_READ_LIMIT_TOO_LARGE")
+    if query.after is None:
+        return
+    if query.after.execution_phase < 0:
+        raise PlanSealViolation("PLAN_OPERATION_READ_CURSOR_PHASE_MUST_BE_NON_NEGATIVE")
+    if not query.after.stable_order_key.strip():
+        raise PlanSealViolation("PLAN_OPERATION_READ_CURSOR_REQUIRES_STABLE_ORDER_KEY")
+    if not query.after.operation_id.strip():
+        raise PlanSealViolation("PLAN_OPERATION_READ_CURSOR_REQUIRES_OPERATION_ID")
 
 
 def _validate_plan_identity(

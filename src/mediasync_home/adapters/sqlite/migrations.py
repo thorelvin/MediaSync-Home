@@ -92,6 +92,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_snapshot_entry_read_model_indexes",
                 statements=CATALOG_SNAPSHOT_ENTRY_READ_MODEL_INDEXES,
             ),
+            SqliteMigration(
+                version=14,
+                name="catalog_plan_operation_read_model_indexes",
+                statements=CATALOG_PLAN_OPERATION_READ_MODEL_INDEXES,
+            ),
         ),
     )
 
@@ -1300,6 +1305,13 @@ CATALOG_SNAPSHOT_ENTRY_READ_MODEL_INDEXES = (
     """
     CREATE INDEX idx_file_entries_snapshot_comparison_path_id
         ON file_entries (snapshot_id, comparison_key, relative_path, id)
+    """,
+)
+
+CATALOG_PLAN_OPERATION_READ_MODEL_INDEXES = (
+    """
+    CREATE INDEX idx_plan_operation_details_plan_phase_key_id
+        ON plan_operation_seal_details (plan_id, execution_phase, stable_order_key, operation_id)
     """,
 )
 

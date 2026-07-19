@@ -8,12 +8,18 @@ from mediasync_home.application.plans import (
     PlanDependency,
     PlanEndpoint,
     PlanEndpointRole,
+    PlanOperationCursor,
+    PlanOperationPage,
+    PlanOperationPageQuery,
+    PlanOperationReadModel,
+    PlanOperationReadModelStore,
     PlanOperation,
     PlanOperationType,
     PlanRiskLevel,
     PlanStore,
     SealedPlan,
     TargetPreconditionKind,
+    validate_plan_operation_page_query,
 )
 
 
@@ -21,7 +27,7 @@ class SqlitePlanStoreError(ValueError):
     pass
 
 
-class SqlitePlanStore(PlanStore):
+class SqlitePlanStore(PlanStore, PlanOperationReadModelStore):
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
@@ -223,6 +229,36 @@ class SqlitePlanStore(PlanStore):
             dependencies=self._load_dependencies(plan_id),
         )
 
+    def page_plan_operations(self, query: PlanOperationPageQuery) -> PlanOperationPage:
+        validate_plan_operation_page_query(query)
+        rows = self._connection.execute(
+            _plan_operation_page_sql(query.after),
+            (*_plan_operation_page_parameters(query), query.limit + 1),
+        ).fetchall()
+        page_rows = rows[: query.limit]
+        operations = tuple(
+            PlanOperationReadModel(
+                operation_id=str(row[0]),
+                operation_type=PlanOperationType(str(row[1])),
+                sequence_no=int(row[2]),
+                execution_phase=int(row[3]),
+                stable_order_key=str(row[4]),
+                target_precondition_kind=TargetPreconditionKind(str(row[5])),
+                reason_code=str(row[6]),
+                risk_level=PlanRiskLevel(str(row[7])),
+                target_relative_path=None if row[8] is None else str(row[8]),
+                planned_bytes=int(row[9]),
+            )
+            for row in page_rows
+        )
+        has_more = len(rows) > query.limit
+        return PlanOperationPage(
+            plan_id=query.plan_id,
+            operations=operations,
+            next_cursor=_plan_operation_cursor(operations[-1]) if has_more and operations else None,
+            has_more=has_more,
+        )
+
     def _load_endpoints(self, plan_id: str) -> tuple[PlanEndpoint, ...]:
         rows = self._connection.execute(
             """
@@ -333,3 +369,70 @@ def _json_object(payload: str) -> dict[str, object]:
     if not isinstance(data, dict):
         raise SqlitePlanStoreError("SEALED_PLAN_JSON_INVALID")
     return data
+
+
+def _plan_operation_page_sql(after: PlanOperationCursor | None) -> str:
+    cursor_clause = ""
+    if after is not None:
+        cursor_clause = """
+            AND (
+                details.execution_phase > ?
+                OR (
+                    details.execution_phase = ?
+                    AND details.stable_order_key > ?
+                )
+                OR (
+                    details.execution_phase = ?
+                    AND details.stable_order_key = ?
+                    AND details.operation_id > ?
+                )
+            )
+        """
+    return f"""
+        SELECT
+            details.operation_id,
+            operations.operation_type,
+            details.sequence_no,
+            details.execution_phase,
+            details.stable_order_key,
+            details.target_precondition_kind,
+            details.reason_code,
+            details.risk_level,
+            details.target_relative_path,
+            details.planned_bytes
+        FROM plan_operation_seal_details AS details
+        INNER JOIN planned_operations AS operations
+            ON operations.plan_id = details.plan_id
+            AND operations.id = details.operation_id
+        WHERE details.plan_id = ?
+        {cursor_clause}
+        ORDER BY
+            details.execution_phase,
+            details.stable_order_key,
+            details.operation_id
+        LIMIT ?
+        """
+
+
+def _plan_operation_page_parameters(query: PlanOperationPageQuery) -> tuple[object, ...]:
+    parameters: list[object] = [query.plan_id]
+    if query.after is not None:
+        parameters.extend(
+            (
+                query.after.execution_phase,
+                query.after.execution_phase,
+                query.after.stable_order_key,
+                query.after.execution_phase,
+                query.after.stable_order_key,
+                query.after.operation_id,
+            )
+        )
+    return tuple(parameters)
+
+
+def _plan_operation_cursor(operation: PlanOperationReadModel) -> PlanOperationCursor:
+    return PlanOperationCursor(
+        execution_phase=operation.execution_phase,
+        stable_order_key=operation.stable_order_key,
+        operation_id=operation.operation_id,
+    )

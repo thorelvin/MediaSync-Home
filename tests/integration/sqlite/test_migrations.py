@@ -28,7 +28,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 13
+        assert current_schema_version(connection, plan.store) == 14
         assert _table_names(connection) >= {
             "endpoint_heads",
             "job_heads",
@@ -52,7 +52,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 13
+        assert _row_count(connection, "schema_migrations") == 14
         assert _foreign_key(
             connection,
             "endpoint_heads",
@@ -114,6 +114,11 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             connection,
             "file_entries",
             ("snapshot_id", "comparison_key", "relative_path", "id"),
+        ) is False
+        assert _index_is_unique(
+            connection,
+            "plan_operation_seal_details",
+            ("plan_id", "execution_phase", "stable_order_key", "operation_id"),
         ) is False
         assert _index_is_unique(
             connection,
