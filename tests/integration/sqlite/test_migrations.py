@@ -183,9 +183,10 @@ def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(tmp_path
 
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 2
+        assert current_schema_version(connection, plan.store) == 3
         assert _table_names(connection) >= {
             "lease_counters",
+            "resource_leases",
             "recovery_epochs",
             "recovery_intents",
             "recovery_intent_steps",

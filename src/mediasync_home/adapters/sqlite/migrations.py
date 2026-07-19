@@ -85,6 +85,11 @@ def recovery_migration_plan() -> SqliteMigrationPlan:
                 name="recovery_lease_counters",
                 statements=RECOVERY_LEASE_COUNTERS,
             ),
+            SqliteMigration(
+                version=3,
+                name="recovery_resource_leases",
+                statements=RECOVERY_RESOURCE_LEASES,
+            ),
         ),
     )
 
@@ -900,5 +905,41 @@ RECOVERY_LEASE_COUNTERS = (
         last_fencing_token INTEGER NOT NULL CHECK (last_fencing_token >= 0),
         updated_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     )
+    """,
+)
+
+RECOVERY_RESOURCE_LEASES = (
+    """
+    CREATE TABLE resource_leases (
+        lease_id TEXT PRIMARY KEY,
+        resource_key TEXT NOT NULL,
+        ownership_epoch INTEGER NOT NULL CHECK (ownership_epoch >= 1),
+        fencing_token INTEGER NOT NULL CHECK (fencing_token >= 1),
+        lease_mode TEXT NOT NULL CHECK (lease_mode IN ('EXCLUSIVE')),
+        owner_instance_id TEXT NOT NULL,
+        run_id TEXT,
+        run_target_id TEXT,
+        endpoint_id TEXT,
+        endpoint_generation INTEGER CHECK (endpoint_generation IS NULL OR endpoint_generation >= 1),
+        os_lock_kind TEXT NOT NULL CHECK (os_lock_kind IN ('LOCAL_OS_HANDLE')),
+        state TEXT NOT NULL CHECK (state IN ('ACQUIRED', 'RELEASED')),
+        acquired_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        heartbeat_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        released_utc TEXT,
+        CHECK (
+            (state = 'ACQUIRED' AND released_utc IS NULL)
+            OR (state = 'RELEASED' AND released_utc IS NOT NULL)
+        ),
+        UNIQUE (resource_key, ownership_epoch, fencing_token)
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX uq_resource_leases_active_exclusive_resource
+        ON resource_leases (resource_key)
+        WHERE state = 'ACQUIRED' AND lease_mode = 'EXCLUSIVE'
+    """,
+    """
+    CREATE INDEX idx_resource_leases_state_heartbeat
+        ON resource_leases (state, heartbeat_utc)
     """,
 )
