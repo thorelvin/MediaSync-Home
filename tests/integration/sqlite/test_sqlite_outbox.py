@@ -69,6 +69,34 @@ def test_sqlite_outbox_replays_same_message_and_rejects_payload_conflict(tmp_pat
             store.enqueue_outbox_message(replace(message, payload_hash="c" * 64))
 
 
+def test_sqlite_outbox_replay_uses_delivered_tombstone_after_detail_compaction(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        store = SqliteOutboxStore(connection)
+        message = command_effect_outbox_message(_succeeded_receipt())
+        store.enqueue_outbox_message(message)
+        store.claim_next_pending(owner_instance_id="host-a", claim_token="claim-a")
+        store.mark_delivered(
+            message_id=message.message_id,
+            claim_token="claim-a",
+            terminal_effect_hash="b" * 64,
+        )
+        connection.execute("DELETE FROM outbox_messages WHERE id = ?", (message.message_id,))
+        connection.commit()
+
+        replay = store.enqueue_outbox_message(message)
+
+        assert replay.state is OutboxMessageState.DELIVERED
+        assert replay.terminal_effect_hash == "b" * 64
+        assert _row_count(connection, "outbox_messages") == 0
+        assert store.claim_next_pending(owner_instance_id="host-b", claim_token="claim-b") is None
+        with pytest.raises(SqliteOutboxStoreError, match="OUTBOX_IDEMPOTENCY_CONFLICT"):
+            store.enqueue_outbox_message(replace(message, payload_hash="c" * 64))
+
+
 def test_sqlite_outbox_delivery_requires_matching_claim_token(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:

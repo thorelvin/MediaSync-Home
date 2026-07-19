@@ -210,6 +210,21 @@ def requeued_claimed_message_after_startup(
     )
 
 
+def delivered_message_from_tombstone(
+    message: OutboxMessage,
+    *,
+    terminal_effect_hash: str | None,
+) -> OutboxMessage:
+    if terminal_effect_hash is None:
+        raise OutboxViolation("OUTBOX_TOMBSTONE_REQUIRES_TERMINAL_EFFECT_HASH")
+    return replace(
+        message,
+        state=OutboxMessageState.DELIVERED,
+        terminal_effect_hash=terminal_effect_hash,
+        last_error_code=None,
+    )
+
+
 def command_effect_outbox_message(receipt: CommandReceipt) -> OutboxMessage:
     if receipt.state is not CommandReceiptState.SUCCEEDED:
         raise OutboxViolation("OUTBOX_COMMAND_EFFECT_REQUIRES_SUCCEEDED_RECEIPT")

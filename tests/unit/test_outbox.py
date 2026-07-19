@@ -19,6 +19,7 @@ from mediasync_home.application.outbox import (
     claimed_message,
     command_effect_outbox_message,
     dead_letter_message,
+    delivered_message_from_tombstone,
     delivered_message,
     dispatch_one_outbox_message,
     requeued_claimed_message_after_startup,
@@ -73,6 +74,17 @@ def test_delivery_requires_claimed_message() -> None:
 
     with pytest.raises(OutboxViolation, match="OUTBOX_DELIVERY_REQUIRES_CLAIMED_MESSAGE"):
         delivered_message(message, terminal_effect_hash="a" * 64)
+
+
+def test_tombstone_replay_returns_terminal_delivered_message() -> None:
+    message = command_effect_outbox_message(_succeeded_receipt())
+
+    replay = delivered_message_from_tombstone(message, terminal_effect_hash="b" * 64)
+
+    assert replay.state is OutboxMessageState.DELIVERED
+    assert replay.terminal_effect_hash == "b" * 64
+    assert replay.claim_token is None
+    assert replay.last_error_code is None
 
 
 def test_dead_letter_requires_claimed_message_and_error_code() -> None:

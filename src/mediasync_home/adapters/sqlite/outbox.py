@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 
 from mediasync_home.application.outbox import (
     OutboxMessage,
@@ -9,6 +10,7 @@ from mediasync_home.application.outbox import (
     OutboxStartupReconciliationReport,
     OutboxStartupReconciliationRequest,
     OutboxStartupReconciliationStore,
+    delivered_message_from_tombstone,
     validate_outbox_startup_reconciliation_request,
 )
 
@@ -22,14 +24,30 @@ class SqliteOutboxStore(OutboxStore, OutboxStartupReconciliationStore):
         self._connection = connection
 
     def enqueue_outbox_message(self, message: OutboxMessage) -> OutboxMessage:
-        existing = self._load_by_idempotency_key(message.idempotency_key)
-        if existing is not None:
-            if existing.payload_hash != message.payload_hash:
-                raise SqliteOutboxStoreError("OUTBOX_IDEMPOTENCY_CONFLICT")
-            return existing
-
         outer_transaction = self._connection.in_transaction
         try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            existing = self._load_by_idempotency_key(message.idempotency_key)
+            tombstone = self._load_delivered_outbox_tombstone(message.idempotency_key)
+            if existing is not None:
+                if existing.payload_hash != message.payload_hash:
+                    raise SqliteOutboxStoreError("OUTBOX_IDEMPOTENCY_CONFLICT")
+                if tombstone is not None and tombstone.payload_hash != existing.payload_hash:
+                    raise SqliteOutboxStoreError("OUTBOX_IDEMPOTENCY_CONFLICT")
+                if not outer_transaction:
+                    self._connection.execute("COMMIT")
+                return existing
+            if tombstone is not None:
+                if tombstone.payload_hash != message.payload_hash:
+                    raise SqliteOutboxStoreError("OUTBOX_IDEMPOTENCY_CONFLICT")
+                if not outer_transaction:
+                    self._connection.execute("COMMIT")
+                return delivered_message_from_tombstone(
+                    message,
+                    terminal_effect_hash=tombstone.terminal_effect_hash,
+                )
+
             self._connection.execute(
                 """
                 INSERT INTO outbox_messages (
@@ -56,10 +74,12 @@ class SqliteOutboxStore(OutboxStore, OutboxStartupReconciliationStore):
                 ),
             )
             if not outer_transaction:
-                self._connection.commit()
-        except sqlite3.Error as exc:
+                self._connection.execute("COMMIT")
+        except (sqlite3.Error, SqliteOutboxStoreError) as exc:
             if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteOutboxStoreError):
+                raise
             raise SqliteOutboxStoreError("OUTBOX_ENQUEUE_FAILED") from exc
         return message
 
@@ -312,6 +332,27 @@ class SqliteOutboxStore(OutboxStore, OutboxStartupReconciliationStore):
     def _load_by_idempotency_key(self, idempotency_key: str) -> OutboxMessage | None:
         return self._load_one("WHERE idempotency_key = ?", (idempotency_key,))
 
+    def _load_delivered_outbox_tombstone(self, deduplication_key: str) -> _OutboxTombstone | None:
+        row = self._connection.execute(
+            """
+            SELECT payload_hash, terminal_state, terminal_effect_hash
+            FROM effect_dedup_tombstones
+            WHERE deduplication_key = ?
+                AND effect_kind = 'outbox'
+            """,
+            (deduplication_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        if str(row[1]) != "DELIVERED":
+            raise SqliteOutboxStoreError("OUTBOX_TOMBSTONE_TERMINAL_STATE_UNSUPPORTED")
+        if row[2] is None:
+            raise SqliteOutboxStoreError("OUTBOX_TOMBSTONE_REQUIRES_TERMINAL_EFFECT_HASH")
+        return _OutboxTombstone(
+            payload_hash=str(row[0]),
+            terminal_effect_hash=str(row[2]),
+        )
+
     def _load_one(
         self,
         where_clause: str,
@@ -357,3 +398,9 @@ class SqliteOutboxStore(OutboxStore, OutboxStartupReconciliationStore):
             terminal_effect_hash=None if row[12] is None else str(row[12]),
             last_error_code=None if row[13] is None else str(row[13]),
         )
+
+
+@dataclass(frozen=True)
+class _OutboxTombstone:
+    payload_hash: str
+    terminal_effect_hash: str
