@@ -28,7 +28,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 10
+        assert current_schema_version(connection, plan.store) == 11
         assert _table_names(connection) >= {
             "endpoint_heads",
             "job_heads",
@@ -50,7 +50,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 10
+        assert _row_count(connection, "schema_migrations") == 11
         assert _foreign_key(
             connection,
             "endpoint_heads",
@@ -130,6 +130,14 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "trg_file_entries_no_insert_after_snapshot_immutable",
             "trg_snapshot_batches_no_insert_after_snapshot_immutable",
             "trg_case_collision_members_no_insert_after_snapshot_immutable",
+            "trg_snapshots_seal_insert_requires_checksum",
+            "trg_snapshots_seal_update_requires_checksum",
+        }
+        assert _column_names(connection, "snapshots") >= {
+            "complete",
+            "checksum_algorithm",
+            "serializer_version",
+            "snapshot_checksum",
         }
 
 
@@ -175,6 +183,27 @@ def test_catalog_migration_preserves_case_collision_entries(tmp_path: Path) -> N
 
         assert _row_count(connection, "file_entries") == 2
         assert _row_count(connection, "case_collision_members") == 2
+
+
+def test_catalog_migration_rejects_malformed_snapshot_seal_checksum(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_migrations(connection, catalog_migration_plan())
+        _insert_catalog_parent_rows(connection)
+
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+            connection.execute(
+                """
+                UPDATE snapshots
+                SET complete = 1,
+                    immutable = 1,
+                    checksum_algorithm = 'SHA-256',
+                    serializer_version = '0B-SNAPSHOT-CANONICAL-JSON-V1',
+                    snapshot_checksum = 'gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg'
+                WHERE id = 'snapshot-a'
+                """
+            )
 
 
 def test_catalog_migration_enforces_composite_head_foreign_key(tmp_path: Path) -> None:
@@ -286,6 +315,10 @@ def _table_names(connection: sqlite3.Connection) -> set[str]:
             """
         )
     }
+
+
+def _column_names(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
 
 
 def _row_count(connection: sqlite3.Connection, table: str) -> int:

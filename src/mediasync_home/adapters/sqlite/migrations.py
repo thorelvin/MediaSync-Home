@@ -77,6 +77,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_snapshot_entry_materialization",
                 statements=CATALOG_SNAPSHOT_ENTRY_MATERIALIZATION,
             ),
+            SqliteMigration(
+                version=11,
+                name="catalog_snapshot_seal_checksum",
+                statements=CATALOG_SNAPSHOT_SEAL_CHECKSUM,
+            ),
         ),
     )
 
@@ -1083,6 +1088,63 @@ CATALOG_SNAPSHOT_ENTRY_MATERIALIZATION = (
     )
     BEGIN
         SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+)
+
+CATALOG_SNAPSHOT_SEAL_CHECKSUM = (
+    """
+    ALTER TABLE snapshots
+        ADD COLUMN complete INTEGER NOT NULL DEFAULT 0 CHECK (complete IN (0, 1))
+    """,
+    """
+    ALTER TABLE snapshots
+        ADD COLUMN snapshot_schema_version INTEGER NOT NULL DEFAULT 1 CHECK (snapshot_schema_version >= 1)
+    """,
+    """
+    ALTER TABLE snapshots
+        ADD COLUMN checksum_algorithm TEXT
+    """,
+    """
+    ALTER TABLE snapshots
+        ADD COLUMN serializer_version TEXT
+    """,
+    """
+    ALTER TABLE snapshots
+        ADD COLUMN snapshot_checksum TEXT CHECK (
+            snapshot_checksum IS NULL
+            OR (
+                length(snapshot_checksum) = 64
+                AND snapshot_checksum NOT GLOB '*[^0-9a-f]*'
+            )
+        )
+    """,
+    """
+    CREATE TRIGGER trg_snapshots_seal_insert_requires_checksum
+    BEFORE INSERT ON snapshots
+    WHEN NEW.immutable = 1
+        AND (
+            NEW.complete != 1
+            OR NEW.checksum_algorithm IS NULL
+            OR NEW.serializer_version IS NULL
+            OR NEW.snapshot_checksum IS NULL
+        )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_SEAL_INCOMPLETE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_snapshots_seal_update_requires_checksum
+    BEFORE UPDATE ON snapshots
+    WHEN NEW.immutable = 1
+        AND (
+            NEW.complete != 1
+            OR NEW.checksum_algorithm IS NULL
+            OR NEW.serializer_version IS NULL
+            OR NEW.snapshot_checksum IS NULL
+        )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_SEAL_INCOMPLETE');
     END
     """,
 )

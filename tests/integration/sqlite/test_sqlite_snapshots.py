@@ -14,7 +14,15 @@ from mediasync_home.adapters.sqlite.snapshots import (
     SqliteSnapshotEntryStore,
     SqliteSnapshotEntryStoreError,
 )
-from mediasync_home.application.snapshots import SnapshotFileEntry, snapshot_entry_batch
+from mediasync_home.application.snapshots import (
+    SNAPSHOT_CHECKSUM_ALGORITHM,
+    SNAPSHOT_SERIALIZER_VERSION,
+    SnapshotBatchSummary,
+    SnapshotFileEntry,
+    SnapshotSealRequest,
+    snapshot_entry_batch,
+    verify_snapshot_checksum,
+)
 
 
 def test_sqlite_snapshot_entry_batch_is_idempotent_and_preserves_case_collisions(
@@ -92,7 +100,11 @@ def test_sqlite_snapshot_entry_batch_rejects_immutable_snapshot(tmp_path: Path) 
             """
             UPDATE snapshots
             SET immutable = 1,
-                sealed_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                complete = 1,
+                sealed_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                checksum_algorithm = 'SHA-256',
+                serializer_version = 'test',
+                snapshot_checksum = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
             WHERE id = 'snapshot-a'
             """
         )
@@ -103,6 +115,97 @@ def test_sqlite_snapshot_entry_batch_rejects_immutable_snapshot(tmp_path: Path) 
 
         assert _row_count(connection, "snapshot_batches") == 0
         assert _row_count(connection, "file_entries") == 0
+
+
+def test_sqlite_snapshot_seal_is_idempotent_and_blocks_later_mutation(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_snapshot_parent_rows(connection)
+        store = SqliteSnapshotEntryStore(connection)
+        batch = _case_collision_batch()
+        store.commit_snapshot_entry_batch(batch)
+
+        sealed = store.seal_snapshot(_seal_request())
+        replay = store.seal_snapshot(_seal_request())
+        loaded = store.load_sealed_snapshot("snapshot-a")
+
+        assert replay == sealed
+        assert loaded == sealed
+        assert sealed.complete is True
+        assert sealed.immutable is True
+        assert sealed.checksum_algorithm == SNAPSHOT_CHECKSUM_ALGORITHM
+        assert sealed.serializer_version == SNAPSHOT_SERIALIZER_VERSION
+        assert verify_snapshot_checksum(
+            sealed,
+            entries=store.load_snapshot_entries("snapshot-a"),
+            batches=(
+                SnapshotBatchSummary(
+                    sequence_no=batch.sequence_no,
+                    payload_hash=batch.payload_hash,
+                    entry_count=len(batch.entries),
+                    approximate_bytes=batch.approximate_bytes,
+                ),
+            ),
+        )
+        assert _snapshot_seal_row(connection) == (
+            1,
+            1,
+            SNAPSHOT_CHECKSUM_ALGORITHM,
+            SNAPSHOT_SERIALIZER_VERSION,
+            sealed.snapshot_checksum,
+        )
+
+        with pytest.raises(SqliteSnapshotEntryStoreError, match="SNAPSHOT_IMMUTABLE"):
+            store.commit_snapshot_entry_batch(
+                snapshot_entry_batch(
+                    snapshot_id="snapshot-a",
+                    sequence_no=1,
+                    entries=(
+                        SnapshotFileEntry(
+                            entry_id="file-c",
+                            relative_path="Other.txt",
+                            comparison_key="other.txt",
+                            object_type="file",
+                            size_bytes=1,
+                        ),
+                    ),
+                )
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="SNAPSHOT_IMMUTABLE"):
+            connection.execute(
+                """
+                UPDATE file_entries
+                SET size_bytes = 65
+                WHERE snapshot_id = 'snapshot-a' AND id = 'file-b'
+                """
+            )
+
+
+def test_sqlite_snapshot_seal_rejects_count_mismatch(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_snapshot_parent_rows(connection)
+        store = SqliteSnapshotEntryStore(connection)
+        store.commit_snapshot_entry_batch(_case_collision_batch())
+
+        with pytest.raises(
+            SqliteSnapshotEntryStoreError,
+            match="SNAPSHOT_SEAL_ENTRY_COUNT_MISMATCH",
+        ):
+            store.seal_snapshot(
+                SnapshotSealRequest(
+                    snapshot_id="snapshot-a",
+                    expected_entry_count=3,
+                    expected_total_bytes=96,
+                    expected_batch_count=1,
+                    expected_case_collision_group_count=1,
+                )
+            )
+
+        assert store.load_sealed_snapshot("snapshot-a") is None
+        assert _snapshot_seal_row(connection) == (0, 0, None, None, None)
 
 
 def _prepare_catalog(connection: sqlite3.Connection, database: Path) -> None:
@@ -172,6 +275,36 @@ def _case_collision_batch():
                 size_bytes=64,
             ),
         ),
+    )
+
+
+def _seal_request() -> SnapshotSealRequest:
+    return SnapshotSealRequest(
+        snapshot_id="snapshot-a",
+        expected_entry_count=2,
+        expected_total_bytes=96,
+        expected_batch_count=1,
+        expected_case_collision_group_count=1,
+    )
+
+
+def _snapshot_seal_row(
+    connection: sqlite3.Connection,
+) -> tuple[int, int, str | None, str | None, str | None]:
+    row = connection.execute(
+        """
+        SELECT complete, immutable, checksum_algorithm, serializer_version, snapshot_checksum
+        FROM snapshots
+        WHERE id = 'snapshot-a'
+        """
+    ).fetchone()
+    assert row is not None
+    return (
+        int(row[0]),
+        int(row[1]),
+        None if row[2] is None else str(row[2]),
+        None if row[3] is None else str(row[3]),
+        None if row[4] is None else str(row[4]),
     )
 
 
