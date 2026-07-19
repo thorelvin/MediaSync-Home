@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pickle
 from pathlib import Path
 
 import pytest
@@ -10,10 +11,12 @@ from mediasync_home.adapters.endpoint_leases import (
     EndpointLeaseUnavailable,
     FencingTokenAllocationError,
     LocalEndpointLeaseAuthority,
+    MutationPermitIssueError,
     ResourceLeaseRegistrationError,
     Win32EndpointLockOpener,
 )
 from mediasync_home.application.runs import EndpointLeaseRequest
+from mediasync_home.domain.capabilities import MutationPermit
 
 
 def test_local_endpoint_lease_authority_opens_lock_and_allocates_fencing_token(tmp_path: Path) -> None:
@@ -78,6 +81,102 @@ def test_local_endpoint_lease_authority_registers_durable_resource_lease(tmp_pat
 
     assert handle.closed is True
     assert resource_store.releases == [attempt.lease.lease_id]
+
+
+def test_local_endpoint_lease_issues_current_mutation_permit(tmp_path: Path) -> None:
+    root = _endpoint_root(tmp_path)
+    handle = _FakeHandle(root / ".mediasync" / "locks" / "mutation.lock")
+    authority = LocalEndpointLeaseAuthority(
+        target_roots={"endpoint:target-a": root},
+        token_store=_FakeTokenStore(42),
+        lock_opener=_FakeOpener(handle),
+    )
+
+    attempt = authority.acquire_endpoint_lease(_request())
+
+    assert attempt.acquired is True
+    assert attempt.lease is not None
+    assert attempt.lease.live is True
+    permit = attempt.lease.issue_mutation_permit()
+    attempt.lease.assert_mutation_permit_current(permit)
+    assert isinstance(permit, MutationPermit)
+    assert permit.lease_id == attempt.lease.lease_id
+    assert permit.resource_key == "endpoint:target-a"
+    assert permit.owner_installation_id == "owner-a"
+    assert permit.ownership_epoch == 1
+    assert permit.fencing_token == 42
+    assert permit.run_id == "run-a"
+    assert permit.run_target_id == "run-a-target-0000"
+    assert permit.endpoint_id == "target-a"
+    assert permit.endpoint_revision_id == "target-rev-a"
+    with pytest.raises(TypeError, match="not serializable"):
+        pickle.dumps(permit)
+
+
+def test_local_endpoint_lease_rejects_new_permit_after_release(tmp_path: Path) -> None:
+    root = _endpoint_root(tmp_path)
+    authority = LocalEndpointLeaseAuthority(
+        target_roots={"endpoint:target-a": root},
+        token_store=_FakeTokenStore(42),
+        lock_opener=_FakeOpener(_FakeHandle(root / ".mediasync" / "locks" / "mutation.lock")),
+    )
+
+    attempt = authority.acquire_endpoint_lease(_request())
+
+    assert attempt.lease is not None
+    attempt.lease.release()
+    with pytest.raises(MutationPermitIssueError) as exc_info:
+        attempt.lease.issue_mutation_permit()
+    assert exc_info.value.validation_code == "MUTATION_PERMIT_LEASE_RELEASED"
+
+
+def test_local_endpoint_lease_rejects_new_permit_after_lock_loss(tmp_path: Path) -> None:
+    root = _endpoint_root(tmp_path)
+    handle = _FakeHandle(root / ".mediasync" / "locks" / "mutation.lock")
+    authority = LocalEndpointLeaseAuthority(
+        target_roots={"endpoint:target-a": root},
+        token_store=_FakeTokenStore(42),
+        lock_opener=_FakeOpener(handle),
+    )
+
+    attempt = authority.acquire_endpoint_lease(_request())
+
+    assert attempt.lease is not None
+    handle.lose()
+    assert attempt.lease.live is False
+    with pytest.raises(MutationPermitIssueError) as exc_info:
+        attempt.lease.issue_mutation_permit()
+    assert exc_info.value.validation_code == "MUTATION_PERMIT_LEASE_LOST"
+
+
+def test_local_endpoint_lease_rejects_permit_from_other_lease(tmp_path: Path) -> None:
+    root_a = _endpoint_root(tmp_path / "a")
+    root_b = _endpoint_root(tmp_path / "b", endpoint_id="target-b")
+    authority = LocalEndpointLeaseAuthority(
+        target_roots={
+            "endpoint:target-a": root_a,
+            "endpoint:target-b": root_b,
+        },
+        token_store=_FakeTokenStore(42),
+        lock_opener=_MultiHandleOpener(),
+    )
+
+    attempt_a = authority.acquire_endpoint_lease(_request())
+    attempt_b = authority.acquire_endpoint_lease(
+        _request(
+            run_target_id="run-a-target-0001",
+            endpoint_id="target-b",
+            endpoint_revision_id="target-rev-b",
+            resource_key="endpoint:target-b",
+        )
+    )
+
+    assert attempt_a.lease is not None
+    assert attempt_b.lease is not None
+    permit_b = attempt_b.lease.issue_mutation_permit()
+    with pytest.raises(MutationPermitIssueError) as exc_info:
+        attempt_a.lease.assert_mutation_permit_current(permit_b)
+    assert exc_info.value.validation_code == "MUTATION_PERMIT_LEASE_MISMATCH"
 
 
 def test_local_endpoint_lease_authority_reports_unknown_resource_without_opening(tmp_path: Path) -> None:
@@ -204,9 +303,16 @@ class _FakeHandle:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.closed = False
+        self.alive = True
 
     def close(self) -> None:
         self.closed = True
+
+    def is_alive(self) -> bool:
+        return self.alive and not self.closed
+
+    def lose(self) -> None:
+        self.alive = False
 
 
 class _FakeOpener:
@@ -217,6 +323,15 @@ class _FakeOpener:
     def acquire_exclusive_lock(self, lock_path: Path) -> _FakeHandle:
         self.paths.append(lock_path)
         return self._handle
+
+
+class _MultiHandleOpener:
+    def __init__(self) -> None:
+        self.paths: list[Path] = []
+
+    def acquire_exclusive_lock(self, lock_path: Path) -> _FakeHandle:
+        self.paths.append(lock_path)
+        return _FakeHandle(lock_path)
 
 
 class _UnavailableOpener:
@@ -309,13 +424,19 @@ class _FailingResourceLeaseStore:
         raise AssertionError("release must not be called when registration fails")
 
 
-def _request() -> EndpointLeaseRequest:
+def _request(
+    *,
+    run_target_id: str = "run-a-target-0000",
+    endpoint_id: str = "target-a",
+    endpoint_revision_id: str = "target-rev-a",
+    resource_key: str = "endpoint:target-a",
+) -> EndpointLeaseRequest:
     return EndpointLeaseRequest(
         run_id="run-a",
-        run_target_id="run-a-target-0000",
-        endpoint_id="target-a",
-        endpoint_revision_id="target-rev-a",
-        resource_key="endpoint:target-a",
+        run_target_id=run_target_id,
+        endpoint_id=endpoint_id,
+        endpoint_revision_id=endpoint_revision_id,
+        resource_key=resource_key,
         required_owner_installation_id="owner-a",
         required_ownership_epoch=1,
     )

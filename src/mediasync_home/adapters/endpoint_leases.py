@@ -14,6 +14,7 @@ from mediasync_home.application.runs import (
     EndpointLeaseAuthority,
     EndpointLeaseRequest,
 )
+from mediasync_home.domain.capabilities import MutationPermit, _issue_mutation_permit
 
 
 class EndpointLeaseAdapterError(RuntimeError):
@@ -35,6 +36,13 @@ class FencingTokenAllocationError(EndpointLeaseAdapterError):
 
 
 class ResourceLeaseRegistrationError(EndpointLeaseAdapterError):
+    def __init__(self, validation_code: str, next_action: str) -> None:
+        super().__init__(validation_code)
+        self.validation_code = validation_code
+        self.next_action = next_action
+
+
+class MutationPermitIssueError(EndpointLeaseAdapterError):
     def __init__(self, validation_code: str, next_action: str) -> None:
         super().__init__(validation_code)
         self.validation_code = validation_code
@@ -67,6 +75,8 @@ class ResourceLeaseStore(Protocol):
 class EndpointLockHandle(Protocol):
     path: Path
 
+    def is_alive(self) -> bool: ...
+
     def close(self) -> None: ...
 
 
@@ -80,6 +90,10 @@ class LocalEndpointLease:
     owner_installation_id: str
     ownership_epoch: int
     fencing_token: int
+    run_id: str
+    run_target_id: str
+    endpoint_id: str
+    endpoint_revision_id: str
     resource_key: str
     lock_path: Path
     _lock_handle: EndpointLockHandle = field(repr=False)
@@ -89,6 +103,54 @@ class LocalEndpointLease:
     @property
     def released(self) -> bool:
         return self._released
+
+    @property
+    def live(self) -> bool:
+        return not self._released and self._lock_handle.is_alive()
+
+    def issue_mutation_permit(self) -> MutationPermit:
+        self._assert_live_for_mutation_permit()
+        return _issue_mutation_permit(
+            lease_id=self.lease_id,
+            resource_key=self.resource_key,
+            owner_installation_id=self.owner_installation_id,
+            ownership_epoch=self.ownership_epoch,
+            fencing_token=self.fencing_token,
+            run_id=self.run_id,
+            run_target_id=self.run_target_id,
+            endpoint_id=self.endpoint_id,
+            endpoint_revision_id=self.endpoint_revision_id,
+        )
+
+    def assert_mutation_permit_current(self, permit: MutationPermit) -> None:
+        self._assert_live_for_mutation_permit()
+        if (
+            permit.lease_id != self.lease_id
+            or permit.resource_key != self.resource_key
+            or permit.owner_installation_id != self.owner_installation_id
+            or permit.ownership_epoch != self.ownership_epoch
+            or permit.fencing_token != self.fencing_token
+            or permit.run_id != self.run_id
+            or permit.run_target_id != self.run_target_id
+            or permit.endpoint_id != self.endpoint_id
+            or permit.endpoint_revision_id != self.endpoint_revision_id
+        ):
+            raise MutationPermitIssueError(
+                "MUTATION_PERMIT_LEASE_MISMATCH",
+                "Reject the stale permit and reacquire the endpoint lease for this target.",
+            )
+
+    def _assert_live_for_mutation_permit(self) -> None:
+        if self._released:
+            raise MutationPermitIssueError(
+                "MUTATION_PERMIT_LEASE_RELEASED",
+                "Reacquire the endpoint lease before preparing a new final-tree mutation.",
+            )
+        if not self._lock_handle.is_alive():
+            raise MutationPermitIssueError(
+                "MUTATION_PERMIT_LEASE_LOST",
+                "Stop mutation work and enter recovery because the endpoint lock is no longer live.",
+            )
 
     def release(self) -> None:
         if self._released:
@@ -175,6 +237,10 @@ class LocalEndpointLeaseAuthority(EndpointLeaseAuthority):
             owner_installation_id=owner_installation_id,
             ownership_epoch=ownership_epoch,
             fencing_token=fencing_token,
+            run_id=request.run_id,
+            run_target_id=request.run_target_id,
+            endpoint_id=request.endpoint_id,
+            endpoint_revision_id=request.endpoint_revision_id,
             resource_key=request.resource_key,
             lock_path=lock_path,
             _lock_handle=lock_handle,
@@ -231,6 +297,9 @@ class Win32EndpointLockHandle:
         kernel32 = _kernel32()
         kernel32.CloseHandle(wintypes.HANDLE(self.handle_value))
         self._closed = True
+
+    def is_alive(self) -> bool:
+        return not self._closed
 
 
 class Win32EndpointLockOpener(EndpointLockOpener):

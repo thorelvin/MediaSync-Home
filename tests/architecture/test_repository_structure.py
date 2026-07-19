@@ -124,3 +124,11 @@ def test_final_commit_port_requires_opaque_mutation_permit() -> None:
         assert "live lease adapter" in str(exc)
     else:  # pragma: no cover - defensive guard
         raise AssertionError("MutationPermit should not be directly constructible")
+
+    try:
+        class ForgedPermit(MutationPermit):
+            pass
+    except TypeError as exc:
+        assert "cannot be subclassed" in str(exc)
+    else:  # pragma: no cover - defensive guard
+        raise AssertionError("MutationPermit should not be subclassable")

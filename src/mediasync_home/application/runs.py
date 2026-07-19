@@ -6,6 +6,7 @@ from enum import Enum
 from typing import Any, Mapping, Protocol
 
 from mediasync_home.application.plans import PlanEndpoint, PlanEndpointRole, PlanStore, SealedPlan, verify_plan_checksum
+from mediasync_home.domain.capabilities import MutationPermit
 
 
 APP_VERSION = "0B-dev"
@@ -173,6 +174,8 @@ class LiveEndpointLease(Protocol):
 
     @property
     def fencing_token(self) -> int: ...
+
+    def issue_mutation_permit(self) -> MutationPermit: ...
 
     def release(self) -> None: ...
 
