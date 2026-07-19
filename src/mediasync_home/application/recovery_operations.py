@@ -113,6 +113,7 @@ class RecoveryOperationStore(Protocol):
         payload: Mapping[str, object] | None = None,
         intent_segment_id: str | None = None,
         intent_ordinal: int | None = None,
+        catalog_handoff_id: str | None = None,
     ) -> RecoveryOperation | None: ...
 
     def load_operation(self, *, run_id: str, operation_id: str) -> RecoveryOperation | None: ...
@@ -160,6 +161,10 @@ PHASES_REQUIRING_INTENT = {
     RecoveryOperationPhase.FILESYSTEM_APPLIED,
     RecoveryOperationPhase.FINAL_DURABLE,
     RecoveryOperationPhase.FINAL_VERIFIED,
+    RecoveryOperationPhase.CATALOG_RECORDED,
+    RecoveryOperationPhase.CLEANED,
+}
+PHASES_REQUIRING_CATALOG_HANDOFF = {
     RecoveryOperationPhase.CATALOG_RECORDED,
     RecoveryOperationPhase.CLEANED,
 }
@@ -243,6 +248,10 @@ def validate_recovery_operation(operation: RecoveryOperation) -> None:
             raise RecoveryOperationViolation("RECOVERY_OPERATION_REQUIRES_INTENT_SEGMENT")
         if operation.intent_ordinal is None or operation.intent_ordinal < 0:
             raise RecoveryOperationViolation("RECOVERY_OPERATION_REQUIRES_INTENT_ORDINAL")
+    if operation.phase in PHASES_REQUIRING_CATALOG_HANDOFF and (
+        operation.catalog_handoff_id is None or not operation.catalog_handoff_id.strip()
+    ):
+        raise RecoveryOperationViolation("RECOVERY_OPERATION_REQUIRES_CATALOG_HANDOFF")
 
 
 def validate_recovery_phase_transition(

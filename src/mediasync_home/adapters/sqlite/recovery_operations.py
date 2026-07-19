@@ -91,6 +91,7 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         payload: Mapping[str, object] | None = None,
         intent_segment_id: str | None = None,
         intent_ordinal: int | None = None,
+        catalog_handoff_id: str | None = None,
     ) -> RecoveryOperation | None:
         _validate_process_instance_id(process_instance_id)
         validate_recovery_phase_transition(expected_phase, next_phase)
@@ -110,6 +111,7 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                 next_phase=next_phase,
                 intent_segment_id=intent_segment_id,
                 intent_ordinal=intent_ordinal,
+                catalog_handoff_id=catalog_handoff_id,
             )
             self._require_active_matching_lease(updated)
             if next_phase is RecoveryOperationPhase.COMMIT_INTENT_RECORDED:
@@ -122,6 +124,7 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                     phase = ?,
                     intent_segment_id = ?,
                     intent_ordinal = ?,
+                    catalog_handoff_id = ?,
                     updated_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 WHERE run_id = ?
                     AND operation_id = ?
@@ -131,6 +134,7 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                     updated.phase.value,
                     updated.intent_segment_id,
                     updated.intent_ordinal,
+                    updated.catalog_handoff_id,
                     run_id,
                     operation_id,
                     expected_phase.value,
@@ -190,19 +194,34 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         next_phase: RecoveryOperationPhase,
         intent_segment_id: str | None,
         intent_ordinal: int | None,
+        catalog_handoff_id: str | None,
     ) -> RecoveryOperation:
         if next_phase is RecoveryOperationPhase.COMMIT_INTENT_RECORDED:
             if intent_segment_id is None or intent_ordinal is None:
                 raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_REQUIRES_INTENT_SEGMENT")
+            if catalog_handoff_id is not None:
+                raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_UNEXPECTED_CATALOG_HANDOFF")
             updated = replace(
                 operation,
                 phase=next_phase,
                 intent_segment_id=intent_segment_id,
                 intent_ordinal=intent_ordinal,
             )
+        elif next_phase is RecoveryOperationPhase.CATALOG_RECORDED:
+            if intent_segment_id is not None or intent_ordinal is not None:
+                raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_UNEXPECTED_INTENT_SEGMENT")
+            if catalog_handoff_id is None or not catalog_handoff_id.strip():
+                raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_REQUIRES_CATALOG_HANDOFF")
+            updated = replace(
+                operation,
+                phase=next_phase,
+                catalog_handoff_id=catalog_handoff_id,
+            )
         else:
             if intent_segment_id is not None or intent_ordinal is not None:
                 raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_UNEXPECTED_INTENT_SEGMENT")
+            if catalog_handoff_id is not None:
+                raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_UNEXPECTED_CATALOG_HANDOFF")
             updated = replace(operation, phase=next_phase)
         validate_recovery_operation(updated)
         return updated

@@ -28,7 +28,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 8
+        assert current_schema_version(connection, plan.store) == 9
         assert _table_names(connection) >= {
             "endpoint_heads",
             "job_heads",
@@ -43,12 +43,13 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "plan_endpoints",
             "outbox_messages",
             "effect_dedup_tombstones",
+            "final_file_catalog_handoffs",
             "runs",
             "run_targets",
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 8
+        assert _row_count(connection, "schema_migrations") == 9
         assert _foreign_key(
             connection,
             "endpoint_heads",
@@ -109,6 +110,11 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         assert _index_is_unique(connection, "command_receipts", ("state",)) is False
         assert _index_is_unique(connection, "runs", ("state",)) is False
         assert _index_is_unique(connection, "outbox_messages", ("state", "next_attempt_utc")) is False
+        assert _index_is_unique(
+            connection,
+            "final_file_catalog_handoffs",
+            ("run_id", "operation_id"),
+        ) is True
         assert _trigger_names(connection) >= {
             "trg_plans_no_update_after_seal",
             "trg_planned_operations_no_insert_after_seal",

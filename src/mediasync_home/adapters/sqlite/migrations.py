@@ -67,6 +67,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_transactional_outbox_skeleton",
                 statements=CATALOG_TRANSACTIONAL_OUTBOX_SKELETON,
             ),
+            SqliteMigration(
+                version=9,
+                name="catalog_final_file_handoff_skeleton",
+                statements=CATALOG_FINAL_FILE_HANDOFF_SKELETON,
+            ),
         ),
     )
 
@@ -870,6 +875,30 @@ CATALOG_TRANSACTIONAL_OUTBOX_SKELETON = (
         first_seen_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
         compacted_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     )
+    """,
+)
+
+CATALOG_FINAL_FILE_HANDOFF_SKELETON = (
+    """
+    CREATE TABLE final_file_catalog_handoffs (
+        handoff_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        run_target_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        target_endpoint_id TEXT NOT NULL,
+        target_endpoint_revision_id TEXT NOT NULL,
+        final_relative_path TEXT NOT NULL,
+        content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+        lease_id TEXT NOT NULL,
+        fencing_token INTEGER NOT NULL CHECK (fencing_token >= 1),
+        effect_kind TEXT NOT NULL CHECK (effect_kind IN ('COPY_NEW_FINAL_FILE')),
+        recorded_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        UNIQUE (run_id, operation_id)
+    )
+    """,
+    """
+    CREATE INDEX idx_final_file_catalog_handoffs_run_target
+        ON final_file_catalog_handoffs (run_id, run_target_id)
     """,
 )
 
