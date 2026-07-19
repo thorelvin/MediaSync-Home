@@ -29,6 +29,9 @@ class OutboxDeliveryOutcome(str, Enum):
     DEAD_LETTER = "DEAD_LETTER"
 
 
+MAX_OUTBOX_STARTUP_RECONCILIATION_LIMIT = 1000
+
+
 @dataclass(frozen=True)
 class OutboxMessage:
     message_id: str
@@ -62,6 +65,20 @@ class OutboxDispatchResult:
     message_id: str | None = None
 
 
+@dataclass(frozen=True)
+class OutboxStartupReconciliationRequest:
+    reconciler_instance_id: str
+    inactive_owner_instance_ids: tuple[str, ...]
+    limit: int
+
+
+@dataclass(frozen=True)
+class OutboxStartupReconciliationReport:
+    reconciler_instance_id: str
+    scanned: int
+    requeued_message_ids: tuple[str, ...]
+
+
 class OutboxStore(Protocol):
     def enqueue_outbox_message(self, message: OutboxMessage) -> OutboxMessage: ...
 
@@ -89,6 +106,13 @@ class OutboxStore(Protocol):
         claim_token: str,
         error_code: str,
     ) -> OutboxMessage: ...
+
+
+class OutboxStartupReconciliationStore(Protocol):
+    def requeue_claimed_after_startup(
+        self,
+        request: OutboxStartupReconciliationRequest,
+    ) -> OutboxStartupReconciliationReport: ...
 
 
 class OutboxDeliveryPort(Protocol):
@@ -145,6 +169,47 @@ def dispatch_one_outbox_message(
     )
 
 
+def validate_outbox_startup_reconciliation_request(
+    request: OutboxStartupReconciliationRequest,
+) -> None:
+    if not request.reconciler_instance_id.strip():
+        raise OutboxViolation("OUTBOX_RECONCILIATION_REQUIRES_RECONCILER")
+    if request.limit < 1:
+        raise OutboxViolation("OUTBOX_RECONCILIATION_LIMIT_MUST_BE_POSITIVE")
+    if request.limit > MAX_OUTBOX_STARTUP_RECONCILIATION_LIMIT:
+        raise OutboxViolation("OUTBOX_RECONCILIATION_LIMIT_TOO_LARGE")
+    if not request.inactive_owner_instance_ids:
+        raise OutboxViolation("OUTBOX_RECONCILIATION_REQUIRES_INACTIVE_OWNER_PROOF")
+    owners = set()
+    for owner_instance_id in request.inactive_owner_instance_ids:
+        if not owner_instance_id.strip():
+            raise OutboxViolation("OUTBOX_RECONCILIATION_REQUIRES_INACTIVE_OWNER_PROOF")
+        if owner_instance_id == request.reconciler_instance_id:
+            raise OutboxViolation("OUTBOX_RECONCILIATION_CANNOT_STEAL_CURRENT_OWNER")
+        owners.add(owner_instance_id)
+    if len(owners) != len(request.inactive_owner_instance_ids):
+        raise OutboxViolation("OUTBOX_RECONCILIATION_OWNERS_MUST_BE_UNIQUE")
+
+
+def requeued_claimed_message_after_startup(
+    message: OutboxMessage,
+    request: OutboxStartupReconciliationRequest,
+) -> OutboxMessage:
+    validate_outbox_startup_reconciliation_request(request)
+    if message.state is not OutboxMessageState.CLAIMED:
+        raise OutboxViolation("OUTBOX_RECONCILIATION_REQUIRES_CLAIMED_MESSAGE")
+    if message.claim_owner_instance_id not in set(request.inactive_owner_instance_ids):
+        raise OutboxViolation("OUTBOX_RECONCILIATION_REQUIRES_INACTIVE_OWNER_PROOF")
+    return replace(
+        message,
+        state=OutboxMessageState.PENDING,
+        claim_owner_instance_id=None,
+        claim_generation=message.claim_generation + 1,
+        claim_token=None,
+        last_error_code="OUTBOX_CLAIM_REQUEUED_AFTER_STARTUP",
+    )
+
+
 def command_effect_outbox_message(receipt: CommandReceipt) -> OutboxMessage:
     if receipt.state is not CommandReceiptState.SUCCEEDED:
         raise OutboxViolation("OUTBOX_COMMAND_EFFECT_REQUIRES_SUCCEEDED_RECEIPT")
@@ -197,6 +262,7 @@ def delivered_message(
         message,
         state=OutboxMessageState.DELIVERED,
         terminal_effect_hash=terminal_effect_hash,
+        last_error_code=None,
     )
 
 

@@ -6,6 +6,7 @@ import pytest
 
 from mediasync_home.application.command_receipts import CommandReceipt, CommandReceiptState
 from mediasync_home.application.outbox import (
+    MAX_OUTBOX_STARTUP_RECONCILIATION_LIMIT,
     OutboxClaimTokenFactory,
     OutboxDeliveryOutcome,
     OutboxDeliveryPort,
@@ -13,12 +14,15 @@ from mediasync_home.application.outbox import (
     OutboxMessage,
     OutboxMessageState,
     OutboxStore,
+    OutboxStartupReconciliationRequest,
     OutboxViolation,
     claimed_message,
     command_effect_outbox_message,
     dead_letter_message,
     delivered_message,
     dispatch_one_outbox_message,
+    requeued_claimed_message_after_startup,
+    validate_outbox_startup_reconciliation_request,
 )
 
 
@@ -48,7 +52,10 @@ def test_command_effect_outbox_message_requires_succeeded_receipt_with_result() 
 def test_claim_and_deliver_helpers_preserve_fencing_shape() -> None:
     message = command_effect_outbox_message(_succeeded_receipt())
 
-    claimed = claimed_message(message, owner_instance_id="host-a", claim_token="claim-a")
+    claimed = replace(
+        claimed_message(message, owner_instance_id="host-a", claim_token="claim-a"),
+        last_error_code="OLD_WARNING",
+    )
     delivered = delivered_message(claimed, terminal_effect_hash="a" * 64)
 
     assert claimed.state is OutboxMessageState.CLAIMED
@@ -58,6 +65,7 @@ def test_claim_and_deliver_helpers_preserve_fencing_shape() -> None:
     assert claimed.attempt_count == 1
     assert delivered.state is OutboxMessageState.DELIVERED
     assert delivered.terminal_effect_hash == "a" * 64
+    assert delivered.last_error_code is None
 
 
 def test_delivery_requires_claimed_message() -> None:
@@ -137,6 +145,65 @@ def test_outbox_dispatcher_returns_idle_when_no_pending_message() -> None:
 
     assert result.claimed is False
     assert delivery.delivered_messages == ()
+
+
+def test_startup_reconciliation_request_requires_bounded_inactive_owner_proof() -> None:
+    validate_outbox_startup_reconciliation_request(
+        OutboxStartupReconciliationRequest(
+            reconciler_instance_id="host-b",
+            inactive_owner_instance_ids=("host-a",),
+            limit=MAX_OUTBOX_STARTUP_RECONCILIATION_LIMIT,
+        )
+    )
+
+    with pytest.raises(OutboxViolation, match="OUTBOX_RECONCILIATION_REQUIRES_INACTIVE_OWNER_PROOF"):
+        validate_outbox_startup_reconciliation_request(
+            OutboxStartupReconciliationRequest(
+                reconciler_instance_id="host-b",
+                inactive_owner_instance_ids=(),
+                limit=10,
+            )
+        )
+    with pytest.raises(OutboxViolation, match="OUTBOX_RECONCILIATION_LIMIT_TOO_LARGE"):
+        validate_outbox_startup_reconciliation_request(
+            OutboxStartupReconciliationRequest(
+                reconciler_instance_id="host-b",
+                inactive_owner_instance_ids=("host-a",),
+                limit=MAX_OUTBOX_STARTUP_RECONCILIATION_LIMIT + 1,
+            )
+        )
+    with pytest.raises(OutboxViolation, match="OUTBOX_RECONCILIATION_CANNOT_STEAL_CURRENT_OWNER"):
+        validate_outbox_startup_reconciliation_request(
+            OutboxStartupReconciliationRequest(
+                reconciler_instance_id="host-b",
+                inactive_owner_instance_ids=("host-b",),
+                limit=10,
+            )
+        )
+
+
+def test_startup_reconciliation_requeues_claimed_message_and_invalidates_claim() -> None:
+    message = claimed_message(
+        command_effect_outbox_message(_succeeded_receipt()),
+        owner_instance_id="host-a",
+        claim_token="claim-a",
+    )
+
+    requeued = requeued_claimed_message_after_startup(
+        message,
+        OutboxStartupReconciliationRequest(
+            reconciler_instance_id="host-b",
+            inactive_owner_instance_ids=("host-a",),
+            limit=10,
+        ),
+    )
+
+    assert requeued.state is OutboxMessageState.PENDING
+    assert requeued.claim_owner_instance_id is None
+    assert requeued.claim_generation == 2
+    assert requeued.claim_token is None
+    assert requeued.attempt_count == 1
+    assert requeued.last_error_code == "OUTBOX_CLAIM_REQUEUED_AFTER_STARTUP"
 
 
 class _FixedClaimTokenFactory(OutboxClaimTokenFactory):

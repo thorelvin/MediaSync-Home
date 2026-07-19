@@ -97,6 +97,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_plan_operation_read_model_indexes",
                 statements=CATALOG_PLAN_OPERATION_READ_MODEL_INDEXES,
             ),
+            SqliteMigration(
+                version=15,
+                name="catalog_outbox_reconciliation_indexes",
+                statements=CATALOG_OUTBOX_RECONCILIATION_INDEXES,
+            ),
         ),
     )
 
@@ -1312,6 +1317,13 @@ CATALOG_PLAN_OPERATION_READ_MODEL_INDEXES = (
     """
     CREATE INDEX idx_plan_operation_details_plan_phase_key_id
         ON plan_operation_seal_details (plan_id, execution_phase, stable_order_key, operation_id)
+    """,
+)
+
+CATALOG_OUTBOX_RECONCILIATION_INDEXES = (
+    """
+    CREATE INDEX idx_outbox_messages_state_owner_claim_started
+        ON outbox_messages (state, claim_owner_instance_id, claim_started_utc, id)
     """,
 )
 

@@ -20,6 +20,7 @@ from mediasync_home.application.outbox import (
     OutboxDeliveryResult,
     OutboxMessage,
     OutboxMessageState,
+    OutboxStartupReconciliationRequest,
     command_effect_outbox_message,
     dispatch_one_outbox_message,
 )
@@ -169,6 +170,90 @@ def test_sqlite_outbox_returns_none_when_no_pending_message(tmp_path: Path) -> N
         store = SqliteOutboxStore(connection)
 
         assert store.claim_next_pending(owner_instance_id="host-a", claim_token="claim-a") is None
+
+
+def test_sqlite_outbox_startup_reconciliation_requeues_inactive_owner_claim(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        store = SqliteOutboxStore(connection)
+        message = command_effect_outbox_message(_succeeded_receipt())
+        store.enqueue_outbox_message(message)
+        store.claim_next_pending(owner_instance_id="host-a", claim_token="claim-a")
+
+        report = store.requeue_claimed_after_startup(
+            OutboxStartupReconciliationRequest(
+                reconciler_instance_id="host-b",
+                inactive_owner_instance_ids=("host-a",),
+                limit=10,
+            )
+        )
+        loaded = store.load_outbox_message(message.message_id)
+
+        assert report.scanned == 1
+        assert report.requeued_message_ids == (message.message_id,)
+        assert loaded is not None
+        assert loaded.state is OutboxMessageState.PENDING
+        assert loaded.claim_owner_instance_id is None
+        assert loaded.claim_token is None
+        assert loaded.claim_generation == 2
+        assert loaded.attempt_count == 1
+        assert loaded.last_error_code == "OUTBOX_CLAIM_REQUEUED_AFTER_STARTUP"
+        with pytest.raises(SqliteOutboxStoreError, match="OUTBOX_DELIVERY_CLAIM_MISMATCH"):
+            store.mark_delivered(
+                message_id=message.message_id,
+                claim_token="claim-a",
+                terminal_effect_hash="b" * 64,
+            )
+
+        reclaimed = store.claim_next_pending(owner_instance_id="host-b", claim_token="claim-b")
+
+        assert reclaimed is not None
+        assert reclaimed.state is OutboxMessageState.CLAIMED
+        assert reclaimed.claim_owner_instance_id == "host-b"
+        assert reclaimed.claim_token == "claim-b"
+        assert reclaimed.claim_generation == 3
+        assert reclaimed.attempt_count == 2
+
+        delivered = store.mark_delivered(
+            message_id=message.message_id,
+            claim_token="claim-b",
+            terminal_effect_hash="c" * 64,
+        )
+
+        assert delivered.state is OutboxMessageState.DELIVERED
+        assert delivered.last_error_code is None
+
+
+def test_sqlite_outbox_startup_reconciliation_does_not_steal_unproven_owner(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        store = SqliteOutboxStore(connection)
+        message = command_effect_outbox_message(_succeeded_receipt())
+        store.enqueue_outbox_message(message)
+        store.claim_next_pending(owner_instance_id="host-live", claim_token="claim-live")
+
+        report = store.requeue_claimed_after_startup(
+            OutboxStartupReconciliationRequest(
+                reconciler_instance_id="host-b",
+                inactive_owner_instance_ids=("host-a",),
+                limit=10,
+            )
+        )
+        loaded = store.load_outbox_message(message.message_id)
+
+        assert report.scanned == 0
+        assert report.requeued_message_ids == ()
+        assert loaded is not None
+        assert loaded.state is OutboxMessageState.CLAIMED
+        assert loaded.claim_owner_instance_id == "host-live"
+        assert loaded.claim_token == "claim-live"
+        assert store.claim_next_pending(owner_instance_id="host-b", claim_token="claim-b") is None
 
 
 def _prepare_catalog(connection: sqlite3.Connection, database: Path) -> None:

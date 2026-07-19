@@ -6,6 +6,10 @@ from mediasync_home.application.outbox import (
     OutboxMessage,
     OutboxMessageState,
     OutboxStore,
+    OutboxStartupReconciliationReport,
+    OutboxStartupReconciliationRequest,
+    OutboxStartupReconciliationStore,
+    validate_outbox_startup_reconciliation_request,
 )
 
 
@@ -13,7 +17,7 @@ class SqliteOutboxStoreError(ValueError):
     pass
 
 
-class SqliteOutboxStore(OutboxStore):
+class SqliteOutboxStore(OutboxStore, OutboxStartupReconciliationStore):
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
@@ -144,6 +148,7 @@ class SqliteOutboxStore(OutboxStore):
                     state = 'DELIVERED',
                     delivered_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                     terminal_effect_hash = ?,
+                    last_error_code = NULL,
                     updated_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                     row_version = row_version + 1
                 WHERE id = ?
@@ -195,6 +200,74 @@ class SqliteOutboxStore(OutboxStore):
             if isinstance(exc, SqliteOutboxStoreError):
                 raise
             raise SqliteOutboxStoreError("OUTBOX_DELIVERY_FAILED") from exc
+
+    def requeue_claimed_after_startup(
+        self,
+        request: OutboxStartupReconciliationRequest,
+    ) -> OutboxStartupReconciliationReport:
+        validate_outbox_startup_reconciliation_request(request)
+        owner_placeholders = ", ".join("?" for _ in request.inactive_owner_instance_ids)
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            rows = self._connection.execute(
+                f"""
+                SELECT id, claim_generation
+                FROM outbox_messages
+                WHERE state = 'CLAIMED'
+                    AND claim_owner_instance_id IN ({owner_placeholders})
+                ORDER BY claim_started_utc, id
+                LIMIT ?
+                """,
+                (*request.inactive_owner_instance_ids, request.limit),
+            ).fetchall()
+
+            requeued: list[str] = []
+            for row in rows:
+                message_id = str(row[0])
+                claim_generation = int(row[1])
+                cursor = self._connection.execute(
+                    f"""
+                    UPDATE outbox_messages
+                    SET
+                        state = 'PENDING',
+                        claim_owner_instance_id = NULL,
+                        claim_generation = claim_generation + 1,
+                        claim_token = NULL,
+                        claim_started_utc = NULL,
+                        next_attempt_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        last_error_code = 'OUTBOX_CLAIM_REQUEUED_AFTER_STARTUP',
+                        updated_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        row_version = row_version + 1
+                    WHERE id = ?
+                        AND state = 'CLAIMED'
+                        AND claim_generation = ?
+                        AND claim_owner_instance_id IN ({owner_placeholders})
+                    """,
+                    (
+                        message_id,
+                        claim_generation,
+                        *request.inactive_owner_instance_ids,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise SqliteOutboxStoreError("OUTBOX_RECONCILIATION_CLAIM_CONFLICT")
+                requeued.append(message_id)
+
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return OutboxStartupReconciliationReport(
+                reconciler_instance_id=request.reconciler_instance_id,
+                scanned=len(rows),
+                requeued_message_ids=tuple(requeued),
+            )
+        except (sqlite3.Error, SqliteOutboxStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteOutboxStoreError):
+                raise
+            raise SqliteOutboxStoreError("OUTBOX_RECONCILIATION_FAILED") from exc
 
     def mark_dead_letter(
         self,
