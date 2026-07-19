@@ -5374,14 +5374,14 @@ Materialisert lokal katalog over immutable target-side intentsegmenter.
 - `byte_count INTEGER NOT NULL`
 - `segment_hash TEXT NOT NULL`
 - `previous_segment_hash TEXT`
-- `durability_state TEXT NOT NULL`
-- `state TEXT NOT NULL` — building, durable, reconciled, cleanup_eligible, cleaned
+- `durability_state TEXT NOT NULL` — `PENDING`, `DURABLE`
+- `state TEXT NOT NULL` — `BUILDING`, `DURABLE`, `RECONCILED`, `CLEANUP_ELIGIBLE`, `CLEANED`
 - `created_utc TEXT NOT NULL`
 - `updated_utc TEXT NOT NULL`
 - unik `(run_target_id, segment_sequence)`
 - unik `(run_target_id, relative_path)`
 
-`relative_path` ligger alltid under den validerte installasjonsspesifikke `.mediasync/installations/<id>/recovery`-roten. Segmentet er immutable etter `durable`; endring i byte/hash er `INTENT_SEGMENT_MISMATCH`.
+`relative_path` ligger alltid under den validerte installasjonsspesifikke `.mediasync/installations/<id>/recovery`-roten. Segmentet er immutable etter `DURABLE`; endring i byte/hash er `INTENT_SEGMENT_MISMATCH`. 0B-skjemaet håndhever én rad per `(run_target_id, segment_sequence)` og `(run_target_id, relative_path)`, 10 000-operasjons-/16 MiB-grensene og immutability for durable bevisfelt.
 
 #### `recovery_object_allocations`
 

@@ -183,10 +183,11 @@ def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(tmp_path
 
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 3
+        assert current_schema_version(connection, plan.store) == 4
         assert _table_names(connection) >= {
             "lease_counters",
             "resource_leases",
+            "recovery_intent_segments",
             "recovery_epochs",
             "recovery_intents",
             "recovery_intent_steps",
@@ -200,6 +201,7 @@ def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(tmp_path
                     VALUES ('missing-epoch', 'intent-a', 'corr-a', 'PREPARED')
                 """
             )
+        assert "trg_recovery_intent_segments_immutable_after_durable" in _trigger_names(connection)
 
 
 def test_migration_runner_rejects_wrong_store_identity(tmp_path: Path) -> None:

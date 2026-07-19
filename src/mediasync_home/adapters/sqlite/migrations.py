@@ -90,6 +90,11 @@ def recovery_migration_plan() -> SqliteMigrationPlan:
                 name="recovery_resource_leases",
                 statements=RECOVERY_RESOURCE_LEASES,
             ),
+            SqliteMigration(
+                version=4,
+                name="recovery_intent_segments",
+                statements=RECOVERY_INTENT_SEGMENTS,
+            ),
         ),
     )
 
@@ -941,5 +946,72 @@ RECOVERY_RESOURCE_LEASES = (
     """
     CREATE INDEX idx_resource_leases_state_heartbeat
         ON resource_leases (state, heartbeat_utc)
+    """,
+)
+
+RECOVERY_INTENT_SEGMENTS = (
+    """
+    CREATE TABLE recovery_intent_segments (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        run_target_id TEXT NOT NULL,
+        target_endpoint_id TEXT NOT NULL,
+        target_endpoint_revision_id TEXT NOT NULL,
+        endpoint_generation INTEGER NOT NULL CHECK (endpoint_generation >= 1),
+        owner_installation_id TEXT NOT NULL,
+        ownership_epoch INTEGER NOT NULL CHECK (ownership_epoch >= 1),
+        lease_id TEXT NOT NULL,
+        fencing_token INTEGER NOT NULL CHECK (fencing_token >= 1),
+        segment_sequence INTEGER NOT NULL CHECK (segment_sequence >= 0),
+        relative_path TEXT NOT NULL,
+        schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
+        operation_count INTEGER NOT NULL CHECK (operation_count BETWEEN 1 AND 10000),
+        byte_count INTEGER NOT NULL CHECK (byte_count BETWEEN 0 AND 16777216),
+        segment_hash TEXT NOT NULL CHECK (length(segment_hash) = 64),
+        previous_segment_hash TEXT CHECK (
+            previous_segment_hash IS NULL OR length(previous_segment_hash) = 64
+        ),
+        durability_state TEXT NOT NULL CHECK (durability_state IN ('PENDING', 'DURABLE')),
+        state TEXT NOT NULL CHECK (
+            state IN ('BUILDING', 'DURABLE', 'RECONCILED', 'CLEANUP_ELIGIBLE', 'CLEANED')
+        ),
+        created_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        UNIQUE (run_target_id, segment_sequence),
+        UNIQUE (run_target_id, relative_path),
+        FOREIGN KEY (lease_id) REFERENCES resource_leases (lease_id) ON DELETE RESTRICT,
+        CHECK (state <> 'DURABLE' OR durability_state = 'DURABLE')
+    )
+    """,
+    """
+    CREATE INDEX idx_recovery_intent_segments_state
+        ON recovery_intent_segments (state, updated_utc)
+    """,
+    """
+    CREATE TRIGGER trg_recovery_intent_segments_immutable_after_durable
+    BEFORE UPDATE ON recovery_intent_segments
+    WHEN OLD.state IN ('DURABLE', 'RECONCILED', 'CLEANUP_ELIGIBLE', 'CLEANED')
+        AND (
+            NEW.run_id IS NOT OLD.run_id
+            OR NEW.run_target_id IS NOT OLD.run_target_id
+            OR NEW.target_endpoint_id IS NOT OLD.target_endpoint_id
+            OR NEW.target_endpoint_revision_id IS NOT OLD.target_endpoint_revision_id
+            OR NEW.endpoint_generation IS NOT OLD.endpoint_generation
+            OR NEW.owner_installation_id IS NOT OLD.owner_installation_id
+            OR NEW.ownership_epoch IS NOT OLD.ownership_epoch
+            OR NEW.lease_id IS NOT OLD.lease_id
+            OR NEW.fencing_token IS NOT OLD.fencing_token
+            OR NEW.segment_sequence IS NOT OLD.segment_sequence
+            OR NEW.relative_path IS NOT OLD.relative_path
+            OR NEW.schema_version IS NOT OLD.schema_version
+            OR NEW.operation_count IS NOT OLD.operation_count
+            OR NEW.byte_count IS NOT OLD.byte_count
+            OR NEW.segment_hash IS NOT OLD.segment_hash
+            OR NEW.previous_segment_hash IS NOT OLD.previous_segment_hash
+            OR NEW.durability_state IS NOT OLD.durability_state
+        )
+    BEGIN
+        SELECT RAISE(ABORT, 'INTENT_SEGMENT_IMMUTABLE');
+    END
     """,
 )
