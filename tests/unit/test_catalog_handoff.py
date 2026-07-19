@@ -7,8 +7,10 @@ import pytest
 
 from mediasync_home.application.catalog_handoff import (
     CatalogHandoffError,
+    CatalogHandoffReconciliationStatus,
     FinalFileCatalogHandoff,
     FinalFileCatalogHandoffStore,
+    reconcile_catalog_handoffs_after_startup,
     record_catalog_handoff_after_final_verification,
 )
 from mediasync_home.application.recovery_operations import (
@@ -142,6 +144,76 @@ def test_catalog_handoff_replays_catalog_recorded_operation_without_transition()
     assert len(catalog.records) == 1
 
 
+def test_startup_reconciliation_advances_matching_catalog_handoff_without_catalog_write() -> None:
+    actions: list[str] = []
+    operation = _final_verified_operation()
+    recovery = _FakeRecoveryOperationStore(operation, actions=actions)
+    catalog = _FakeCatalogHandoffStore(actions=actions)
+    catalog.records["final-file:run-a:operation-a"] = _handoff(operation=operation)
+
+    report = reconcile_catalog_handoffs_after_startup(
+        recovery_operations=recovery,
+        catalog_handoffs=catalog,
+        process_instance_id="host-a",
+    )
+
+    assert actions == ["transition:CATALOG_RECORDED"]
+    assert report.scanned == 1
+    assert report.recovered[0].status is CatalogHandoffReconciliationStatus.RECOVERED
+    assert report.pending == ()
+    assert report.ambiguous == ()
+    assert report.should_block_mutating_readiness is False
+    assert recovery.operation is not None
+    assert recovery.operation.phase is RecoveryOperationPhase.CATALOG_RECORDED
+    assert recovery.operation.catalog_handoff_id == "final-file:run-a:operation-a"
+
+
+def test_startup_reconciliation_leaves_final_verified_operation_pending_without_catalog_row() -> None:
+    recovery = _FakeRecoveryOperationStore(_final_verified_operation())
+    catalog = _FakeCatalogHandoffStore()
+
+    report = reconcile_catalog_handoffs_after_startup(
+        recovery_operations=recovery,
+        catalog_handoffs=catalog,
+        process_instance_id="host-a",
+    )
+
+    assert report.scanned == 1
+    assert report.recovered == ()
+    assert report.pending[0].status is CatalogHandoffReconciliationStatus.PENDING_CATALOG
+    assert report.pending[0].validation_code == "CATALOG_HANDOFF_NOT_COMMITTED"
+    assert report.ambiguous == ()
+    assert report.should_block_mutating_readiness is False
+    assert recovery.transitions == []
+
+
+def test_startup_reconciliation_blocks_ambiguous_catalog_handoff_mismatch() -> None:
+    operation = _final_verified_operation()
+    recovery = _FakeRecoveryOperationStore(operation)
+    catalog = _FakeCatalogHandoffStore()
+    catalog.records["final-file:run-a:operation-a"] = replace(
+        _handoff(operation=operation),
+        final_relative_path="Photos/other.jpg",
+    )
+
+    report = reconcile_catalog_handoffs_after_startup(
+        recovery_operations=recovery,
+        catalog_handoffs=catalog,
+        process_instance_id="host-a",
+    )
+
+    assert report.scanned == 1
+    assert report.recovered == ()
+    assert report.pending == ()
+    assert report.ambiguous[0].status is CatalogHandoffReconciliationStatus.AMBIGUOUS
+    assert (
+        report.ambiguous[0].validation_code
+        == "CATALOG_HANDOFF_RECONCILIATION_PAYLOAD_MISMATCH"
+    )
+    assert report.should_block_mutating_readiness is True
+    assert recovery.transitions == []
+
+
 class _Transition:
     def __init__(
         self,
@@ -237,6 +309,16 @@ class _FakeRecoveryOperationStore(RecoveryOperationStore):
             return self.operation
         return None
 
+    def list_operations_in_phase(
+        self,
+        *,
+        phase: RecoveryOperationPhase,
+        limit: int,
+    ) -> tuple[RecoveryOperation, ...]:
+        if self.operation is None or limit < 1 or self.operation.phase is not phase:
+            return ()
+        return (self.operation,)
+
 
 class _FakeCatalogHandoffStore(FinalFileCatalogHandoffStore):
     def __init__(
@@ -295,4 +377,19 @@ def _final_verified_operation() -> RecoveryOperation:
         phase=RecoveryOperationPhase.FINAL_VERIFIED,
         intent_segment_id="segment-a",
         intent_ordinal=0,
+    )
+
+
+def _handoff(*, operation: RecoveryOperation) -> FinalFileCatalogHandoff:
+    return FinalFileCatalogHandoff(
+        handoff_id=f"final-file:{operation.run_id}:{operation.operation_id}",
+        run_id=operation.run_id,
+        run_target_id=operation.run_target_id,
+        operation_id=operation.operation_id,
+        target_endpoint_id=operation.target_endpoint_id,
+        target_endpoint_revision_id=operation.target_endpoint_revision_id,
+        final_relative_path=operation.final_relative_path,
+        content_hash="a" * 64,
+        lease_id=operation.lease_id,
+        fencing_token=operation.fencing_token,
     )

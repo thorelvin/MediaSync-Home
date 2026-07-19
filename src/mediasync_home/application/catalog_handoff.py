@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from enum import Enum
 from typing import Mapping, Protocol
 
 from mediasync_home.application.recovery_operations import (
@@ -44,6 +45,34 @@ class CatalogHandoffOutcome:
     idempotent_replay: bool
 
 
+class CatalogHandoffReconciliationStatus(str, Enum):
+    RECOVERED = "RECOVERED"
+    PENDING_CATALOG = "PENDING_CATALOG"
+    AMBIGUOUS = "AMBIGUOUS"
+    PHASE_CONFLICT = "PHASE_CONFLICT"
+
+
+@dataclass(frozen=True)
+class CatalogHandoffReconciliationItem:
+    run_id: str
+    operation_id: str
+    handoff_id: str
+    status: CatalogHandoffReconciliationStatus
+    validation_code: str | None = None
+
+
+@dataclass(frozen=True)
+class CatalogHandoffReconciliationReport:
+    scanned: int
+    recovered: tuple[CatalogHandoffReconciliationItem, ...]
+    pending: tuple[CatalogHandoffReconciliationItem, ...]
+    ambiguous: tuple[CatalogHandoffReconciliationItem, ...]
+
+    @property
+    def should_block_mutating_readiness(self) -> bool:
+        return bool(self.ambiguous)
+
+
 class FinalFileCatalogHandoffStore(Protocol):
     def record_final_file_handoff(
         self,
@@ -51,6 +80,15 @@ class FinalFileCatalogHandoffStore(Protocol):
     ) -> FinalFileCatalogHandoff: ...
 
     def load_final_file_handoff(self, handoff_id: str) -> FinalFileCatalogHandoff | None: ...
+
+
+class CatalogHandoffRecoveryOperationStore(RecoveryOperationStore, Protocol):
+    def list_operations_in_phase(
+        self,
+        *,
+        phase: RecoveryOperationPhase,
+        limit: int,
+    ) -> tuple[RecoveryOperation, ...]: ...
 
 
 def record_catalog_handoff_after_final_verification(
@@ -104,6 +142,91 @@ def record_catalog_handoff_after_final_verification(
         handoff=recorded,
         recovery_operation=updated,
         idempotent_replay=False,
+    )
+
+
+def reconcile_catalog_handoffs_after_startup(
+    *,
+    recovery_operations: CatalogHandoffRecoveryOperationStore,
+    catalog_handoffs: FinalFileCatalogHandoffStore,
+    process_instance_id: str,
+    limit: int = 100,
+) -> CatalogHandoffReconciliationReport:
+    _validate_process_instance_id(process_instance_id)
+    if limit < 1:
+        raise CatalogHandoffError(
+            "CATALOG_HANDOFF_RECONCILIATION_REQUIRES_LIMIT",
+            "Run startup catalog handoff reconciliation with a positive bounded limit.",
+        )
+
+    recovered: list[CatalogHandoffReconciliationItem] = []
+    pending: list[CatalogHandoffReconciliationItem] = []
+    ambiguous: list[CatalogHandoffReconciliationItem] = []
+    operations = recovery_operations.list_operations_in_phase(
+        phase=RecoveryOperationPhase.FINAL_VERIFIED,
+        limit=limit,
+    )
+    for operation in operations:
+        handoff_id = _handoff_id(operation)
+        handoff = catalog_handoffs.load_final_file_handoff(handoff_id)
+        if handoff is None:
+            pending.append(
+                _reconciliation_item(
+                    operation=operation,
+                    handoff_id=handoff_id,
+                    status=CatalogHandoffReconciliationStatus.PENDING_CATALOG,
+                    validation_code="CATALOG_HANDOFF_NOT_COMMITTED",
+                )
+            )
+            continue
+
+        mismatch = _catalog_handoff_reconciliation_mismatch(
+            operation=operation,
+            handoff=handoff,
+        )
+        if mismatch is not None:
+            ambiguous.append(
+                _reconciliation_item(
+                    operation=operation,
+                    handoff_id=handoff_id,
+                    status=CatalogHandoffReconciliationStatus.AMBIGUOUS,
+                    validation_code=mismatch,
+                )
+            )
+            continue
+
+        updated = recovery_operations.record_operation_phase_transition(
+            run_id=operation.run_id,
+            operation_id=operation.operation_id,
+            expected_phase=RecoveryOperationPhase.FINAL_VERIFIED,
+            next_phase=RecoveryOperationPhase.CATALOG_RECORDED,
+            process_instance_id=process_instance_id,
+            payload=_handoff_payload(handoff),
+            catalog_handoff_id=handoff.handoff_id,
+        )
+        if updated is None:
+            ambiguous.append(
+                _reconciliation_item(
+                    operation=operation,
+                    handoff_id=handoff_id,
+                    status=CatalogHandoffReconciliationStatus.PHASE_CONFLICT,
+                    validation_code="CATALOG_HANDOFF_RECONCILIATION_PHASE_CONFLICT",
+                )
+            )
+            continue
+        recovered.append(
+            _reconciliation_item(
+                operation=updated,
+                handoff_id=handoff.handoff_id,
+                status=CatalogHandoffReconciliationStatus.RECOVERED,
+            )
+        )
+
+    return CatalogHandoffReconciliationReport(
+        scanned=len(operations),
+        recovered=tuple(recovered),
+        pending=tuple(pending),
+        ambiguous=tuple(ambiguous),
     )
 
 
@@ -168,7 +291,7 @@ def _handoff_from_operation(
     handoff_id: str | None = None,
 ) -> FinalFileCatalogHandoff:
     handoff = FinalFileCatalogHandoff(
-        handoff_id=handoff_id or f"final-file:{operation.run_id}:{operation.operation_id}",
+        handoff_id=handoff_id or _handoff_id(operation),
         run_id=operation.run_id,
         run_target_id=operation.run_target_id,
         operation_id=operation.operation_id,
@@ -183,6 +306,10 @@ def _handoff_from_operation(
     return handoff
 
 
+def _handoff_id(operation: RecoveryOperation) -> str:
+    return f"final-file:{operation.run_id}:{operation.operation_id}"
+
+
 def _handoff_payload(handoff: FinalFileCatalogHandoff) -> Mapping[str, object]:
     return {
         "catalog_effect_kind": handoff.effect_kind,
@@ -190,6 +317,42 @@ def _handoff_payload(handoff: FinalFileCatalogHandoff) -> Mapping[str, object]:
         "content_hash": handoff.content_hash,
         "final_relative_path": handoff.final_relative_path,
     }
+
+
+def _catalog_handoff_reconciliation_mismatch(
+    *,
+    operation: RecoveryOperation,
+    handoff: FinalFileCatalogHandoff,
+) -> str | None:
+    try:
+        validate_final_file_catalog_handoff(handoff)
+    except CatalogHandoffError as exc:
+        return exc.validation_code
+
+    expected = _handoff_from_operation(
+        operation=operation,
+        content_hash=handoff.content_hash,
+        handoff_id=handoff.handoff_id,
+    )
+    if handoff != expected:
+        return "CATALOG_HANDOFF_RECONCILIATION_PAYLOAD_MISMATCH"
+    return None
+
+
+def _reconciliation_item(
+    *,
+    operation: RecoveryOperation,
+    handoff_id: str,
+    status: CatalogHandoffReconciliationStatus,
+    validation_code: str | None = None,
+) -> CatalogHandoffReconciliationItem:
+    return CatalogHandoffReconciliationItem(
+        run_id=operation.run_id,
+        operation_id=operation.operation_id,
+        handoff_id=handoff_id,
+        status=status,
+        validation_code=validation_code,
+    )
 
 
 def _validate_process_instance_id(process_instance_id: str) -> None:

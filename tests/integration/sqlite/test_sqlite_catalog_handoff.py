@@ -25,7 +25,9 @@ from mediasync_home.adapters.sqlite.migrations import (
 from mediasync_home.adapters.sqlite.recovery_intents import SqliteRecoveryIntentSegmentStore
 from mediasync_home.adapters.sqlite.recovery_operations import SqliteRecoveryOperationStore
 from mediasync_home.application.catalog_handoff import (
+    CatalogHandoffReconciliationStatus,
     FinalFileCatalogHandoff,
+    reconcile_catalog_handoffs_after_startup,
     record_catalog_handoff_after_final_verification,
 )
 from mediasync_home.application.recovery_intents import durable_recovery_intent_segment
@@ -100,6 +102,51 @@ def test_sqlite_catalog_handoff_records_catalog_then_recovery_phase(
             "final-file:run-a:operation-a"
         )
         assert _row_count(recovery_connection, "recovery_events") == event_count
+    finally:
+        catalog_connection.close()
+        recovery_connection.close()
+
+
+def test_sqlite_startup_reconciliation_completes_partial_catalog_handoff(
+    tmp_path: Path,
+) -> None:
+    catalog_connection = _prepared_catalog_connection(tmp_path)
+    recovery_connection = _prepared_recovery_connection(tmp_path)
+    try:
+        catalog_store = SqliteFinalFileCatalogHandoffStore(catalog_connection)
+        _register_resource_lease(recovery_connection)
+        SqliteRecoveryIntentSegmentStore(recovery_connection).publish_intent_segment(_segment())
+        recovery_store = SqliteRecoveryOperationStore(recovery_connection)
+        _record_final_verified_operation(recovery_store)
+        catalog_store.record_final_file_handoff(_handoff())
+        event_count = _row_count(recovery_connection, "recovery_events")
+
+        report = reconcile_catalog_handoffs_after_startup(
+            recovery_operations=recovery_store,
+            catalog_handoffs=catalog_store,
+            process_instance_id="host-a",
+        )
+        replay = reconcile_catalog_handoffs_after_startup(
+            recovery_operations=recovery_store,
+            catalog_handoffs=catalog_store,
+            process_instance_id="host-a",
+        )
+
+        operation = recovery_store.load_operation(run_id="run-a", operation_id="operation-a")
+        assert operation is not None
+        assert operation.phase is RecoveryOperationPhase.CATALOG_RECORDED
+        assert operation.catalog_handoff_id == "final-file:run-a:operation-a"
+        assert report.scanned == 1
+        assert report.recovered[0].status is CatalogHandoffReconciliationStatus.RECOVERED
+        assert report.pending == ()
+        assert report.ambiguous == ()
+        assert replay.scanned == 0
+        assert _row_count(catalog_connection, "final_file_catalog_handoffs") == 1
+        assert _event_phases(recovery_connection)[-1] == "CATALOG_RECORDED"
+        assert _last_event_payload(recovery_connection)["catalog_handoff_id"] == (
+            "final-file:run-a:operation-a"
+        )
+        assert _row_count(recovery_connection, "recovery_events") == event_count + 1
     finally:
         catalog_connection.close()
         recovery_connection.close()
