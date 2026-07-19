@@ -10,10 +10,15 @@ from mediasync_home.domain.capabilities import MutationPermit
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "src/mediasync_home"
+TESTS = ROOT / "tests"
 
 
 def _python_files(relative: str) -> Iterable[Path]:
     return sorted((PACKAGE / relative).rglob("*.py"))
+
+
+def _python_tree(root: Path) -> Iterable[Path]:
+    return sorted(root.rglob("*.py"))
 
 
 def _imports(path: Path) -> set[str]:
@@ -107,6 +112,18 @@ def test_no_generic_write_filesystem_port_in_application_or_domain() -> None:
         for layer in ("application", "domain")
         for path in _python_files(layer)
         if path.name.lower() in forbidden_names
+    ]
+
+    assert offenders == []
+
+
+def test_python_code_does_not_import_forbidden_object_serializers() -> None:
+    forbidden = {"pickle", "marshal"}
+    offenders = [
+        path.relative_to(ROOT).as_posix()
+        for root in (PACKAGE, TESTS)
+        for path in _python_tree(root)
+        if _imports(path) & forbidden
     ]
 
     assert offenders == []

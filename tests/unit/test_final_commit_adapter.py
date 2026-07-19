@@ -1,0 +1,243 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+from typing import cast
+
+import pytest
+
+from mediasync_home.adapters.endpoint_leases import (
+    EndpointLeaseUnavailable,
+    LocalEndpointLease,
+    LocalEndpointLeaseAuthority,
+    MutationPermitIssueError,
+)
+from mediasync_home.adapters.final_commit import (
+    FinalCommitAdapterError,
+    LabNoOverwriteFinalCommitAdapter,
+)
+from mediasync_home.application.ports import RelativePath, VerifiedStagingArtifact
+from mediasync_home.application.runs import EndpointLeaseRequest
+
+
+def test_lab_final_commit_inserts_verified_staging_payload_without_overwrite(tmp_path: Path) -> None:
+    fixture = _commit_fixture(tmp_path)
+    permit = fixture.lease.issue_mutation_permit()
+    artifact = fixture.stage(object_id="object-a", relative_path="Photos/image.jpg", payload=b"image")
+
+    receipt = fixture.adapter.commit_verified_artifact(permit, artifact)
+
+    assert receipt.operation_id == "object-a"
+    assert receipt.final_relative_path == artifact.relative_path
+    assert (fixture.target_root / "Photos" / "image.jpg").read_bytes() == b"image"
+    assert (fixture.staging_root / "object-a.payload").read_bytes() == b"image"
+
+
+def test_lab_final_commit_requires_matching_test_root_marker(tmp_path: Path) -> None:
+    fixture = _commit_fixture(tmp_path)
+    (fixture.target_root / ".mediasync_test_root").write_text(
+        json.dumps({"run_id": "other-run"}),
+        encoding="utf-8",
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    artifact = fixture.stage(object_id="object-a", relative_path="Photos/image.jpg", payload=b"image")
+
+    with pytest.raises(FinalCommitAdapterError) as exc_info:
+        fixture.adapter.commit_verified_artifact(permit, artifact)
+
+    assert exc_info.value.validation_code == "LAB_FINAL_COMMIT_TEST_ROOT_RUN_MISMATCH"
+    assert not (fixture.target_root / "Photos" / "image.jpg").exists()
+
+
+def test_lab_final_commit_never_overwrites_existing_target(tmp_path: Path) -> None:
+    fixture = _commit_fixture(tmp_path)
+    final = fixture.target_root / "Photos" / "image.jpg"
+    final.write_bytes(b"existing")
+    permit = fixture.lease.issue_mutation_permit()
+    artifact = fixture.stage(object_id="object-a", relative_path="Photos/image.jpg", payload=b"new")
+
+    with pytest.raises(FinalCommitAdapterError) as exc_info:
+        fixture.adapter.commit_verified_artifact(permit, artifact)
+
+    assert exc_info.value.validation_code == "LAB_FINAL_COMMIT_TARGET_EXISTS"
+    assert final.read_bytes() == b"existing"
+
+
+def test_lab_final_commit_revalidates_staging_hash(tmp_path: Path) -> None:
+    fixture = _commit_fixture(tmp_path)
+    permit = fixture.lease.issue_mutation_permit()
+    artifact = VerifiedStagingArtifact(
+        object_id="object-a",
+        relative_path=RelativePath("Photos/image.jpg"),
+        content_hash="0" * 64,
+    )
+    (fixture.staging_root / "object-a.payload").write_bytes(b"unexpected")
+
+    with pytest.raises(FinalCommitAdapterError) as exc_info:
+        fixture.adapter.commit_verified_artifact(permit, artifact)
+
+    assert exc_info.value.validation_code == "LAB_FINAL_COMMIT_STAGING_HASH_MISMATCH"
+    assert not (fixture.target_root / "Photos" / "image.jpg").exists()
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "",
+        "/absolute.txt",
+        "C:/absolute.txt",
+        "Photos/../secret.txt",
+        "Photos//image.jpg",
+        "Photos/name:stream.jpg",
+    ],
+)
+def test_lab_final_commit_rejects_unsafe_relative_paths(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    permit = fixture.lease.issue_mutation_permit()
+    artifact = fixture.stage(object_id="object-a", relative_path=relative_path, payload=b"image")
+
+    with pytest.raises(FinalCommitAdapterError) as exc_info:
+        fixture.adapter.commit_verified_artifact(permit, artifact)
+
+    assert exc_info.value.validation_code == "LAB_FINAL_COMMIT_REQUIRES_RELATIVE_PATH"
+
+
+def test_lab_final_commit_rejects_lost_lease_before_touching_final_tree(tmp_path: Path) -> None:
+    fixture = _commit_fixture(tmp_path)
+    permit = fixture.lease.issue_mutation_permit()
+    fixture.handle.lose()
+    artifact = fixture.stage(object_id="object-a", relative_path="Photos/image.jpg", payload=b"image")
+
+    with pytest.raises(MutationPermitIssueError) as exc_info:
+        fixture.adapter.commit_verified_artifact(permit, artifact)
+
+    assert exc_info.value.validation_code == "MUTATION_PERMIT_LEASE_LOST"
+    assert not (fixture.target_root / "Photos" / "image.jpg").exists()
+
+
+class _CommitFixture:
+    def __init__(
+        self,
+        *,
+        target_root: Path,
+        staging_root: Path,
+        lease: LocalEndpointLease,
+        handle: "_FakeHandle",
+    ) -> None:
+        self.target_root = target_root
+        self.staging_root = staging_root
+        self.lease = lease
+        self.handle = handle
+        self.adapter = LabNoOverwriteFinalCommitAdapter(
+            target_root=target_root,
+            staging_root=staging_root,
+            permit_validator=lease,
+        )
+
+    def stage(
+        self,
+        *,
+        object_id: str,
+        relative_path: str,
+        payload: bytes,
+    ) -> VerifiedStagingArtifact:
+        (self.staging_root / f"{object_id}.payload").write_bytes(payload)
+        return VerifiedStagingArtifact(
+            object_id=object_id,
+            relative_path=RelativePath(relative_path),
+            content_hash=_sha256(payload),
+        )
+
+
+def _commit_fixture(tmp_path: Path) -> _CommitFixture:
+    target_root = tmp_path / "target"
+    staging_root = tmp_path / "staging"
+    (target_root / ".mediasync" / "locks").mkdir(parents=True)
+    (target_root / "Photos").mkdir()
+    staging_root.mkdir()
+    (target_root / ".mediasync" / "endpoint.json").write_text(
+        json.dumps(
+            {
+                "endpoint_id": "target-a",
+                "owner_installation_id": "owner-a",
+                "ownership_epoch": 1,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (target_root / ".mediasync_test_root").write_text(
+        json.dumps({"run_id": "run-a"}),
+        encoding="utf-8",
+    )
+    handle = _FakeHandle(target_root / ".mediasync" / "locks" / "mutation.lock")
+    authority = LocalEndpointLeaseAuthority(
+        target_roots={"endpoint:target-a": target_root},
+        token_store=_FakeTokenStore(42),
+        lock_opener=_FakeOpener(handle),
+    )
+    attempt = authority.acquire_endpoint_lease(_request())
+    assert attempt.lease is not None
+    return _CommitFixture(
+        target_root=target_root,
+        staging_root=staging_root,
+        lease=cast(LocalEndpointLease, attempt.lease),
+        handle=handle,
+    )
+
+
+def _request() -> EndpointLeaseRequest:
+    return EndpointLeaseRequest(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+        endpoint_id="target-a",
+        endpoint_revision_id="target-rev-a",
+        resource_key="endpoint:target-a",
+        required_owner_installation_id="owner-a",
+        required_ownership_epoch=1,
+    )
+
+
+def _sha256(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+class _FakeHandle:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.closed = False
+        self.alive = True
+
+    def close(self) -> None:
+        self.closed = True
+
+    def is_alive(self) -> bool:
+        return self.alive and not self.closed
+
+    def lose(self) -> None:
+        self.alive = False
+
+
+class _FakeOpener:
+    def __init__(self, handle: _FakeHandle) -> None:
+        self._handle = handle
+
+    def acquire_exclusive_lock(self, lock_path: Path) -> _FakeHandle:
+        if lock_path != self._handle.path:
+            raise EndpointLeaseUnavailable(
+                "ENDPOINT_LEASE_UNAVAILABLE",
+                "Use the expected lock path for this fixture.",
+            )
+        return self._handle
+
+
+class _FakeTokenStore:
+    def __init__(self, token: int) -> None:
+        self._token = token
+
+    def allocate_next_fencing_token(self, *, resource_key: str, ownership_epoch: int) -> int:
+        return self._token

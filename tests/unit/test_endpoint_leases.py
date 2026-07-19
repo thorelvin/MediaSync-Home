@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import pickle
 from pathlib import Path
 
 import pytest
@@ -110,7 +109,7 @@ def test_local_endpoint_lease_issues_current_mutation_permit(tmp_path: Path) -> 
     assert permit.endpoint_id == "target-a"
     assert permit.endpoint_revision_id == "target-rev-a"
     with pytest.raises(TypeError, match="not serializable"):
-        pickle.dumps(permit)
+        permit.__reduce__()
 
 
 def test_local_endpoint_lease_rejects_new_permit_after_release(tmp_path: Path) -> None:
