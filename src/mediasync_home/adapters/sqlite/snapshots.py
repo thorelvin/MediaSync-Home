@@ -4,12 +4,15 @@ import hashlib
 import sqlite3
 
 from mediasync_home.application.snapshots import (
+    SNAPSHOT_COMPLETE_COVERAGE_STATE,
     SealedSnapshot,
     SnapshotBatchCommitReceipt,
     SnapshotBatchSummary,
+    SnapshotDirectoryCoverage,
     SnapshotEntryBatch,
     SnapshotEntryMaterializationStore,
     SnapshotFileEntry,
+    SnapshotIssue,
     SnapshotSealRequest,
     SnapshotSealStore,
     snapshot_seal,
@@ -38,6 +41,8 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
                 if (
                     existing.payload_hash != batch.payload_hash
                     or existing.entry_count != len(batch.entries)
+                    or existing.coverage_update_count != len(batch.coverage_updates)
+                    or existing.issue_count != len(batch.issues)
                     or existing.approximate_bytes != batch.approximate_bytes
                 ):
                     raise SqliteSnapshotEntryStoreError("SNAPSHOT_BATCH_CONFLICT")
@@ -48,6 +53,8 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
                     sequence_no=existing.sequence_no,
                     payload_hash=existing.payload_hash,
                     entry_count=existing.entry_count,
+                    coverage_update_count=existing.coverage_update_count,
+                    issue_count=existing.issue_count,
                     approximate_bytes=existing.approximate_bytes,
                     idempotent_replay=True,
                 )
@@ -60,16 +67,20 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
                     sequence_no,
                     payload_hash,
                     entry_count,
+                    coverage_update_count,
+                    issue_count,
                     approximate_bytes,
                     state
                 )
-                VALUES (?, ?, ?, ?, ?, 'COMMITTED')
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'COMMITTED')
                 """,
                 (
                     batch.snapshot_id,
                     batch.sequence_no,
                     batch.payload_hash,
                     len(batch.entries),
+                    len(batch.coverage_updates),
+                    len(batch.issues),
                     batch.approximate_bytes,
                 ),
             )
@@ -97,6 +108,54 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
                         entry.size_bytes,
                     ),
                 )
+            for coverage in batch.coverage_updates:
+                self._connection.execute(
+                    """
+                    INSERT INTO directory_coverage (
+                        snapshot_id,
+                        relative_path,
+                        comparison_key,
+                        coverage_state,
+                        case_mode,
+                        case_mode_evidence,
+                        case_context_hash,
+                        case_probe_error
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        batch.snapshot_id,
+                        coverage.relative_path,
+                        coverage.comparison_key,
+                        coverage.coverage_state,
+                        coverage.case_mode,
+                        coverage.case_mode_evidence,
+                        coverage.case_context_hash,
+                        coverage.case_probe_error,
+                    ),
+                )
+            for issue in batch.issues:
+                self._connection.execute(
+                    """
+                    INSERT INTO snapshot_issues (
+                        snapshot_id,
+                        relative_path,
+                        issue_type,
+                        error_code,
+                        sanitized_message,
+                        blocks_destructive_actions
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        batch.snapshot_id,
+                        issue.relative_path,
+                        issue.issue_type,
+                        issue.error_code,
+                        issue.sanitized_message,
+                        1 if issue.blocks_destructive_actions else 0,
+                    ),
+                )
             self._materialize_case_collisions(batch.snapshot_id)
             self._connection.execute(
                 """
@@ -120,6 +179,8 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
                 sequence_no=batch.sequence_no,
                 payload_hash=batch.payload_hash,
                 entry_count=len(batch.entries),
+                coverage_update_count=len(batch.coverage_updates),
+                issue_count=len(batch.issues),
                 approximate_bytes=batch.approximate_bytes,
                 idempotent_replay=False,
             )
@@ -157,6 +218,62 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
             for row in rows
         )
 
+    def load_directory_coverage(self, snapshot_id: str) -> tuple[SnapshotDirectoryCoverage, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                relative_path,
+                comparison_key,
+                coverage_state,
+                case_mode,
+                case_mode_evidence,
+                case_context_hash,
+                case_probe_error
+            FROM directory_coverage
+            WHERE snapshot_id = ?
+            ORDER BY relative_path
+            """,
+            (snapshot_id,),
+        ).fetchall()
+        return tuple(
+            SnapshotDirectoryCoverage(
+                relative_path=str(row[0]),
+                comparison_key=str(row[1]),
+                coverage_state=str(row[2]),
+                case_mode=str(row[3]),
+                case_mode_evidence=str(row[4]),
+                case_context_hash=str(row[5]),
+                case_probe_error=None if row[6] is None else str(row[6]),
+            )
+            for row in rows
+        )
+
+    def load_snapshot_issues(self, snapshot_id: str) -> tuple[SnapshotIssue, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                relative_path,
+                issue_type,
+                blocks_destructive_actions,
+                error_code,
+                sanitized_message
+            FROM snapshot_issues
+            WHERE snapshot_id = ?
+            ORDER BY relative_path, issue_type, id
+            """,
+            (snapshot_id,),
+        ).fetchall()
+        return tuple(
+            SnapshotIssue(
+                relative_path=str(row[0]),
+                issue_type=str(row[1]),
+                blocks_destructive_actions=bool(row[2]),
+                error_code=None if row[3] is None else str(row[3]),
+                sanitized_message=None if row[4] is None else str(row[4]),
+            )
+            for row in rows
+        )
+
     def seal_snapshot(self, request: SnapshotSealRequest) -> SealedSnapshot:
         validate_snapshot_seal_request(request)
         outer_transaction = self._connection.in_transaction
@@ -174,6 +291,8 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
             snapshot_counts = self._load_snapshot_counts_for_seal(request.snapshot_id)
             batches = self._load_batch_summaries(request.snapshot_id)
             entries = self.load_snapshot_entries(request.snapshot_id)
+            coverage = self.load_directory_coverage(request.snapshot_id)
+            issues = self.load_snapshot_issues(request.snapshot_id)
             actual_case_groups = self._expected_case_collision_group_count(request.snapshot_id)
             self._validate_snapshot_ready_for_seal(
                 request=request,
@@ -181,11 +300,15 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
                 snapshot_total_bytes=snapshot_counts[1],
                 batches=batches,
                 entries=entries,
+                coverage=coverage,
+                issues=issues,
                 actual_case_groups=actual_case_groups,
             )
             sealed = snapshot_seal(
                 snapshot_id=request.snapshot_id,
                 entries=entries,
+                coverage=coverage,
+                issues=issues,
                 batches=batches,
                 case_collision_group_count=actual_case_groups,
             )
@@ -199,7 +322,9 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
                     snapshot_schema_version = ?,
                     checksum_algorithm = ?,
                     serializer_version = ?,
-                    snapshot_checksum = ?
+                    snapshot_checksum = ?,
+                    scan_error_count = ?,
+                    volatile_directory_count = ?
                 WHERE id = ?
                     AND immutable = 0
                 """,
@@ -208,6 +333,8 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
                     sealed.checksum_algorithm,
                     sealed.serializer_version,
                     sealed.snapshot_checksum,
+                    sealed.issue_count,
+                    self._volatile_directory_count(request.snapshot_id),
                     sealed.snapshot_id,
                 ),
             )
@@ -239,6 +366,8 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
                 snapshot_checksum,
                 entry_count,
                 total_bytes,
+                scan_error_count,
+                volatile_directory_count,
                 complete,
                 immutable
             FROM snapshots
@@ -259,9 +388,12 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
             entry_count=int(row[4]),
             total_bytes=int(row[5]),
             batch_count=len(self._load_batch_summaries(snapshot_id)),
+            directory_coverage_count=len(self.load_directory_coverage(snapshot_id)),
+            issue_count=int(row[6]),
+            blocking_issue_count=self._blocking_issue_count(snapshot_id),
             case_collision_group_count=self._expected_case_collision_group_count(snapshot_id),
-            complete=bool(row[6]),
-            immutable=bool(row[7]),
+            complete=bool(row[8]),
+            immutable=bool(row[9]),
         )
 
     def _load_batch_receipt(
@@ -271,7 +403,7 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
     ) -> SnapshotBatchCommitReceipt | None:
         row = self._connection.execute(
             """
-            SELECT payload_hash, entry_count, approximate_bytes
+            SELECT payload_hash, entry_count, coverage_update_count, issue_count, approximate_bytes
             FROM snapshot_batches
             WHERE snapshot_id = ?
                 AND sequence_no = ?
@@ -285,7 +417,9 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
             sequence_no=sequence_no,
             payload_hash=str(row[0]),
             entry_count=int(row[1]),
-            approximate_bytes=int(row[2]),
+            coverage_update_count=int(row[2]),
+            issue_count=int(row[3]),
+            approximate_bytes=int(row[4]),
             idempotent_replay=False,
         )
 
@@ -379,7 +513,13 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
     def _load_batch_summaries(self, snapshot_id: str) -> tuple[SnapshotBatchSummary, ...]:
         rows = self._connection.execute(
             """
-            SELECT sequence_no, payload_hash, entry_count, approximate_bytes
+            SELECT
+                sequence_no,
+                payload_hash,
+                entry_count,
+                coverage_update_count,
+                issue_count,
+                approximate_bytes
             FROM snapshot_batches
             WHERE snapshot_id = ?
             ORDER BY sequence_no
@@ -391,7 +531,9 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
                 sequence_no=int(row[0]),
                 payload_hash=str(row[1]),
                 entry_count=int(row[2]),
-                approximate_bytes=int(row[3]),
+                coverage_update_count=int(row[3]),
+                issue_count=int(row[4]),
+                approximate_bytes=int(row[5]),
             )
             for row in rows
         )
@@ -404,6 +546,8 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
         snapshot_total_bytes: int,
         batches: tuple[SnapshotBatchSummary, ...],
         entries: tuple[SnapshotFileEntry, ...],
+        coverage: tuple[SnapshotDirectoryCoverage, ...],
+        issues: tuple[SnapshotIssue, ...],
         actual_case_groups: int,
     ) -> None:
         if snapshot_entry_count != request.expected_entry_count or len(entries) != request.expected_entry_count:
@@ -416,6 +560,20 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_BATCH_COUNT_MISMATCH")
         if sum(batch.entry_count for batch in batches) != request.expected_entry_count:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_BATCH_ENTRY_COUNT_MISMATCH")
+        if len(coverage) != request.expected_directory_coverage_count:
+            raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_COVERAGE_COUNT_MISMATCH")
+        if sum(batch.coverage_update_count for batch in batches) != request.expected_directory_coverage_count:
+            raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_BATCH_COVERAGE_COUNT_MISMATCH")
+        if len(issues) != request.expected_issue_count:
+            raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_ISSUE_COUNT_MISMATCH")
+        if sum(batch.issue_count for batch in batches) != request.expected_issue_count:
+            raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_BATCH_ISSUE_COUNT_MISMATCH")
+        if sum(1 for issue in issues if issue.blocks_destructive_actions) != request.expected_blocking_issue_count:
+            raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_BLOCKING_COUNT_MISMATCH")
+        if any(item.coverage_state != SNAPSHOT_COMPLETE_COVERAGE_STATE for item in coverage):
+            raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_COVERAGE_INCOMPLETE")
+        if any(issue.blocks_destructive_actions for issue in issues):
+            raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_BLOCKING_ISSUES")
         if actual_case_groups != request.expected_case_collision_group_count:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_CASE_GROUP_COUNT_MISMATCH")
         if self._missing_case_collision_member_count(request.snapshot_id) != 0:
@@ -430,6 +588,9 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
             existing.entry_count != request.expected_entry_count
             or existing.total_bytes != request.expected_total_bytes
             or existing.batch_count != request.expected_batch_count
+            or existing.directory_coverage_count != request.expected_directory_coverage_count
+            or existing.issue_count != request.expected_issue_count
+            or existing.blocking_issue_count != request.expected_blocking_issue_count
             or existing.case_collision_group_count != request.expected_case_collision_group_count
         ):
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_CONFLICT")
@@ -445,6 +606,34 @@ class SqliteSnapshotEntryStore(SnapshotEntryMaterializationStore, SnapshotSealSt
                 GROUP BY comparison_key
                 HAVING count(*) > 1
             )
+            """,
+            (snapshot_id,),
+        ).fetchone()
+        if row is None:
+            raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_PERSISTENCE_FAILED")
+        return int(row[0])
+
+    def _blocking_issue_count(self, snapshot_id: str) -> int:
+        row = self._connection.execute(
+            """
+            SELECT count(*)
+            FROM snapshot_issues
+            WHERE snapshot_id = ?
+                AND blocks_destructive_actions = 1
+            """,
+            (snapshot_id,),
+        ).fetchone()
+        if row is None:
+            raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_PERSISTENCE_FAILED")
+        return int(row[0])
+
+    def _volatile_directory_count(self, snapshot_id: str) -> int:
+        row = self._connection.execute(
+            """
+            SELECT count(*)
+            FROM directory_coverage
+            WHERE snapshot_id = ?
+                AND coverage_state = 'VOLATILE'
             """,
             (snapshot_id,),
         ).fetchone()

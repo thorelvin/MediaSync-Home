@@ -28,11 +28,13 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 11
+        assert current_schema_version(connection, plan.store) == 12
         assert _table_names(connection) >= {
             "endpoint_heads",
             "job_heads",
             "file_entries",
+            "directory_coverage",
+            "snapshot_issues",
             "case_collision_members",
             "snapshot_batches",
             "operation_dependencies",
@@ -50,7 +52,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 11
+        assert _row_count(connection, "schema_migrations") == 12
         assert _foreign_key(
             connection,
             "endpoint_heads",
@@ -129,6 +131,8 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "trg_plan_seal_details_no_update",
             "trg_file_entries_no_insert_after_snapshot_immutable",
             "trg_snapshot_batches_no_insert_after_snapshot_immutable",
+            "trg_directory_coverage_no_insert_after_snapshot_immutable",
+            "trg_snapshot_issues_no_insert_after_snapshot_immutable",
             "trg_case_collision_members_no_insert_after_snapshot_immutable",
             "trg_snapshots_seal_insert_requires_checksum",
             "trg_snapshots_seal_update_requires_checksum",
@@ -138,6 +142,12 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "checksum_algorithm",
             "serializer_version",
             "snapshot_checksum",
+            "scan_error_count",
+            "volatile_directory_count",
+        }
+        assert _column_names(connection, "snapshot_batches") >= {
+            "coverage_update_count",
+            "issue_count",
         }
 
 

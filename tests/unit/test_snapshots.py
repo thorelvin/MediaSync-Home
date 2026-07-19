@@ -4,7 +4,9 @@ import pytest
 
 from mediasync_home.application.snapshots import (
     SnapshotBatchSummary,
+    SnapshotDirectoryCoverage,
     SnapshotFileEntry,
+    SnapshotIssue,
     SnapshotMaterializationError,
     snapshot_entry_batch,
     snapshot_seal,
@@ -102,18 +104,24 @@ def test_snapshot_seal_checksum_is_deterministic_and_verifiable() -> None:
         sequence_no=batch.sequence_no,
         payload_hash=batch.payload_hash,
         entry_count=len(batch.entries),
+        coverage_update_count=len(batch.coverage_updates),
+        issue_count=len(batch.issues),
         approximate_bytes=batch.approximate_bytes,
     )
 
     sealed = snapshot_seal(
         snapshot_id=batch.snapshot_id,
         entries=batch.entries,
+        coverage=batch.coverage_updates,
+        issues=batch.issues,
         batches=(summary,),
         case_collision_group_count=1,
     )
     replay = snapshot_seal(
         snapshot_id=batch.snapshot_id,
         entries=tuple(reversed(batch.entries)),
+        coverage=batch.coverage_updates,
+        issues=batch.issues,
         batches=(summary,),
         case_collision_group_count=1,
     )
@@ -123,7 +131,15 @@ def test_snapshot_seal_checksum_is_deterministic_and_verifiable() -> None:
     assert sealed.entry_count == 2
     assert sealed.total_bytes == 96
     assert sealed.batch_count == 1
-    assert verify_snapshot_checksum(sealed, entries=batch.entries, batches=(summary,)) is True
+    assert sealed.directory_coverage_count == 1
+    assert sealed.issue_count == 0
+    assert verify_snapshot_checksum(
+        sealed,
+        entries=batch.entries,
+        coverage=batch.coverage_updates,
+        issues=batch.issues,
+        batches=(summary,),
+    ) is True
     assert (
         verify_snapshot_checksum(
             sealed,
@@ -137,6 +153,8 @@ def test_snapshot_seal_checksum_is_deterministic_and_verifiable() -> None:
                 ),
                 batch.entries[1],
             ),
+            coverage=batch.coverage_updates,
+            issues=batch.issues,
             batches=(summary,),
         )
         is False
@@ -153,11 +171,15 @@ def test_snapshot_seal_rejects_non_contiguous_batch_sequence() -> None:
         snapshot_seal(
             snapshot_id=batch.snapshot_id,
             entries=batch.entries,
+            coverage=batch.coverage_updates,
+            issues=batch.issues,
             batches=(
                 SnapshotBatchSummary(
                     sequence_no=1,
                     payload_hash=batch.payload_hash,
                     entry_count=len(batch.entries),
+                    coverage_update_count=len(batch.coverage_updates),
+                    issue_count=len(batch.issues),
                     approximate_bytes=batch.approximate_bytes,
                 ),
             ),
@@ -165,7 +187,64 @@ def test_snapshot_seal_rejects_non_contiguous_batch_sequence() -> None:
         )
 
 
-def _case_collision_batch():
+def test_snapshot_seal_rejects_incomplete_directory_coverage() -> None:
+    batch = _case_collision_batch(
+        coverage=(SnapshotDirectoryCoverage(
+            relative_path=".",
+            comparison_key=".",
+            coverage_state="VOLATILE",
+            case_mode="CASE_INSENSITIVE",
+            case_mode_evidence="probe",
+            case_context_hash="1" * 64,
+        ),)
+    )
+
+    with pytest.raises(
+        SnapshotMaterializationError,
+        match="SNAPSHOT_SEAL_COVERAGE_INCOMPLETE",
+    ):
+        snapshot_seal(
+            snapshot_id=batch.snapshot_id,
+            entries=batch.entries,
+            coverage=batch.coverage_updates,
+            issues=batch.issues,
+            batches=(_summary(batch),),
+            case_collision_group_count=1,
+        )
+
+
+def test_snapshot_seal_rejects_blocking_issue() -> None:
+    batch = _case_collision_batch(
+        issues=(
+            SnapshotIssue(
+                relative_path="Photos",
+                issue_type="UNREADABLE_DIRECTORY",
+                blocks_destructive_actions=True,
+                error_code="ERROR_ACCESS_DENIED",
+                sanitized_message="access denied",
+            ),
+        )
+    )
+
+    with pytest.raises(
+        SnapshotMaterializationError,
+        match="SNAPSHOT_SEAL_BLOCKING_ISSUES",
+    ):
+        snapshot_seal(
+            snapshot_id=batch.snapshot_id,
+            entries=batch.entries,
+            coverage=batch.coverage_updates,
+            issues=batch.issues,
+            batches=(_summary(batch),),
+            case_collision_group_count=1,
+        )
+
+
+def _case_collision_batch(
+    *,
+    coverage: tuple[SnapshotDirectoryCoverage, ...] | None = None,
+    issues: tuple[SnapshotIssue, ...] = (),
+):
     return snapshot_entry_batch(
         snapshot_id="snapshot-a",
         sequence_no=0,
@@ -184,5 +263,31 @@ def _case_collision_batch():
                 object_type="file",
                 size_bytes=64,
             ),
+        ),
+        coverage_updates=_complete_root_coverage() if coverage is None else coverage,
+        issues=issues,
+    )
+
+
+def _summary(batch) -> SnapshotBatchSummary:
+    return SnapshotBatchSummary(
+        sequence_no=batch.sequence_no,
+        payload_hash=batch.payload_hash,
+        entry_count=len(batch.entries),
+        coverage_update_count=len(batch.coverage_updates),
+        issue_count=len(batch.issues),
+        approximate_bytes=batch.approximate_bytes,
+    )
+
+
+def _complete_root_coverage() -> tuple[SnapshotDirectoryCoverage, ...]:
+    return (
+        SnapshotDirectoryCoverage(
+            relative_path=".",
+            comparison_key=".",
+            coverage_state="COMPLETE",
+            case_mode="CASE_INSENSITIVE",
+            case_mode_evidence="probe",
+            case_context_hash="1" * 64,
         ),
     )

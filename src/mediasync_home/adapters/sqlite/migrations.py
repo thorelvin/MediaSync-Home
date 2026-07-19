@@ -82,6 +82,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_snapshot_seal_checksum",
                 statements=CATALOG_SNAPSHOT_SEAL_CHECKSUM,
             ),
+            SqliteMigration(
+                version=12,
+                name="catalog_snapshot_coverage_issue_materialization",
+                statements=CATALOG_SNAPSHOT_COVERAGE_ISSUE_MATERIALIZATION,
+            ),
         ),
     )
 
@@ -1145,6 +1150,143 @@ CATALOG_SNAPSHOT_SEAL_CHECKSUM = (
         )
     BEGIN
         SELECT RAISE(ABORT, 'SNAPSHOT_SEAL_INCOMPLETE');
+    END
+    """,
+)
+
+CATALOG_SNAPSHOT_COVERAGE_ISSUE_MATERIALIZATION = (
+    """
+    ALTER TABLE snapshot_batches
+        ADD COLUMN coverage_update_count INTEGER NOT NULL DEFAULT 0 CHECK (coverage_update_count >= 0)
+    """,
+    """
+    ALTER TABLE snapshot_batches
+        ADD COLUMN issue_count INTEGER NOT NULL DEFAULT 0 CHECK (issue_count >= 0)
+    """,
+    """
+    ALTER TABLE snapshots
+        ADD COLUMN scan_error_count INTEGER NOT NULL DEFAULT 0 CHECK (scan_error_count >= 0)
+    """,
+    """
+    ALTER TABLE snapshots
+        ADD COLUMN volatile_directory_count INTEGER NOT NULL DEFAULT 0 CHECK (volatile_directory_count >= 0)
+    """,
+    """
+    CREATE TABLE directory_coverage (
+        snapshot_id TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        comparison_key TEXT NOT NULL,
+        coverage_state TEXT NOT NULL CHECK (
+            coverage_state IN (
+                'COMPLETE',
+                'VOLATILE',
+                'UNREADABLE',
+                'DISAPPEARED',
+                'REPARSE_BLOCKED',
+                'CASE_CONTEXT_UNKNOWN',
+                'CANCELLED'
+            )
+        ),
+        case_mode TEXT NOT NULL CHECK (case_mode IN ('CASE_SENSITIVE', 'CASE_INSENSITIVE', 'UNKNOWN')),
+        case_mode_evidence TEXT NOT NULL,
+        case_context_hash TEXT NOT NULL CHECK (
+            length(case_context_hash) = 64
+            AND case_context_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        case_probe_error TEXT,
+        identity_before_json TEXT,
+        identity_after_json TEXT,
+        enumerated_start_utc TEXT,
+        enumerated_end_utc TEXT,
+        PRIMARY KEY (snapshot_id, relative_path),
+        FOREIGN KEY (snapshot_id) REFERENCES snapshots (id) ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_directory_coverage_snapshot_comparison_state
+        ON directory_coverage (snapshot_id, comparison_key, coverage_state)
+    """,
+    """
+    CREATE TABLE snapshot_issues (
+        id INTEGER PRIMARY KEY,
+        snapshot_id TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        issue_type TEXT NOT NULL,
+        error_code TEXT,
+        sanitized_message TEXT,
+        blocks_destructive_actions INTEGER NOT NULL CHECK (blocks_destructive_actions IN (0, 1)),
+        observed_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        FOREIGN KEY (snapshot_id) REFERENCES snapshots (id) ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_snapshot_issues_snapshot_relative_path
+        ON snapshot_issues (snapshot_id, relative_path)
+    """,
+    """
+    CREATE TRIGGER trg_directory_coverage_no_insert_after_snapshot_immutable
+    BEFORE INSERT ON directory_coverage
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = NEW.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_directory_coverage_no_update_after_snapshot_immutable
+    BEFORE UPDATE ON directory_coverage
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = OLD.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_directory_coverage_no_delete_after_snapshot_immutable
+    BEFORE DELETE ON directory_coverage
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = OLD.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_snapshot_issues_no_insert_after_snapshot_immutable
+    BEFORE INSERT ON snapshot_issues
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = NEW.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_snapshot_issues_no_update_after_snapshot_immutable
+    BEFORE UPDATE ON snapshot_issues
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = OLD.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_snapshot_issues_no_delete_after_snapshot_immutable
+    BEFORE DELETE ON snapshot_issues
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = OLD.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
     END
     """,
 )

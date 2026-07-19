@@ -12,6 +12,19 @@ WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
 SNAPSHOT_SCHEMA_VERSION = 1
 SNAPSHOT_CHECKSUM_ALGORITHM = "SHA-256"
 SNAPSHOT_SERIALIZER_VERSION = "0B-SNAPSHOT-CANONICAL-JSON-V1"
+SNAPSHOT_COMPLETE_COVERAGE_STATE = "COMPLETE"
+SNAPSHOT_COVERAGE_STATES = frozenset(
+    {
+        "COMPLETE",
+        "VOLATILE",
+        "UNREADABLE",
+        "DISAPPEARED",
+        "REPARSE_BLOCKED",
+        "CASE_CONTEXT_UNKNOWN",
+        "CANCELLED",
+    }
+)
+SNAPSHOT_CASE_MODES = frozenset({"CASE_SENSITIVE", "CASE_INSENSITIVE", "UNKNOWN"})
 
 
 class SnapshotMaterializationError(ValueError):
@@ -28,11 +41,33 @@ class SnapshotFileEntry:
 
 
 @dataclass(frozen=True)
+class SnapshotDirectoryCoverage:
+    relative_path: str
+    comparison_key: str
+    coverage_state: str
+    case_mode: str
+    case_mode_evidence: str
+    case_context_hash: str
+    case_probe_error: str | None = None
+
+
+@dataclass(frozen=True)
+class SnapshotIssue:
+    relative_path: str
+    issue_type: str
+    blocks_destructive_actions: bool
+    error_code: str | None = None
+    sanitized_message: str | None = None
+
+
+@dataclass(frozen=True)
 class SnapshotEntryBatch:
     snapshot_id: str
     sequence_no: int
     payload_hash: str
     entries: tuple[SnapshotFileEntry, ...]
+    coverage_updates: tuple[SnapshotDirectoryCoverage, ...]
+    issues: tuple[SnapshotIssue, ...]
     approximate_bytes: int
 
 
@@ -42,6 +77,8 @@ class SnapshotBatchCommitReceipt:
     sequence_no: int
     payload_hash: str
     entry_count: int
+    coverage_update_count: int
+    issue_count: int
     approximate_bytes: int
     idempotent_replay: bool
 
@@ -51,6 +88,8 @@ class SnapshotBatchSummary:
     sequence_no: int
     payload_hash: str
     entry_count: int
+    coverage_update_count: int
+    issue_count: int
     approximate_bytes: int
 
 
@@ -60,6 +99,9 @@ class SnapshotSealRequest:
     expected_entry_count: int
     expected_total_bytes: int
     expected_batch_count: int
+    expected_directory_coverage_count: int
+    expected_issue_count: int = 0
+    expected_blocking_issue_count: int = 0
     expected_case_collision_group_count: int = 0
 
 
@@ -73,6 +115,9 @@ class SealedSnapshot:
     entry_count: int
     total_bytes: int
     batch_count: int
+    directory_coverage_count: int
+    issue_count: int
+    blocking_issue_count: int
     case_collision_group_count: int
     complete: bool = True
     immutable: bool = True
@@ -82,6 +127,10 @@ class SnapshotEntryMaterializationStore(Protocol):
     def commit_snapshot_entry_batch(self, batch: SnapshotEntryBatch) -> SnapshotBatchCommitReceipt: ...
 
     def load_snapshot_entries(self, snapshot_id: str) -> tuple[SnapshotFileEntry, ...]: ...
+
+    def load_directory_coverage(self, snapshot_id: str) -> tuple[SnapshotDirectoryCoverage, ...]: ...
+
+    def load_snapshot_issues(self, snapshot_id: str) -> tuple[SnapshotIssue, ...]: ...
 
 
 class SnapshotSealStore(Protocol):
@@ -95,6 +144,8 @@ def snapshot_entry_batch(
     snapshot_id: str,
     sequence_no: int,
     entries: tuple[SnapshotFileEntry, ...],
+    coverage_updates: tuple[SnapshotDirectoryCoverage, ...] = (),
+    issues: tuple[SnapshotIssue, ...] = (),
     approximate_bytes: int | None = None,
     payload_hash: str | None = None,
 ) -> SnapshotEntryBatch:
@@ -107,9 +158,13 @@ def snapshot_entry_batch(
             snapshot_id=snapshot_id,
             sequence_no=sequence_no,
             entries=entries,
+            coverage_updates=coverage_updates,
+            issues=issues,
             approximate_bytes=measured_bytes if approximate_bytes is None else approximate_bytes,
         ),
         entries=entries,
+        coverage_updates=coverage_updates,
+        issues=issues,
         approximate_bytes=measured_bytes if approximate_bytes is None else approximate_bytes,
     )
     validate_snapshot_entry_batch(batch)
@@ -120,14 +175,20 @@ def snapshot_seal(
     *,
     snapshot_id: str,
     entries: tuple[SnapshotFileEntry, ...],
+    coverage: tuple[SnapshotDirectoryCoverage, ...],
+    issues: tuple[SnapshotIssue, ...],
     batches: tuple[SnapshotBatchSummary, ...],
     case_collision_group_count: int,
 ) -> SealedSnapshot:
     ordered_entries = tuple(sorted(entries, key=lambda entry: (entry.relative_path, entry.entry_id)))
+    ordered_coverage = tuple(sorted(coverage, key=lambda item: item.relative_path))
+    ordered_issues = tuple(sorted(issues, key=_snapshot_issue_sort_key))
     ordered_batches = tuple(sorted(batches, key=lambda batch: batch.sequence_no))
     _validate_snapshot_seal_inputs(
         snapshot_id=snapshot_id,
         entries=ordered_entries,
+        coverage=ordered_coverage,
+        issues=ordered_issues,
         batches=ordered_batches,
         case_collision_group_count=case_collision_group_count,
     )
@@ -136,6 +197,8 @@ def snapshot_seal(
     checksum = _snapshot_checksum(
         snapshot_id=snapshot_id,
         entries=ordered_entries,
+        coverage=ordered_coverage,
+        issues=ordered_issues,
         batches=ordered_batches,
         entry_count=entry_count,
         total_bytes=total_bytes,
@@ -150,6 +213,9 @@ def snapshot_seal(
         entry_count=entry_count,
         total_bytes=total_bytes,
         batch_count=len(ordered_batches),
+        directory_coverage_count=len(ordered_coverage),
+        issue_count=len(ordered_issues),
+        blocking_issue_count=sum(1 for issue in ordered_issues if issue.blocks_destructive_actions),
         case_collision_group_count=case_collision_group_count,
     )
     validate_sealed_snapshot(sealed)
@@ -160,6 +226,8 @@ def verify_snapshot_checksum(
     snapshot: SealedSnapshot,
     *,
     entries: tuple[SnapshotFileEntry, ...],
+    coverage: tuple[SnapshotDirectoryCoverage, ...],
+    issues: tuple[SnapshotIssue, ...],
     batches: tuple[SnapshotBatchSummary, ...],
 ) -> bool:
     if not snapshot.complete or not snapshot.immutable:
@@ -168,6 +236,8 @@ def verify_snapshot_checksum(
         expected = snapshot_seal(
             snapshot_id=snapshot.snapshot_id,
             entries=entries,
+            coverage=coverage,
+            issues=issues,
             batches=batches,
             case_collision_group_count=snapshot.case_collision_group_count,
         )
@@ -181,6 +251,9 @@ def verify_snapshot_checksum(
         and snapshot.entry_count == expected.entry_count
         and snapshot.total_bytes == expected.total_bytes
         and snapshot.batch_count == expected.batch_count
+        and snapshot.directory_coverage_count == expected.directory_coverage_count
+        and snapshot.issue_count == expected.issue_count
+        and snapshot.blocking_issue_count == expected.blocking_issue_count
     )
 
 
@@ -193,6 +266,12 @@ def validate_snapshot_seal_request(request: SnapshotSealRequest) -> None:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_BYTES_MUST_BE_NON_NEGATIVE")
     if request.expected_batch_count < 0:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_BATCH_COUNT_MUST_BE_NON_NEGATIVE")
+    if request.expected_directory_coverage_count <= 0:
+        raise SnapshotMaterializationError("SNAPSHOT_SEAL_REQUIRES_COVERAGE")
+    if request.expected_issue_count < 0:
+        raise SnapshotMaterializationError("SNAPSHOT_SEAL_ISSUE_COUNT_MUST_BE_NON_NEGATIVE")
+    if request.expected_blocking_issue_count < 0:
+        raise SnapshotMaterializationError("SNAPSHOT_SEAL_BLOCKING_COUNT_MUST_BE_NON_NEGATIVE")
     if request.expected_case_collision_group_count < 0:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_CASE_GROUP_COUNT_MUST_BE_NON_NEGATIVE")
 
@@ -214,6 +293,14 @@ def validate_sealed_snapshot(snapshot: SealedSnapshot) -> None:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_BYTES_MUST_BE_NON_NEGATIVE")
     if snapshot.batch_count < 0:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_BATCH_COUNT_MUST_BE_NON_NEGATIVE")
+    if snapshot.directory_coverage_count <= 0:
+        raise SnapshotMaterializationError("SNAPSHOT_SEAL_REQUIRES_COVERAGE")
+    if snapshot.issue_count < 0:
+        raise SnapshotMaterializationError("SNAPSHOT_SEAL_ISSUE_COUNT_MUST_BE_NON_NEGATIVE")
+    if snapshot.blocking_issue_count < 0:
+        raise SnapshotMaterializationError("SNAPSHOT_SEAL_BLOCKING_COUNT_MUST_BE_NON_NEGATIVE")
+    if snapshot.blocking_issue_count > snapshot.issue_count:
+        raise SnapshotMaterializationError("SNAPSHOT_SEAL_BLOCKING_COUNT_MISMATCH")
     if snapshot.case_collision_group_count < 0:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_CASE_GROUP_COUNT_MUST_BE_NON_NEGATIVE")
     if not snapshot.complete or not snapshot.immutable:
@@ -249,6 +336,8 @@ def validate_snapshot_entry_batch(batch: SnapshotEntryBatch) -> None:
             raise SnapshotMaterializationError("SNAPSHOT_ENTRY_REQUIRES_OBJECT_TYPE")
         if entry.size_bytes is not None and entry.size_bytes < 0:
             raise SnapshotMaterializationError("SNAPSHOT_ENTRY_SIZE_MUST_BE_NON_NEGATIVE")
+    _validate_directory_coverage(batch.coverage_updates)
+    _validate_snapshot_issues(batch.issues)
 
 
 def _payload_hash(
@@ -256,10 +345,16 @@ def _payload_hash(
     snapshot_id: str,
     sequence_no: int,
     entries: tuple[SnapshotFileEntry, ...],
+    coverage_updates: tuple[SnapshotDirectoryCoverage, ...],
+    issues: tuple[SnapshotIssue, ...],
     approximate_bytes: int,
 ) -> str:
     payload = {
         "approximate_bytes": approximate_bytes,
+        "coverage_updates": [
+            _directory_coverage_payload(item)
+            for item in sorted(coverage_updates, key=lambda coverage: coverage.relative_path)
+        ],
         "entries": [
             {
                 "comparison_key": entry.comparison_key,
@@ -270,6 +365,7 @@ def _payload_hash(
             }
             for entry in sorted(entries, key=lambda item: (item.entry_id, item.relative_path))
         ],
+        "issues": [_snapshot_issue_payload(issue) for issue in sorted(issues, key=_snapshot_issue_sort_key)],
         "sequence_no": sequence_no,
         "snapshot_id": snapshot_id,
     }
@@ -282,6 +378,8 @@ def _snapshot_checksum(
     *,
     snapshot_id: str,
     entries: tuple[SnapshotFileEntry, ...],
+    coverage: tuple[SnapshotDirectoryCoverage, ...],
+    issues: tuple[SnapshotIssue, ...],
     batches: tuple[SnapshotBatchSummary, ...],
     entry_count: int,
     total_bytes: int,
@@ -292,7 +390,9 @@ def _snapshot_checksum(
         "batches": [
             {
                 "approximate_bytes": batch.approximate_bytes,
+                "coverage_update_count": batch.coverage_update_count,
                 "entry_count": batch.entry_count,
+                "issue_count": batch.issue_count,
                 "payload_hash": batch.payload_hash,
                 "sequence_no": batch.sequence_no,
             }
@@ -301,6 +401,8 @@ def _snapshot_checksum(
         "case_collision_group_count": case_collision_group_count,
         "checksum_algorithm": SNAPSHOT_CHECKSUM_ALGORITHM,
         "complete": True,
+        "coverage": [_directory_coverage_payload(item) for item in coverage],
+        "directory_coverage_count": len(coverage),
         "entries": [
             {
                 "comparison_key": entry.comparison_key,
@@ -313,6 +415,9 @@ def _snapshot_checksum(
         ],
         "entry_count": entry_count,
         "immutable": True,
+        "issue_count": len(issues),
+        "issues": [_snapshot_issue_payload(issue) for issue in issues],
+        "blocking_issue_count": sum(1 for issue in issues if issue.blocks_destructive_actions),
         "serializer_version": SNAPSHOT_SERIALIZER_VERSION,
         "snapshot_id": snapshot_id,
         "snapshot_schema_version": SNAPSHOT_SCHEMA_VERSION,
@@ -327,6 +432,8 @@ def _validate_snapshot_seal_inputs(
     *,
     snapshot_id: str,
     entries: tuple[SnapshotFileEntry, ...],
+    coverage: tuple[SnapshotDirectoryCoverage, ...],
+    issues: tuple[SnapshotIssue, ...],
     batches: tuple[SnapshotBatchSummary, ...],
     case_collision_group_count: int,
 ) -> None:
@@ -340,12 +447,24 @@ def _validate_snapshot_seal_inputs(
             sequence_no=0,
             payload_hash="0" * 64,
             entries=entries,
+            coverage_updates=coverage,
+            issues=issues,
             approximate_bytes=sum(entry.size_bytes or 0 for entry in entries),
         )
     )
     _validate_snapshot_batch_summaries(batches)
     if sum(batch.entry_count for batch in batches) != len(entries):
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_ENTRY_COUNT_MISMATCH")
+    if sum(batch.coverage_update_count for batch in batches) != len(coverage):
+        raise SnapshotMaterializationError("SNAPSHOT_SEAL_COVERAGE_COUNT_MISMATCH")
+    if sum(batch.issue_count for batch in batches) != len(issues):
+        raise SnapshotMaterializationError("SNAPSHOT_SEAL_ISSUE_COUNT_MISMATCH")
+    if not coverage:
+        raise SnapshotMaterializationError("SNAPSHOT_SEAL_REQUIRES_COVERAGE")
+    if any(item.coverage_state != SNAPSHOT_COMPLETE_COVERAGE_STATE for item in coverage):
+        raise SnapshotMaterializationError("SNAPSHOT_SEAL_COVERAGE_INCOMPLETE")
+    if any(issue.blocks_destructive_actions for issue in issues):
+        raise SnapshotMaterializationError("SNAPSHOT_SEAL_BLOCKING_ISSUES")
 
 
 def _validate_snapshot_batch_summaries(batches: tuple[SnapshotBatchSummary, ...]) -> None:
@@ -357,8 +476,76 @@ def _validate_snapshot_batch_summaries(batches: tuple[SnapshotBatchSummary, ...]
             raise SnapshotMaterializationError("SNAPSHOT_SEAL_REQUIRES_BATCH_PAYLOAD_HASH")
         if batch.entry_count < 0:
             raise SnapshotMaterializationError("SNAPSHOT_SEAL_BATCH_ENTRY_COUNT_MUST_BE_NON_NEGATIVE")
+        if batch.coverage_update_count < 0:
+            raise SnapshotMaterializationError("SNAPSHOT_SEAL_BATCH_COVERAGE_COUNT_MUST_BE_NON_NEGATIVE")
+        if batch.issue_count < 0:
+            raise SnapshotMaterializationError("SNAPSHOT_SEAL_BATCH_ISSUE_COUNT_MUST_BE_NON_NEGATIVE")
         if batch.approximate_bytes < 0:
             raise SnapshotMaterializationError("SNAPSHOT_SEAL_BATCH_BYTES_MUST_BE_NON_NEGATIVE")
+
+
+def _validate_directory_coverage(coverage_updates: tuple[SnapshotDirectoryCoverage, ...]) -> None:
+    relative_paths: set[str] = set()
+    for coverage in coverage_updates:
+        if not _valid_coverage_path(coverage.relative_path):
+            raise SnapshotMaterializationError("SNAPSHOT_COVERAGE_REQUIRES_RELATIVE_PATH")
+        if coverage.relative_path in relative_paths:
+            raise SnapshotMaterializationError("SNAPSHOT_COVERAGE_PATHS_MUST_BE_UNIQUE_IN_BATCH")
+        relative_paths.add(coverage.relative_path)
+        if not coverage.comparison_key.strip():
+            raise SnapshotMaterializationError("SNAPSHOT_COVERAGE_REQUIRES_COMPARISON_KEY")
+        if coverage.coverage_state not in SNAPSHOT_COVERAGE_STATES:
+            raise SnapshotMaterializationError("SNAPSHOT_COVERAGE_STATE_UNKNOWN")
+        if coverage.case_mode not in SNAPSHOT_CASE_MODES:
+            raise SnapshotMaterializationError("SNAPSHOT_COVERAGE_CASE_MODE_UNKNOWN")
+        if not coverage.case_mode_evidence.strip():
+            raise SnapshotMaterializationError("SNAPSHOT_COVERAGE_REQUIRES_CASE_MODE_EVIDENCE")
+        if HASH_PATTERN.fullmatch(coverage.case_context_hash) is None:
+            raise SnapshotMaterializationError("SNAPSHOT_COVERAGE_REQUIRES_CASE_CONTEXT_HASH")
+
+
+def _validate_snapshot_issues(issues: tuple[SnapshotIssue, ...]) -> None:
+    for issue in issues:
+        if not _valid_coverage_path(issue.relative_path):
+            raise SnapshotMaterializationError("SNAPSHOT_ISSUE_REQUIRES_RELATIVE_PATH")
+        if not issue.issue_type.strip():
+            raise SnapshotMaterializationError("SNAPSHOT_ISSUE_REQUIRES_TYPE")
+
+
+def _directory_coverage_payload(coverage: SnapshotDirectoryCoverage) -> dict[str, str | None]:
+    return {
+        "case_context_hash": coverage.case_context_hash,
+        "case_mode": coverage.case_mode,
+        "case_mode_evidence": coverage.case_mode_evidence,
+        "case_probe_error": coverage.case_probe_error,
+        "comparison_key": coverage.comparison_key,
+        "coverage_state": coverage.coverage_state,
+        "relative_path": coverage.relative_path,
+    }
+
+
+def _snapshot_issue_payload(issue: SnapshotIssue) -> dict[str, bool | str | None]:
+    return {
+        "blocks_destructive_actions": issue.blocks_destructive_actions,
+        "error_code": issue.error_code,
+        "issue_type": issue.issue_type,
+        "relative_path": issue.relative_path,
+        "sanitized_message": issue.sanitized_message,
+    }
+
+
+def _snapshot_issue_sort_key(issue: SnapshotIssue) -> tuple[str, str, str, str, bool]:
+    return (
+        issue.relative_path,
+        issue.issue_type,
+        issue.error_code or "",
+        issue.sanitized_message or "",
+        issue.blocks_destructive_actions,
+    )
+
+
+def _valid_coverage_path(value: str) -> bool:
+    return value == "." or _valid_relative_path(value)
 
 
 def _valid_relative_path(value: str) -> bool:
