@@ -72,6 +72,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_final_file_handoff_skeleton",
                 statements=CATALOG_FINAL_FILE_HANDOFF_SKELETON,
             ),
+            SqliteMigration(
+                version=10,
+                name="catalog_snapshot_entry_materialization",
+                statements=CATALOG_SNAPSHOT_ENTRY_MATERIALIZATION,
+            ),
         ),
     )
 
@@ -899,6 +904,186 @@ CATALOG_FINAL_FILE_HANDOFF_SKELETON = (
     """
     CREATE INDEX idx_final_file_catalog_handoffs_run_target
         ON final_file_catalog_handoffs (run_id, run_target_id)
+    """,
+)
+
+CATALOG_SNAPSHOT_ENTRY_MATERIALIZATION = (
+    """
+    ALTER TABLE snapshots
+        ADD COLUMN entry_count INTEGER NOT NULL DEFAULT 0 CHECK (entry_count >= 0)
+    """,
+    """
+    ALTER TABLE snapshots
+        ADD COLUMN total_bytes INTEGER NOT NULL DEFAULT 0 CHECK (total_bytes >= 0)
+    """,
+    """
+    ALTER TABLE snapshots
+        ADD COLUMN immutable INTEGER NOT NULL DEFAULT 0 CHECK (immutable IN (0, 1))
+    """,
+    """
+    ALTER TABLE snapshots
+        ADD COLUMN sealed_utc TEXT
+    """,
+    """
+    ALTER TABLE file_entries
+        ADD COLUMN size_bytes INTEGER CHECK (size_bytes IS NULL OR size_bytes >= 0)
+    """,
+    """
+    CREATE TABLE snapshot_batches (
+        snapshot_id TEXT NOT NULL,
+        sequence_no INTEGER NOT NULL CHECK (sequence_no >= 0),
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        entry_count INTEGER NOT NULL CHECK (entry_count >= 0),
+        approximate_bytes INTEGER NOT NULL CHECK (approximate_bytes >= 0),
+        state TEXT NOT NULL CHECK (state IN ('COMMITTED')),
+        committed_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        PRIMARY KEY (snapshot_id, sequence_no),
+        FOREIGN KEY (snapshot_id) REFERENCES snapshots (id) ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX uq_case_collision_groups_snapshot_comparison_key
+        ON case_collision_groups (snapshot_id, comparison_key)
+    """,
+    """
+    CREATE TRIGGER trg_snapshots_no_update_after_immutable
+    BEFORE UPDATE ON snapshots
+    WHEN OLD.immutable = 1
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_file_entries_no_insert_after_snapshot_immutable
+    BEFORE INSERT ON file_entries
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = NEW.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_file_entries_no_update_after_snapshot_immutable
+    BEFORE UPDATE ON file_entries
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = OLD.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_file_entries_no_delete_after_snapshot_immutable
+    BEFORE DELETE ON file_entries
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = OLD.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_snapshot_batches_no_insert_after_snapshot_immutable
+    BEFORE INSERT ON snapshot_batches
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = NEW.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_snapshot_batches_no_update_after_snapshot_immutable
+    BEFORE UPDATE ON snapshot_batches
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = OLD.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_snapshot_batches_no_delete_after_snapshot_immutable
+    BEFORE DELETE ON snapshot_batches
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = OLD.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_case_collision_groups_no_insert_after_snapshot_immutable
+    BEFORE INSERT ON case_collision_groups
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = NEW.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_case_collision_groups_no_update_after_snapshot_immutable
+    BEFORE UPDATE ON case_collision_groups
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = OLD.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_case_collision_groups_no_delete_after_snapshot_immutable
+    BEFORE DELETE ON case_collision_groups
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = OLD.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_case_collision_members_no_insert_after_snapshot_immutable
+    BEFORE INSERT ON case_collision_members
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = NEW.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_case_collision_members_no_update_after_snapshot_immutable
+    BEFORE UPDATE ON case_collision_members
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = OLD.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_case_collision_members_no_delete_after_snapshot_immutable
+    BEFORE DELETE ON case_collision_members
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = OLD.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
     """,
 )
 
