@@ -5,7 +5,7 @@ import json
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 
@@ -21,6 +21,10 @@ class TriggerOccurrencePayloadError(ValueError):
     pass
 
 
+class TriggerOccurrenceConflict(ValueError):
+    pass
+
+
 class TriggerKind(str, Enum):
     SCHEDULED_TIME = "SCHEDULED_TIME"
     LOGON = "LOGON"
@@ -28,6 +32,24 @@ class TriggerKind(str, Enum):
     EVENT = "EVENT"
     VOLUME_CONNECTED = "VOLUME_CONNECTED"
     MANUAL_LOCAL_PREVIEW = "MANUAL_LOCAL_PREVIEW"
+
+
+class TriggerOccurrenceState(str, Enum):
+    RECEIVED = "RECEIVED"
+    WAITING_FOR_RECOVERY = "WAITING_FOR_RECOVERY"
+    RUN_ENQUEUED = "RUN_ENQUEUED"
+    SUCCEEDED = "SUCCEEDED"
+    REJECTED = "REJECTED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+TERMINAL_TRIGGER_OCCURRENCE_STATES = {
+    TriggerOccurrenceState.SUCCEEDED,
+    TriggerOccurrenceState.REJECTED,
+    TriggerOccurrenceState.FAILED,
+    TriggerOccurrenceState.CANCELLED,
+}
 
 
 @dataclass(frozen=True)
@@ -75,6 +97,42 @@ class EnqueueTriggerOccurrenceCommand:
         }
 
 
+@dataclass(frozen=True)
+class TriggerOccurrence:
+    occurrence_id: str
+    schedule_id: str
+    schedule_revision_hash: str
+    job_id: str
+    occurrence_key: str
+    deduplication_key: str
+    first_delivery_id: str
+    trigger_type: TriggerKind
+    payload_hash: str
+    occurrence_slot_utc: str | None = None
+    source_instance_key: str | None = None
+    state: TriggerOccurrenceState = TriggerOccurrenceState.RECEIVED
+    run_id: str | None = None
+    terminal_effect_hash: str | None = None
+
+
+@dataclass(frozen=True)
+class TriggerOccurrenceRegistration:
+    occurrence: TriggerOccurrence
+    deduplicated: bool
+    compacted: bool = False
+
+
+class TriggerOccurrenceStore(Protocol):
+    def record_received(self, occurrence: TriggerOccurrence) -> TriggerOccurrenceRegistration: ...
+
+    def load_trigger_occurrence(self, occurrence_id: str) -> TriggerOccurrence | None: ...
+
+    def load_trigger_occurrence_by_deduplication_key(
+        self,
+        deduplication_key: str,
+    ) -> TriggerOccurrence | None: ...
+
+
 def build_enqueue_trigger_occurrence_payload(
     *,
     schedule_id: str,
@@ -100,6 +158,68 @@ def build_enqueue_trigger_occurrence_payload(
 def payload_hash(payload: dict[str, object]) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def build_trigger_occurrence(
+    *,
+    installation_id: str,
+    job_id: str,
+    command: EnqueueTriggerOccurrenceCommand,
+) -> TriggerOccurrence:
+    installation_id = _required_identifier(installation_id, "installation_id")
+    job_id = _required_identifier(job_id, "job_id")
+    key_context = _logical_key_context(command.delivery)
+    occurrence_key = f"{command.delivery.trigger_kind.value}:{key_context.key_material}"
+    deduplication_key = _sha256_hex(
+        {
+            "installation_id": installation_id,
+            "occurrence_key": occurrence_key,
+            "schedule_id": command.schedule_id,
+            "schedule_revision_hash": command.schedule_revision_hash,
+        }
+    )
+    logical_payload_hash = _sha256_hex(
+        {
+            "job_id": job_id,
+            "occurrence_key": occurrence_key,
+            "schedule_id": command.schedule_id,
+            "schedule_revision_hash": command.schedule_revision_hash,
+            "source_instance_key": key_context.source_instance_key,
+            "task_definition_hash": command.delivery.task_definition_hash,
+            "trigger_type": command.delivery.trigger_kind.value,
+        }
+    )
+    return TriggerOccurrence(
+        occurrence_id=f"trigger:{deduplication_key}",
+        schedule_id=command.schedule_id,
+        schedule_revision_hash=command.schedule_revision_hash,
+        job_id=job_id,
+        occurrence_key=occurrence_key,
+        deduplication_key=deduplication_key,
+        first_delivery_id=command.delivery.delivery_id,
+        occurrence_slot_utc=key_context.occurrence_slot_utc,
+        source_instance_key=key_context.source_instance_key,
+        trigger_type=command.delivery.trigger_kind,
+        payload_hash=logical_payload_hash,
+    )
+
+
+def ensure_trigger_occurrence_compatible(
+    existing: TriggerOccurrence,
+    incoming: TriggerOccurrence,
+) -> TriggerOccurrence:
+    compared_fields = (
+        "schedule_id",
+        "schedule_revision_hash",
+        "job_id",
+        "occurrence_key",
+        "trigger_type",
+        "payload_hash",
+    )
+    for field_name in compared_fields:
+        if getattr(existing, field_name) != getattr(incoming, field_name):
+            raise TriggerOccurrenceConflict(f"TRIGGER_OCCURRENCE_CONFLICT:{field_name}")
+    return existing
 
 
 def parse_enqueue_trigger_occurrence_command(
@@ -201,3 +321,42 @@ def _optional_text(value: object) -> str | None:
         raise TriggerOccurrencePayloadError("ENQUEUE_TRIGGER_INVALID_TEXT")
     normalized = value.strip()
     return normalized or None
+
+
+@dataclass(frozen=True)
+class _LogicalKeyContext:
+    key_material: str
+    occurrence_slot_utc: str | None
+    source_instance_key: str | None
+
+
+def _logical_key_context(delivery: TriggerDeliveryContext) -> _LogicalKeyContext:
+    if delivery.trigger_kind is TriggerKind.SCHEDULED_TIME:
+        occurrence_slot_utc = delivery.scheduled_slot_utc or delivery.observed_start_utc
+        return _LogicalKeyContext(
+            key_material=f"slot:{occurrence_slot_utc}",
+            occurrence_slot_utc=occurrence_slot_utc,
+            source_instance_key=delivery.task_instance_id,
+        )
+    if delivery.trigger_kind is TriggerKind.MANUAL_LOCAL_PREVIEW:
+        return _LogicalKeyContext(
+            key_material=f"delivery:{delivery.delivery_id}",
+            occurrence_slot_utc=delivery.observed_start_utc,
+            source_instance_key=delivery.delivery_id,
+        )
+
+    source_instance_key = (
+        delivery.event_identity
+        or delivery.task_instance_id
+        or f"observed:{delivery.observed_start_utc}"
+    )
+    return _LogicalKeyContext(
+        key_material=f"source:{source_instance_key}",
+        occurrence_slot_utc=delivery.scheduled_slot_utc,
+        source_instance_key=source_instance_key,
+    )
+
+
+def _sha256_hex(payload: dict[str, object]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

@@ -28,7 +28,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 18
+        assert current_schema_version(connection, plan.store) == 19
         assert _table_names(connection) >= {
             "endpoint_heads",
             "job_heads",
@@ -47,13 +47,14 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "plan_endpoints",
             "outbox_messages",
             "effect_dedup_tombstones",
+            "trigger_occurrences",
             "final_file_catalog_handoffs",
             "runs",
             "run_targets",
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 18
+        assert _row_count(connection, "schema_migrations") == 19
         assert _foreign_key(
             connection,
             "endpoint_heads",
@@ -110,6 +111,20 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             ("snapshot_id", "endpoint_id"),
             ("id", "endpoint_id"),
         )
+        assert _foreign_key(
+            connection,
+            "trigger_occurrences",
+            "jobs",
+            ("job_id",),
+            ("id",),
+        )
+        assert _foreign_key(
+            connection,
+            "trigger_occurrences",
+            "runs",
+            ("run_id",),
+            ("id",),
+        )
         assert _index_is_unique(connection, "file_entries", ("snapshot_id", "comparison_key")) is False
         assert _index_is_unique(
             connection,
@@ -160,6 +175,11 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             connection,
             "outbox_messages",
             ("state", "claim_owner_instance_id", "claim_started_utc", "id"),
+        ) is False
+        assert _index_is_unique(
+            connection,
+            "trigger_occurrences",
+            ("job_id", "received_utc"),
         ) is False
         assert _index_is_unique(
             connection,

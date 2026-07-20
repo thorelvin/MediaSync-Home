@@ -117,6 +117,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_run_activity_read_model_indexes",
                 statements=CATALOG_RUN_ACTIVITY_READ_MODEL_INDEXES,
             ),
+            SqliteMigration(
+                version=19,
+                name="catalog_trigger_occurrence_dedup",
+                statements=CATALOG_TRIGGER_OCCURRENCE_DEDUP,
+            ),
         ),
     )
 
@@ -955,6 +960,60 @@ CATALOG_TRANSACTIONAL_OUTBOX_SKELETON = (
         first_seen_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
         compacted_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     )
+    """,
+)
+
+CATALOG_TRIGGER_OCCURRENCE_DEDUP = (
+    """
+    CREATE TABLE trigger_occurrences (
+        id TEXT PRIMARY KEY,
+        schedule_id TEXT NOT NULL,
+        schedule_revision_hash TEXT NOT NULL CHECK (length(schedule_revision_hash) = 64),
+        job_id TEXT NOT NULL,
+        occurrence_key TEXT NOT NULL,
+        deduplication_key TEXT NOT NULL UNIQUE CHECK (length(deduplication_key) = 64),
+        first_delivery_id TEXT NOT NULL,
+        occurrence_slot_utc TEXT,
+        source_instance_key TEXT,
+        trigger_type TEXT NOT NULL CHECK (
+            trigger_type IN (
+                'SCHEDULED_TIME',
+                'LOGON',
+                'STARTUP',
+                'EVENT',
+                'VOLUME_CONNECTED',
+                'MANUAL_LOCAL_PREVIEW'
+            )
+        ),
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        received_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        state TEXT NOT NULL CHECK (
+            state IN (
+                'RECEIVED',
+                'WAITING_FOR_RECOVERY',
+                'RUN_ENQUEUED',
+                'SUCCEEDED',
+                'REJECTED',
+                'FAILED',
+                'CANCELLED'
+            )
+        ),
+        run_id TEXT,
+        terminal_effect_hash TEXT CHECK (
+            terminal_effect_hash IS NULL OR length(terminal_effect_hash) = 64
+        ),
+        completed_utc TEXT,
+        FOREIGN KEY (job_id)
+            REFERENCES jobs (id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (run_id)
+            REFERENCES runs (id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_trigger_occurrences_job_received
+        ON trigger_occurrences (job_id, received_utc)
     """,
 )
 

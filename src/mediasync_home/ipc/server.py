@@ -84,6 +84,7 @@ from mediasync_home.application.snapshots import (
 )
 from mediasync_home.application.trigger_occurrences import (
     TriggerCommandName,
+    TriggerOccurrenceStore,
     TriggerOccurrencePayloadError,
     parse_enqueue_trigger_occurrence_command,
 )
@@ -119,6 +120,7 @@ class EngineHostIpcService:
     plan_store: PlanStore | None = None
     run_store: RunStore | None = None
     run_id_factory: RunIdFactory | None = None
+    trigger_occurrence_store: TriggerOccurrenceStore | None = None
     command_receipt_store: CommandReceiptStore | None = None
     command_effect_transaction: CommandEffectTransaction | None = None
     outbox_store: OutboxStore | None = None
