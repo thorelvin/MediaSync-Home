@@ -18,6 +18,7 @@ from mediasync_home.application.host_locator import (
     HostLocatorViolation,
     build_local_engine_host_descriptor,
     build_local_engine_host_publication,
+    local_engine_host_publication_matches_descriptor,
     local_engine_host_publication_from_payload,
     validate_local_preview_pipe_name,
     validate_local_preview_mutex_name,
@@ -148,6 +149,31 @@ def test_local_engine_host_publication_payload_binds_pipe_mutex_and_process(
         "status": "STARTING",
     }
     assert local_engine_host_publication_from_payload(publication.to_payload()) == publication
+
+
+def test_local_engine_host_publication_matches_only_same_descriptor(
+    tmp_path: Path,
+) -> None:
+    descriptor = build_local_engine_host_descriptor(
+        installation_id="local-dev",
+        user_scope_hash=USER_HASH,
+        state_root=tmp_path / "state",
+    )
+    publication = build_local_engine_host_publication(
+        installation_id=descriptor.installation_id,
+        pipe_name=descriptor.pipe_name,
+        mutex_name=descriptor.mutex_name,
+        state_root=descriptor.state_root or tmp_path / "state",
+        process_id=4321,
+    )
+    other_descriptor = build_local_engine_host_descriptor(
+        installation_id="other-dev",
+        user_scope_hash=USER_HASH,
+        state_root=tmp_path / "state",
+    )
+
+    assert local_engine_host_publication_matches_descriptor(publication, descriptor) is True
+    assert local_engine_host_publication_matches_descriptor(publication, other_descriptor) is False
 
 
 @pytest.mark.parametrize(

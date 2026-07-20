@@ -138,6 +138,21 @@ def local_engine_host_publication_from_payload(
     return publication
 
 
+def local_engine_host_publication_matches_descriptor(
+    publication: LocalEngineHostPublication,
+    descriptor: LocalEngineHostDescriptor,
+) -> bool:
+    return (
+        descriptor.state_root is not None
+        and publication.installation_id == descriptor.installation_id
+        and publication.locator_key == descriptor.locator_key
+        and publication.pipe_name == descriptor.pipe_name
+        and publication.mutex_name == descriptor.mutex_name
+        and publication.state_root == descriptor.state_root
+        and publication.scope == descriptor.scope
+    )
+
+
 def validate_installation_id(installation_id: str) -> None:
     _normalize_installation_id(installation_id)
 

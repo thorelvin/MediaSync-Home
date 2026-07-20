@@ -20,7 +20,11 @@ from mediasync_home.application.process_supervision import (
     ProcessLaunchPlan,
     build_internal_role_launch_plan,
 )
-from mediasync_home.application.host_locator import LocalEngineHostDescriptor
+from mediasync_home.application.host_locator import (
+    LocalEngineHostDescriptor,
+    LocalEngineHostPublication,
+    local_engine_host_publication_matches_descriptor,
+)
 from mediasync_home.domain.process_roles import ProcessRole
 
 
@@ -52,11 +56,23 @@ class LocalPreviewStatusResult:
     gui_response: dict[str, object] | None
     gui_stderr: str
     host_locator: dict[str, object] | None = None
+    host_locator_publication: dict[str, object] | None = None
+    adoption_attempted: bool = False
+    adopted_existing_host: bool = False
     killed_engine_host: bool = False
     error_type: str | None = None
 
     @property
     def accepted(self) -> bool:
+        if self.adopted_existing_host:
+            return (
+                self.error_type is None
+                and self.engine_host_returncode is None
+                and self.engine_host_events == ()
+                and self.gui_returncode == 0
+                and self.gui_response is not None
+                and self.gui_response.get("status") == "ACCEPTED"
+            )
         event_names = tuple(str(event.get("event", "")) for event in self.engine_host_events)
         return (
             self.error_type is None
@@ -69,6 +85,8 @@ class LocalPreviewStatusResult:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "adopted_existing_host": self.adopted_existing_host,
+            "adoption_attempted": self.adoption_attempted,
             "accepted": self.accepted,
             "engine_host": {
                 "events": list(self.engine_host_events),
@@ -84,6 +102,7 @@ class LocalPreviewStatusResult:
                 "stderr": self.gui_stderr,
             },
             "host_locator": self.host_locator,
+            "host_locator_publication": self.host_locator_publication,
             "pipe_name": self.pipe_name,
             "scope": "0B_SAME_USER_LOCAL_PREVIEW",
         }
@@ -173,7 +192,18 @@ def run_local_preview_status(
     *,
     supervisor: RoleProcessSupervisor,
     timeout_seconds: float,
+    existing_publication: LocalEngineHostPublication | None = None,
 ) -> LocalPreviewStatusResult:
+    if existing_publication is not None:
+        adopted = _try_adopt_existing_local_preview_host(
+            launch,
+            supervisor=supervisor,
+            timeout_seconds=timeout_seconds,
+            publication=existing_publication,
+        )
+        if adopted is not None:
+            return adopted
+
     host = supervisor.start(launch.engine_host)
     host_completed: CompletedRoleProcess | None = None
     gui_completed: CompletedRoleProcess | None = None
@@ -208,8 +238,49 @@ def run_local_preview_status(
         host_locator=None
         if launch.host_descriptor is None
         else launch.host_descriptor.to_payload(),
+        host_locator_publication=None
+        if existing_publication is None
+        else existing_publication.to_payload(),
+        adoption_attempted=existing_publication is not None,
         killed_engine_host=killed_engine_host,
         error_type=error_type,
+    )
+
+
+def _try_adopt_existing_local_preview_host(
+    launch: LocalPreviewStatusLaunch,
+    *,
+    supervisor: RoleProcessSupervisor,
+    timeout_seconds: float,
+    publication: LocalEngineHostPublication,
+) -> LocalPreviewStatusResult | None:
+    try:
+        gui_completed = supervisor.run(launch.gui_status, timeout_seconds=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        return None
+
+    gui_response = _parse_json_object(gui_completed.stdout)
+    if (
+        gui_completed.returncode != 0
+        or gui_response is None
+        or gui_response.get("status") != "ACCEPTED"
+    ):
+        return None
+
+    return LocalPreviewStatusResult(
+        pipe_name=launch.pipe_name,
+        engine_host_returncode=None,
+        engine_host_events=(),
+        engine_host_stderr="",
+        gui_returncode=gui_completed.returncode,
+        gui_response=gui_response,
+        gui_stderr=gui_completed.stderr,
+        host_locator=None
+        if launch.host_descriptor is None
+        else launch.host_descriptor.to_payload(),
+        host_locator_publication=publication.to_payload(),
+        adoption_attempted=True,
+        adopted_existing_host=True,
     )
 
 
@@ -234,9 +305,11 @@ def _run_local_preview_status_from_args(args: argparse.Namespace) -> LocalPrevie
         )
         pipe_name = host_descriptor.pipe_name
         state_root = host_descriptor.state_root
+        existing_publication = _load_matching_host_publication(host_descriptor)
     else:
         pipe_name = args.pipe_name or make_pipe_name(installation_id=args.installation_id)
         state_root = args.state_root
+        existing_publication = None
     launch = build_local_preview_status_launch(
         pipe_name=pipe_name,
         state_root=state_root,
@@ -247,7 +320,27 @@ def _run_local_preview_status_from_args(args: argparse.Namespace) -> LocalPrevie
         launch,
         supervisor=LocalSubprocessSupervisor(),
         timeout_seconds=args.timeout_seconds,
+        existing_publication=existing_publication,
     )
+
+
+def _load_matching_host_publication(
+    host_descriptor: LocalEngineHostDescriptor,
+) -> LocalEngineHostPublication | None:
+    if host_descriptor.state_root is None:
+        return None
+
+    from mediasync_home.adapters.local_host_locator import load_local_engine_host_publication
+
+    try:
+        publication = load_local_engine_host_publication(host_descriptor.state_root)
+    except (OSError, ValueError):
+        return None
+    if publication is None:
+        return None
+    if not local_engine_host_publication_matches_descriptor(publication, host_descriptor):
+        return None
+    return publication
 
 
 def _parse_json_object_lines(value: str) -> tuple[dict[str, object], ...]:

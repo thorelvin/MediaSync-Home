@@ -5,6 +5,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -18,6 +19,7 @@ pytestmark = pytest.mark.skipif(os.name != "nt", reason="Win32 named-pipe role w
 
 if os.name == "nt":
     from mediasync_home.adapters.host_mutex import LocalEngineHostMutex
+    from mediasync_home.adapters.local_host_locator import build_local_engine_host_descriptor_for_user
     from mediasync_home.ipc import win32_named_pipe
 
 
@@ -201,6 +203,8 @@ def test_launcher_local_preview_status_uses_host_locator_when_pipe_omitted(
 
     assert result.stderr == ""
     assert payload["accepted"] is True
+    assert payload["adoption_attempted"] is False
+    assert payload["adopted_existing_host"] is False
     assert payload["pipe_name"].startswith("MediaSyncHome-0B-")
     assert payload["host_locator"] == {
         "installation_id": installation_id,
@@ -232,6 +236,94 @@ def test_launcher_local_preview_status_uses_host_locator_when_pipe_omitted(
     assert host_events[0]["host_locator"] == publication
     assert host_events[0]["host_locator_path"] == str(publication_path)
     assert host_events[0]["state_root"] == str(state_root)
+    assert host_events[-1]["served_requests"] == 2
+
+
+def test_launcher_local_preview_status_adopts_live_published_host(
+    tmp_path: Path,
+) -> None:
+    installation_id = f"preview-{uuid4().hex}"
+    state_root = tmp_path / "state"
+    identity = win32_named_pipe.current_process_identity()
+    descriptor = build_local_engine_host_descriptor_for_user(
+        installation_id=installation_id,
+        user_scope_hash=identity.user_sid_hash,
+        state_root=state_root,
+    )
+    publication_path = state_root / LOCAL_ENGINE_HOST_PUBLICATION_FILENAME
+    host = subprocess.Popen(
+        [
+            sys.executable,
+            "scripts/run_role.py",
+            "--role",
+            "engine-host",
+            "--pipe-name",
+            descriptor.pipe_name,
+            "--serve-requests",
+            "2",
+            "--installation-id",
+            installation_id,
+            "--host-mutex-name",
+            descriptor.mutex_name,
+            "--publish-host-locator",
+            "--state-root",
+            str(state_root),
+        ],
+        cwd=Path(__file__).resolve().parents[3],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _wait_for_file(publication_path)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/run_role.py",
+                "--role",
+                "launcher",
+                "--local-preview-status",
+                "--installation-id",
+                installation_id,
+                "--state-root",
+                str(state_root),
+            ],
+            cwd=Path(__file__).resolve().parents[3],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
+        )
+        stdout, stderr = host.communicate(timeout=10)
+    finally:
+        if host.poll() is None:
+            host.kill()
+            host.communicate(timeout=5)
+
+    payload = json.loads(result.stdout)
+    host_events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+    publication = json.loads(publication_path.read_text(encoding="utf-8"))
+
+    assert result.stderr == ""
+    assert stderr == ""
+    assert payload["accepted"] is True
+    assert payload["adoption_attempted"] is True
+    assert payload["adopted_existing_host"] is True
+    assert payload["pipe_name"] == descriptor.pipe_name
+    assert payload["engine_host"] == {
+        "events": [],
+        "killed": False,
+        "returncode": None,
+        "stderr": "",
+    }
+    assert payload["gui"]["response"]["status"] == "ACCEPTED"
+    assert payload["host_locator"] == descriptor.to_payload()
+    assert payload["host_locator_publication"] == publication
+    assert [event["event"] for event in host_events] == [
+        "ENGINE_HOST_PIPE_STARTING",
+        "ENGINE_HOST_PIPE_STOPPED",
+    ]
+    assert host_events[0]["host_locator"] == publication
     assert host_events[-1]["served_requests"] == 2
 
 
@@ -860,3 +952,12 @@ def _run_status_query(pipe_name: str) -> subprocess.CompletedProcess[str]:
         timeout=10,
         check=True,
     )
+
+
+def _wait_for_file(path: Path, *, timeout_seconds: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if path.is_file():
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"timed out waiting for {path}")
