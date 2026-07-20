@@ -115,6 +115,64 @@ def test_sqlite_command_receipts_update_state_and_result(tmp_path: Path) -> None
         assert loaded == succeeded
 
 
+def test_sqlite_command_receipts_compact_terminal_receipt_and_replay(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        store = SqliteCommandReceiptStore(connection)
+        received = store.record_received(_receipt())
+        succeeded = _succeeded_receipt(received)
+        store.update_command_receipt(succeeded)
+
+        compacted = store.compact_terminal_command_receipt("idempotency-a")
+        replay = store.record_received(replace(received, request_id="request-retry"))
+
+        assert compacted == succeeded
+        assert replay == succeeded
+        assert store.load_command_receipt("idempotency-a") == succeeded
+        assert _row_count(connection, "command_receipts") == 0
+        assert _row_count(connection, "command_dedup_tombstones") == 1
+
+
+def test_sqlite_command_receipts_tombstone_rejects_payload_conflict(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        store = SqliteCommandReceiptStore(connection)
+        received = store.record_received(_receipt())
+        store.update_command_receipt(_succeeded_receipt(received))
+        store.compact_terminal_command_receipt("idempotency-a")
+
+        with pytest.raises(CommandReceiptConflict, match="COMMAND_IDEMPOTENCY_CONFLICT:payload_hash"):
+            store.record_received(replace(received, request_id="request-retry", payload_hash="b" * 64))
+
+        assert _row_count(connection, "command_receipts") == 0
+        assert _row_count(connection, "command_dedup_tombstones") == 1
+
+
+def test_sqlite_command_receipts_compaction_requires_terminal_receipt(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        store = SqliteCommandReceiptStore(connection)
+        store.record_received(_receipt())
+
+        with pytest.raises(
+            SqliteCommandReceiptStoreError,
+            match="COMMAND_RECEIPT_COMPACTION_REQUIRES_TERMINAL",
+        ):
+            store.compact_terminal_command_receipt("idempotency-a")
+
+        assert _row_count(connection, "command_receipts") == 1
+        assert _row_count(connection, "command_dedup_tombstones") == 0
+
+
 def test_sqlite_command_receipts_update_requires_existing_row(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
@@ -239,6 +297,78 @@ def test_sqlite_enabled_ipc_command_persists_job_and_success_receipt(tmp_path: P
         assert id_factory.calls == 1
 
 
+def test_sqlite_enabled_ipc_command_replays_from_compacted_receipt_tombstone(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        receipts = SqliteCommandReceiptStore(connection)
+        drafts = SqliteJobDraftStore(connection)
+        catalog = SqliteStandardBackupJobCatalog(connection)
+        outbox = SqliteOutboxStore(connection)
+        id_factory = FixedStandardBackupJobIdFactory()
+        drafts.save_standard_backup_draft(_complete_draft())
+        service = EngineHostIpcService(
+            ClientAuthorizationPolicy(
+                expected_user_sid_hash="same-user",
+                expected_session_id=42,
+            ),
+            status=replace(
+                startup_status(ProcessRole.ENGINE_HOST),
+                mutations_enabled=True,
+                scope="0B_LOCAL_MUTATION_PREVIEW",
+            ),
+            job_draft_store=drafts,
+            standard_backup_job_catalog=catalog,
+            standard_backup_job_id_factory=id_factory,
+            command_receipt_store=receipts,
+            command_effect_transaction=SqliteImmediateTransactionRunner(connection),
+            outbox_store=outbox,
+        )
+        ipc_client = InProcessIpcClient(
+            service=service,
+            identity=VerifiedClientIdentity(
+                user_sid_hash="same-user",
+                session_id=42,
+                is_remote=False,
+                transport="sqlite-ipc-test",
+            ),
+            role=ProcessRole.GUI,
+            client_instance_id="55555555-5555-4555-8555-555555555555",
+        )
+        ipc_client.connect()
+        first = ipc_client.submit_command(
+            JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+            request_id="44444444-4444-4444-8444-444444444444",
+            idempotency_key="66666666-6666-4666-8666-666666666666",
+            payload={"draft_id": "draft-a"},
+            payload_hash="98cdbb1f712331be51355f90ab8c193c5c6f681d33d5c052cd38fe94820f3d02",
+        )
+        receipts.compact_terminal_command_receipt("66666666-6666-4666-8666-666666666666")
+
+        second = ipc_client.submit_command(
+            JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+            request_id="77777777-7777-4777-8777-777777777777",
+            idempotency_key="66666666-6666-4666-8666-666666666666",
+            payload={"draft_id": "draft-a"},
+            payload_hash="98cdbb1f712331be51355f90ab8c193c5c6f681d33d5c052cd38fe94820f3d02",
+        )
+
+        assert first.status is IpcStatus.ACCEPTED
+        assert second.status is IpcStatus.ACCEPTED
+        assert second.payload["created"] is False
+        assert second.payload["idempotent_replay"] is True
+        assert second.payload["receipt"]["request_id"] == "44444444-4444-4444-8444-444444444444"
+        assert second.payload["receipt"]["state"] == CommandReceiptState.SUCCEEDED.value
+        assert second.payload["job"]["job_id"] == "job-a"
+        assert _row_count(connection, "standard_backup_job_revision_details") == 1
+        assert _row_count(connection, "command_receipts") == 0
+        assert _row_count(connection, "command_dedup_tombstones") == 1
+        assert _row_count(connection, "outbox_messages") == 1
+        assert id_factory.calls == 1
+
+
 def test_sqlite_enabled_ipc_command_rolls_back_effect_when_outbox_enqueue_fails(
     tmp_path: Path,
 ) -> None:
@@ -320,6 +450,18 @@ def _receipt() -> CommandReceipt:
         protocol_version=1,
         schema_version=1,
         expected_entity_revision=7,
+    )
+
+
+def _succeeded_receipt(receipt: CommandReceipt) -> CommandReceipt:
+    validated = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
+    prepared = transition_command_receipt(validated, CommandReceiptState.EFFECT_PREPARED)
+    accepted = transition_command_receipt(prepared, CommandReceiptState.ACCEPTED)
+    return transition_command_receipt(
+        accepted,
+        CommandReceiptState.SUCCEEDED,
+        result_entity_type="standard_backup_job",
+        result_entity_id="job-a",
     )
 
 

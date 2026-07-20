@@ -28,7 +28,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 16
+        assert current_schema_version(connection, plan.store) == 17
         assert _table_names(connection) >= {
             "endpoint_heads",
             "job_heads",
@@ -41,6 +41,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "standard_backup_job_drafts",
             "standard_backup_job_revision_details",
             "command_receipts",
+            "command_dedup_tombstones",
             "plan_seal_details",
             "plan_operation_seal_details",
             "plan_endpoints",
@@ -52,7 +53,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 16
+        assert _row_count(connection, "schema_migrations") == 17
         assert _foreign_key(
             connection,
             "endpoint_heads",

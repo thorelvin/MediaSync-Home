@@ -5175,14 +5175,21 @@ Samme key med annen principal, `command_name`, schema, `expected_entity_revision
 Kompakt, append-only dedupliseringsindeks etter at detaljert command receipt ikke lenger må beholdes.
 
 - `idempotency_key TEXT PRIMARY KEY`
-- `principal_sid_hash TEXT NOT NULL`
+- `request_id TEXT NOT NULL` — kompakt auditfelt som gjør 0B-replaypayload stabil etter detaljkompaktering
+- `client_instance_id TEXT NOT NULL` — audit/rate-limit metadata, ikke namespace
+- `principal_fingerprint TEXT NOT NULL`
 - `command_name TEXT NOT NULL`
-- `command_schema_version INTEGER NOT NULL`
+- `protocol_version INTEGER NOT NULL`
+- `schema_version INTEGER NOT NULL` — command schema version
 - `expected_entity_revision INTEGER`
 - `payload_hash TEXT NOT NULL`
+- `payload_hash_scope TEXT NOT NULL`
+- `payload_canonicalization_algorithm TEXT NOT NULL`
+- `payload_hash_algorithm TEXT NOT NULL`
 - `terminal_state TEXT NOT NULL`
-- `effect_entity_type TEXT`
-- `effect_entity_id TEXT`
+- `result_entity_type TEXT`
+- `result_entity_id TEXT`
+- `rejection_reason TEXT`
 - `terminal_effect_hash TEXT`
 - `first_seen_utc TEXT NOT NULL`
 - `compacted_utc TEXT NOT NULL`

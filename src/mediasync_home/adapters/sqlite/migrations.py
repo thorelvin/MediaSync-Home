@@ -107,6 +107,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_snapshot_coverage_issue_read_model_indexes",
                 statements=CATALOG_SNAPSHOT_COVERAGE_ISSUE_READ_MODEL_INDEXES,
             ),
+            SqliteMigration(
+                version=17,
+                name="catalog_command_receipt_tombstones",
+                statements=CATALOG_COMMAND_RECEIPT_TOMBSTONES,
+            ),
         ),
     )
 
@@ -503,6 +508,37 @@ CATALOG_COMMAND_RECEIPTS = (
     """
     CREATE INDEX idx_command_receipts_state
         ON command_receipts (state)
+    """,
+)
+
+CATALOG_COMMAND_RECEIPT_TOMBSTONES = (
+    """
+    CREATE TABLE command_dedup_tombstones (
+        idempotency_key TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        client_instance_id TEXT NOT NULL,
+        principal_fingerprint TEXT NOT NULL,
+        command_name TEXT NOT NULL,
+        payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+        protocol_version INTEGER NOT NULL,
+        schema_version INTEGER NOT NULL,
+        terminal_state TEXT NOT NULL CHECK (
+            terminal_state IN ('SUCCEEDED', 'REJECTED', 'FAILED', 'CANCELLED')
+        ),
+        expected_entity_revision INTEGER,
+        payload_hash_scope TEXT NOT NULL,
+        payload_canonicalization_algorithm TEXT NOT NULL,
+        payload_hash_algorithm TEXT NOT NULL,
+        result_entity_type TEXT,
+        result_entity_id TEXT,
+        rejection_reason TEXT,
+        terminal_effect_hash TEXT NOT NULL CHECK (
+            length(terminal_effect_hash) = 64
+            AND terminal_effect_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        first_seen_utc TEXT NOT NULL,
+        compacted_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )
     """,
 )
 
