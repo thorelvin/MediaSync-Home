@@ -103,6 +103,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.recovery_connection is not None
         assert runtime.service.job_draft_store is not None
         assert runtime.service.standard_backup_job_read_store is not None
+        assert runtime.service.standard_backup_job_detail_store is not None
         assert runtime.service.snapshot_entry_read_store is not None
         assert runtime.service.snapshot_coverage_read_store is not None
         assert runtime.service.snapshot_issue_read_store is not None
@@ -131,6 +132,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         )
 
         overview = ipc_client.query_backup_overview(draft_id="draft-a")
+        backup_job_detail = ipc_client.query_backup_job_detail(job_id="job-a")
         activity = ipc_client.query_activity_overview(limit=5)
         plan_operations = ipc_client.query_plan_operations(plan_id="plan-a", limit=5)
         snapshot_entries = ipc_client.query_snapshot_entries(snapshot_id="snapshot-a", limit=5)
@@ -157,6 +159,10 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert overview.status is IpcStatus.ACCEPTED
         assert overview.payload["backup_overview"]["read_model_available"] is True
         assert overview.payload["backup_overview"]["draft"]["can_create"] is True
+        assert backup_job_detail.status is IpcStatus.ACCEPTED
+        assert backup_job_detail.payload["backup_job_detail"]["read_model_available"] is True
+        assert backup_job_detail.payload["backup_job_detail"]["found"] is False
+        assert backup_job_detail.payload["backup_job_detail"]["job"] is None
         assert activity.status is IpcStatus.ACCEPTED
         assert activity.payload["activity_overview"]["read_model_available"] is True
         assert activity.payload["activity_overview"]["limit"] == 5

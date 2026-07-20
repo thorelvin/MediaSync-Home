@@ -4,10 +4,14 @@ import pytest
 
 from mediasync_home.application.job_drafts import JobDraftStore, StandardBackupJobDraft
 from mediasync_home.application.job_read_models import (
+    BackupJobDetailQueryError,
     BackupOverviewQueryError,
+    StandardBackupJobDetail,
+    StandardBackupJobDetailReadModelStore,
     StandardBackupJobReadModelStore,
     StandardBackupJobSummary,
     StandardBackupTargetSummary,
+    query_backup_job_detail,
     query_backup_overview,
 )
 
@@ -25,10 +29,14 @@ class _Drafts(JobDraftStore):
         return None
 
 
-class _ReadStore(StandardBackupJobReadModelStore):
+class _ReadStore(StandardBackupJobReadModelStore, StandardBackupJobDetailReadModelStore):
     def __init__(self, jobs: tuple[StandardBackupJobSummary, ...]) -> None:
         self.jobs = jobs
+        self.details: dict[str, StandardBackupJobDetail] = {
+            job.job_id: _job_detail(job.job_id) for job in jobs
+        }
         self.calls: list[dict[str, int]] = []
+        self.detail_calls: list[str] = []
 
     def list_active_standard_backup_job_summaries(
         self,
@@ -38,6 +46,10 @@ class _ReadStore(StandardBackupJobReadModelStore):
     ) -> tuple[StandardBackupJobSummary, ...]:
         self.calls.append({"limit": limit, "offset": offset})
         return self.jobs[offset : offset + limit]
+
+    def load_standard_backup_job_detail(self, job_id: str) -> StandardBackupJobDetail | None:
+        self.detail_calls.append(job_id)
+        return self.details.get(job_id)
 
 
 def test_backup_overview_query_returns_bounded_page_and_requested_draft() -> None:
@@ -79,6 +91,74 @@ def test_backup_overview_query_reports_unavailable_read_model_without_store() ->
     }
 
 
+def test_backup_job_detail_query_returns_exact_job_revision_payload() -> None:
+    read_store = _ReadStore((_job("job-a"),))
+
+    result = query_backup_job_detail(job_detail_store=read_store, job_id=" job-a ")
+
+    assert read_store.detail_calls == ["job-a"]
+    assert result.to_dict() == {
+        "job_id": "job-a",
+        "read_model_available": True,
+        "found": True,
+        "job": {
+            "job_id": "job-a",
+            "job_revision_id": "job-a-rev",
+            "filter_set_id": "job-a-filter",
+            "title": "job-a source",
+            "source_name": "job-a source",
+            "source_path_label": "C:/Data/job-a",
+            "configured_target_count": 1,
+            "independent_device_count": 1,
+            "defaults": {
+                "behavior": "UPDATE_BACKUP",
+                "file_selection": "ALL_USER_FILES",
+                "verification": "STANDARD",
+                "retention": "THIRTY_DAYS",
+                "extra_files": "KEEP_ON_TARGET",
+                "performance": "AUTO",
+            },
+            "targets": [
+                {
+                    "name": "USB",
+                    "path_label": "E:/Backup/job-a",
+                    "independent_device_id": "disk-a",
+                }
+            ],
+        },
+    }
+
+
+def test_backup_job_detail_query_reports_available_not_found() -> None:
+    result = query_backup_job_detail(
+        job_detail_store=_ReadStore((_job("job-a"),)),
+        job_id="job-missing",
+    )
+
+    assert result.to_dict() == {
+        "job_id": "job-missing",
+        "read_model_available": True,
+        "found": False,
+        "job": None,
+    }
+
+
+def test_backup_job_detail_query_reports_unavailable_without_store() -> None:
+    result = query_backup_job_detail(job_detail_store=None, job_id="job-a")
+
+    assert result.to_dict() == {
+        "job_id": "job-a",
+        "read_model_available": False,
+        "found": False,
+        "job": None,
+    }
+
+
+def test_backup_job_detail_query_rejects_empty_job_id() -> None:
+    with pytest.raises(BackupJobDetailQueryError):
+        query_backup_job_detail(job_detail_store=None, job_id=" ")
+
+
 def test_backup_overview_query_rejects_unbounded_limits() -> None:
     with pytest.raises(BackupOverviewQueryError):
         query_backup_overview(job_read_store=None, limit=26, offset=0)
@@ -100,4 +180,22 @@ def _job(job_id: str) -> StandardBackupJobSummary:
                 independent_device_id="disk-a",
             ),
         ),
+    )
+
+
+def _job_detail(job_id: str) -> StandardBackupJobDetail:
+    return StandardBackupJobDetail(
+        job_id=job_id,
+        job_revision_id=f"{job_id}-rev",
+        filter_set_id=f"{job_id}-filter",
+        source_name=f"{job_id} source",
+        source_path_label=f"C:/Data/{job_id}",
+        targets=(
+            StandardBackupTargetSummary(
+                name="USB",
+                path_label=f"E:/Backup/{job_id}",
+                independent_device_id="disk-a",
+            ),
+        ),
+        defaults=StandardBackupJobDraft.new("draft-a").defaults,
     )

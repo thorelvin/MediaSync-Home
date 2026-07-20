@@ -217,6 +217,70 @@ def test_engine_host_state_root_serves_backup_overview_query(
     assert host_events[-1]["served_requests"] == 2
 
 
+def test_engine_host_state_root_serves_backup_job_detail_query(
+    tmp_path: Path,
+) -> None:
+    pipe_name = win32_named_pipe.make_pipe_name(
+        installation_id="role-backup-job-detail-test",
+        suffix=uuid4().hex,
+    )
+    state_root = tmp_path / "state"
+    host = subprocess.Popen(
+        [
+            sys.executable,
+            "scripts/run_role.py",
+            "--role",
+            "engine-host",
+            "--pipe-name",
+            pipe_name,
+            "--serve-requests",
+            "2",
+            "--state-root",
+            str(state_root),
+        ],
+        cwd=Path(__file__).resolve().parents[3],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        gui = subprocess.run(
+            [
+                sys.executable,
+                "scripts/run_role.py",
+                "--role",
+                "gui",
+                "--pipe-name",
+                pipe_name,
+                "--query-backup-job-detail",
+                "--job-id",
+                "job-a",
+            ],
+            cwd=Path(__file__).resolve().parents[3],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        stdout, stderr = host.communicate(timeout=10)
+    finally:
+        if host.poll() is None:
+            host.kill()
+            host.communicate(timeout=5)
+
+    gui_response = json.loads(gui.stdout)
+    host_events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+
+    assert stderr == ""
+    assert gui_response["status"] == "ACCEPTED"
+    assert gui_response["payload"]["backup_job_detail"]["job_id"] == "job-a"
+    assert gui_response["payload"]["backup_job_detail"]["read_model_available"] is True
+    assert gui_response["payload"]["backup_job_detail"]["found"] is False
+    assert gui_response["payload"]["backup_job_detail"]["job"] is None
+    assert host_events[0]["state_root"] == str(state_root)
+    assert host_events[-1]["served_requests"] == 2
+
+
 def test_engine_host_state_root_serves_activity_overview_query(
     tmp_path: Path,
 ) -> None:

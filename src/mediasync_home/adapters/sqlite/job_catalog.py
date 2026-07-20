@@ -20,6 +20,7 @@ from mediasync_home.application.job_drafts import (
     draft_path_labels_overlap,
 )
 from mediasync_home.application.job_read_models import (
+    StandardBackupJobDetail,
     StandardBackupJobSummary,
     StandardBackupTargetSummary,
 )
@@ -208,6 +209,32 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
         ).fetchall()
         return tuple(_job_summary_from_row(row) for row in rows)
 
+    def load_standard_backup_job_detail(self, job_id: str) -> StandardBackupJobDetail | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                details.job_id,
+                details.job_revision_id,
+                revisions.filter_set_id,
+                details.source_name,
+                details.source_path_label,
+                details.defaults_json,
+                details.targets_json
+            FROM standard_backup_job_revision_details AS details
+            INNER JOIN job_revisions AS revisions
+                ON revisions.job_id = details.job_id
+                AND revisions.id = details.job_revision_id
+            INNER JOIN job_heads AS heads
+                ON heads.job_id = details.job_id
+                AND heads.active_revision_id = details.job_revision_id
+            WHERE details.job_id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _job_detail_from_row(row)
+
     def _load_many(
         self,
         query: str,
@@ -266,6 +293,26 @@ def _job_summary_from_row(row: sqlite3.Row | tuple[object, ...]) -> StandardBack
                 independent_device_id=target.independent_device_id,
             )
             for target in _deserialize_targets(str(row[5]))
+        ),
+    )
+
+
+def _job_detail_from_row(row: sqlite3.Row | tuple[object, ...]) -> StandardBackupJobDetail:
+    targets = _deserialize_targets(str(row[6]))
+    return StandardBackupJobDetail(
+        job_id=str(row[0]),
+        job_revision_id=str(row[1]),
+        filter_set_id=str(row[2]),
+        source_name=str(row[3]),
+        source_path_label=str(row[4]),
+        defaults=_deserialize_defaults(str(row[5])),
+        targets=tuple(
+            StandardBackupTargetSummary(
+                name=target.name,
+                path_label=target.path_label,
+                independent_device_id=target.independent_device_id,
+            )
+            for target in targets
         ),
     )
 

@@ -21,6 +21,9 @@ class StatusIpcClient(Protocol):
     ) -> IpcResponse:
         pass
 
+    def query_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        pass
+
     def query_activity_overview(
         self,
         *,
@@ -91,6 +94,9 @@ class EngineClient:
             limit=limit,
             offset=offset,
         )
+
+    def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        return self._ipc_client.query_backup_job_detail(job_id=job_id)
 
     def get_activity_overview(
         self,

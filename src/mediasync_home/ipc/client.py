@@ -58,6 +58,12 @@ class InProcessIpcClient:
             offset=offset,
         )
 
+    def query_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        return self.service.query_backup_job_detail(
+            self.client_instance_id,
+            job_id=job_id,
+        )
+
     def query_activity_overview(
         self,
         *,

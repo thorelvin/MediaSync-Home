@@ -24,6 +24,8 @@ class GuiIpcClient(Protocol):
         offset: int | None = None,
     ) -> IpcResponse: ...
 
+    def query_backup_job_detail(self, *, job_id: str) -> IpcResponse: ...
+
     def query_activity_overview(
         self,
         *,
@@ -83,6 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--query-status", action="store_true")
     mode.add_argument("--query-backup-overview", action="store_true")
+    mode.add_argument("--query-backup-job-detail", action="store_true")
     mode.add_argument("--query-activity-overview", action="store_true")
     mode.add_argument("--query-plan-operations", action="store_true")
     mode.add_argument("--query-snapshot-entries", action="store_true")
@@ -143,6 +146,8 @@ def _run_pipe_action(args: argparse.Namespace, client: GuiIpcClient) -> IpcRespo
             limit=args.limit,
             offset=args.offset,
         )
+    if args.query_backup_job_detail:
+        return client.query_backup_job_detail(job_id=args.job_id or "")
     if args.query_activity_overview:
         return client.query_activity_overview(
             job_id=args.job_id,

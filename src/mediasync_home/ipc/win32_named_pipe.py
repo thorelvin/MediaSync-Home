@@ -401,6 +401,11 @@ class Win32NamedPipeServer:
                 limit=_optional_query_int(request.get("limit")),
                 offset=_optional_query_int(request.get("offset")),
             )
+        if message_type == "QUERY_BACKUP_JOB_DETAIL":
+            return self.service.query_backup_job_detail(
+                str(request["client_instance_id"]),
+                job_id=str(request["job_id"]),
+            )
         if message_type == "QUERY_ACTIVITY_OVERVIEW":
             return self.service.query_activity_overview(
                 str(request["client_instance_id"]),
@@ -495,6 +500,15 @@ class Win32NamedPipeClient:
         if offset is not None:
             request["offset"] = offset
         return self._roundtrip(request)
+
+    def query_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        return self._roundtrip(
+            {
+                "message_type": "QUERY_BACKUP_JOB_DETAIL",
+                "client_instance_id": self.client_instance_id,
+                "job_id": job_id,
+            }
+        )
 
     def query_activity_overview(
         self,

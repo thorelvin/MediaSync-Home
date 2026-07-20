@@ -48,6 +48,25 @@ def test_ui_pipe_action_queries_backup_overview_after_handshake() -> None:
     }
 
 
+def test_ui_pipe_action_queries_backup_job_detail_after_handshake() -> None:
+    client = _FakeGuiIpcClient()
+    args = build_parser().parse_args(
+        [
+            "--pipe-name",
+            "pipe-a",
+            "--query-backup-job-detail",
+            "--job-id",
+            "job-a",
+        ]
+    )
+
+    response = _run_pipe_action(args, client)
+
+    assert response.payload == {"backup_job_detail": "ok"}
+    assert client.calls == ("connect", "query_backup_job_detail")
+    assert client.backup_job_detail_query == {"job_id": "job-a"}
+
+
 def test_ui_pipe_action_queries_activity_overview_after_handshake() -> None:
     client = _FakeGuiIpcClient()
     args = build_parser().parse_args(
@@ -300,6 +319,7 @@ class _FakeGuiIpcClient:
         self.calls: tuple[str, ...] = ()
         self.submitted: dict[str, object] | None = None
         self.overview_query: dict[str, object] | None = None
+        self.backup_job_detail_query: dict[str, object] | None = None
         self.activity_query: dict[str, object] | None = None
         self.plan_operations_query: dict[str, object] | None = None
         self.snapshot_entries_query: dict[str, object] | None = None
@@ -328,6 +348,11 @@ class _FakeGuiIpcClient:
             "offset": offset,
         }
         return IpcResponse.accepted({"overview": "ok"})
+
+    def query_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        self.calls = (*self.calls, "query_backup_job_detail")
+        self.backup_job_detail_query = {"job_id": job_id}
+        return IpcResponse.accepted({"backup_job_detail": "ok"})
 
     def query_activity_overview(
         self,

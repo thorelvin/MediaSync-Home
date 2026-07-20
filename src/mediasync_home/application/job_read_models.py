@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from mediasync_home.application.job_drafts import JobDraftStore, StandardBackupJobDraft
+from mediasync_home.application.job_drafts import (
+    JobDraftStore,
+    StandardBackupDefaults,
+    StandardBackupJobDraft,
+)
 
 
 DEFAULT_BACKUP_OVERVIEW_LIMIT = 10
@@ -11,6 +15,10 @@ MAX_BACKUP_OVERVIEW_LIMIT = 25
 
 
 class BackupOverviewQueryError(ValueError):
+    pass
+
+
+class BackupJobDetailQueryError(ValueError):
     pass
 
 
@@ -55,6 +63,34 @@ class StandardBackupJobSummary:
 
 
 @dataclass(frozen=True)
+class StandardBackupJobDetail:
+    job_id: str
+    job_revision_id: str
+    filter_set_id: str
+    source_name: str
+    source_path_label: str
+    targets: tuple[StandardBackupTargetSummary, ...]
+    defaults: StandardBackupDefaults
+
+    def to_dict(self) -> dict[str, object]:
+        independent_device_ids = {
+            target.independent_device_id for target in self.targets if target.independent_device_id
+        }
+        return {
+            "job_id": self.job_id,
+            "job_revision_id": self.job_revision_id,
+            "filter_set_id": self.filter_set_id,
+            "title": self.source_name,
+            "source_name": self.source_name,
+            "source_path_label": self.source_path_label,
+            "configured_target_count": len(self.targets),
+            "independent_device_count": len(independent_device_ids),
+            "defaults": _defaults_to_dict(self.defaults),
+            "targets": [target.to_dict() for target in self.targets],
+        }
+
+
+@dataclass(frozen=True)
 class BackupOverviewPage:
     limit: int
     offset: int
@@ -86,6 +122,30 @@ class BackupOverviewPage:
         }
 
 
+@dataclass(frozen=True)
+class BackupJobDetailResult:
+    job_id: str
+    read_model_available: bool
+    found: bool
+    job: StandardBackupJobDetail | None = None
+
+    @classmethod
+    def unavailable(cls, *, job_id: str) -> "BackupJobDetailResult":
+        return cls(
+            job_id=job_id,
+            read_model_available=False,
+            found=False,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "job_id": self.job_id,
+            "read_model_available": self.read_model_available,
+            "found": self.found,
+            "job": None if self.job is None else self.job.to_dict(),
+        }
+
+
 class StandardBackupJobReadModelStore(Protocol):
     def list_active_standard_backup_job_summaries(
         self,
@@ -93,6 +153,10 @@ class StandardBackupJobReadModelStore(Protocol):
         limit: int,
         offset: int,
     ) -> tuple[StandardBackupJobSummary, ...]: ...
+
+
+class StandardBackupJobDetailReadModelStore(Protocol):
+    def load_standard_backup_job_detail(self, job_id: str) -> StandardBackupJobDetail | None: ...
 
 
 def query_backup_overview(
@@ -132,6 +196,31 @@ def query_backup_overview(
     )
 
 
+def query_backup_job_detail(
+    *,
+    job_detail_store: StandardBackupJobDetailReadModelStore | None,
+    job_id: str,
+) -> BackupJobDetailResult:
+    normalized_job_id = normalize_backup_job_detail_id(job_id)
+    if job_detail_store is None:
+        return BackupJobDetailResult.unavailable(job_id=normalized_job_id)
+
+    detail = job_detail_store.load_standard_backup_job_detail(normalized_job_id)
+    return BackupJobDetailResult(
+        job_id=normalized_job_id,
+        read_model_available=True,
+        found=detail is not None,
+        job=detail,
+    )
+
+
+def normalize_backup_job_detail_id(job_id: str) -> str:
+    normalized = str(job_id).strip()
+    if not normalized:
+        raise BackupJobDetailQueryError("BACKUP_JOB_DETAIL_REQUIRES_JOB_ID")
+    return normalized
+
+
 def normalize_backup_overview_bounds(
     *,
     limit: int | None,
@@ -163,14 +252,7 @@ def _draft_to_dict(draft: StandardBackupJobDraft) -> dict[str, object]:
         "source_path_label": draft.source_path_label,
         "can_create": draft.can_create(),
         "validation_codes": [issue.code.value for issue in draft.validation_issues()],
-        "defaults": {
-            "behavior": draft.defaults.behavior.value,
-            "file_selection": draft.defaults.file_selection.value,
-            "verification": draft.defaults.verification.value,
-            "retention": draft.defaults.retention.value,
-            "extra_files": draft.defaults.extra_files.value,
-            "performance": draft.defaults.performance.value,
-        },
+        "defaults": _defaults_to_dict(draft.defaults),
         "targets": [
             {
                 "name": target.name,
@@ -179,4 +261,15 @@ def _draft_to_dict(draft: StandardBackupJobDraft) -> dict[str, object]:
             }
             for target in draft.targets
         ],
+    }
+
+
+def _defaults_to_dict(defaults: StandardBackupDefaults) -> dict[str, object]:
+    return {
+        "behavior": defaults.behavior.value,
+        "file_selection": defaults.file_selection.value,
+        "verification": defaults.verification.value,
+        "retention": defaults.retention.value,
+        "extra_files": defaults.extra_files.value,
+        "performance": defaults.performance.value,
     }

@@ -214,6 +214,7 @@ def build_engine_host_runtime(
             job_draft_store=job_drafts,
             standard_backup_job_catalog=standard_backup_jobs,
             standard_backup_job_read_store=standard_backup_jobs,
+            standard_backup_job_detail_store=standard_backup_jobs,
             snapshot_entry_read_store=snapshots,
             snapshot_coverage_read_store=snapshots,
             snapshot_issue_read_store=snapshots,

@@ -25,6 +25,7 @@ from mediasync_home.application.job_creation import (
 )
 from mediasync_home.application.job_drafts import JobDraftStore, StandardBackupJobDraft
 from mediasync_home.application.job_read_models import (
+    StandardBackupJobDetail,
     StandardBackupJobSummary,
     StandardBackupTargetSummary,
 )
@@ -208,6 +209,27 @@ class _InMemoryStandardBackupJobCatalog(StandardBackupJobCatalog):
                 ),
             )
             for job in jobs
+        )
+
+    def load_standard_backup_job_detail(self, job_id: str) -> StandardBackupJobDetail | None:
+        job = self.load_standard_backup_job(job_id)
+        if job is None:
+            return None
+        return StandardBackupJobDetail(
+            job_id=job.job_id,
+            job_revision_id=job.job_revision_id,
+            filter_set_id=job.filter_set_id,
+            source_name=job.source_name,
+            source_path_label=job.source_path_label,
+            defaults=job.defaults,
+            targets=tuple(
+                StandardBackupTargetSummary(
+                    name=target.name,
+                    path_label=target.path_label,
+                    independent_device_id=target.independent_device_id,
+                )
+                for target in job.targets
+            ),
         )
 
 
@@ -540,6 +562,7 @@ def test_gui_client_handshake_and_status_query_succeed() -> None:
     handshake = gui_client.connect()
     status = gui_client.get_status()
     overview = gui_client.get_backup_overview()
+    backup_job_detail = gui_client.get_backup_job_detail(job_id="job-a")
     activity = gui_client.get_activity_overview()
     plan_operations = gui_client.get_plan_operations(plan_id="plan-a")
     snapshot_entries = gui_client.get_snapshot_entries(snapshot_id="snapshot-a")
@@ -554,6 +577,9 @@ def test_gui_client_handshake_and_status_query_succeed() -> None:
     assert status.payload["host_status"]["mutations_enabled"] is False
     assert overview.status is IpcStatus.ACCEPTED
     assert overview.payload["backup_overview"]["read_model_available"] is False
+    assert backup_job_detail.status is IpcStatus.ACCEPTED
+    assert backup_job_detail.payload["backup_job_detail"]["read_model_available"] is False
+    assert backup_job_detail.payload["backup_job_detail"]["found"] is False
     assert activity.status is IpcStatus.ACCEPTED
     assert activity.payload["activity_overview"]["read_model_available"] is False
     assert plan_operations.status is IpcStatus.ACCEPTED
@@ -626,6 +652,73 @@ def test_backup_overview_query_returns_bounded_draft_and_job_read_model() -> Non
     assert overview["draft"]["can_create"] is True
     assert overview["jobs"][0]["job_id"] == "job-a"
     assert overview["jobs"][0]["configured_target_count"] == 1
+
+
+def test_backup_job_detail_query_requires_prior_handshake() -> None:
+    response = _client().query_backup_job_detail(job_id="job-a")
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.HANDSHAKE_REQUIRED
+
+
+def test_backup_job_detail_query_rejects_invalid_job_id() -> None:
+    ipc_client = _client()
+    ipc_client.connect()
+
+    response = ipc_client.query_backup_job_detail(job_id=" ")
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.INVALID_FRAME
+
+
+def test_backup_job_detail_query_returns_exact_active_job_revision() -> None:
+    catalog = _InMemoryStandardBackupJobCatalog()
+    draft = (
+        StandardBackupJobDraft.new("draft-a")
+        .with_source(name="Pictures", path_label="C:/Users/Ada/Pictures")
+        .with_added_target(name="USB 1", path_label="E:/Backup", independent_device_id="disk-a")
+    )
+    catalog.save_standard_backup_job(
+        SealedStandardBackupJob(
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            filter_set_id="filter-a",
+            draft_id="draft-a",
+            command_request_id=REQUEST_ID_A,
+            idempotency_key=IDEMPOTENCY_KEY_A,
+            source_name="Pictures",
+            source_path_label="C:/Users/Ada/Pictures",
+            targets=(
+                SealedStandardBackupTarget(
+                    name="USB 1",
+                    path_label="E:/Backup",
+                    independent_device_id="disk-a",
+                ),
+            ),
+            defaults=draft.defaults,
+        )
+    )
+    service = _service()
+    service.standard_backup_job_detail_store = catalog
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    found = ipc_client.query_backup_job_detail(job_id="job-a")
+    missing = ipc_client.query_backup_job_detail(job_id="job-missing")
+
+    detail = found.payload["backup_job_detail"]
+    assert found.status is IpcStatus.ACCEPTED
+    assert detail["read_model_available"] is True
+    assert detail["found"] is True
+    assert detail["job"]["job_id"] == "job-a"
+    assert detail["job"]["job_revision_id"] == "job-rev-a"
+    assert detail["job"]["source_path_label"] == "C:/Users/Ada/Pictures"
+    assert detail["job"]["defaults"]["retention"] == "THIRTY_DAYS"
+    assert detail["job"]["targets"][0]["independent_device_id"] == "disk-a"
+    assert missing.status is IpcStatus.ACCEPTED
+    assert missing.payload["backup_job_detail"]["read_model_available"] is True
+    assert missing.payload["backup_job_detail"]["found"] is False
+    assert missing.payload["backup_job_detail"]["job"] is None
 
 
 def test_activity_overview_query_requires_prior_handshake() -> None:

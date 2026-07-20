@@ -276,6 +276,34 @@ def test_sqlite_catalog_lists_active_standard_backup_job_summaries_page(tmp_path
         assert summaries[0].targets[0].independent_device_id == "disk-b"
 
 
+def test_sqlite_catalog_loads_active_standard_backup_job_detail(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        drafts = SqliteJobDraftStore(connection)
+        catalog = SqliteStandardBackupJobCatalog(connection)
+        drafts.save_standard_backup_draft(_complete_draft())
+        create_standard_backup_job_from_draft(
+            command=_create_command(),
+            drafts=drafts,
+            catalog=catalog,
+            id_factory=FixedStandardBackupJobIdFactory(),
+        )
+
+        detail = catalog.load_standard_backup_job_detail("job-a")
+        missing = catalog.load_standard_backup_job_detail("job-missing")
+
+        assert detail is not None
+        assert detail.job_id == "job-a"
+        assert detail.job_revision_id == "job-rev-a"
+        assert detail.filter_set_id == "filter-a"
+        assert detail.source_path_label == "C:/Users/Ada/Pictures"
+        assert detail.defaults.retention.value == "THIRTY_DAYS"
+        assert detail.targets[0].name == "USB 1"
+        assert detail.targets[0].independent_device_id == "disk-a"
+        assert missing is None
+
+
 def test_sqlite_catalog_direct_save_rejects_cross_job_root_overlap(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:

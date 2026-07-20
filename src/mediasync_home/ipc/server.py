@@ -32,8 +32,11 @@ from mediasync_home.application.job_creation import (
 )
 from mediasync_home.application.job_drafts import JobDraftStore
 from mediasync_home.application.job_read_models import (
+    BackupJobDetailQueryError,
     BackupOverviewQueryError,
+    StandardBackupJobDetailReadModelStore,
     StandardBackupJobReadModelStore,
+    query_backup_job_detail,
     query_backup_overview,
 )
 from mediasync_home.application.outbox import OutboxStore, command_effect_outbox_message
@@ -88,6 +91,7 @@ class EngineHostIpcService:
     job_draft_store: JobDraftStore | None = None
     standard_backup_job_catalog: StandardBackupJobCatalog | None = None
     standard_backup_job_read_store: StandardBackupJobReadModelStore | None = None
+    standard_backup_job_detail_store: StandardBackupJobDetailReadModelStore | None = None
     run_activity_read_store: RunActivityReadModelStore | None = None
     plan_operation_read_store: PlanOperationReadModelStore | None = None
     snapshot_entry_read_store: SnapshotEntryReadModelStore | None = None
@@ -154,6 +158,23 @@ class EngineHostIpcService:
         except BackupOverviewQueryError:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         return IpcResponse.accepted({"backup_overview": overview.to_dict()})
+
+    def query_backup_job_detail(
+        self,
+        client_instance_id: str,
+        *,
+        job_id: str,
+    ) -> IpcResponse:
+        if client_instance_id not in self._accepted_clients:
+            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        try:
+            detail = query_backup_job_detail(
+                job_detail_store=self.standard_backup_job_detail_store,
+                job_id=job_id,
+            )
+        except BackupJobDetailQueryError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        return IpcResponse.accepted({"backup_job_detail": detail.to_dict()})
 
     def query_activity_overview(
         self,

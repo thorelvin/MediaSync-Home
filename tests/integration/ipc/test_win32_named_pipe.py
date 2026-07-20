@@ -95,6 +95,19 @@ def test_named_pipe_backup_overview_query_succeeds_after_handshake() -> None:
     assert overview.payload["backup_overview"]["read_model_available"] is False
 
 
+def test_named_pipe_backup_job_detail_query_succeeds_after_handshake() -> None:
+    server, client = _server_and_client()
+
+    handshake = _roundtrip(server, client.connect)
+    detail = _roundtrip(server, lambda: client.query_backup_job_detail(job_id="job-a"))
+
+    assert handshake.status is IpcStatus.ACCEPTED
+    assert detail.status is IpcStatus.ACCEPTED
+    assert detail.payload["backup_job_detail"]["job_id"] == "job-a"
+    assert detail.payload["backup_job_detail"]["read_model_available"] is False
+    assert detail.payload["backup_job_detail"]["found"] is False
+
+
 def test_named_pipe_activity_overview_query_succeeds_after_handshake() -> None:
     server, client = _server_and_client()
 
