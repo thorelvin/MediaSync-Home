@@ -786,6 +786,90 @@ def test_engine_host_state_root_persists_gui_submitted_disabled_command(
     assert host_events[-1]["served_requests"] == 2
 
 
+def test_engine_host_state_root_persists_trigger_occurrence_receipt(
+    tmp_path: Path,
+) -> None:
+    pipe_name = win32_named_pipe.make_pipe_name(
+        installation_id="role-trigger-occurrence-test",
+        suffix=uuid4().hex,
+    )
+    state_root = tmp_path / "state"
+    delivery_id = "11111111-1111-4111-8111-111111111111"
+    host = subprocess.Popen(
+        [
+            sys.executable,
+            "scripts/run_role.py",
+            "--role",
+            "engine-host",
+            "--pipe-name",
+            pipe_name,
+            "--serve-requests",
+            "2",
+            "--state-root",
+            str(state_root),
+        ],
+        cwd=Path(__file__).resolve().parents[3],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        trigger = subprocess.run(
+            [
+                sys.executable,
+                "scripts/run_role.py",
+                "--role",
+                "trigger-client",
+                "--pipe-name",
+                pipe_name,
+                "--enqueue-trigger-occurrence",
+                "--schedule-id",
+                "schedule-a",
+                "--schedule-revision-hash",
+                "a" * 64,
+                "--delivery-id",
+                delivery_id,
+                "--observed-start-utc",
+                "2026-07-20T12:00:00.000Z",
+                "--task-definition-hash",
+                "b" * 64,
+            ],
+            cwd=Path(__file__).resolve().parents[3],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        stdout, stderr = host.communicate(timeout=10)
+    finally:
+        if host.poll() is None:
+            host.kill()
+            host.communicate(timeout=5)
+
+    trigger_response = json.loads(trigger.stdout)
+    host_events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+    with sqlite3.connect(state_root / "catalog.sqlite") as connection:
+        row = connection.execute(
+            """
+            SELECT command_name, state, rejection_reason
+            FROM command_receipts
+            WHERE idempotency_key = ?
+            """,
+            (delivery_id,),
+        ).fetchone()
+
+    assert stderr == ""
+    assert trigger.returncode == 2
+    assert trigger_response["status"] == "REJECTED"
+    assert trigger_response["reason"] == "MUTATING_COMMANDS_DISABLED"
+    assert trigger_response["payload"]["recognized"] is True
+    assert trigger_response["payload"]["schedule_id"] == "schedule-a"
+    assert trigger_response["payload"]["receipt"]["state"] == "REJECTED"
+    assert row == ("ENQUEUE_TRIGGER_OCCURRENCE", "REJECTED", "MUTATING_COMMANDS_DISABLED")
+    assert host_events[0]["state_root"] == str(state_root)
+    assert host_events[-1]["served_requests"] == 2
+
+
 def test_engine_host_state_root_serves_backup_overview_query(
     tmp_path: Path,
 ) -> None:

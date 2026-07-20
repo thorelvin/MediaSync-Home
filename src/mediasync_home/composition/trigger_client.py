@@ -4,15 +4,25 @@ import argparse
 import json
 import os
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
-from mediasync_home.composition._role_runner import Emit, run_role
 from mediasync_home.application.host_locator import (
     LocalEngineHostDescriptor,
     LocalEngineHostPublication,
     local_engine_host_publication_matches_descriptor,
 )
+from mediasync_home.application.trigger_occurrences import (
+    TriggerCommandName,
+    TriggerDeliveryContext,
+    TriggerKind,
+    TriggerOccurrencePayloadError,
+    build_enqueue_trigger_occurrence_payload,
+    payload_hash,
+)
+from mediasync_home.composition._role_runner import Emit, run_role
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.protocol import IpcReason, IpcResponse
 
@@ -21,6 +31,16 @@ class TriggerIpcClient(Protocol):
     def connect(self) -> IpcResponse: ...
 
     def query_status(self) -> IpcResponse: ...
+
+    def submit_command(
+        self,
+        command_name: str,
+        *,
+        request_id: str | None = None,
+        idempotency_key: str | None = None,
+        payload: dict[str, object] | None = None,
+        payload_hash: str | None = None,
+    ) -> IpcResponse: ...
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,12 +54,34 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="probe the compatible Engine Host through a non-mutating status query",
     )
+    parser.add_argument(
+        "--enqueue-trigger-occurrence",
+        action="store_true",
+        help="submit a validated trigger occurrence command to the compatible Engine Host",
+    )
+    parser.add_argument("--schedule-id")
+    parser.add_argument("--schedule-revision-hash")
+    parser.add_argument("--delivery-id")
+    parser.add_argument("--observed-start-utc")
+    parser.add_argument(
+        "--trigger-kind",
+        choices=tuple(kind.value for kind in TriggerKind),
+        default=TriggerKind.SCHEDULED_TIME.value,
+    )
+    parser.add_argument("--task-definition-hash")
+    parser.add_argument("--task-instance-id")
+    parser.add_argument("--scheduled-slot-utc")
+    parser.add_argument("--event-identity")
     return parser
 
 
 def run_trigger_client(argv: Sequence[str] | None = None, *, emit: Emit | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    if not args.query_status:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    action_count = int(args.query_status) + int(args.enqueue_trigger_occurrence)
+    if action_count > 1:
+        parser.error("choose only one trigger-client action")
+    if action_count == 0:
         return run_role(ProcessRole.TRIGGER_CLIENT, argv, emit=emit)
     if os.name != "nt":
         raise RuntimeError("named-pipe trigger-client mode is Windows-only")
@@ -70,7 +112,7 @@ def run_trigger_client(argv: Sequence[str] | None = None, *, emit: Emit | None =
         timeout_ms=int(args.timeout_seconds * 1000),
     )
     try:
-        response = _run_status_query(client)
+        response = _run_named_pipe_action(args, client)
     except (OSError, TimeoutError):
         if publication is None:
             raise
@@ -90,11 +132,59 @@ def run_trigger_client(argv: Sequence[str] | None = None, *, emit: Emit | None =
     return 0 if response.reason is None else 2
 
 
+def _run_named_pipe_action(args: argparse.Namespace, client: TriggerIpcClient) -> IpcResponse:
+    if args.query_status:
+        return _run_status_query(client)
+    return _run_enqueue_trigger_occurrence(args, client)
+
+
 def _run_status_query(client: TriggerIpcClient) -> IpcResponse:
     handshake = client.connect()
     if handshake.reason is not None:
         return handshake
     return client.query_status()
+
+
+def _run_enqueue_trigger_occurrence(
+    args: argparse.Namespace,
+    client: TriggerIpcClient,
+) -> IpcResponse:
+    try:
+        delivery_id = args.delivery_id or str(uuid4())
+        schedule_revision_hash = _required_cli_value(
+            args.schedule_revision_hash,
+            "schedule-revision-hash",
+        )
+        task_definition_hash = args.task_definition_hash or schedule_revision_hash
+        delivery = TriggerDeliveryContext(
+            delivery_id=delivery_id,
+            observed_start_utc=args.observed_start_utc or _utc_now(),
+            trigger_kind=TriggerKind(args.trigger_kind),
+            task_definition_hash=task_definition_hash,
+            task_instance_id=args.task_instance_id,
+            scheduled_slot_utc=args.scheduled_slot_utc,
+            event_identity=args.event_identity,
+        )
+        payload = build_enqueue_trigger_occurrence_payload(
+            schedule_id=_required_cli_value(args.schedule_id, "schedule-id"),
+            schedule_revision_hash=schedule_revision_hash,
+            delivery=delivery,
+        )
+    except (TriggerOccurrencePayloadError, ValueError):
+        return IpcResponse.rejected(
+            IpcReason.INVALID_FRAME,
+            {"reason": "TRIGGER_OCCURRENCE_PAYLOAD_INVALID"},
+        )
+    handshake = client.connect()
+    if handshake.reason is not None:
+        return handshake
+    return client.submit_command(
+        TriggerCommandName.ENQUEUE_TRIGGER_OCCURRENCE.value,
+        request_id=delivery_id,
+        idempotency_key=delivery_id,
+        payload=payload,
+        payload_hash=payload_hash(payload),
+    )
 
 
 def _load_matching_local_preview_publication(
@@ -152,3 +242,13 @@ def _positive_float(value: str) -> float:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("value must be greater than zero")
     return parsed
+
+
+def _required_cli_value(value: str | None, argument_name: str) -> str:
+    if value is None or not value.strip():
+        raise ValueError(f"{argument_name} is required")
+    return value
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")

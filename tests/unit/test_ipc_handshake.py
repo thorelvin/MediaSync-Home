@@ -85,6 +85,7 @@ from mediasync_home.application.snapshots import (
     validate_snapshot_entry_page_query,
     validate_snapshot_issue_page_query,
 )
+from mediasync_home.application.trigger_occurrences import TriggerCommandName, payload_hash
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
@@ -110,6 +111,20 @@ REQUEST_ID_B = "77777777-7777-4777-8777-777777777777"
 IDEMPOTENCY_KEY_A = "66666666-6666-4666-8666-666666666666"
 PAYLOAD_HASH_A = "98cdbb1f712331be51355f90ab8c193c5c6f681d33d5c052cd38fe94820f3d02"
 PAYLOAD_HASH_B = "a" * 64
+TRIGGER_DELIVERY_ID = "11111111-1111-4111-8111-111111111111"
+
+
+def _trigger_payload() -> dict[str, object]:
+    return {
+        "delivery": {
+            "delivery_id": TRIGGER_DELIVERY_ID,
+            "observed_start_utc": "2026-07-20T12:00:00.000Z",
+            "task_definition_hash": "b" * 64,
+            "trigger_kind": "SCHEDULED_TIME",
+        },
+        "schedule_id": "schedule-a",
+        "schedule_revision_hash": "a" * 64,
+    }
 
 
 def _identity(
@@ -1312,6 +1327,87 @@ def test_create_standard_backup_job_command_records_rejected_receipt() -> None:
         "state": "REJECTED",
         "rejection_reason": IpcReason.MUTATING_COMMANDS_DISABLED.value,
     }
+
+
+def test_enqueue_trigger_occurrence_command_records_rejected_receipt() -> None:
+    receipts = _InMemoryCommandReceiptStore()
+    service = _service()
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service, role=ProcessRole.TRIGGER_CLIENT)
+    ipc_client.connect()
+    trigger_payload = _trigger_payload()
+
+    response = ipc_client.submit_command(
+        TriggerCommandName.ENQUEUE_TRIGGER_OCCURRENCE.value,
+        request_id=TRIGGER_DELIVERY_ID,
+        idempotency_key=TRIGGER_DELIVERY_ID,
+        payload=trigger_payload,
+        payload_hash=payload_hash(trigger_payload),
+    )
+
+    receipt = receipts.load_command_receipt(TRIGGER_DELIVERY_ID)
+    assert receipt is not None
+    assert receipt.state is CommandReceiptState.REJECTED
+    assert receipt.rejection_reason == IpcReason.MUTATING_COMMANDS_DISABLED.value
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.MUTATING_COMMANDS_DISABLED
+    assert response.payload["recognized"] is True
+    assert response.payload["mutations_enabled"] is False
+    assert response.payload["schedule_id"] == "schedule-a"
+    assert response.payload["delivery_id"] == TRIGGER_DELIVERY_ID
+    assert response.payload["receipt"] == {
+        "request_id": TRIGGER_DELIVERY_ID,
+        "idempotency_key": TRIGGER_DELIVERY_ID,
+        "command_name": TriggerCommandName.ENQUEUE_TRIGGER_OCCURRENCE.value,
+        "state": "REJECTED",
+        "rejection_reason": IpcReason.MUTATING_COMMANDS_DISABLED.value,
+    }
+
+
+def test_enqueue_trigger_occurrence_command_rejects_invalid_payload_shape() -> None:
+    service = _service()
+    ipc_client = _client(service=service, role=ProcessRole.TRIGGER_CLIENT)
+    ipc_client.connect()
+
+    response = ipc_client.submit_command(
+        TriggerCommandName.ENQUEUE_TRIGGER_OCCURRENCE.value,
+        request_id=TRIGGER_DELIVERY_ID,
+        idempotency_key=TRIGGER_DELIVERY_ID,
+        payload={"schedule_id": "schedule-a"},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.INVALID_FRAME
+
+
+def test_enabled_enqueue_trigger_occurrence_requires_dispatcher_dependencies() -> None:
+    receipts = _InMemoryCommandReceiptStore()
+    service = _service(mutations_enabled=True)
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service, role=ProcessRole.TRIGGER_CLIENT)
+    ipc_client.connect()
+    trigger_payload = _trigger_payload()
+
+    response = ipc_client.submit_command(
+        TriggerCommandName.ENQUEUE_TRIGGER_OCCURRENCE.value,
+        request_id=TRIGGER_DELIVERY_ID,
+        idempotency_key=TRIGGER_DELIVERY_ID,
+        payload=trigger_payload,
+        payload_hash=payload_hash(trigger_payload),
+    )
+
+    receipt = receipts.load_command_receipt(TRIGGER_DELIVERY_ID)
+    assert receipt is not None
+    assert receipt.state is CommandReceiptState.REJECTED
+    assert receipt.rejection_reason == IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED.value
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED
+    assert response.payload["recognized"] is True
+    assert response.payload["mutations_enabled"] is True
+    assert response.payload["receipt"]["rejection_reason"] == (
+        IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED.value
+    )
 
 
 def test_enabled_create_standard_backup_job_persists_job_and_succeeds_receipt() -> None:

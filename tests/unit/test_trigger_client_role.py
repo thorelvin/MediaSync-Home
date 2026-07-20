@@ -7,6 +7,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 import mediasync_home.composition.trigger_client as trigger_module
+from mediasync_home.application.trigger_occurrences import TriggerCommandName
 from mediasync_home.composition.trigger_client import (
     _run_status_query,
     run_trigger_client,
@@ -72,6 +73,98 @@ def test_trigger_status_query_uses_explicit_pipe_with_trigger_role(
     assert client.role is ProcessRole.TRIGGER_CLIENT
     assert client.timeout_ms == 1250
     assert client.calls == ("connect", "query_status")
+
+
+def test_trigger_enqueue_occurrence_submits_command_with_stable_delivery_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeWin32NamedPipeClient(_AcceptedTriggerCommandClient):
+        instances: list["FakeWin32NamedPipeClient"] = []
+
+    monkeypatch.setattr(trigger_module.os, "name", "nt")
+    _install_fake_win32_module(monkeypatch, FakeWin32NamedPipeClient)
+    output: list[str] = []
+    delivery_id = "11111111-1111-4111-8111-111111111111"
+
+    result = run_trigger_client(
+        [
+            "--enqueue-trigger-occurrence",
+            "--pipe-name",
+            "pipe-a",
+            "--schedule-id",
+            "schedule-a",
+            "--schedule-revision-hash",
+            "a" * 64,
+            "--delivery-id",
+            delivery_id,
+            "--observed-start-utc",
+            "2026-07-20T12:00:00.000Z",
+            "--task-definition-hash",
+            "b" * 64,
+            "--task-instance-id",
+            "task-instance-a",
+        ],
+        emit=output.append,
+    )
+
+    response = json.loads(output[0])
+    client = FakeWin32NamedPipeClient.instances[0]
+    assert result == 2
+    assert response["reason"] == "MUTATING_COMMANDS_DISABLED"
+    assert client.pipe_name == "pipe-a"
+    assert client.role is ProcessRole.TRIGGER_CLIENT
+    assert client.calls == ("connect", "submit_command")
+    assert client.submitted is not None
+    assert client.submitted["command_name"] == TriggerCommandName.ENQUEUE_TRIGGER_OCCURRENCE.value
+    assert client.submitted["request_id"] == delivery_id
+    assert client.submitted["idempotency_key"] == delivery_id
+    assert len(str(client.submitted["payload_hash"])) == 64
+    assert client.submitted["payload"] == {
+        "delivery": {
+            "delivery_id": delivery_id,
+            "observed_start_utc": "2026-07-20T12:00:00.000Z",
+            "task_definition_hash": "b" * 64,
+            "task_instance_id": "task-instance-a",
+            "trigger_kind": "SCHEDULED_TIME",
+        },
+        "schedule_id": "schedule-a",
+        "schedule_revision_hash": "a" * 64,
+    }
+
+
+def test_trigger_enqueue_occurrence_rejects_invalid_cli_payload_without_submit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeWin32NamedPipeClient(_AcceptedTriggerCommandClient):
+        instances: list["FakeWin32NamedPipeClient"] = []
+
+    monkeypatch.setattr(trigger_module.os, "name", "nt")
+    _install_fake_win32_module(monkeypatch, FakeWin32NamedPipeClient)
+    output: list[str] = []
+
+    result = run_trigger_client(
+        [
+            "--enqueue-trigger-occurrence",
+            "--pipe-name",
+            "pipe-a",
+            "--schedule-id",
+            "schedule-a",
+            "--schedule-revision-hash",
+            "not-a-hash",
+        ],
+        emit=output.append,
+    )
+
+    response = json.loads(output[0])
+    client = FakeWin32NamedPipeClient.instances[0]
+    assert result == 2
+    assert response == {
+        "payload": {"reason": "TRIGGER_OCCURRENCE_PAYLOAD_INVALID"},
+        "reason": "INVALID_FRAME",
+        "status": "REJECTED",
+    }
+    assert client.calls == ()
+    assert client.submitted is None
 
 
 def test_trigger_status_query_returns_typed_unavailable_when_publication_missing(
@@ -208,6 +301,34 @@ class _AcceptedStatusClient:
     def query_status(self) -> IpcResponse:
         self.calls = (*self.calls, "query_status")
         return IpcResponse.accepted({"status": "trigger-ok"})
+
+
+class _AcceptedTriggerCommandClient(_AcceptedStatusClient):
+    def __init__(self, *, pipe_name: str, role: ProcessRole, timeout_ms: int) -> None:
+        super().__init__(pipe_name=pipe_name, role=role, timeout_ms=timeout_ms)
+        self.submitted: dict[str, object] | None = None
+
+    def submit_command(
+        self,
+        command_name: str,
+        *,
+        request_id: str | None = None,
+        idempotency_key: str | None = None,
+        payload: dict[str, object] | None = None,
+        payload_hash: str | None = None,
+    ) -> IpcResponse:
+        self.calls = (*self.calls, "submit_command")
+        self.submitted = {
+            "command_name": command_name,
+            "idempotency_key": idempotency_key,
+            "payload": payload,
+            "payload_hash": payload_hash,
+            "request_id": request_id,
+        }
+        return IpcResponse.rejected(
+            IpcReason.MUTATING_COMMANDS_DISABLED,
+            {"command_name": command_name, "recognized": True},
+        )
 
 
 class _DeadPipeClient:

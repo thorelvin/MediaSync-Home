@@ -82,6 +82,11 @@ from mediasync_home.application.snapshots import (
     SnapshotEntryReadModelStore,
     SnapshotIssueReadModelStore,
 )
+from mediasync_home.application.trigger_occurrences import (
+    TriggerCommandName,
+    TriggerOccurrencePayloadError,
+    parse_enqueue_trigger_occurrence_command,
+)
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
 from mediasync_home.ipc.protocol import (
@@ -364,6 +369,8 @@ class EngineHostIpcService:
             return self._handle_create_standard_backup_job(command, identity)
         if command.command_name == RunCommandName.START_RUN.value:
             return self._handle_start_run(command, identity)
+        if command.command_name == TriggerCommandName.ENQUEUE_TRIGGER_OCCURRENCE.value:
+            return self._handle_enqueue_trigger_occurrence(command, identity)
         receipt_response = self._record_terminal_rejected_receipt(
             command,
             identity,
@@ -377,6 +384,46 @@ class EngineHostIpcService:
             IpcReason.MUTATING_COMMANDS_DISABLED,
             response_payload,
         )
+
+    def _handle_enqueue_trigger_occurrence(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+    ) -> IpcResponse:
+        try:
+            command = parse_enqueue_trigger_occurrence_command(
+                request_id=envelope.request_id,
+                idempotency_key=envelope.idempotency_key,
+                payload=envelope.payload,
+            )
+        except TriggerOccurrencePayloadError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+
+        if self.status.mutations_enabled:
+            receipt_response = self._record_terminal_rejected_receipt(
+                envelope,
+                identity,
+                rejection_reason=IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED.value,
+            )
+            if receipt_response is not None:
+                return receipt_response
+            response_payload = command.response_payload(mutations_enabled=True)
+            self._add_receipt_payload(response_payload, envelope.idempotency_key)
+            return IpcResponse.rejected(
+                IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED,
+                response_payload,
+            )
+
+        receipt_response = self._record_terminal_rejected_receipt(
+            envelope,
+            identity,
+            rejection_reason=IpcReason.MUTATING_COMMANDS_DISABLED.value,
+        )
+        if receipt_response is not None:
+            return receipt_response
+        response_payload = command.response_payload(mutations_enabled=False)
+        self._add_receipt_payload(response_payload, envelope.idempotency_key)
+        return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, response_payload)
 
     def _handle_create_standard_backup_job(
         self,
