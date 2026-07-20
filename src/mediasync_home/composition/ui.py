@@ -347,7 +347,8 @@ def _parse_after_json(after_json: str | None) -> dict[str, object] | None:
 
 def _run_qt_shell(args: argparse.Namespace) -> int:
     engine_client = None
-    if args.pipe_name:
+    pipe_name = _resolve_qt_shell_pipe_name(args)
+    if pipe_name is not None:
         if os.name != "nt":
             raise RuntimeError("named-pipe GUI client mode is Windows-only")
 
@@ -355,10 +356,26 @@ def _run_qt_shell(args: argparse.Namespace) -> int:
         from mediasync_home.presentation.engine_client import EngineClient
 
         engine_client = EngineClient(
-            Win32NamedPipeClient(pipe_name=args.pipe_name, role=ProcessRole.GUI)
+            Win32NamedPipeClient(
+                pipe_name=pipe_name,
+                role=ProcessRole.GUI,
+                timeout_ms=int(args.timeout_seconds * 1000),
+            )
         )
 
     from mediasync_home.presentation.app import run_gui
     from mediasync_home.presentation.theme.theme_manager import ThemeMode
 
     return run_gui([], engine_client=engine_client, theme_mode=ThemeMode(args.theme))
+
+
+def _resolve_qt_shell_pipe_name(args: argparse.Namespace) -> str | None:
+    explicit_pipe_name = args.pipe_name
+    if isinstance(explicit_pipe_name, str) and explicit_pipe_name:
+        return explicit_pipe_name
+    if os.name != "nt":
+        return None
+    publication = _load_matching_local_preview_publication(args)
+    if publication is None:
+        return None
+    return publication.pipe_name

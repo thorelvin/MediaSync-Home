@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import sys
+from enum import Enum
+from types import ModuleType
+
 import pytest
 
+import mediasync_home.composition.ui as ui_module
 from mediasync_home.composition.ui import (
     build_parser,
     _parse_after_json,
     _parse_payload_json,
     _pipe_action_requested,
+    _resolve_qt_shell_pipe_name,
     _run_pipe_action,
+    _run_qt_shell,
 )
+from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.protocol import IpcProtocolError, IpcReason, IpcResponse
 
 
@@ -349,6 +357,132 @@ def test_ui_client_without_pipe_or_query_keeps_generic_role_path() -> None:
 
     assert args.pipe_name is None
     assert _pipe_action_requested(args) is False
+
+
+def test_qt_shell_uses_explicit_pipe_name_without_host_locator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+
+    def fail_if_called(args: object) -> None:
+        calls.append(args)
+        raise AssertionError("HostLocator should not be consulted for an explicit pipe")
+
+    monkeypatch.setattr(ui_module, "_load_matching_local_preview_publication", fail_if_called)
+    args = build_parser().parse_args(["--qt-shell", "--pipe-name", "pipe-a"])
+
+    assert _resolve_qt_shell_pipe_name(args) == "pipe-a"
+    assert calls == []
+
+
+def test_qt_shell_uses_matching_host_locator_when_pipe_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Publication:
+        pipe_name = "pipe-from-host-locator"
+
+    monkeypatch.setattr(ui_module.os, "name", "nt")
+    monkeypatch.setattr(
+        ui_module,
+        "_load_matching_local_preview_publication",
+        lambda args: Publication(),
+    )
+    args = build_parser().parse_args(["--qt-shell", "--installation-id", "preview-a"])
+
+    assert _resolve_qt_shell_pipe_name(args) == "pipe-from-host-locator"
+
+
+def test_qt_shell_without_pipe_or_publication_starts_disconnected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ui_module.os, "name", "nt")
+    monkeypatch.setattr(ui_module, "_load_matching_local_preview_publication", lambda args: None)
+    args = build_parser().parse_args(["--qt-shell", "--installation-id", "preview-a"])
+
+    assert _resolve_qt_shell_pipe_name(args) is None
+
+
+def test_qt_shell_wires_host_locator_publication_to_engine_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Publication:
+        pipe_name = "pipe-from-host-locator"
+
+    class FakeThemeMode(str, Enum):
+        LIGHT = "light"
+        DARK = "dark"
+        SYSTEM = "system"
+
+    class FakeWin32NamedPipeClient:
+        instances: list["FakeWin32NamedPipeClient"] = []
+
+        def __init__(self, *, pipe_name: str, role: ProcessRole, timeout_ms: int) -> None:
+            self.pipe_name = pipe_name
+            self.role = role
+            self.timeout_ms = timeout_ms
+            self.instances.append(self)
+
+        def connect(self) -> IpcResponse:
+            return IpcResponse.accepted({"handshake": "ok"})
+
+        def query_status(self) -> IpcResponse:
+            return IpcResponse.accepted({"status": "ok"})
+
+    captured: dict[str, object] = {}
+    app_module = ModuleType("mediasync_home.presentation.app")
+
+    def fake_run_gui(
+        argv: list[str],
+        *,
+        engine_client: object | None = None,
+        theme_mode: FakeThemeMode = FakeThemeMode.SYSTEM,
+    ) -> int:
+        captured["argv"] = argv
+        captured["engine_client"] = engine_client
+        captured["theme_mode"] = theme_mode
+        return 0
+
+    app_module.run_gui = fake_run_gui  # type: ignore[attr-defined]
+    theme_module = ModuleType("mediasync_home.presentation.theme.theme_manager")
+    theme_module.ThemeMode = FakeThemeMode  # type: ignore[attr-defined]
+
+    from mediasync_home.ipc import win32_named_pipe
+
+    monkeypatch.setattr(ui_module.os, "name", "nt")
+    monkeypatch.setattr(
+        ui_module,
+        "_load_matching_local_preview_publication",
+        lambda args: Publication(),
+    )
+    monkeypatch.setattr(win32_named_pipe, "Win32NamedPipeClient", FakeWin32NamedPipeClient)
+    monkeypatch.setitem(sys.modules, "mediasync_home.presentation.app", app_module)
+    monkeypatch.setitem(
+        sys.modules,
+        "mediasync_home.presentation.theme.theme_manager",
+        theme_module,
+    )
+    args = build_parser().parse_args(
+        [
+            "--qt-shell",
+            "--installation-id",
+            "preview-a",
+            "--timeout-seconds",
+            "1.5",
+            "--theme",
+            "light",
+        ]
+    )
+
+    assert _run_qt_shell(args) == 0
+
+    assert captured["argv"] == []
+    assert captured["theme_mode"] is FakeThemeMode.LIGHT
+    assert captured["engine_client"] is not None
+    assert len(FakeWin32NamedPipeClient.instances) == 1
+    client = FakeWin32NamedPipeClient.instances[0]
+    assert client.pipe_name == "pipe-from-host-locator"
+    assert client.role is ProcessRole.GUI
+    assert client.timeout_ms == 1500
 
 
 def test_parse_payload_json_requires_object() -> None:
