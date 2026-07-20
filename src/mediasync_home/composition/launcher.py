@@ -132,7 +132,14 @@ def build_local_preview_status_launch(
 
     engine_args = ["--pipe-name", pipe_name, "--serve-requests", "2"]
     if host_descriptor is not None:
-        engine_args.extend(("--installation-id", host_descriptor.installation_id))
+        engine_args.extend(
+            (
+                "--installation-id",
+                host_descriptor.installation_id,
+                "--host-mutex-name",
+                host_descriptor.mutex_name,
+            )
+        )
     if state_root is not None:
         engine_args.extend(("--state-root", str(state_root.resolve())))
     engine_host = build_internal_role_launch_plan(

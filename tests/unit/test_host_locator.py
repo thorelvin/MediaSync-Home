@@ -12,6 +12,7 @@ from mediasync_home.adapters.local_host_locator import (
 from mediasync_home.application.host_locator import (
     HostLocatorViolation,
     build_local_engine_host_descriptor,
+    validate_local_preview_mutex_name,
 )
 
 
@@ -99,3 +100,10 @@ def test_local_host_locator_adapter_binds_default_state_root_to_descriptor() -> 
     assert descriptor.state_root == Path(
         "C:/Users/Ada/AppData/Local/MediaSyncHome/0b-local-preview/local-dev"
     )
+
+
+def test_local_preview_mutex_name_validation_allows_only_locator_names() -> None:
+    validate_local_preview_mutex_name("Local\\MediaSyncHome-0B-1234567890abcdef12345678")
+
+    with pytest.raises(HostLocatorViolation, match="HOST_LOCATOR_INVALID_MUTEX_NAME"):
+        validate_local_preview_mutex_name("Global\\MediaSyncHome-0B-1234567890abcdef12345678")

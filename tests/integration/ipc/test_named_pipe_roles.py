@@ -15,6 +15,7 @@ pytestmark = pytest.mark.skipif(os.name != "nt", reason="Win32 named-pipe role w
 
 
 if os.name == "nt":
+    from mediasync_home.adapters.host_mutex import LocalEngineHostMutex
     from mediasync_home.ipc import win32_named_pipe
 
 
@@ -208,8 +209,57 @@ def test_launcher_local_preview_status_uses_host_locator_when_pipe_omitted(
     assert payload["gui"]["response"]["status"] == "ACCEPTED"
     assert payload["engine_host"]["returncode"] == 0
     assert host_events[0]["pipe_name"] == payload["pipe_name"]
+    assert host_events[0]["host_mutex"] == {
+        "acquired": True,
+        "name": payload["host_locator"]["mutex_name"],
+    }
     assert host_events[0]["state_root"] == str(state_root)
     assert host_events[-1]["served_requests"] == 2
+
+
+def test_engine_host_mutex_rejects_when_same_user_mutex_is_owned() -> None:
+    pipe_name = win32_named_pipe.make_pipe_name(
+        installation_id="role-mutex-reject-test",
+        suffix=uuid4().hex,
+    )
+    mutex_name = f"Local\\MediaSyncHome-0B-{uuid4().hex[:24]}"
+    mutex = LocalEngineHostMutex.acquire(mutex_name)
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/run_role.py",
+                "--role",
+                "engine-host",
+                "--pipe-name",
+                pipe_name,
+                "--serve-requests",
+                "1",
+                "--host-mutex-name",
+                mutex_name,
+            ],
+            cwd=Path(__file__).resolve().parents[3],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    finally:
+        mutex.close()
+
+    events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+
+    assert result.stderr == ""
+    assert result.returncode == 3
+    assert events == [
+        {
+            "event": "ENGINE_HOST_SINGLETON_REJECTED",
+            "mutex_name": mutex_name,
+            "pipe_name": pipe_name,
+            "reason": "ENGINE_HOST_ALREADY_RUNNING",
+            "scope": "0B_SAME_USER_LOCAL_PREVIEW",
+        }
+    ]
 
 
 def test_engine_host_state_root_persists_gui_submitted_disabled_command(

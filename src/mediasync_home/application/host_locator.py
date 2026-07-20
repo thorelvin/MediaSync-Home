@@ -10,6 +10,7 @@ INSTALLATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 USER_SCOPE_HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 LOCAL_PREVIEW_SCOPE = "0B_SAME_USER_LOCAL_PREVIEW"
 LOCAL_PREVIEW_PIPE_PREFIX = "MediaSyncHome-0B"
+LOCAL_PREVIEW_MUTEX_PATTERN = re.compile(r"^Local\\MediaSyncHome-0B-[0-9a-f]{24}$")
 
 
 class HostLocatorViolation(ValueError):
@@ -63,6 +64,11 @@ def build_local_engine_host_descriptor(
 
 def validate_installation_id(installation_id: str) -> None:
     _normalize_installation_id(installation_id)
+
+
+def validate_local_preview_mutex_name(mutex_name: str) -> None:
+    if LOCAL_PREVIEW_MUTEX_PATTERN.fullmatch(mutex_name) is None:
+        raise HostLocatorViolation("HOST_LOCATOR_INVALID_MUTEX_NAME")
 
 
 def _normalize_installation_id(installation_id: str) -> str:

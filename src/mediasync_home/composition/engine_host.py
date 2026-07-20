@@ -49,6 +49,12 @@ class PipeServer(Protocol):
         pass
 
 
+class EngineHostMutexGuard(Protocol):
+    name: str
+
+    def close(self) -> None: ...
+
+
 @dataclass(frozen=True)
 class PipeLoopResult:
     served_requests: int
@@ -77,6 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--installation-id", default="local-dev")
     parser.add_argument("--serve-requests", type=_positive_int, default=1)
     parser.add_argument("--state-root", type=Path, help="optional local preview state root")
+    parser.add_argument("--host-mutex-name", help="optional local Engine Host singleton mutex")
     parser.add_argument(
         "--inactive-outbox-owner-instance-id",
         action="append",
@@ -100,36 +107,43 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
         ProcessRole.ENGINE_HOST,
         runtime_policy=current_process_runtime_policy(ROOT),
     )
-    runtime = build_engine_host_runtime(
-        authorization=current_user_policy(),
-        service_status=service_status,
-        state_root=args.state_root,
-        reconciler_instance_id=args.installation_id,
-        inactive_outbox_owner_instance_ids=tuple(args.inactive_outbox_owner_instance_id or ()),
-    )
-    output(
-        json.dumps(
-            {
-                "event": "ENGINE_HOST_PIPE_STARTING",
-                "pipe_name": args.pipe_name,
-                "serve_requests": args.serve_requests,
-                "startup_reconciliation": _startup_reconciliation_payload(
-                    runtime.startup_reconciliation
-                ),
-                "state_root": None
-                if runtime.state_layout is None
-                else str(runtime.state_layout.root),
-                "host_status": service_status.to_dict(),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    )
-    server = Win32NamedPipeServer(
-        pipe_name=args.pipe_name,
-        service=runtime.service,
-    )
+    host_mutex = _acquire_host_mutex(args.host_mutex_name, output=output, pipe_name=args.pipe_name)
+    if args.host_mutex_name and host_mutex is None:
+        return 3
+    runtime: EngineHostRuntime | None = None
     try:
+        runtime = build_engine_host_runtime(
+            authorization=current_user_policy(),
+            service_status=service_status,
+            state_root=args.state_root,
+            reconciler_instance_id=args.installation_id,
+            inactive_outbox_owner_instance_ids=tuple(args.inactive_outbox_owner_instance_id or ()),
+        )
+        output(
+            json.dumps(
+                {
+                    "event": "ENGINE_HOST_PIPE_STARTING",
+                    "pipe_name": args.pipe_name,
+                    "serve_requests": args.serve_requests,
+                    "startup_reconciliation": _startup_reconciliation_payload(
+                        runtime.startup_reconciliation
+                    ),
+                    "state_root": None
+                    if runtime.state_layout is None
+                    else str(runtime.state_layout.root),
+                    "host_status": service_status.to_dict(),
+                    "host_mutex": None
+                    if host_mutex is None
+                    else {"acquired": True, "name": host_mutex.name},
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        server = Win32NamedPipeServer(
+            pipe_name=args.pipe_name,
+            service=runtime.service,
+        )
         result = serve_bounded_pipe_requests(server, request_limit=args.serve_requests)
         if result.completed:
             output(
@@ -159,7 +173,10 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
         )
         return 2
     finally:
-        runtime.close()
+        if runtime is not None:
+            runtime.close()
+        if host_mutex is not None:
+            host_mutex.close()
 
 
 def build_engine_host_runtime(
@@ -280,6 +297,36 @@ def _startup_reconciliation_payload(
         "outbox": outbox,
         "skipped_outbox_requeue_reason": report.skipped_outbox_requeue_reason,
     }
+
+
+def _acquire_host_mutex(
+    mutex_name: str | None,
+    *,
+    output: Emit,
+    pipe_name: str,
+) -> EngineHostMutexGuard | None:
+    if mutex_name is None:
+        return None
+
+    from mediasync_home.adapters.host_mutex import EngineHostMutexError, LocalEngineHostMutex
+
+    try:
+        return LocalEngineHostMutex.acquire(mutex_name)
+    except EngineHostMutexError as exc:
+        output(
+            json.dumps(
+                {
+                    "event": "ENGINE_HOST_SINGLETON_REJECTED",
+                    "mutex_name": mutex_name,
+                    "pipe_name": pipe_name,
+                    "reason": exc.validation_code,
+                    "scope": "0B_SAME_USER_LOCAL_PREVIEW",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return None
 
 
 def _positive_int(value: str) -> int:
