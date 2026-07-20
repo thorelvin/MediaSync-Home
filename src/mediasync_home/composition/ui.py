@@ -4,11 +4,17 @@ import argparse
 import json
 import os
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Protocol
 
 from mediasync_home.composition._role_runner import Emit, run_role
 from mediasync_home.domain.process_roles import ProcessRole
-from mediasync_home.ipc.protocol import IpcProtocolError, IpcResponse
+from mediasync_home.application.host_locator import (
+    LocalEngineHostDescriptor,
+    LocalEngineHostPublication,
+    local_engine_host_publication_matches_descriptor,
+)
+from mediasync_home.ipc.protocol import IpcProtocolError, IpcReason, IpcResponse
 
 
 class GuiIpcClient(Protocol):
@@ -90,6 +96,9 @@ class GuiIpcClient(Protocol):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MediaSync Home GUI client role")
     parser.add_argument("--pipe-name", help="connect to an Engine Host local named pipe")
+    parser.add_argument("--installation-id", default="local-dev")
+    parser.add_argument("--state-root", type=Path)
+    parser.add_argument("--timeout-seconds", type=_positive_float, default=5.0)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--query-status", action="store_true")
     mode.add_argument("--query-backup-overview", action="store_true")
@@ -123,7 +132,7 @@ def run_ui(argv: Sequence[str] | None = None, *, emit: Emit | None = None) -> in
     args = build_parser().parse_args(argv)
     if args.qt_shell:
         return _run_qt_shell(args)
-    if not args.pipe_name:
+    if not args.pipe_name and not _pipe_action_requested(args):
         return run_role(ProcessRole.GUI, argv, emit=emit)
     if os.name != "nt":
         raise RuntimeError("named-pipe GUI client mode is Windows-only")
@@ -131,10 +140,61 @@ def run_ui(argv: Sequence[str] | None = None, *, emit: Emit | None = None) -> in
     from mediasync_home.ipc.win32_named_pipe import Win32NamedPipeClient
 
     output = emit or print
-    client = Win32NamedPipeClient(pipe_name=args.pipe_name, role=ProcessRole.GUI)
-    response = _run_pipe_action(args, client)
+    publication = None
+    pipe_name = args.pipe_name
+    if pipe_name is None:
+        publication = _load_matching_local_preview_publication(args)
+        if publication is None:
+            response = IpcResponse.rejected(
+                IpcReason.ENGINE_HOST_UNAVAILABLE,
+                {
+                    "reason": "HOST_LOCATOR_PUBLICATION_UNAVAILABLE",
+                    "scope": "0B_SAME_USER_LOCAL_PREVIEW",
+                },
+            )
+            output(json.dumps(response.to_dict(), sort_keys=True, separators=(",", ":")))
+            return 2
+        pipe_name = publication.pipe_name
+
+    assert pipe_name is not None
+    client = Win32NamedPipeClient(
+        pipe_name=pipe_name,
+        role=ProcessRole.GUI,
+        timeout_ms=int(args.timeout_seconds * 1000),
+    )
+    try:
+        response = _run_pipe_action(args, client)
+    except (OSError, TimeoutError):
+        if publication is None:
+            raise
+        response = IpcResponse.rejected(
+            IpcReason.ENGINE_HOST_UNAVAILABLE,
+            {
+                "host_locator_publication": publication.to_payload(),
+                "reason": "HOST_LOCATOR_PUBLICATION_NOT_LIVE",
+                "scope": "0B_SAME_USER_LOCAL_PREVIEW",
+                "stale_host_locator_publication_cleared": _clear_stale_host_publication(
+                    publication
+                ),
+            },
+        )
     output(json.dumps(response.to_dict(), sort_keys=True, separators=(",", ":")))
     return 0 if response.reason is None else 2
+
+
+def _pipe_action_requested(args: argparse.Namespace) -> bool:
+    return (
+        args.query_status
+        or args.query_backup_overview
+        or args.query_backup_job_detail
+        or args.query_activity_overview
+        or args.query_plan_operations
+        or args.query_plan_endpoints
+        or args.query_snapshot_entries
+        or args.query_snapshot_coverage
+        or args.query_snapshot_issues
+        or args.submit_command is not None
+    )
 
 
 def _run_pipe_action(args: argparse.Namespace, client: GuiIpcClient) -> IpcResponse:
@@ -200,6 +260,56 @@ def _run_pipe_action(args: argparse.Namespace, client: GuiIpcClient) -> IpcRespo
     return handshake
 
 
+def _load_matching_local_preview_publication(
+    args: argparse.Namespace,
+) -> LocalEngineHostPublication | None:
+    from mediasync_home.adapters.local_host_locator import (
+        build_local_engine_host_descriptor_for_user,
+    )
+    from mediasync_home.ipc.win32_named_pipe import current_process_identity
+
+    identity = current_process_identity()
+    descriptor = build_local_engine_host_descriptor_for_user(
+        installation_id=args.installation_id,
+        user_scope_hash=identity.user_sid_hash,
+        state_root=args.state_root,
+        environ=os.environ,
+    )
+    return _load_matching_publication_for_descriptor(descriptor)
+
+
+def _load_matching_publication_for_descriptor(
+    descriptor: LocalEngineHostDescriptor,
+) -> LocalEngineHostPublication | None:
+    if descriptor.state_root is None:
+        return None
+
+    from mediasync_home.adapters.local_host_locator import load_local_engine_host_publication
+
+    try:
+        publication = load_local_engine_host_publication(descriptor.state_root)
+    except (OSError, ValueError):
+        return None
+    if publication is None:
+        return None
+    if not local_engine_host_publication_matches_descriptor(publication, descriptor):
+        return None
+    return publication
+
+
+def _clear_stale_host_publication(
+    publication: LocalEngineHostPublication,
+) -> bool:
+    from mediasync_home.adapters.local_host_locator import (
+        clear_stale_local_engine_host_publication,
+    )
+
+    try:
+        return clear_stale_local_engine_host_publication(publication)
+    except OSError:
+        return False
+
+
 def _parse_payload_json(payload_json: str | None) -> dict[str, object] | None:
     if payload_json is None:
         return None
@@ -212,6 +322,13 @@ def _parse_payload_json(payload_json: str | None) -> dict[str, object] | None:
     if any(not isinstance(key, str) for key in payload):
         raise IpcProtocolError("command payload JSON object keys must be strings")
     return dict(payload)
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return parsed
 
 
 def _parse_after_json(after_json: str | None) -> dict[str, object] | None:

@@ -6,6 +6,7 @@ from mediasync_home.composition.ui import (
     build_parser,
     _parse_after_json,
     _parse_payload_json,
+    _pipe_action_requested,
     _run_pipe_action,
 )
 from mediasync_home.ipc.protocol import IpcProtocolError, IpcReason, IpcResponse
@@ -324,6 +325,30 @@ def test_ui_client_parser_rejects_query_and_submit_command_together() -> None:
         build_parser().parse_args(
             ["--pipe-name", "pipe-a", "--query-status", "--submit-command", "UNKNOWN"]
         )
+
+
+def test_ui_client_treats_no_pipe_query_as_host_locator_action() -> None:
+    args = build_parser().parse_args(
+        [
+            "--query-status",
+            "--installation-id",
+            "preview-a",
+            "--state-root",
+            "C:/Users/Ada/AppData/Local/MediaSyncHome/0b-local-preview/preview-a",
+            "--timeout-seconds",
+            "1",
+        ]
+    )
+
+    assert args.pipe_name is None
+    assert _pipe_action_requested(args) is True
+
+
+def test_ui_client_without_pipe_or_query_keeps_generic_role_path() -> None:
+    args = build_parser().parse_args([])
+
+    assert args.pipe_name is None
+    assert _pipe_action_requested(args) is False
 
 
 def test_parse_payload_json_requires_object() -> None:

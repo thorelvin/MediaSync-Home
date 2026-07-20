@@ -392,6 +392,139 @@ def test_launcher_local_preview_status_clears_stale_publication_before_fallback(
     assert host_events[-1]["served_requests"] == 2
 
 
+def test_gui_status_query_uses_host_locator_when_pipe_omitted(
+    tmp_path: Path,
+) -> None:
+    installation_id = f"preview-{uuid4().hex}"
+    state_root = tmp_path / "state"
+    identity = win32_named_pipe.current_process_identity()
+    descriptor = build_local_engine_host_descriptor_for_user(
+        installation_id=installation_id,
+        user_scope_hash=identity.user_sid_hash,
+        state_root=state_root,
+    )
+    publication_path = state_root / LOCAL_ENGINE_HOST_PUBLICATION_FILENAME
+    host = subprocess.Popen(
+        [
+            sys.executable,
+            "scripts/run_role.py",
+            "--role",
+            "engine-host",
+            "--pipe-name",
+            descriptor.pipe_name,
+            "--serve-requests",
+            "2",
+            "--installation-id",
+            installation_id,
+            "--host-mutex-name",
+            descriptor.mutex_name,
+            "--publish-host-locator",
+            "--state-root",
+            str(state_root),
+        ],
+        cwd=Path(__file__).resolve().parents[3],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _wait_for_file(publication_path)
+        gui = subprocess.run(
+            [
+                sys.executable,
+                "scripts/run_role.py",
+                "--role",
+                "gui",
+                "--query-status",
+                "--installation-id",
+                installation_id,
+                "--state-root",
+                str(state_root),
+            ],
+            cwd=Path(__file__).resolve().parents[3],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
+        )
+        stdout, stderr = host.communicate(timeout=10)
+    finally:
+        if host.poll() is None:
+            host.kill()
+            host.communicate(timeout=5)
+
+    gui_response = json.loads(gui.stdout)
+    host_events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+
+    assert gui.stderr == ""
+    assert stderr == ""
+    assert gui_response["status"] == "ACCEPTED"
+    assert gui_response["payload"]["host_status"]["role"] == "engine-host"
+    assert [event["event"] for event in host_events] == [
+        "ENGINE_HOST_PIPE_STARTING",
+        "ENGINE_HOST_PIPE_STOPPED",
+    ]
+    assert host_events[-1]["served_requests"] == 2
+
+
+def test_gui_status_query_clears_dead_host_locator_when_pipe_omitted(
+    tmp_path: Path,
+) -> None:
+    installation_id = f"preview-{uuid4().hex}"
+    state_root = tmp_path / "state"
+    identity = win32_named_pipe.current_process_identity()
+    descriptor = build_local_engine_host_descriptor_for_user(
+        installation_id=installation_id,
+        user_scope_hash=identity.user_sid_hash,
+        state_root=state_root,
+    )
+    stale_publication = build_local_engine_host_publication(
+        installation_id=descriptor.installation_id,
+        pipe_name=descriptor.pipe_name,
+        mutex_name=descriptor.mutex_name,
+        state_root=state_root,
+        process_id=4321,
+    )
+    publication_path = publish_local_engine_host_publication(stale_publication)
+
+    gui = subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_role.py",
+            "--role",
+            "gui",
+            "--query-status",
+            "--installation-id",
+            installation_id,
+            "--state-root",
+            str(state_root),
+            "--timeout-seconds",
+            "1",
+        ],
+        cwd=Path(__file__).resolve().parents[3],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    gui_response = json.loads(gui.stdout)
+
+    assert gui.stderr == ""
+    assert gui.returncode == 2
+    assert gui_response == {
+        "payload": {
+            "host_locator_publication": stale_publication.to_payload(),
+            "reason": "HOST_LOCATOR_PUBLICATION_NOT_LIVE",
+            "scope": "0B_SAME_USER_LOCAL_PREVIEW",
+            "stale_host_locator_publication_cleared": True,
+        },
+        "reason": "ENGINE_HOST_UNAVAILABLE",
+        "status": "REJECTED",
+    }
+    assert not publication_path.exists()
+
+
 def test_engine_host_mutex_rejects_when_same_user_mutex_is_owned(tmp_path: Path) -> None:
     pipe_name = win32_named_pipe.make_pipe_name(
         installation_id="role-mutex-reject-test",
