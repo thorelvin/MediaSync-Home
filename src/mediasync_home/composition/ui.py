@@ -16,6 +16,14 @@ class GuiIpcClient(Protocol):
 
     def query_status(self) -> IpcResponse: ...
 
+    def query_backup_overview(
+        self,
+        *,
+        draft_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse: ...
+
     def submit_command(
         self,
         command_name: str,
@@ -32,7 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pipe-name", help="connect to an Engine Host local named pipe")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--query-status", action="store_true")
+    mode.add_argument("--query-backup-overview", action="store_true")
     mode.add_argument("--submit-command", metavar="NAME")
+    parser.add_argument("--draft-id")
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--offset", type=int)
     parser.add_argument("--request-id")
     parser.add_argument("--idempotency-key")
     parser.add_argument("--payload-json")
@@ -71,6 +83,12 @@ def _run_pipe_action(args: argparse.Namespace, client: GuiIpcClient) -> IpcRespo
             idempotency_key=args.idempotency_key,
             payload=_parse_payload_json(args.payload_json),
             payload_hash=args.payload_hash,
+        )
+    if args.query_backup_overview:
+        return client.query_backup_overview(
+            draft_id=args.draft_id,
+            limit=args.limit,
+            offset=args.offset,
         )
     if args.query_status:
         return client.query_status()

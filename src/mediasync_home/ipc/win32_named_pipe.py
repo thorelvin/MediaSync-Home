@@ -394,6 +394,13 @@ class Win32NamedPipeServer:
             return self.service.handshake(request, identity)
         if message_type == "QUERY_STATUS":
             return self.service.query_status(str(request["client_instance_id"]))
+        if message_type == "QUERY_BACKUP_OVERVIEW":
+            return self.service.query_backup_overview(
+                str(request["client_instance_id"]),
+                draft_id=_optional_query_str(request.get("draft_id")),
+                limit=_optional_query_int(request.get("limit")),
+                offset=_optional_query_int(request.get("offset")),
+            )
         if message_type == "COMMAND":
             return self.service.submit_command_envelope(request)
         return IpcResponse.rejected(IpcReason.INVALID_FRAME)
@@ -432,6 +439,25 @@ class Win32NamedPipeClient:
                 "client_instance_id": self.client_instance_id,
             }
         )
+
+    def query_backup_overview(
+        self,
+        *,
+        draft_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        request: dict[str, Any] = {
+            "message_type": "QUERY_BACKUP_OVERVIEW",
+            "client_instance_id": self.client_instance_id,
+        }
+        if draft_id is not None:
+            request["draft_id"] = draft_id
+        if limit is not None:
+            request["limit"] = limit
+        if offset is not None:
+            request["offset"] = offset
+        return self._roundtrip(request)
 
     def submit_command(
         self,
@@ -499,3 +525,21 @@ class Win32NamedPipeClient:
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"timed out opening pipe {self.pipe_name}; last_error={code}")
             time.sleep(0.02)
+
+
+def _optional_query_str(value: object) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _optional_query_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("query integer must not be a boolean")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        return int(value)
+    raise ValueError("query integer must be an integer or string")

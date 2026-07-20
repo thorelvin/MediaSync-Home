@@ -226,6 +226,56 @@ def test_sqlite_catalog_allows_source_only_overlap_with_existing_job(tmp_path: P
         assert id_factory.calls == 2
 
 
+def test_sqlite_catalog_lists_active_standard_backup_job_summaries_page(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        drafts = SqliteJobDraftStore(connection)
+        catalog = SqliteStandardBackupJobCatalog(connection)
+        id_factory = FixedStandardBackupJobIdFactory(
+            (
+                StandardBackupJobIds(
+                    job_id="job-a",
+                    job_revision_id="job-rev-a",
+                    filter_set_id="filter-a",
+                ),
+                StandardBackupJobIds(
+                    job_id="job-b",
+                    job_revision_id="job-rev-b",
+                    filter_set_id="filter-b",
+                ),
+            )
+        )
+        drafts.save_standard_backup_draft(_complete_draft())
+        create_standard_backup_job_from_draft(
+            command=_create_command(),
+            drafts=drafts,
+            catalog=catalog,
+            id_factory=id_factory,
+        )
+        drafts.save_standard_backup_draft(
+            StandardBackupJobDraft.new("draft-b")
+            .with_source(name="Documents", path_label="C:/Users/Ada/Documents")
+            .with_added_target(name="USB 2", path_label="F:/Backup", independent_device_id="disk-b")
+        )
+        create_standard_backup_job_from_draft(
+            command=parse_create_standard_backup_job_command(
+                request_id="request-b",
+                idempotency_key="idempotency-b",
+                payload={"draft_id": "draft-b"},
+            ),
+            drafts=drafts,
+            catalog=catalog,
+            id_factory=id_factory,
+        )
+
+        summaries = catalog.list_active_standard_backup_job_summaries(limit=1, offset=1)
+
+        assert [summary.job_id for summary in summaries] == ["job-b"]
+        assert summaries[0].source_name == "Documents"
+        assert summaries[0].targets[0].independent_device_id == "disk-b"
+
+
 def test_sqlite_catalog_direct_save_rejects_cross_job_root_overlap(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:

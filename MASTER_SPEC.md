@@ -3308,6 +3308,8 @@ Engine Host-startupkoordinereren kjører command receipt-avstemming før nye mut
 
 0B pipe-komposisjonen kan eksplisitt startes med `--state-root` for å opprette og migrere lokale `catalog.sqlite`/`recovery.sqlite` før serving. GUI-rollen har en command-submit smoke mode for denne IPC-linjen, men Engine Host-policyen styrer fortsatt utfallet og skriver terminal receipt når muterende kommandoer er deaktivert. Uten denne flaggen beholdes den ikke-persistente status-previewen, og ingen lokal statefil opprettes av pipe-komposisjonen.
 
+0B read-model-linjen implementerer `QUERY_STATUS` og bounded `QUERY_BACKUP_OVERVIEW` etter handshake. `QUERY_BACKUP_OVERVIEW` leser standard-backup draft og aktive jobbsammendrag gjennom Engine Host-eide katalogporter, krever `limit <= 25` og ikke-negativ `offset`, og returnerer `read_model_available=false` når hosten kjører uten read store. GUI-/presentation-laget får bare IPC-payloaden og åpner ikke SQLite.
+
 Idempotency-retention:
 
 - command dispatcher slår opp både full receipt og `command_dedup_tombstones` før validering av ny effekt;

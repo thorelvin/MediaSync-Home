@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from typing import Protocol, cast
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
@@ -23,10 +24,12 @@ from PySide6.QtWidgets import (
 
 from mediasync_home.presentation.theme.icon_registry import IconRegistry
 from mediasync_home.presentation.view_models.backup_setup import (
+    BackupOverviewViewState,
     BackupSetupDraft,
     BackupSetupStepViewState,
     BackupJobStatusViewState,
     StandardBackupSetupViewState,
+    backup_overview_from_response,
     build_standard_backup_setup_state,
     empty_backup_job_status_state,
 )
@@ -35,6 +38,17 @@ from mediasync_home.presentation.view_models.engine_status import (
     EngineStatusViewState,
     engine_status_from_response,
 )
+from mediasync_home.ipc.protocol import IpcResponse
+
+
+class BackupOverviewProvider(Protocol):
+    def get_backup_overview(
+        self,
+        *,
+        draft_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse: ...
 
 
 class MediaSyncWindow(QMainWindow):
@@ -51,6 +65,14 @@ class MediaSyncWindow(QMainWindow):
         self._connected = False
         self._setup_state = build_standard_backup_setup_state(BackupSetupDraft.empty())
         self._job_status_state = empty_backup_job_status_state()
+        self._setup_step_labels: list[QLabel] = []
+        self._setup_source_value: QLabel | None = None
+        self._setup_target_value: QLabel | None = None
+        self._setup_defaults_value: QLabel | None = None
+        self._setup_retention_value: QLabel | None = None
+        self._setup_primary_button: QPushButton | None = None
+        self._activity_status_title: QLabel | None = None
+        self._activity_dimension_rows: list[QLabel] = []
         self._language_options = (
             ("nb", "Norsk"),
             ("en", "English"),
@@ -117,6 +139,7 @@ class MediaSyncWindow(QMainWindow):
                 return
             self._connected = True
         self.apply_engine_status(engine_status_from_response(self._engine_client.get_status()))
+        self._refresh_backup_overview()
 
     def apply_engine_status(self, state: EngineStatusViewState) -> None:
         self._engine_chip.setText(f"{state.connection_label}: {state.state_label}")
@@ -127,6 +150,53 @@ class MediaSyncWindow(QMainWindow):
         self._engine_protocol.setText(state.protocol_label)
         self._engine_mutation.setText(state.mutation_label)
         _refresh_style(self._engine_chip)
+
+    def apply_backup_overview(self, state: BackupOverviewViewState) -> None:
+        self._setup_state = state.setup
+        self._job_status_state = state.job_status
+        self._apply_backup_setup_state(state.setup)
+        self._apply_job_status_state(state.job_status)
+
+    def _refresh_backup_overview(self) -> None:
+        if self._engine_client is None or not hasattr(self._engine_client, "get_backup_overview"):
+            return
+        provider = cast(BackupOverviewProvider, self._engine_client)
+        self.apply_backup_overview(backup_overview_from_response(provider.get_backup_overview()))
+
+    def _apply_backup_setup_state(self, state: StandardBackupSetupViewState) -> None:
+        for label, step in zip(self._setup_step_labels, state.steps, strict=False):
+            label.setText(f"{step.number}. {step.title}")
+            label.setProperty(
+                "stepState",
+                "current" if step.current else "complete" if step.complete else "upcoming",
+            )
+            _refresh_style(label)
+        if self._setup_source_value is not None:
+            self._setup_source_value.setText(state.source_label)
+        if self._setup_target_value is not None:
+            self._setup_target_value.setText(state.target_label)
+        if self._setup_defaults_value is not None:
+            self._setup_defaults_value.setText(" · ".join(state.defaults.summary()[:3]))
+        if self._setup_retention_value is not None:
+            self._setup_retention_value.setText(state.defaults.retention_label)
+        if self._setup_primary_button is not None:
+            self._setup_primary_button.setText(state.primary_action_label)
+            self._setup_primary_button.setEnabled(state.can_create)
+
+    def _apply_job_status_state(self, state: BackupJobStatusViewState) -> None:
+        if self._activity_status_title is not None:
+            self._activity_status_title.setText(state.title)
+        values = (
+            ("Aktivitet", state.activity_label),
+            ("Oppmerksomhet", state.attention_label),
+            (
+                "Ferskhet per mål",
+                "Ikke konfigurert" if not state.target_statuses else state.target_statuses[0].freshness_label,
+            ),
+            ("Neste handling", state.recommended_action),
+        )
+        for row, (label, value) in zip(self._activity_dimension_rows, values, strict=False):
+            row.setText(f"{label}: {value}")
 
     def _build_layout(self) -> None:
         root = QWidget()
@@ -225,18 +295,30 @@ class MediaSyncWindow(QMainWindow):
         stepper_layout.setContentsMargins(0, 4, 0, 4)
         stepper_layout.setSpacing(8)
         for step in state.steps:
-            stepper_layout.addWidget(_step_label(step))
+            label = _step_label(step)
+            self._setup_step_labels.append(label)
+            stepper_layout.addWidget(label)
         layout.addWidget(stepper, 2, 0, 1, 3)
 
-        _add_text_value(layout, 3, "Kilde", state.source_label)
-        _add_text_value(layout, 4, "Mål", state.target_label)
-        _add_text_value(layout, 5, "Standard", " · ".join(state.defaults.summary()[:3]))
-        _add_text_value(layout, 6, "Bevaring", state.defaults.retention_label)
+        self._setup_source_value = _add_text_value(layout, 3, "Kilde", state.source_label)
+        self._setup_source_value.setObjectName("setupSourceValue")
+        self._setup_target_value = _add_text_value(layout, 4, "Mål", state.target_label)
+        self._setup_target_value.setObjectName("setupTargetValue")
+        self._setup_defaults_value = _add_text_value(
+            layout,
+            5,
+            "Standard",
+            " · ".join(state.defaults.summary()[:3]),
+        )
+        self._setup_defaults_value.setObjectName("setupDefaultsValue")
+        self._setup_retention_value = _add_text_value(layout, 6, "Bevaring", state.defaults.retention_label)
+        self._setup_retention_value.setObjectName("setupRetentionValue")
 
         primary = QPushButton(state.primary_action_label)
         primary.setObjectName("createBackupButton")
         primary.setEnabled(state.can_create)
         primary.setToolTip("Opprett backup når kilde og minst ett mål er valgt")
+        self._setup_primary_button = primary
         layout.addWidget(primary, 7, 2)
         layout.setColumnStretch(1, 1)
         return panel
@@ -290,7 +372,9 @@ class MediaSyncWindow(QMainWindow):
     ) -> None:
         heading = QLabel(state.title)
         heading.setObjectName("activityStatusTitle")
+        self._activity_status_title = heading
         layout.addWidget(heading)
+        self._activity_dimension_rows = []
         for label, value in (
             ("Aktivitet", state.activity_label),
             ("Oppmerksomhet", state.attention_label),
@@ -300,6 +384,7 @@ class MediaSyncWindow(QMainWindow):
             row = QLabel(f"{label}: {value}")
             row.setObjectName("activityDimensionLabel")
             row.setWordWrap(True)
+            self._activity_dimension_rows.append(row)
             layout.addWidget(row)
 
     def _build_component_gallery(self) -> QFrame:
@@ -358,10 +443,11 @@ def _add_key_value(layout: QGridLayout, row: int, label_text: str, value: QLabel
     layout.addWidget(value, row, 1, 1, 2)
 
 
-def _add_text_value(layout: QGridLayout, row: int, label_text: str, value_text: str) -> None:
+def _add_text_value(layout: QGridLayout, row: int, label_text: str, value_text: str) -> QLabel:
     value = QLabel(value_text)
     value.setWordWrap(True)
     _add_key_value(layout, row, label_text, value)
+    return value
 
 
 def _step_label(step: BackupSetupStepViewState) -> QLabel:

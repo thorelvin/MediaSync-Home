@@ -26,6 +26,11 @@ from mediasync_home.application.job_creation import (
     parse_create_standard_backup_job_command,
 )
 from mediasync_home.application.job_drafts import JobDraftStore
+from mediasync_home.application.job_read_models import (
+    BackupOverviewQueryError,
+    StandardBackupJobReadModelStore,
+    query_backup_overview,
+)
 from mediasync_home.application.outbox import OutboxStore, command_effect_outbox_message
 from mediasync_home.application.plans import PlanStore
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
@@ -60,6 +65,7 @@ class EngineHostIpcService:
     status: RuntimeStatus = field(default_factory=lambda: startup_status(ProcessRole.ENGINE_HOST))
     job_draft_store: JobDraftStore | None = None
     standard_backup_job_catalog: StandardBackupJobCatalog | None = None
+    standard_backup_job_read_store: StandardBackupJobReadModelStore | None = None
     standard_backup_job_id_factory: StandardBackupJobIdFactory | None = None
     plan_store: PlanStore | None = None
     run_store: RunStore | None = None
@@ -99,6 +105,28 @@ class EngineHostIpcService:
         if client_instance_id not in self._accepted_clients:
             return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
         return IpcResponse.accepted({"host_status": self.status.to_dict()})
+
+    def query_backup_overview(
+        self,
+        client_instance_id: str,
+        *,
+        draft_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        if client_instance_id not in self._accepted_clients:
+            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        try:
+            overview = query_backup_overview(
+                job_read_store=self.standard_backup_job_read_store,
+                draft_store=self.job_draft_store,
+                draft_id=draft_id,
+                limit=limit,
+                offset=offset,
+            )
+        except BackupOverviewQueryError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        return IpcResponse.accepted({"backup_overview": overview.to_dict()})
 
     def submit_command(self, client_instance_id: str, command_name: str) -> IpcResponse:
         del command_name

@@ -18,6 +18,8 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     catalog_critical_writer_policy,
     recovery_writer_policy,
 )
+from mediasync_home.adapters.sqlite.job_catalog import SqliteStandardBackupJobCatalog
+from mediasync_home.adapters.sqlite.job_draft_store import SqliteJobDraftStore
 from mediasync_home.adapters.sqlite.migrations import (
     apply_sqlite_migrations,
     catalog_migration_plan,
@@ -190,6 +192,8 @@ def build_engine_host_runtime(
         apply_sqlite_migrations(recovery_connection, recovery_migration_plan())
         command_receipts = SqliteCommandReceiptStore(catalog_connection)
         outbox = SqliteOutboxStore(catalog_connection)
+        job_drafts = SqliteJobDraftStore(catalog_connection)
+        standard_backup_jobs = SqliteStandardBackupJobCatalog(catalog_connection)
         startup_reconciliation = reconcile_engine_host_after_startup(
             EngineHostStartupReconciliationRequest(
                 reconciler_instance_id=reconciler_instance_id,
@@ -201,6 +205,9 @@ def build_engine_host_runtime(
         service = EngineHostIpcService(
             authorization,
             status=service_status,
+            job_draft_store=job_drafts,
+            standard_backup_job_catalog=standard_backup_jobs,
+            standard_backup_job_read_store=standard_backup_jobs,
             command_receipt_store=command_receipts,
             outbox_store=outbox,
         )

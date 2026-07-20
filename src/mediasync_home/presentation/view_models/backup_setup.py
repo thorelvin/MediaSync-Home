@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
+from mediasync_home.ipc.protocol import IpcResponse, IpcStatus
 
 
 class BackupSetupStep(str, Enum):
@@ -117,6 +118,14 @@ class BackupJobStatusViewState:
     independent_device_count: int
     target_statuses: tuple[TargetStatusViewState, ...]
     recommended_action: str
+
+
+@dataclass(frozen=True)
+class BackupOverviewViewState:
+    setup: StandardBackupSetupViewState
+    job_status: BackupJobStatusViewState
+    read_model_available: bool
+    has_more_jobs: bool
 
 
 STEP_TITLES = {
@@ -239,6 +248,36 @@ def empty_backup_job_status_state() -> BackupJobStatusViewState:
     )
 
 
+def empty_backup_overview_state() -> BackupOverviewViewState:
+    return BackupOverviewViewState(
+        setup=build_standard_backup_setup_state(BackupSetupDraft.empty()),
+        job_status=empty_backup_job_status_state(),
+        read_model_available=False,
+        has_more_jobs=False,
+    )
+
+
+def backup_overview_from_response(response: IpcResponse | None) -> BackupOverviewViewState:
+    if response is None or response.status is IpcStatus.REJECTED:
+        return empty_backup_overview_state()
+    overview = response.payload.get("backup_overview")
+    if not isinstance(overview, dict):
+        return empty_backup_overview_state()
+
+    draft = _setup_draft_from_payload(overview.get("draft"))
+    jobs = overview.get("jobs")
+    job_payloads = tuple(item for item in jobs if isinstance(item, dict)) if isinstance(jobs, list) else ()
+    return BackupOverviewViewState(
+        setup=build_standard_backup_setup_state(
+            draft or BackupSetupDraft.empty(),
+            current_step=BackupSetupStep.REVIEW if draft is not None and draft.targets else BackupSetupStep.SOURCE,
+        ),
+        job_status=_job_status_from_payload(job_payloads[0]) if job_payloads else empty_backup_job_status_state(),
+        read_model_available=bool(overview.get("read_model_available", False)),
+        has_more_jobs=bool(overview.get("has_more", False)),
+    )
+
+
 def _build_steps(
     draft: BackupSetupDraft,
     current_step: BackupSetupStep,
@@ -320,3 +359,71 @@ def _freshness_label(freshness: FreshnessState) -> str:
         FreshnessState.NEVER_CHECKED: "Aldri kontrollert",
         FreshnessState.UNKNOWN: "Ukjent",
     }[freshness]
+
+
+def _setup_draft_from_payload(payload: object) -> BackupSetupDraft | None:
+    if not isinstance(payload, dict):
+        return None
+    targets_payload = payload.get("targets")
+    targets: list[BackupTargetDraft] = []
+    if isinstance(targets_payload, list):
+        for item in targets_payload:
+            if not isinstance(item, dict):
+                continue
+            name = _required_text(item.get("name"))
+            path_label = _required_text(item.get("path_label"))
+            if name is None or path_label is None:
+                continue
+            targets.append(
+                BackupTargetDraft(
+                    name=name,
+                    path_label=path_label,
+                    independent_device_id=_optional_text(item.get("independent_device_id")),
+                )
+            )
+    return BackupSetupDraft(
+        source_name=_optional_text(payload.get("source_name")),
+        source_path_label=_optional_text(payload.get("source_path_label")),
+        targets=tuple(targets),
+    )
+
+
+def _job_status_from_payload(payload: dict[object, object]) -> BackupJobStatusViewState:
+    targets_payload = payload.get("targets")
+    targets: list[TargetStatusViewState] = []
+    if isinstance(targets_payload, list):
+        for item in targets_payload:
+            if not isinstance(item, dict):
+                continue
+            name = _required_text(item.get("name"))
+            if name is None:
+                continue
+            targets.append(
+                target_status(
+                    name=name,
+                    activity=ActivityState.INACTIVE,
+                    attention=AttentionState.WAITING,
+                    freshness=FreshnessState.UNKNOWN,
+                    recommended_action="Venter pÃ¥ analyse og kjÃ¸ring.",
+                    independent_device_id=_optional_text(item.get("independent_device_id")),
+                )
+            )
+    title = _required_text(payload.get("title")) or _required_text(payload.get("source_name")) or "Backupjobb"
+    return build_backup_job_status_state(
+        title=title,
+        activity=ActivityState.INACTIVE,
+        attention=AttentionState.WAITING,
+        target_statuses=tuple(targets),
+        recommended_action="Kontroller backupen nÃ¥r analysefunksjonen er tilgjengelig.",
+    )
+
+
+def _optional_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _required_text(value: object) -> str | None:
+    return _optional_text(value)

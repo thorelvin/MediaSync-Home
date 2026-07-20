@@ -19,6 +19,10 @@ from mediasync_home.application.job_drafts import (
     VerificationPreset,
     draft_path_labels_overlap,
 )
+from mediasync_home.application.job_read_models import (
+    StandardBackupJobSummary,
+    StandardBackupTargetSummary,
+)
 
 
 class SqliteJobCatalogError(ValueError):
@@ -173,6 +177,37 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
             (idempotency_key,),
         )
 
+    def list_active_standard_backup_job_summaries(
+        self,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[StandardBackupJobSummary, ...]:
+        if limit < 1 or offset < 0:
+            raise SqliteJobCatalogError("STANDARD_BACKUP_JOB_QUERY_BOUNDS_INVALID")
+        rows = self._connection.execute(
+            """
+            SELECT
+                details.job_id,
+                details.job_revision_id,
+                revisions.filter_set_id,
+                details.source_name,
+                details.source_path_label,
+                details.targets_json
+            FROM standard_backup_job_revision_details AS details
+            INNER JOIN job_revisions AS revisions
+                ON revisions.job_id = details.job_id
+                AND revisions.id = details.job_revision_id
+            INNER JOIN job_heads AS heads
+                ON heads.job_id = details.job_id
+                AND heads.active_revision_id = details.job_revision_id
+            ORDER BY details.job_id
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+        return tuple(_job_summary_from_row(row) for row in rows)
+
     def _load_many(
         self,
         query: str,
@@ -214,6 +249,24 @@ def _job_from_row(row: sqlite3.Row | tuple[object, ...]) -> SealedStandardBackup
         source_path_label=str(row[7]),
         defaults=_deserialize_defaults(str(row[8])),
         targets=_deserialize_targets(str(row[9])),
+    )
+
+
+def _job_summary_from_row(row: sqlite3.Row | tuple[object, ...]) -> StandardBackupJobSummary:
+    return StandardBackupJobSummary(
+        job_id=str(row[0]),
+        job_revision_id=str(row[1]),
+        filter_set_id=str(row[2]),
+        source_name=str(row[3]),
+        source_path_label=str(row[4]),
+        targets=tuple(
+            StandardBackupTargetSummary(
+                name=target.name,
+                path_label=target.path_label,
+                independent_device_id=target.independent_device_id,
+            )
+            for target in _deserialize_targets(str(row[5]))
+        ),
     )
 
 

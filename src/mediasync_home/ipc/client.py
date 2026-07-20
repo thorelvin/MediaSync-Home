@@ -44,6 +44,20 @@ class InProcessIpcClient:
     def query_status(self) -> IpcResponse:
         return self.service.query_status(self.client_instance_id)
 
+    def query_backup_overview(
+        self,
+        *,
+        draft_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        return self.service.query_backup_overview(
+            self.client_instance_id,
+            draft_id=draft_id,
+            limit=limit,
+            offset=offset,
+        )
+
     def submit_command(
         self,
         command_name: str,

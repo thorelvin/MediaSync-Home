@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
+from mediasync_home.ipc.protocol import IpcResponse
 from mediasync_home.presentation.view_models.backup_setup import (
     ActivityState,
     AttentionState,
@@ -8,6 +9,7 @@ from mediasync_home.presentation.view_models.backup_setup import (
     BackupSetupStep,
     BackupTargetDraft,
     FreshnessState,
+    backup_overview_from_response,
     build_backup_job_status_state,
     build_standard_backup_setup_state,
     build_standard_backup_setup_state_from_job_draft,
@@ -123,3 +125,51 @@ def test_backup_job_status_keeps_activity_attention_and_freshness_separate() -> 
         "Aldri kontrollert",
     ]
     assert state.recommended_action == "Følg opp NAS etter aktiv kopiering."
+
+
+def test_backup_overview_view_model_renders_draft_and_first_job_summary() -> None:
+    response = IpcResponse.accepted(
+        {
+            "backup_overview": {
+                "read_model_available": True,
+                "has_more": False,
+                "draft": {
+                    "draft_id": "draft-a",
+                    "source_name": "Pictures",
+                    "source_path_label": "C:/Users/Ada/Pictures",
+                    "targets": [
+                        {
+                            "name": "USB 1",
+                            "path_label": "E:/Backup",
+                            "independent_device_id": "disk-a",
+                        }
+                    ],
+                },
+                "jobs": [
+                    {
+                        "job_id": "job-a",
+                        "title": "Pictures",
+                        "source_name": "Pictures",
+                        "source_path_label": "C:/Users/Ada/Pictures",
+                        "targets": [
+                            {
+                                "name": "USB 1",
+                                "path_label": "E:/Backup",
+                                "independent_device_id": "disk-a",
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+    )
+
+    state = backup_overview_from_response(response)
+
+    assert state.read_model_available is True
+    assert state.setup.source_label == "C:/Users/Ada/Pictures"
+    assert state.setup.target_label == "1 mål: USB 1"
+    assert state.setup.can_create is True
+    assert state.job_status.title == "Pictures"
+    assert state.job_status.configured_target_count == 1
+    assert state.job_status.target_statuses[0].freshness_label == "Ukjent"

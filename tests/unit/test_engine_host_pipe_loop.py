@@ -6,6 +6,8 @@ import pytest
 
 from mediasync_home.adapters.sqlite.connection_policy import SqliteStore
 from mediasync_home.adapters.sqlite.migrations import current_schema_version
+from mediasync_home.application.job_drafts import StandardBackupJobDraft
+from mediasync_home.application.runtime_status import startup_status
 from mediasync_home.composition.engine_host import (
     build_engine_host_runtime,
     build_parser,
@@ -15,7 +17,6 @@ from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
 from mediasync_home.ipc.protocol import IpcReason, IpcStatus
-from mediasync_home.application.runtime_status import startup_status
 
 
 EXPECTED_USER = "same-user"
@@ -100,6 +101,8 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.state_layout.recovery.is_file()
         assert runtime.catalog_connection is not None
         assert runtime.recovery_connection is not None
+        assert runtime.service.job_draft_store is not None
+        assert runtime.service.standard_backup_job_read_store is not None
         assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 17
         assert current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY) == 5
         assert runtime.startup_reconciliation is not None
@@ -115,6 +118,13 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
             client_instance_id="55555555-5555-4555-8555-555555555555",
         )
         assert ipc_client.connect().status is IpcStatus.ACCEPTED
+        runtime.service.job_draft_store.save_standard_backup_draft(
+            StandardBackupJobDraft.new("draft-a")
+            .with_source(name="Pictures", path_label="C:/Users/Ada/Pictures")
+            .with_added_target(name="USB 1", path_label="E:/Backup")
+        )
+
+        overview = ipc_client.query_backup_overview(draft_id="draft-a")
 
         response = ipc_client.submit_command(
             "UNKNOWN_MUTATION",
@@ -130,6 +140,9 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
             """,
             ("66666666-6666-4666-8666-666666666666",),
         ).fetchone()
+        assert overview.status is IpcStatus.ACCEPTED
+        assert overview.payload["backup_overview"]["read_model_available"] is True
+        assert overview.payload["backup_overview"]["draft"]["can_create"] is True
         assert response.status is IpcStatus.REJECTED
         assert response.reason is IpcReason.MUTATING_COMMANDS_DISABLED
         assert row == (

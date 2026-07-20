@@ -16,6 +16,33 @@ def test_ui_pipe_action_queries_status_after_handshake() -> None:
     assert client.calls == ("connect", "query_status")
 
 
+def test_ui_pipe_action_queries_backup_overview_after_handshake() -> None:
+    client = _FakeGuiIpcClient()
+    args = build_parser().parse_args(
+        [
+            "--pipe-name",
+            "pipe-a",
+            "--query-backup-overview",
+            "--draft-id",
+            "draft-a",
+            "--limit",
+            "5",
+            "--offset",
+            "10",
+        ]
+    )
+
+    response = _run_pipe_action(args, client)
+
+    assert response.payload == {"overview": "ok"}
+    assert client.calls == ("connect", "query_backup_overview")
+    assert client.overview_query == {
+        "draft_id": "draft-a",
+        "limit": 5,
+        "offset": 10,
+    }
+
+
 def test_ui_pipe_action_submits_command_after_handshake() -> None:
     client = _FakeGuiIpcClient()
     args = build_parser().parse_args(
@@ -89,6 +116,7 @@ class _FakeGuiIpcClient:
         self._handshake = handshake or IpcResponse.accepted({"handshake": "ok"})
         self.calls: tuple[str, ...] = ()
         self.submitted: dict[str, object] | None = None
+        self.overview_query: dict[str, object] | None = None
 
     def connect(self) -> IpcResponse:
         self.calls = (*self.calls, "connect")
@@ -97,6 +125,21 @@ class _FakeGuiIpcClient:
     def query_status(self) -> IpcResponse:
         self.calls = (*self.calls, "query_status")
         return IpcResponse.accepted({"status": "ready"})
+
+    def query_backup_overview(
+        self,
+        *,
+        draft_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        self.calls = (*self.calls, "query_backup_overview")
+        self.overview_query = {
+            "draft_id": draft_id,
+            "limit": limit,
+            "offset": offset,
+        }
+        return IpcResponse.accepted({"overview": "ok"})
 
     def submit_command(
         self,

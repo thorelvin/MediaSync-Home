@@ -141,6 +141,35 @@ def test_main_window_refreshes_through_engine_client(qapp) -> None:
         window.deleteLater()
 
 
+def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -> None:
+    provider = _FakeDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.refresh_engine_status()
+        source = window.findChild(QLabel, "setupSourceValue")
+        target = window.findChild(QLabel, "setupTargetValue")
+        create_backup = window.findChild(QPushButton, "createBackupButton")
+        activity_title = window.findChild(QLabel, "activityStatusTitle")
+
+        assert provider.calls == ["connect", "get_status", "get_backup_overview"]
+        assert source is not None
+        assert source.text() == "C:/Users/Ada/Pictures"
+        assert target is not None
+        assert target.text() == "1 mål: USB 1"
+        assert create_backup is not None
+        assert create_backup.isEnabled() is True
+        assert activity_title is not None
+        assert activity_title.text() == "Pictures"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_component_gallery_is_development_only(qapp) -> None:
     window = build_main_window(
         initial_state=_ready_state(),
@@ -175,4 +204,51 @@ class _FakeEngineClient:
         self.calls.append("get_status")
         return IpcResponse.accepted(
             {"host_status": startup_status(ProcessRole.ENGINE_HOST).to_dict()}
+        )
+
+
+class _FakeDashboardEngineClient(_FakeEngineClient):
+    def get_backup_overview(
+        self,
+        *,
+        draft_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        del draft_id, limit, offset
+        self.calls.append("get_backup_overview")
+        return IpcResponse.accepted(
+            {
+                "backup_overview": {
+                    "read_model_available": True,
+                    "has_more": False,
+                    "draft": {
+                        "draft_id": "draft-a",
+                        "source_name": "Pictures",
+                        "source_path_label": "C:/Users/Ada/Pictures",
+                        "targets": [
+                            {
+                                "name": "USB 1",
+                                "path_label": "E:/Backup",
+                                "independent_device_id": "disk-a",
+                            }
+                        ],
+                    },
+                    "jobs": [
+                        {
+                            "job_id": "job-a",
+                            "title": "Pictures",
+                            "source_name": "Pictures",
+                            "source_path_label": "C:/Users/Ada/Pictures",
+                            "targets": [
+                                {
+                                    "name": "USB 1",
+                                    "path_label": "E:/Backup",
+                                    "independent_device_id": "disk-a",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
         )
