@@ -152,6 +152,22 @@ class InProcessIpcClient:
             blocking_only=blocking_only,
         )
 
+    def query_cataloged_files(
+        self,
+        *,
+        run_id: str | None = None,
+        target_endpoint_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        return self.service.query_cataloged_files(
+            self.client_instance_id,
+            run_id=run_id,
+            target_endpoint_id=target_endpoint_id,
+            limit=limit,
+            offset=offset,
+        )
+
     def submit_command(
         self,
         command_name: str,

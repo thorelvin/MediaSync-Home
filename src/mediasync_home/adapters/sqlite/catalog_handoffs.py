@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from mediasync_home.application.catalog_read_models import CatalogedFileReadModel
 from mediasync_home.application.catalog_handoff import (
     FinalFileCatalogHandoff,
     FinalFileCatalogHandoffStore,
@@ -120,3 +121,76 @@ class SqliteFinalFileCatalogHandoffStore(FinalFileCatalogHandoffStore):
             fencing_token=int(row[9]),
             effect_kind=str(row[10]),
         )
+
+    def list_recent_cataloged_files(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        run_id: str | None = None,
+        target_endpoint_id: str | None = None,
+    ) -> tuple[CatalogedFileReadModel, ...]:
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        if offset < 0:
+            raise ValueError("offset must not be negative")
+
+        filters: list[str] = []
+        parameters: list[object] = []
+        if run_id is not None:
+            filters.append("run_id = ?")
+            parameters.append(run_id)
+        if target_endpoint_id is not None:
+            filters.append("target_endpoint_id = ?")
+            parameters.append(target_endpoint_id)
+        where_clause = "" if not filters else f"WHERE {' AND '.join(filters)}"
+        rows = self._connection.execute(
+            f"""
+            SELECT
+                handoff_id,
+                run_id,
+                run_target_id,
+                operation_id,
+                target_endpoint_id,
+                target_endpoint_revision_id,
+                final_relative_path,
+                content_hash,
+                lease_id,
+                fencing_token,
+                effect_kind,
+                recorded_utc
+            FROM final_file_catalog_handoffs
+            {where_clause}
+            ORDER BY recorded_utc DESC, handoff_id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (*parameters, limit, offset),
+        ).fetchall()
+        return tuple(_cataloged_file_from_row(row) for row in rows)
+
+
+def _cataloged_file_from_row(row: sqlite3.Row | tuple[object, ...]) -> CatalogedFileReadModel:
+    return CatalogedFileReadModel(
+        handoff_id=str(row[0]),
+        run_id=str(row[1]),
+        run_target_id=str(row[2]),
+        operation_id=str(row[3]),
+        target_endpoint_id=str(row[4]),
+        target_endpoint_revision_id=str(row[5]),
+        final_relative_path=str(row[6]),
+        content_hash=str(row[7]),
+        lease_id=str(row[8]),
+        fencing_token=_fencing_token_from_column(row[9]),
+        effect_kind=str(row[10]),
+        recorded_utc=str(row[11]),
+    )
+
+
+def _fencing_token_from_column(value: object) -> int:
+    if isinstance(value, bool):
+        raise ValueError("fencing_token must be an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        return int(value)
+    raise ValueError("fencing_token must be an integer")

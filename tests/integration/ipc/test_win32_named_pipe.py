@@ -185,6 +185,22 @@ def test_named_pipe_snapshot_issues_query_succeeds_after_handshake() -> None:
     assert page.payload["snapshot_issues"]["blocking_only"] is True
 
 
+def test_named_pipe_cataloged_files_query_succeeds_after_handshake() -> None:
+    server, client = _server_and_client()
+
+    handshake = _roundtrip(server, client.connect)
+    page = _roundtrip(
+        server,
+        lambda: client.query_cataloged_files(run_id="run-a", target_endpoint_id="target-a"),
+    )
+
+    assert handshake.status is IpcStatus.ACCEPTED
+    assert page.status is IpcStatus.ACCEPTED
+    assert page.payload["cataloged_files"]["read_model_available"] is False
+    assert page.payload["cataloged_files"]["run_id"] == "run-a"
+    assert page.payload["cataloged_files"]["target_endpoint_id"] == "target-a"
+
+
 @pytest.mark.parametrize(
     ("protocol_version", "schema_version", "reason"),
     [

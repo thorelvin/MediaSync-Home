@@ -82,6 +82,15 @@ class GuiIpcClient(Protocol):
         blocking_only: bool = False,
     ) -> IpcResponse: ...
 
+    def query_cataloged_files(
+        self,
+        *,
+        run_id: str | None = None,
+        target_endpoint_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse: ...
+
     def submit_command(
         self,
         command_name: str,
@@ -109,11 +118,14 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--query-snapshot-entries", action="store_true")
     mode.add_argument("--query-snapshot-coverage", action="store_true")
     mode.add_argument("--query-snapshot-issues", action="store_true")
+    mode.add_argument("--query-cataloged-files", action="store_true")
     mode.add_argument("--submit-command", metavar="NAME")
     parser.add_argument("--draft-id")
     parser.add_argument("--job-id")
     parser.add_argument("--plan-id")
     parser.add_argument("--snapshot-id")
+    parser.add_argument("--run-id")
+    parser.add_argument("--target-endpoint-id")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--offset", type=int)
     parser.add_argument("--after-json")
@@ -193,6 +205,7 @@ def _pipe_action_requested(args: argparse.Namespace) -> bool:
         or args.query_snapshot_entries
         or args.query_snapshot_coverage
         or args.query_snapshot_issues
+        or args.query_cataloged_files
         or args.submit_command is not None
     )
 
@@ -254,6 +267,13 @@ def _run_pipe_action(args: argparse.Namespace, client: GuiIpcClient) -> IpcRespo
             limit=args.limit,
             after=_parse_after_json(args.after_json),
             blocking_only=args.blocking_only,
+        )
+    if args.query_cataloged_files:
+        return client.query_cataloged_files(
+            run_id=args.run_id,
+            target_endpoint_id=args.target_endpoint_id,
+            limit=args.limit,
+            offset=args.offset,
         )
     if args.query_status:
         return client.query_status()

@@ -9,6 +9,10 @@ from mediasync_home.application.activity_read_models import (
     RunActivitySummary,
     RunTargetActivitySummary,
 )
+from mediasync_home.application.catalog_read_models import (
+    CatalogedFileReadModel,
+    CatalogedFileReadModelStore,
+)
 from mediasync_home.application.command_receipts import (
     CommandReceipt,
     CommandReceiptState,
@@ -510,6 +514,27 @@ class _InMemoryRunStore(RunStore, RunActivityReadModelStore):
         return recorded
 
 
+class _InMemoryCatalogedFileStore(CatalogedFileReadModelStore):
+    def __init__(self, files: tuple[CatalogedFileReadModel, ...]) -> None:
+        self._files = files
+
+    def list_recent_cataloged_files(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        run_id: str | None = None,
+        target_endpoint_id: str | None = None,
+    ) -> tuple[CatalogedFileReadModel, ...]:
+        files = tuple(
+            file
+            for file in self._files
+            if (run_id is None or file.run_id == run_id)
+            and (target_endpoint_id is None or file.target_endpoint_id == target_endpoint_id)
+        )
+        return files[offset : offset + limit]
+
+
 class _FixedRunIdFactory(RunIdFactory):
     def __init__(self) -> None:
         self.calls = 0
@@ -562,6 +587,28 @@ def _run_activity_summary(run: StartedRun) -> RunActivitySummary:
     )
 
 
+def _cataloged_file(
+    handoff_id: str,
+    *,
+    run_id: str = "run-a",
+    operation_id: str = "operation-a",
+) -> CatalogedFileReadModel:
+    return CatalogedFileReadModel(
+        handoff_id=handoff_id,
+        run_id=run_id,
+        run_target_id=f"{run_id}-target-0000",
+        operation_id=operation_id,
+        target_endpoint_id="target-a",
+        target_endpoint_revision_id="target-rev-a",
+        final_relative_path=f"Photos/{operation_id}.jpg",
+        content_hash="a" * 64,
+        lease_id="lease-a",
+        fencing_token=1,
+        effect_kind="COPY_NEW_FINAL_FILE",
+        recorded_utc="2026-07-20T12:00:00.000Z",
+    )
+
+
 def _started_run(run_id: str = "run-a", *, job_id: str = "job-a") -> StartedRun:
     return StartedRun(
         run_id=run_id,
@@ -605,6 +652,7 @@ def test_gui_client_handshake_and_status_query_succeed() -> None:
     snapshot_entries = gui_client.get_snapshot_entries(snapshot_id="snapshot-a")
     snapshot_coverage = gui_client.get_snapshot_coverage(snapshot_id="snapshot-a")
     snapshot_issues = gui_client.get_snapshot_issues(snapshot_id="snapshot-a")
+    cataloged_files = gui_client.get_cataloged_files()
 
     assert handshake.status is IpcStatus.ACCEPTED
     assert handshake.reason is None
@@ -629,6 +677,8 @@ def test_gui_client_handshake_and_status_query_succeed() -> None:
     assert snapshot_coverage.payload["snapshot_coverage"]["read_model_available"] is False
     assert snapshot_issues.status is IpcStatus.ACCEPTED
     assert snapshot_issues.payload["snapshot_issues"]["read_model_available"] is False
+    assert cataloged_files.status is IpcStatus.ACCEPTED
+    assert cataloged_files.payload["cataloged_files"]["read_model_available"] is False
 
 
 def test_backup_overview_query_requires_prior_handshake() -> None:
@@ -794,6 +844,48 @@ def test_activity_overview_query_returns_bounded_run_read_model() -> None:
     assert overview["has_more"] is True
     assert overview["runs"][0]["run_id"] == "run-b"
     assert overview["runs"][0]["targets"][0]["state"] == RunTargetState.PENDING.value
+
+
+def test_cataloged_files_query_requires_prior_handshake() -> None:
+    response = _client().query_cataloged_files()
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.HANDSHAKE_REQUIRED
+
+
+def test_cataloged_files_query_rejects_invalid_bounds() -> None:
+    ipc_client = _client()
+    ipc_client.connect()
+
+    response = ipc_client.query_cataloged_files(limit=0)
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.INVALID_FRAME
+
+
+def test_cataloged_files_query_returns_bounded_catalog_read_model() -> None:
+    store = _InMemoryCatalogedFileStore(
+        (
+            _cataloged_file("final-file:run-b:operation-c", run_id="run-b"),
+            _cataloged_file("final-file:run-a:operation-b", operation_id="operation-b"),
+            _cataloged_file("final-file:run-a:operation-a", operation_id="operation-a"),
+        )
+    )
+    service = _service()
+    service.cataloged_file_read_store = store
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.query_cataloged_files(run_id="run-a", limit=1, offset=0)
+
+    page = response.payload["cataloged_files"]
+    assert response.status is IpcStatus.ACCEPTED
+    assert page["read_model_available"] is True
+    assert page["has_more"] is True
+    assert page["run_id"] == "run-a"
+    assert page["target_endpoint_id"] is None
+    assert page["files"][0]["handoff_id"] == "final-file:run-a:operation-b"
+    assert page["files"][0]["final_relative_path"] == "Photos/operation-b.jpg"
 
 
 def test_plan_operations_query_requires_prior_handshake() -> None:

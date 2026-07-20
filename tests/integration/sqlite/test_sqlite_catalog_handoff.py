@@ -58,6 +58,79 @@ def test_sqlite_final_file_catalog_handoff_store_is_idempotent(
         connection.close()
 
 
+def test_sqlite_final_file_catalog_handoff_store_lists_recent_cataloged_files(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_catalog_connection(tmp_path)
+    try:
+        store = SqliteFinalFileCatalogHandoffStore(connection)
+        store.record_final_file_handoff(_handoff())
+        store.record_final_file_handoff(
+            replace(
+                _handoff(),
+                handoff_id="final-file:run-a:operation-b",
+                operation_id="operation-b",
+                final_relative_path="Photos/new.jpg",
+                content_hash="b" * 64,
+            )
+        )
+        store.record_final_file_handoff(
+            replace(
+                _handoff(),
+                handoff_id="final-file:run-b:operation-c",
+                run_id="run-b",
+                run_target_id="run-b-target-0000",
+                operation_id="operation-c",
+                target_endpoint_id="target-b",
+                target_endpoint_revision_id="target-rev-b",
+                final_relative_path="Videos/clip.mp4",
+                content_hash="c" * 64,
+            )
+        )
+        connection.execute(
+            """
+            UPDATE final_file_catalog_handoffs
+            SET recorded_utc = ?
+            WHERE handoff_id = ?
+            """,
+            ("2026-07-20T12:00:00.000Z", "final-file:run-a:operation-a"),
+        )
+        connection.execute(
+            """
+            UPDATE final_file_catalog_handoffs
+            SET recorded_utc = ?
+            WHERE handoff_id = ?
+            """,
+            ("2026-07-20T12:01:00.000Z", "final-file:run-a:operation-b"),
+        )
+        connection.execute(
+            """
+            UPDATE final_file_catalog_handoffs
+            SET recorded_utc = ?
+            WHERE handoff_id = ?
+            """,
+            ("2026-07-20T12:02:00.000Z", "final-file:run-b:operation-c"),
+        )
+        connection.commit()
+
+        page = store.list_recent_cataloged_files(limit=2, offset=0, run_id="run-a")
+        target_page = store.list_recent_cataloged_files(
+            limit=2,
+            offset=0,
+            target_endpoint_id="target-b",
+        )
+
+        assert [file.handoff_id for file in page] == [
+            "final-file:run-a:operation-b",
+            "final-file:run-a:operation-a",
+        ]
+        assert page[0].final_relative_path == "Photos/new.jpg"
+        assert page[0].recorded_utc == "2026-07-20T12:01:00.000Z"
+        assert [file.handoff_id for file in target_page] == ["final-file:run-b:operation-c"]
+    finally:
+        connection.close()
+
+
 def test_sqlite_catalog_handoff_records_catalog_then_recovery_phase(
     tmp_path: Path,
 ) -> None:

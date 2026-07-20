@@ -10,6 +10,11 @@ from mediasync_home.application.activity_read_models import (
     RunActivityReadModelStore,
     query_activity_overview,
 )
+from mediasync_home.application.catalog_read_models import (
+    CatalogedFileReadModelStore,
+    CatalogedFilesQueryError,
+    query_cataloged_files,
+)
 from mediasync_home.application.command_receipts import (
     CommandReceipt,
     CommandReceiptConflict,
@@ -104,6 +109,7 @@ class EngineHostIpcService:
     snapshot_entry_read_store: SnapshotEntryReadModelStore | None = None
     snapshot_coverage_read_store: SnapshotCoverageReadModelStore | None = None
     snapshot_issue_read_store: SnapshotIssueReadModelStore | None = None
+    cataloged_file_read_store: CatalogedFileReadModelStore | None = None
     standard_backup_job_id_factory: StandardBackupJobIdFactory | None = None
     plan_store: PlanStore | None = None
     run_store: RunStore | None = None
@@ -312,6 +318,29 @@ class EngineHostIpcService:
         except SnapshotIssuesQueryError:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         return IpcResponse.accepted({"snapshot_issues": page.to_dict()})
+
+    def query_cataloged_files(
+        self,
+        client_instance_id: str,
+        *,
+        run_id: str | None = None,
+        target_endpoint_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        if client_instance_id not in self._accepted_clients:
+            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        try:
+            page = query_cataloged_files(
+                cataloged_file_read_store=self.cataloged_file_read_store,
+                run_id=run_id,
+                target_endpoint_id=target_endpoint_id,
+                limit=limit,
+                offset=offset,
+            )
+        except CatalogedFilesQueryError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        return IpcResponse.accepted({"cataloged_files": page.to_dict()})
 
     def submit_command(self, client_instance_id: str, command_name: str) -> IpcResponse:
         del command_name

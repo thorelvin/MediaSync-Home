@@ -233,9 +233,13 @@ _EN_TO_NB.update(
             "Engine Host svarte uten statusinnhold."
         ),
         "Engine status is unavailable.": "Motorstatus er utilgjengelig.",
+        "Cataloged files": "Katalogf\u00f8rte filer",
+        "Catalog read model is not available.": "Katalogvisningen er ikke tilgjengelig.",
         "High": "Høy",
         "Blocking issue": "Blokkerende problem",
         "Coverage warning": "Dekningsadvarsel",
+        "No cataloged files.": "Ingen katalogf\u00f8rte filer.",
+        "No cataloged files to show.": "Ingen katalogf\u00f8rte filer \u00e5 vise.",
         "No sealed plan to show.": "Ingen forseglet plan å vise.",
         "No sealed plan endpoints to show.": "Ingen forseglede planendepunkter å vise.",
         "No endpoint rows.": "Ingen endepunkter.",
@@ -307,6 +311,9 @@ def _to_english(value: str) -> str:
     translated = _translate_snapshot_summary_to_english(value)
     if translated != value:
         return translated
+    translated = _translate_catalog_summary_to_english(value)
+    if translated != value:
+        return translated
     return value
 
 
@@ -326,6 +333,9 @@ def _to_norwegian(value: str) -> str:
     if translated != value:
         return translated
     translated = _translate_snapshot_summary_to_norwegian(value)
+    if translated != value:
+        return translated
+    translated = _translate_catalog_summary_to_norwegian(value)
     if translated != value:
         return translated
     translated = _translate_delimited(value, " · ", _to_norwegian)
@@ -523,3 +533,27 @@ def _translate_snapshot_summary_to_norwegian(value: str) -> str:
     warning_word = "dekningsadvarsel" if match.group("count") == "1" else "dekningsadvarsler"
     more = " Flere snapshoterader finnes." if match.group("more") else ""
     return f"{match.group('count')} {warning_word} i {match.group('snapshot')}.{more}"
+
+
+def _translate_catalog_summary_to_english(value: str) -> str:
+    match = re.fullmatch(
+        r"(?P<count>\d+) katalogført(?:e)? fil(?:er)?\.(?P<more> Flere katalogførte filer finnes\.)?",
+        value,
+    )
+    if match is None:
+        return value
+    file_word = "cataloged file" if match.group("count") == "1" else "cataloged files"
+    more = " More cataloged files exist." if match.group("more") else ""
+    return f"{match.group('count')} {file_word}.{more}"
+
+
+def _translate_catalog_summary_to_norwegian(value: str) -> str:
+    match = re.fullmatch(
+        r"(?P<count>\d+) cataloged file(?:s)?\.(?P<more> More cataloged files exist\.)?",
+        value,
+    )
+    if match is None:
+        return value
+    file_word = "katalogf\u00f8rt fil" if match.group("count") == "1" else "katalogf\u00f8rte filer"
+    more = " Flere katalogf\u00f8rte filer finnes." if match.group("more") else ""
+    return f"{match.group('count')} {file_word}.{more}"

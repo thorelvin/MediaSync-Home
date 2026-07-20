@@ -222,6 +222,8 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         plan_endpoint_rows = window.findChildren(QLabel, "planEndpointRow")
         snapshot_health_summary = window.findChild(QLabel, "snapshotHealthSummary")
         snapshot_health_rows = window.findChildren(QLabel, "snapshotHealthRow")
+        cataloged_files_summary = window.findChild(QLabel, "catalogedFilesSummary")
+        cataloged_files_rows = window.findChildren(QLabel, "catalogedFilesRow")
         language = window.findChild(QToolButton, "languageSelectorButton")
 
         assert provider.calls == [
@@ -234,6 +236,7 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
             "get_plan_endpoints",
             "get_snapshot_issues",
             "get_snapshot_coverage",
+            "get_cataloged_files",
         ]
         assert source is not None
         assert source.text() == "C:/Users/Ada/Pictures"
@@ -264,6 +267,11 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert snapshot_health_summary.text() == "1 blokkerende problem i source-snapshot-a."
         assert snapshot_health_rows[0].text() == "Blokkerende problem: Archive · UNREADABLE_DIRECTORY"
         assert snapshot_health_rows[1].text() == "Dekningsadvarsel: Videos · VOLATILE"
+        assert cataloged_files_summary is not None
+        assert cataloged_files_summary.text() == (
+            "1 katalogf\u00f8rt fil. Flere katalogf\u00f8rte filer finnes."
+        )
+        assert cataloged_files_rows[0].text() == "Photos/2026/a.jpg · target-a · sha abcdef01"
         assert activity_title is not None
         assert activity_title.text() == "Siste kjøring: run-a"
         assert activity_rows[0].text() == "Aktivitet: Kontrollerer"
@@ -285,6 +293,10 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert snapshot_health_summary.text() == "1 blocking issue in source-snapshot-a."
         assert snapshot_health_rows[0].text() == "Blocking issue: Archive · UNREADABLE_DIRECTORY"
         assert snapshot_health_rows[1].text() == "Coverage warning: Videos · VOLATILE"
+        assert cataloged_files_summary.text() == (
+            "1 cataloged file. More cataloged files exist."
+        )
+        assert cataloged_files_rows[0].text() == "Photos/2026/a.jpg · target-a · sha abcdef01"
         assert activity_title.text() == "Latest run: run-a"
         assert activity_rows[0].text() == "Activity: Checking"
         assert activity_rows[1].text() == "Attention: Waiting"
@@ -624,6 +636,46 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                             "case_mode_evidence": "probe-ok",
                             "case_context_hash": "a" * 64,
                             "case_probe_error": None,
+                        }
+                    ],
+                }
+            }
+        )
+
+    def get_cataloged_files(
+        self,
+        *,
+        run_id: str | None = None,
+        target_endpoint_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        del run_id, target_endpoint_id, offset
+        self.calls.append("get_cataloged_files")
+        assert limit == 3
+        return IpcResponse.accepted(
+            {
+                "cataloged_files": {
+                    "limit": 3,
+                    "offset": 0,
+                    "has_more": True,
+                    "read_model_available": True,
+                    "run_id": None,
+                    "target_endpoint_id": None,
+                    "files": [
+                        {
+                            "handoff_id": "final-file:run-a:operation-a",
+                            "run_id": "run-a",
+                            "run_target_id": "run-a-target-0000",
+                            "operation_id": "operation-a",
+                            "target_endpoint_id": "target-a",
+                            "target_endpoint_revision_id": "target-rev-a",
+                            "final_relative_path": "Photos/2026/a.jpg",
+                            "content_hash": "abcdef0123456789" * 4,
+                            "lease_id": "lease-a",
+                            "fencing_token": 1,
+                            "effect_kind": "COPY_NEW_FINAL_FILE",
+                            "recorded_utc": "2026-07-20T12:00:00.000Z",
                         }
                     ],
                 }

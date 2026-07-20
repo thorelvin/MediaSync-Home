@@ -37,6 +37,11 @@ from mediasync_home.presentation.view_models.backup_setup import (
     empty_backup_job_detail_state,
     empty_backup_job_status_state,
 )
+from mediasync_home.presentation.view_models.catalog_preview import (
+    CatalogedFilesPreviewState,
+    cataloged_files_preview_from_response,
+    empty_cataloged_files_preview_state,
+)
 from mediasync_home.presentation.view_models.engine_status import (
     EngineStatusProvider,
     EngineStatusViewState,
@@ -141,6 +146,17 @@ class SnapshotHealthProvider(Protocol):
     ) -> IpcResponse: ...
 
 
+class CatalogedFilesProvider(Protocol):
+    def get_cataloged_files(
+        self,
+        *,
+        run_id: str | None = None,
+        target_endpoint_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse: ...
+
+
 class MediaSyncWindow(QMainWindow):
     def __init__(
         self,
@@ -159,6 +175,7 @@ class MediaSyncWindow(QMainWindow):
         self._plan_preview_state = empty_plan_operation_preview_state()
         self._plan_endpoint_preview_state = empty_plan_endpoint_preview_state()
         self._snapshot_health_preview_state = empty_snapshot_health_preview_state()
+        self._cataloged_files_preview_state = empty_cataloged_files_preview_state()
         self._engine_status_state = initial_state
         self._subtitle_label: QLabel | None = None
         self._navigation_items: list[QListWidgetItem] = []
@@ -203,6 +220,9 @@ class MediaSyncWindow(QMainWindow):
         self._snapshot_health_title: QLabel | None = None
         self._snapshot_health_summary: QLabel | None = None
         self._snapshot_health_rows: list[QLabel] = []
+        self._cataloged_files_title: QLabel | None = None
+        self._cataloged_files_summary: QLabel | None = None
+        self._cataloged_files_rows: list[QLabel] = []
         self._language_options = (
             ("nb", "Norsk"),
             ("en", "English"),
@@ -277,6 +297,7 @@ class MediaSyncWindow(QMainWindow):
         self.apply_engine_status(engine_status_from_response(self._engine_client.get_status()))
         self._refresh_backup_overview()
         self._refresh_activity_overview()
+        self._refresh_cataloged_files_preview()
 
     def apply_engine_status(self, state: EngineStatusViewState) -> None:
         self._engine_status_state = state
@@ -310,6 +331,10 @@ class MediaSyncWindow(QMainWindow):
     def apply_snapshot_health_preview(self, state: SnapshotHealthPreviewState) -> None:
         self._snapshot_health_preview_state = state
         self._apply_snapshot_health_preview_state(state)
+
+    def apply_cataloged_files_preview(self, state: CatalogedFilesPreviewState) -> None:
+        self._cataloged_files_preview_state = state
+        self._apply_cataloged_files_preview_state(state)
 
     def _refresh_backup_overview(self) -> None:
         if self._engine_client is None or not hasattr(self._engine_client, "get_backup_overview"):
@@ -389,6 +414,15 @@ class MediaSyncWindow(QMainWindow):
                     coverage_states=SNAPSHOT_HEALTH_COVERAGE_STATES,
                 ),
             )
+        )
+
+    def _refresh_cataloged_files_preview(self) -> None:
+        if self._engine_client is None or not hasattr(self._engine_client, "get_cataloged_files"):
+            self.apply_cataloged_files_preview(empty_cataloged_files_preview_state())
+            return
+        provider = cast(CatalogedFilesProvider, self._engine_client)
+        self.apply_cataloged_files_preview(
+            cataloged_files_preview_from_response(provider.get_cataloged_files(limit=3))
         )
 
     def _apply_backup_setup_state(self, state: StandardBackupSetupViewState) -> None:
@@ -495,6 +529,22 @@ class MediaSyncWindow(QMainWindow):
             "No snapshot health rows.",
         )
         for index, row in enumerate(self._snapshot_health_rows):
+            if index < len(lines):
+                row.setText(self._display(lines[index]))
+                row.setVisible(True)
+            else:
+                row.setText("")
+                row.setVisible(False)
+
+    def _apply_cataloged_files_preview_state(self, state: CatalogedFilesPreviewState) -> None:
+        if self._cataloged_files_title is not None:
+            self._cataloged_files_title.setText(self._display(state.title))
+        if self._cataloged_files_summary is not None:
+            self._cataloged_files_summary.setText(self._display(state.summary_label))
+        lines = tuple(row.display_line for row in state.rows) or (
+            "No cataloged files.",
+        )
+        for index, row in enumerate(self._cataloged_files_rows):
             if index < len(lines):
                 row.setText(self._display(lines[index]))
                 row.setVisible(True)
@@ -774,6 +824,8 @@ class MediaSyncWindow(QMainWindow):
         self._add_plan_endpoint_preview(layout, self._plan_endpoint_preview_state)
         layout.addSpacing(8)
         self._add_snapshot_health_preview(layout, self._snapshot_health_preview_state)
+        layout.addSpacing(8)
+        self._add_cataloged_files_preview(layout, self._cataloged_files_preview_state)
         if self._show_component_gallery:
             layout.addWidget(self._build_component_gallery())
         layout.addStretch(1)
@@ -880,6 +932,32 @@ class MediaSyncWindow(QMainWindow):
             self._snapshot_health_rows.append(row)
             layout.addWidget(row)
 
+    def _add_cataloged_files_preview(
+        self,
+        layout: QVBoxLayout,
+        state: CatalogedFilesPreviewState,
+    ) -> None:
+        title = QLabel(self._display(state.title))
+        title.setObjectName("catalogedFilesTitle")
+        self._cataloged_files_title = title
+        summary = QLabel(self._display(state.summary_label))
+        summary.setObjectName("catalogedFilesSummary")
+        summary.setWordWrap(True)
+        self._cataloged_files_summary = summary
+        layout.addWidget(title)
+        layout.addWidget(summary)
+        self._cataloged_files_rows = []
+        lines = tuple(row.display_line for row in state.rows) or (
+            "No cataloged files.",
+        )
+        for index in range(3):
+            row = QLabel(self._display(lines[index]) if index < len(lines) else "")
+            row.setObjectName("catalogedFilesRow")
+            row.setWordWrap(True)
+            row.setVisible(index < len(lines))
+            self._cataloged_files_rows.append(row)
+            layout.addWidget(row)
+
     def _build_component_gallery(self) -> QFrame:
         gallery = QFrame()
         gallery.setObjectName("componentGallery")
@@ -975,6 +1053,7 @@ class MediaSyncWindow(QMainWindow):
         self._apply_plan_operation_preview_state(self._plan_preview_state)
         self._apply_plan_endpoint_preview_state(self._plan_endpoint_preview_state)
         self._apply_snapshot_health_preview_state(self._snapshot_health_preview_state)
+        self._apply_cataloged_files_preview_state(self._cataloged_files_preview_state)
 
 
 def _add_key_value(layout: QGridLayout, row: int, label_text: str, value: QLabel) -> QLabel:

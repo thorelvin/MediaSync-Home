@@ -80,6 +80,16 @@ class StatusIpcClient(Protocol):
     ) -> IpcResponse:
         pass
 
+    def query_cataloged_files(
+        self,
+        *,
+        run_id: str | None = None,
+        target_endpoint_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        pass
+
 
 class EngineClient:
     def __init__(self, ipc_client: StatusIpcClient) -> None:
@@ -187,4 +197,19 @@ class EngineClient:
             limit=limit,
             after=after,
             blocking_only=blocking_only,
+        )
+
+    def get_cataloged_files(
+        self,
+        *,
+        run_id: str | None = None,
+        target_endpoint_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        return self._ipc_client.query_cataloged_files(
+            run_id=run_id,
+            target_endpoint_id=target_endpoint_id,
+            limit=limit,
+            offset=offset,
         )

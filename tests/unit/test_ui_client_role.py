@@ -276,6 +276,36 @@ def test_ui_pipe_action_queries_snapshot_issues_after_handshake() -> None:
     }
 
 
+def test_ui_pipe_action_queries_cataloged_files_after_handshake() -> None:
+    client = _FakeGuiIpcClient()
+    args = build_parser().parse_args(
+        [
+            "--pipe-name",
+            "pipe-a",
+            "--query-cataloged-files",
+            "--run-id",
+            "run-a",
+            "--target-endpoint-id",
+            "target-a",
+            "--limit",
+            "5",
+            "--offset",
+            "10",
+        ]
+    )
+
+    response = _run_pipe_action(args, client)
+
+    assert response.payload == {"cataloged_files": "ok"}
+    assert client.calls == ("connect", "query_cataloged_files")
+    assert client.cataloged_files_query == {
+        "run_id": "run-a",
+        "target_endpoint_id": "target-a",
+        "limit": 5,
+        "offset": 10,
+    }
+
+
 def test_ui_pipe_action_submits_command_after_handshake() -> None:
     client = _FakeGuiIpcClient()
     args = build_parser().parse_args(
@@ -516,6 +546,7 @@ class _FakeGuiIpcClient:
         self.snapshot_entries_query: dict[str, object] | None = None
         self.snapshot_coverage_query: dict[str, object] | None = None
         self.snapshot_issues_query: dict[str, object] | None = None
+        self.cataloged_files_query: dict[str, object] | None = None
 
     def connect(self) -> IpcResponse:
         self.calls = (*self.calls, "connect")
@@ -638,6 +669,23 @@ class _FakeGuiIpcClient:
             "blocking_only": blocking_only,
         }
         return IpcResponse.accepted({"snapshot_issues": "ok"})
+
+    def query_cataloged_files(
+        self,
+        *,
+        run_id: str | None = None,
+        target_endpoint_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        self.calls = (*self.calls, "query_cataloged_files")
+        self.cataloged_files_query = {
+            "run_id": run_id,
+            "target_endpoint_id": target_endpoint_id,
+            "limit": limit,
+            "offset": offset,
+        }
+        return IpcResponse.accepted({"cataloged_files": "ok"})
 
     def submit_command(
         self,

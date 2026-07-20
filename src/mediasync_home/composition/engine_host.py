@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol
 
 from mediasync_home.adapters.runtime_policy import current_process_runtime_policy
+from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
 from mediasync_home.adapters.sqlite.command_receipts import SqliteCommandReceiptStore
 from mediasync_home.adapters.sqlite.connection_policy import (
     StateStoreLayout,
@@ -236,6 +237,7 @@ def build_engine_host_runtime(
         snapshots = SqliteSnapshotEntryStore(catalog_connection)
         plans = SqlitePlanStore(catalog_connection)
         runs = SqliteRunStore(catalog_connection)
+        catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
         startup_reconciliation = reconcile_engine_host_after_startup(
             EngineHostStartupReconciliationRequest(
                 reconciler_instance_id=reconciler_instance_id,
@@ -259,6 +261,7 @@ def build_engine_host_runtime(
             plan_endpoint_read_store=plans,
             run_store=runs,
             run_activity_read_store=runs,
+            cataloged_file_read_store=catalog_handoffs,
             command_receipt_store=command_receipts,
             outbox_store=outbox,
         )

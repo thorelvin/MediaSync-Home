@@ -450,6 +450,14 @@ class Win32NamedPipeServer:
                 after=_optional_query_object(request.get("after")),
                 blocking_only=_optional_query_bool(request.get("blocking_only")),
             )
+        if message_type == "QUERY_CATALOGED_FILES":
+            return self.service.query_cataloged_files(
+                str(request["client_instance_id"]),
+                run_id=_optional_query_str(request.get("run_id")),
+                target_endpoint_id=_optional_query_str(request.get("target_endpoint_id")),
+                limit=_optional_query_int(request.get("limit")),
+                offset=_optional_query_int(request.get("offset")),
+            )
         if message_type == "COMMAND":
             return self.service.submit_command_envelope(request)
         return IpcResponse.rejected(IpcReason.INVALID_FRAME)
@@ -630,6 +638,28 @@ class Win32NamedPipeClient:
             request["after"] = after
         if blocking_only:
             request["blocking_only"] = True
+        return self._roundtrip(request)
+
+    def query_cataloged_files(
+        self,
+        *,
+        run_id: str | None = None,
+        target_endpoint_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        request: dict[str, Any] = {
+            "message_type": "QUERY_CATALOGED_FILES",
+            "client_instance_id": self.client_instance_id,
+        }
+        if run_id is not None:
+            request["run_id"] = run_id
+        if target_endpoint_id is not None:
+            request["target_endpoint_id"] = target_endpoint_id
+        if limit is not None:
+            request["limit"] = limit
+        if offset is not None:
+            request["offset"] = offset
         return self._roundtrip(request)
 
     def submit_command(
