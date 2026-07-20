@@ -57,6 +57,8 @@ def test_main_window_displays_engine_status(qapp) -> None:
         setup_panel = window.findChild(QWidget, "standardBackupPanel")
         setup_steps = window.findChildren(QLabel, "setupStepLabel")
         create_backup = window.findChild(QPushButton, "createBackupButton")
+        detail_panel = window.findChild(QWidget, "backupJobDetailPanel")
+        detail_title = window.findChild(QLabel, "jobDetailTitle")
 
         assert nav is not None
         assert nav.count() == 4
@@ -94,6 +96,9 @@ def test_main_window_displays_engine_status(qapp) -> None:
         assert create_backup is not None
         assert create_backup.text() == "Fortsett"
         assert create_backup.isEnabled() is False
+        assert detail_panel is not None
+        assert detail_title is not None
+        assert detail_title.text() == "Ingen lagret backupjobb"
     finally:
         window.close()
         window.deleteLater()
@@ -156,14 +161,37 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         create_backup = window.findChild(QPushButton, "createBackupButton")
         activity_title = window.findChild(QLabel, "activityStatusTitle")
         activity_rows = window.findChildren(QLabel, "activityDimensionLabel")
+        job_detail_title = window.findChild(QLabel, "jobDetailTitle")
+        job_detail_source = window.findChild(QLabel, "jobDetailSourceValue")
+        job_detail_targets = window.findChild(QLabel, "jobDetailTargetsValue")
+        job_detail_defaults = window.findChild(QLabel, "jobDetailDefaultsValue")
+        job_detail_revision = window.findChild(QLabel, "jobDetailRevisionValue")
+        job_detail_rows = window.findChildren(QLabel, "jobDetailTargetRow")
 
-        assert provider.calls == ["connect", "get_status", "get_backup_overview", "get_activity_overview"]
+        assert provider.calls == [
+            "connect",
+            "get_status",
+            "get_backup_overview",
+            "get_backup_job_detail",
+            "get_activity_overview",
+        ]
         assert source is not None
         assert source.text() == "C:/Users/Ada/Pictures"
         assert target is not None
         assert target.text() == "1 mål: USB 1"
         assert create_backup is not None
         assert create_backup.isEnabled() is True
+        assert job_detail_title is not None
+        assert job_detail_title.text() == "Pictures"
+        assert job_detail_source is not None
+        assert job_detail_source.text() == "C:/Users/Ada/Pictures"
+        assert job_detail_targets is not None
+        assert job_detail_targets.text() == "1 mål / 1 uavhengig enhet"
+        assert job_detail_defaults is not None
+        assert job_detail_defaults.text() == "Oppdater backup - Alle brukerfiler - Standard kontroll"
+        assert job_detail_revision is not None
+        assert job_detail_revision.text() == "Revisjon: job-rev-a - Filter: filter-a"
+        assert job_detail_rows[0].text() == "USB 1: E:/Backup"
         assert activity_title is not None
         assert activity_title.text() == "Siste kjøring: run-a"
         assert activity_rows[0].text() == "Aktivitet: Kontrollerer"
@@ -252,6 +280,43 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                             ],
                         }
                     ],
+                }
+            }
+        )
+
+    def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        self.calls.append("get_backup_job_detail")
+        return IpcResponse.accepted(
+            {
+                "backup_job_detail": {
+                    "job_id": job_id,
+                    "read_model_available": True,
+                    "found": True,
+                    "job": {
+                        "job_id": "job-a",
+                        "job_revision_id": "job-rev-a",
+                        "filter_set_id": "filter-a",
+                        "title": "Pictures",
+                        "source_name": "Pictures",
+                        "source_path_label": "C:/Users/Ada/Pictures",
+                        "configured_target_count": 1,
+                        "independent_device_count": 1,
+                        "defaults": {
+                            "behavior": "UPDATE_BACKUP",
+                            "file_selection": "ALL_USER_FILES",
+                            "verification": "STANDARD",
+                            "retention": "THIRTY_DAYS",
+                            "extra_files": "KEEP_ON_TARGET",
+                            "performance": "AUTO",
+                        },
+                        "targets": [
+                            {
+                                "name": "USB 1",
+                                "path_label": "E:/Backup",
+                                "independent_device_id": "disk-a",
+                            }
+                        ],
+                    },
                 }
             }
         )

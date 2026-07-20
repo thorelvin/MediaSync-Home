@@ -92,6 +92,7 @@ QWidget#workspace {{
 
 QFrame#engineStatusPanel,
 QFrame#standardBackupPanel,
+QFrame#backupJobDetailPanel,
 QFrame#componentGallery {{
     background: {tokens.panel};
     border: {tokens.border_hairline}px solid {tokens.border};
@@ -122,7 +123,15 @@ QLabel#activityStatusTitle {{
     font-weight: 600;
 }}
 
+QLabel#jobDetailTitle {{
+    font-weight: 600;
+}}
+
 QLabel#activityDimensionLabel {{
+    color: {tokens.text_muted};
+}}
+
+QLabel#jobDetailTargetRow {{
     color: {tokens.text_muted};
 }}
 

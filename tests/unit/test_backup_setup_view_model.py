@@ -10,6 +10,7 @@ from mediasync_home.presentation.view_models.backup_setup import (
     BackupTargetDraft,
     FreshnessState,
     activity_overview_from_response,
+    backup_job_detail_from_response,
     backup_overview_from_response,
     build_backup_job_status_state,
     build_standard_backup_setup_state,
@@ -174,6 +175,96 @@ def test_backup_overview_view_model_renders_draft_and_first_job_summary() -> Non
     assert state.job_status.title == "Pictures"
     assert state.job_status.configured_target_count == 1
     assert state.job_status.target_statuses[0].freshness_label == "Ukjent"
+    assert state.selected_job_id == "job-a"
+
+
+def test_backup_job_detail_view_model_renders_exact_job_revision() -> None:
+    response = IpcResponse.accepted(
+        {
+            "backup_job_detail": {
+                "job_id": "job-a",
+                "read_model_available": True,
+                "found": True,
+                "job": {
+                    "job_id": "job-a",
+                    "job_revision_id": "job-rev-a",
+                    "filter_set_id": "filter-a",
+                    "title": "Pictures",
+                    "source_name": "Pictures",
+                    "source_path_label": "C:/Users/Ada/Pictures",
+                    "configured_target_count": 1,
+                    "independent_device_count": 1,
+                    "defaults": {
+                        "behavior": "UPDATE_BACKUP",
+                        "file_selection": "ALL_USER_FILES",
+                        "verification": "STANDARD",
+                        "retention": "THIRTY_DAYS",
+                        "extra_files": "KEEP_ON_TARGET",
+                        "performance": "AUTO",
+                    },
+                    "targets": [
+                        {
+                            "name": "USB 1",
+                            "path_label": "E:/Backup",
+                            "independent_device_id": "disk-a",
+                        }
+                    ],
+                },
+            }
+        }
+    )
+
+    state = backup_job_detail_from_response(response)
+
+    assert state.read_model_available is True
+    assert state.found is True
+    assert state.job_id == "job-a"
+    assert state.title == "Pictures"
+    assert state.source_label == "C:/Users/Ada/Pictures"
+    assert state.revision_label == "Revisjon: job-rev-a - Filter: filter-a"
+    assert state.target_summary_label == "1 mål / 1 uavhengig enhet"
+    assert state.defaults_summary_label == "Oppdater backup - Alle brukerfiler - Standard kontroll"
+    assert state.target_lines == ("USB 1: E:/Backup",)
+
+
+def test_backup_job_detail_view_model_handles_missing_read_model() -> None:
+    response = IpcResponse.accepted(
+        {
+            "backup_job_detail": {
+                "job_id": "job-a",
+                "read_model_available": False,
+                "found": False,
+                "job": None,
+            }
+        }
+    )
+
+    state = backup_job_detail_from_response(response)
+
+    assert state.read_model_available is False
+    assert state.found is False
+    assert state.title == "Ingen lagret backupjobb"
+
+
+def test_backup_job_detail_view_model_handles_not_found_job() -> None:
+    response = IpcResponse.accepted(
+        {
+            "backup_job_detail": {
+                "job_id": "job-missing",
+                "read_model_available": True,
+                "found": False,
+                "job": None,
+            }
+        }
+    )
+
+    state = backup_job_detail_from_response(response)
+
+    assert state.read_model_available is True
+    assert state.found is False
+    assert state.job_id == "job-missing"
+    assert state.title == "Jobben finnes ikke"
+    assert state.revision_label == "Jobb: job-missing"
 
 
 def test_activity_overview_view_model_renders_latest_run_status() -> None:

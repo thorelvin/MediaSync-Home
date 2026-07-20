@@ -122,11 +122,32 @@ class BackupJobStatusViewState:
 
 
 @dataclass(frozen=True)
+class BackupJobDetailTargetViewState:
+    name: str
+    path_label: str
+    independent_device_id: str | None = None
+
+
+@dataclass(frozen=True)
+class BackupJobDetailViewState:
+    job_id: str | None
+    title: str
+    source_label: str
+    revision_label: str
+    target_summary_label: str
+    defaults_summary_label: str
+    target_lines: tuple[str, ...]
+    read_model_available: bool
+    found: bool
+
+
+@dataclass(frozen=True)
 class BackupOverviewViewState:
     setup: StandardBackupSetupViewState
     job_status: BackupJobStatusViewState
     read_model_available: bool
     has_more_jobs: bool
+    selected_job_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -265,6 +286,20 @@ def empty_backup_overview_state() -> BackupOverviewViewState:
     )
 
 
+def empty_backup_job_detail_state() -> BackupJobDetailViewState:
+    return BackupJobDetailViewState(
+        job_id=None,
+        title="Ingen lagret backupjobb",
+        source_label="Opprett eller velg en backupjobb.",
+        revision_label="Ingen aktiv revisjon",
+        target_summary_label="Ingen mål konfigurert",
+        defaults_summary_label="Standardvalg ikke lastet",
+        target_lines=(),
+        read_model_available=False,
+        found=False,
+    )
+
+
 def backup_overview_from_response(response: IpcResponse | None) -> BackupOverviewViewState:
     if response is None or response.status is IpcStatus.REJECTED:
         return empty_backup_overview_state()
@@ -275,6 +310,7 @@ def backup_overview_from_response(response: IpcResponse | None) -> BackupOvervie
     draft = _setup_draft_from_payload(overview.get("draft"))
     jobs = overview.get("jobs")
     job_payloads = tuple(item for item in jobs if isinstance(item, dict)) if isinstance(jobs, list) else ()
+    selected_job_id = _required_text(job_payloads[0].get("job_id")) if job_payloads else None
     return BackupOverviewViewState(
         setup=build_standard_backup_setup_state(
             draft or BackupSetupDraft.empty(),
@@ -283,7 +319,36 @@ def backup_overview_from_response(response: IpcResponse | None) -> BackupOvervie
         job_status=_job_status_from_payload(job_payloads[0]) if job_payloads else empty_backup_job_status_state(),
         read_model_available=bool(overview.get("read_model_available", False)),
         has_more_jobs=bool(overview.get("has_more", False)),
+        selected_job_id=selected_job_id,
     )
+
+
+def backup_job_detail_from_response(response: IpcResponse | None) -> BackupJobDetailViewState:
+    if response is None or response.status is IpcStatus.REJECTED:
+        return empty_backup_job_detail_state()
+    detail = response.payload.get("backup_job_detail")
+    if not isinstance(detail, dict):
+        return empty_backup_job_detail_state()
+
+    job_id = _required_text(detail.get("job_id"))
+    read_model_available = bool(detail.get("read_model_available", False))
+    found = bool(detail.get("found", False))
+    job = detail.get("job")
+    if not read_model_available:
+        return empty_backup_job_detail_state()
+    if not found or not isinstance(job, dict):
+        return BackupJobDetailViewState(
+            job_id=job_id,
+            title="Jobben finnes ikke",
+            source_label="Ingen aktiv jobbrevisjon funnet.",
+            revision_label=f"Jobb: {job_id or 'ukjent'}",
+            target_summary_label="Ingen mål konfigurert",
+            defaults_summary_label="Standardvalg ikke lastet",
+            target_lines=(),
+            read_model_available=True,
+            found=False,
+        )
+    return _job_detail_from_payload(job, job_id=job_id)
 
 
 def activity_overview_from_response(response: IpcResponse | None) -> ActivityOverviewViewState:
@@ -448,6 +513,99 @@ def _job_status_from_payload(payload: dict[object, object]) -> BackupJobStatusVi
         target_statuses=tuple(targets),
         recommended_action="Kontroller backupen nÃ¥r analysefunksjonen er tilgjengelig.",
     )
+
+
+def _job_detail_from_payload(payload: dict[object, object], *, job_id: str | None) -> BackupJobDetailViewState:
+    targets = _target_details_from_payload(payload.get("targets"))
+    configured_target_count = _non_negative_int(payload.get("configured_target_count")) or len(targets)
+    independent_device_count = _non_negative_int(payload.get("independent_device_count"))
+    if independent_device_count is None:
+        independent_device_count = len(
+            {target.independent_device_id for target in targets if target.independent_device_id}
+        )
+    job_revision_id = _required_text(payload.get("job_revision_id"))
+    filter_set_id = _required_text(payload.get("filter_set_id"))
+    return BackupJobDetailViewState(
+        job_id=_required_text(payload.get("job_id")) or job_id,
+        title=(
+            _required_text(payload.get("title"))
+            or _required_text(payload.get("source_name"))
+            or "Backupjobb"
+        ),
+        source_label=(
+            _required_text(payload.get("source_path_label"))
+            or _required_text(payload.get("source_name"))
+            or "Kilde mangler"
+        ),
+        revision_label=_revision_label(job_revision_id, filter_set_id),
+        target_summary_label=(
+            f"{_count_label(configured_target_count, 'mål', 'mål')} / "
+            f"{_count_label(independent_device_count, 'uavhengig enhet', 'uavhengige enheter')}"
+        ),
+        defaults_summary_label=_defaults_summary_from_payload(payload.get("defaults")),
+        target_lines=tuple(f"{target.name}: {target.path_label}" for target in targets),
+        read_model_available=True,
+        found=True,
+    )
+
+
+def _target_details_from_payload(payload: object) -> tuple[BackupJobDetailTargetViewState, ...]:
+    if not isinstance(payload, list):
+        return ()
+    targets: list[BackupJobDetailTargetViewState] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        name = _required_text(item.get("name"))
+        path_label = _required_text(item.get("path_label"))
+        if name is None or path_label is None:
+            continue
+        targets.append(
+            BackupJobDetailTargetViewState(
+                name=name,
+                path_label=path_label,
+                independent_device_id=_optional_text(item.get("independent_device_id")),
+            )
+        )
+    return tuple(targets)
+
+
+def _revision_label(job_revision_id: str | None, filter_set_id: str | None) -> str:
+    if job_revision_id and filter_set_id:
+        return f"Revisjon: {job_revision_id} - Filter: {filter_set_id}"
+    if job_revision_id:
+        return f"Revisjon: {job_revision_id}"
+    return "Ingen aktiv revisjon"
+
+
+def _count_label(count: int, singular: str, plural: str) -> str:
+    return f"{count} {singular if count == 1 else plural}"
+
+
+def _defaults_summary_from_payload(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return "Standardvalg ikke lastet"
+    labels = (
+        _enum_label(payload.get("behavior"), {"UPDATE_BACKUP": "Oppdater backup"}),
+        _enum_label(payload.get("file_selection"), {"ALL_USER_FILES": "Alle brukerfiler"}),
+        _enum_label(payload.get("verification"), {"STANDARD": "Standard kontroll"}),
+    )
+    return " - ".join(label for label in labels if label)
+
+
+def _enum_label(value: object, labels: dict[str, str]) -> str | None:
+    text = _required_text(value)
+    if text is None:
+        return None
+    return labels.get(text, text)
+
+
+def _non_negative_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
 
 
 def _activity_status_from_run_payload(payload: dict[object, object]) -> BackupJobStatusViewState:

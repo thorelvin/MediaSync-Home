@@ -1,6 +1,6 @@
 # 0B GUI shell evidence artifacts
 
-Generated on 2026-07-17 for branch `spike/0b-repository-contracts-preflight`.
+Generated on 2026-07-20 for branch `spike/0b-repository-contracts-preflight`.
 
 - `gui-shell-light-100.png`, `gui-shell-light-150.png`, and
   `gui-shell-light-200.png` are native Windows Qt renders of the minimal
@@ -13,9 +13,11 @@ Generated on 2026-07-17 for branch `spike/0b-repository-contracts-preflight`.
 
 The evidence is intentionally limited to the 0B shell frame: navigation,
 action bar, workspace, activity bar, theme tokens/QSS, icon registry, Engine
-Host status display, and the non-mutating standard backup setup surface. It
-does not claim completion of real job creation, the full GUI workflow,
-localization matrix, accessibility review, or final visual acceptance suite.
+Host status display, the non-mutating standard backup setup surface,
+flag-based language selector chrome, and the read-only backup job detail
+panel. It does not claim completion of real job creation, the full GUI
+workflow, localization matrix, accessibility review, or final visual
+acceptance suite.
 
 The render command uses the native Windows Qt platform by default on Windows.
 Qt's `offscreen` platform is still used by automated smoke tests, but this

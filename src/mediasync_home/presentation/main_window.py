@@ -27,11 +27,14 @@ from mediasync_home.presentation.view_models.backup_setup import (
     BackupOverviewViewState,
     BackupSetupDraft,
     BackupSetupStepViewState,
+    BackupJobDetailViewState,
     BackupJobStatusViewState,
     StandardBackupSetupViewState,
     activity_overview_from_response,
+    backup_job_detail_from_response,
     backup_overview_from_response,
     build_standard_backup_setup_state,
+    empty_backup_job_detail_state,
     empty_backup_job_status_state,
 )
 from mediasync_home.presentation.view_models.engine_status import (
@@ -62,6 +65,10 @@ class ActivityOverviewProvider(Protocol):
     ) -> IpcResponse: ...
 
 
+class BackupJobDetailProvider(Protocol):
+    def get_backup_job_detail(self, *, job_id: str) -> IpcResponse: ...
+
+
 class MediaSyncWindow(QMainWindow):
     def __init__(
         self,
@@ -76,12 +83,19 @@ class MediaSyncWindow(QMainWindow):
         self._connected = False
         self._setup_state = build_standard_backup_setup_state(BackupSetupDraft.empty())
         self._job_status_state = empty_backup_job_status_state()
+        self._job_detail_state = empty_backup_job_detail_state()
         self._setup_step_labels: list[QLabel] = []
         self._setup_source_value: QLabel | None = None
         self._setup_target_value: QLabel | None = None
         self._setup_defaults_value: QLabel | None = None
         self._setup_retention_value: QLabel | None = None
         self._setup_primary_button: QPushButton | None = None
+        self._job_detail_title: QLabel | None = None
+        self._job_detail_source_value: QLabel | None = None
+        self._job_detail_revision_value: QLabel | None = None
+        self._job_detail_targets_value: QLabel | None = None
+        self._job_detail_defaults_value: QLabel | None = None
+        self._job_detail_target_rows: list[QLabel] = []
         self._activity_status_title: QLabel | None = None
         self._activity_dimension_rows: list[QLabel] = []
         self._language_options = (
@@ -169,11 +183,26 @@ class MediaSyncWindow(QMainWindow):
         self._apply_backup_setup_state(state.setup)
         self._apply_job_status_state(state.job_status)
 
+    def apply_backup_job_detail(self, state: BackupJobDetailViewState) -> None:
+        self._job_detail_state = state
+        self._apply_backup_job_detail_state(state)
+
     def _refresh_backup_overview(self) -> None:
         if self._engine_client is None or not hasattr(self._engine_client, "get_backup_overview"):
             return
         provider = cast(BackupOverviewProvider, self._engine_client)
-        self.apply_backup_overview(backup_overview_from_response(provider.get_backup_overview()))
+        state = backup_overview_from_response(provider.get_backup_overview())
+        self.apply_backup_overview(state)
+        if state.selected_job_id is None:
+            self.apply_backup_job_detail(empty_backup_job_detail_state())
+            return
+        self._refresh_backup_job_detail(state.selected_job_id)
+
+    def _refresh_backup_job_detail(self, job_id: str) -> None:
+        if self._engine_client is None or not hasattr(self._engine_client, "get_backup_job_detail"):
+            return
+        provider = cast(BackupJobDetailProvider, self._engine_client)
+        self.apply_backup_job_detail(backup_job_detail_from_response(provider.get_backup_job_detail(job_id=job_id)))
 
     def _refresh_activity_overview(self) -> None:
         if self._engine_client is None or not hasattr(self._engine_client, "get_activity_overview"):
@@ -203,6 +232,26 @@ class MediaSyncWindow(QMainWindow):
         if self._setup_primary_button is not None:
             self._setup_primary_button.setText(state.primary_action_label)
             self._setup_primary_button.setEnabled(state.can_create)
+
+    def _apply_backup_job_detail_state(self, state: BackupJobDetailViewState) -> None:
+        if self._job_detail_title is not None:
+            self._job_detail_title.setText(state.title)
+        if self._job_detail_source_value is not None:
+            self._job_detail_source_value.setText(state.source_label)
+        if self._job_detail_revision_value is not None:
+            self._job_detail_revision_value.setText(state.revision_label)
+        if self._job_detail_targets_value is not None:
+            self._job_detail_targets_value.setText(state.target_summary_label)
+        if self._job_detail_defaults_value is not None:
+            self._job_detail_defaults_value.setText(state.defaults_summary_label)
+        lines = state.target_lines or ("Ingen mål å vise.",)
+        for index, row in enumerate(self._job_detail_target_rows):
+            if index < len(lines):
+                row.setText(lines[index])
+                row.setVisible(True)
+            else:
+                row.setText("")
+                row.setVisible(False)
 
     def _apply_job_status_state(self, state: BackupJobStatusViewState) -> None:
         if self._activity_status_title is not None:
@@ -290,9 +339,19 @@ class MediaSyncWindow(QMainWindow):
         heading.setObjectName("sectionTitle")
         layout.addWidget(heading)
         layout.addWidget(self._build_backup_setup_panel(self._setup_state))
-        layout.addWidget(self._build_engine_panel())
+        layout.addWidget(self._build_dashboard_detail_row())
         layout.addStretch(1)
         return workspace
+
+    def _build_dashboard_detail_row(self) -> QWidget:
+        row = QWidget()
+        row.setObjectName("dashboardDetailRow")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        layout.addWidget(self._build_backup_job_detail_panel(self._job_detail_state), 1)
+        layout.addWidget(self._build_engine_panel(), 1)
+        return row
 
     def _build_backup_setup_panel(self, state: StandardBackupSetupViewState) -> QFrame:
         panel = QFrame()
@@ -341,6 +400,44 @@ class MediaSyncWindow(QMainWindow):
         primary.setToolTip("Opprett backup når kilde og minst ett mål er valgt")
         self._setup_primary_button = primary
         layout.addWidget(primary, 7, 2)
+        layout.setColumnStretch(1, 1)
+        return panel
+
+    def _build_backup_job_detail_panel(self, state: BackupJobDetailViewState) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("backupJobDetailPanel")
+        layout = QGridLayout(panel)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setHorizontalSpacing(18)
+        layout.setVerticalSpacing(8)
+
+        title = QLabel(state.title)
+        title.setObjectName("jobDetailTitle")
+        self._job_detail_title = title
+        layout.addWidget(title, 0, 0, 1, 3)
+
+        self._job_detail_source_value = _add_text_value(layout, 1, "Kilde", state.source_label)
+        self._job_detail_source_value.setObjectName("jobDetailSourceValue")
+        self._job_detail_targets_value = _add_text_value(layout, 2, "Mål", state.target_summary_label)
+        self._job_detail_targets_value.setObjectName("jobDetailTargetsValue")
+        self._job_detail_defaults_value = _add_text_value(layout, 3, "Standard", state.defaults_summary_label)
+        self._job_detail_defaults_value.setObjectName("jobDetailDefaultsValue")
+        self._job_detail_revision_value = _add_text_value(layout, 4, "Revisjon", state.revision_label)
+        self._job_detail_revision_value.setObjectName("jobDetailRevisionValue")
+
+        target_heading = QLabel("Målsteder")
+        target_heading.setObjectName("mutedLabel")
+        layout.addWidget(target_heading, 5, 0)
+        self._job_detail_target_rows = []
+        target_lines = state.target_lines or ("Ingen mål å vise.",)
+        for index in range(3):
+            row = QLabel(target_lines[index] if index < len(target_lines) else "")
+            row.setObjectName("jobDetailTargetRow")
+            row.setWordWrap(True)
+            row.setVisible(index < len(target_lines))
+            self._job_detail_target_rows.append(row)
+            layout.addWidget(row, 5 + index, 1, 1, 2)
+
         layout.setColumnStretch(1, 1)
         return panel
 
