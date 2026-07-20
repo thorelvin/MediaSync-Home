@@ -2,10 +2,10 @@
   "height": 1400,
   "image_path": "gui-shell-light-200.png",
   "manifest_path": "gui-shell-light-200.json",
-  "non_background_ratio": 0.5817816721431179,
+  "non_background_ratio": 0.581416575392479,
   "sampled_pixels": 10956,
   "scale_percent": 200,
   "theme": "light",
-  "unique_sampled_colors": 113,
+  "unique_sampled_colors": 116,
   "width": 2240
 }

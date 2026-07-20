@@ -63,15 +63,22 @@ def test_main_window_displays_engine_status(qapp) -> None:
 
         assert nav is not None
         assert nav.count() == 4
+        assert [nav.item(index).text() for index in range(nav.count())] == [
+            "Oversikt",
+            "Jobber",
+            "Historikk",
+            "Innstillinger",
+        ]
         assert chip is not None
-        assert chip.text() == "Connected: Ready"
+        assert chip.text() == "Tilkoblet: Klar"
         assert chip.property("statusKind") == "ready"
         assert refresh is not None
         assert refresh.isEnabled() is False
+        assert refresh.toolTip() == "Oppdater motorstatus"
         assert language is not None
         assert language.text() == ""
         assert not language.icon().isNull()
-        assert language.toolTip() == "Language: Norsk"
+        assert language.toolTip() == "Språk: Norsk"
         assert language.menu() is not None
         action_bar = window.findChild(QWidget, "actionBar")
         assert action_bar is not None
@@ -101,7 +108,7 @@ def test_main_window_displays_engine_status(qapp) -> None:
         assert detail_title is not None
         assert detail_title.text() == "Ingen lagret backupjobb"
         assert plan_preview_title is not None
-        assert plan_preview_title.text() == "Plan preview"
+        assert plan_preview_title.text() == "Planforhåndsvisning"
     finally:
         window.close()
         window.deleteLater()
@@ -112,6 +119,12 @@ def test_language_selector_updates_selected_flag(qapp) -> None:
 
     try:
         language = window.findChild(QToolButton, "languageSelectorButton")
+        nav = window.findChild(QListWidget, "navigationRail")
+        refresh = window.findChild(QPushButton, "refreshEngineButton")
+        setup_steps = window.findChildren(QLabel, "setupStepLabel")
+        create_backup = window.findChild(QPushButton, "createBackupButton")
+        detail_title = window.findChild(QLabel, "jobDetailTitle")
+        plan_preview_title = window.findChild(QLabel, "planPreviewTitle")
 
         assert language is not None
         assert language.menu() is not None
@@ -124,6 +137,27 @@ def test_language_selector_updates_selected_flag(qapp) -> None:
             False,
             True,
         ]
+        assert nav is not None
+        assert [nav.item(index).text() for index in range(nav.count())] == [
+            "Dashboard",
+            "Jobs",
+            "History",
+            "Settings",
+        ]
+        assert refresh is not None
+        assert refresh.toolTip() == "Refresh engine status"
+        assert [step.text() for step in setup_steps] == [
+            "1. What do you want to protect?",
+            "2. Where should copies go?",
+            "3. How should backup work?",
+            "4. Review and create",
+        ]
+        assert create_backup is not None
+        assert create_backup.text() == "Continue"
+        assert detail_title is not None
+        assert detail_title.text() == "No saved backup job"
+        assert plan_preview_title is not None
+        assert plan_preview_title.text() == "Plan preview"
     finally:
         window.close()
         window.deleteLater()
@@ -143,7 +177,7 @@ def test_main_window_refreshes_through_engine_client(qapp) -> None:
 
         assert provider.calls == ["connect", "get_status"]
         assert chip is not None
-        assert chip.text() == "Connected: Ready"
+        assert chip.text() == "Tilkoblet: Klar"
     finally:
         window.close()
         window.deleteLater()
@@ -172,6 +206,7 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         job_detail_rows = window.findChildren(QLabel, "jobDetailTargetRow")
         plan_preview_summary = window.findChild(QLabel, "planPreviewSummary")
         plan_preview_rows = window.findChildren(QLabel, "planPreviewRow")
+        language = window.findChild(QToolButton, "languageSelectorButton")
 
         assert provider.calls == [
             "connect",
@@ -199,13 +234,27 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert job_detail_revision.text() == "Revisjon: job-rev-a - Filter: filter-a"
         assert job_detail_rows[0].text() == "USB 1: E:/Backup"
         assert plan_preview_summary is not None
-        assert plan_preview_summary.text() == "2 operations from plan-a."
-        assert plan_preview_rows[0].text() == "Low: Create folder: Photos"
-        assert plan_preview_rows[1].text() == "Low: Copy new: Photos/2026/a.jpg - 2.0 KiB"
+        assert plan_preview_summary.text() == "2 operasjoner fra plan-a."
+        assert plan_preview_rows[0].text() == "Lav: Opprett mappe: Photos"
+        assert plan_preview_rows[1].text() == "Lav: Kopier ny: Photos/2026/a.jpg - 2.0 KiB"
         assert activity_title is not None
         assert activity_title.text() == "Siste kjøring: run-a"
         assert activity_rows[0].text() == "Aktivitet: Kontrollerer"
         assert activity_rows[1].text() == "Oppmerksomhet: Venter"
+        assert language is not None
+        assert language.menu() is not None
+        language.menu().actions()[1].trigger()
+
+        assert target.text() == "1 target: USB 1"
+        assert job_detail_targets.text() == "1 target / 1 independent device"
+        assert job_detail_defaults.text() == "Update backup - All user files - Standard verification"
+        assert job_detail_revision.text() == "Revision: job-rev-a - Filter: filter-a"
+        assert plan_preview_summary.text() == "2 operations from plan-a."
+        assert plan_preview_rows[0].text() == "Low: Create folder: Photos"
+        assert plan_preview_rows[1].text() == "Low: Copy new: Photos/2026/a.jpg - 2.0 KiB"
+        assert activity_title.text() == "Latest run: run-a"
+        assert activity_rows[0].text() == "Activity: Checking"
+        assert activity_rows[1].text() == "Attention: Waiting"
     finally:
         window.close()
         window.deleteLater()
