@@ -99,6 +99,33 @@ def test_sqlite_catalog_replays_standard_backup_job_idempotency_key(tmp_path: Pa
         assert id_factory.calls == 1
 
 
+def test_sqlite_catalog_does_not_create_job_from_overlapping_roots(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        drafts = SqliteJobDraftStore(connection)
+        catalog = SqliteStandardBackupJobCatalog(connection)
+        id_factory = FixedStandardBackupJobIdFactory()
+        drafts.save_standard_backup_draft(
+            StandardBackupJobDraft.new("draft-a")
+            .with_source(name="Pictures", path_label="C:/Users/Ada/Pictures")
+            .with_added_target(name="Nested target", path_label="C:/Users/Ada/Pictures/Phone")
+        )
+
+        outcome = create_standard_backup_job_from_draft(
+            command=_create_command(),
+            drafts=drafts,
+            catalog=catalog,
+            id_factory=id_factory,
+        )
+
+        assert outcome.created is False
+        assert outcome.job is None
+        assert outcome.readiness.validation_codes == ("TARGET_ROOT_OVERLAPS_SOURCE",)
+        assert _row_count(connection, "jobs") == 0
+        assert id_factory.calls == 0
+
+
 def test_sqlite_catalog_requires_source_draft_row(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:

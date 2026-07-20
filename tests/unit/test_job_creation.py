@@ -130,6 +130,22 @@ def test_job_creation_readiness_accepts_complete_draft_but_keeps_creation_disabl
     assert readiness.next_action == "Backup job creation is recognized but disabled in the 0B local preview."
 
 
+def test_job_creation_readiness_blocks_overlapping_roots() -> None:
+    store = InMemoryJobDraftStore()
+    draft = (
+        StandardBackupJobDraft.new("draft-a")
+        .with_source(name="Pictures", path_label="C:/Users/Ada/Pictures")
+        .with_added_target(name="Nested target", path_label="C:/Users/Ada/Pictures/Phone")
+    )
+    store.save_standard_backup_draft(draft)
+
+    readiness = evaluate_standard_backup_job_creation(command=_create_command(), drafts=store)
+
+    assert readiness.draft_found is True
+    assert readiness.draft_valid is False
+    assert readiness.validation_codes == ("TARGET_ROOT_OVERLAPS_SOURCE",)
+
+
 def test_create_standard_backup_job_persists_sealed_revision_from_valid_draft() -> None:
     drafts = InMemoryJobDraftStore()
     catalog = InMemoryStandardBackupJobCatalog()
@@ -181,6 +197,30 @@ def test_create_standard_backup_job_does_not_persist_invalid_draft() -> None:
         "SOURCE_LABEL_REQUIRED",
         "TARGET_REQUIRED",
     )
+    assert catalog.jobs == {}
+    assert id_factory.calls == 0
+
+
+def test_create_standard_backup_job_does_not_persist_overlapping_roots() -> None:
+    drafts = InMemoryJobDraftStore()
+    catalog = InMemoryStandardBackupJobCatalog()
+    id_factory = FixedStandardBackupJobIdFactory()
+    drafts.save_standard_backup_draft(
+        StandardBackupJobDraft.new("draft-a")
+        .with_source(name="Pictures", path_label="C:/Users/Ada/Pictures")
+        .with_added_target(name="Nested target", path_label="C:/Users/Ada/Pictures/Phone")
+    )
+
+    outcome = create_standard_backup_job_from_draft(
+        command=_create_command(),
+        drafts=drafts,
+        catalog=catalog,
+        id_factory=id_factory,
+    )
+
+    assert outcome.created is False
+    assert outcome.job is None
+    assert outcome.readiness.validation_codes == ("TARGET_ROOT_OVERLAPS_SOURCE",)
     assert catalog.jobs == {}
     assert id_factory.calls == 0
 

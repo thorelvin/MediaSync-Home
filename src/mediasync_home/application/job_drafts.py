@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
+from urllib.parse import urlparse
 
 
 MAX_STANDARD_BACKUP_TARGETS = 3
@@ -17,6 +18,8 @@ class DraftValidationCode(str, Enum):
     TARGET_NAME_REQUIRED = "TARGET_NAME_REQUIRED"
     TARGET_LABEL_REQUIRED = "TARGET_LABEL_REQUIRED"
     DUPLICATE_TARGET_NAME = "DUPLICATE_TARGET_NAME"
+    TARGET_ROOT_OVERLAPS_SOURCE = "TARGET_ROOT_OVERLAPS_SOURCE"
+    TARGET_ROOT_OVERLAPS_TARGET = "TARGET_ROOT_OVERLAPS_TARGET"
 
 
 class DraftValidationError(ValueError):
@@ -132,6 +135,8 @@ class StandardBackupJobDraft:
             issues.append(DraftValidationIssue(DraftValidationCode.TOO_MANY_TARGETS, "targets"))
 
         seen_target_names: set[str] = set()
+        seen_target_roots: list[_DraftRootKey] = []
+        source_root = _draft_root_key(self.source_path_label)
         for index, target in enumerate(self.targets):
             field_prefix = f"targets[{index}]"
             normalized_name = target.name.strip().casefold()
@@ -145,6 +150,25 @@ class StandardBackupJobDraft:
                 issues.append(
                     DraftValidationIssue(DraftValidationCode.TARGET_LABEL_REQUIRED, f"{field_prefix}.path_label")
                 )
+                continue
+            target_root = _draft_root_key(target.path_label)
+            if target_root is None:
+                continue
+            if source_root is not None and _roots_overlap(source_root, target_root):
+                issues.append(
+                    DraftValidationIssue(
+                        DraftValidationCode.TARGET_ROOT_OVERLAPS_SOURCE,
+                        f"{field_prefix}.path_label",
+                    )
+                )
+            if any(_roots_overlap(existing_root, target_root) for existing_root in seen_target_roots):
+                issues.append(
+                    DraftValidationIssue(
+                        DraftValidationCode.TARGET_ROOT_OVERLAPS_TARGET,
+                        f"{field_prefix}.path_label",
+                    )
+                )
+            seen_target_roots.append(target_root)
         return tuple(issues)
 
     def can_create(self) -> bool:
@@ -155,3 +179,72 @@ class JobDraftStore(Protocol):
     def save_standard_backup_draft(self, draft: StandardBackupJobDraft) -> None: ...
 
     def load_standard_backup_draft(self, draft_id: str) -> StandardBackupJobDraft | None: ...
+
+
+@dataclass(frozen=True)
+class _DraftRootKey:
+    anchor: str
+    parts: tuple[str, ...]
+
+
+def _draft_root_key(path_label: str | None) -> _DraftRootKey | None:
+    if path_label is None:
+        return None
+    value = path_label.strip()
+    if not value:
+        return None
+    drive_candidate = value.replace("\\", "/")
+    if len(drive_candidate) >= 2 and drive_candidate[1] == ":" and drive_candidate[0].isalpha():
+        return _drive_root_key(drive_candidate)
+    parsed = urlparse(value)
+    if parsed.scheme:
+        if parsed.scheme.lower() != "file":
+            return None
+        value = _file_uri_to_windows_path(parsed.netloc, parsed.path)
+    normalized = value.replace("\\", "/").strip()
+    if normalized.startswith("//"):
+        return _unc_root_key(normalized)
+    if len(normalized) >= 2 and normalized[1] == ":" and normalized[0].isalpha():
+        return _drive_root_key(normalized)
+    return None
+
+
+def _file_uri_to_windows_path(netloc: str, path: str) -> str:
+    normalized_path = path.replace("\\", "/")
+    if netloc:
+        return f"//{netloc}{normalized_path}"
+    if len(normalized_path) >= 3 and normalized_path[0] == "/" and normalized_path[2] == ":":
+        return normalized_path[1:]
+    return normalized_path
+
+
+def _unc_root_key(value: str) -> _DraftRootKey | None:
+    parts = _path_parts(value[2:])
+    if len(parts) < 2:
+        return None
+    return _DraftRootKey(
+        anchor=f"unc://{parts[0]}/{parts[1]}",
+        parts=parts[2:],
+    )
+
+
+def _drive_root_key(value: str) -> _DraftRootKey:
+    return _DraftRootKey(
+        anchor=f"drive:{value[0].casefold()}",
+        parts=_path_parts(value[2:]),
+    )
+
+
+def _path_parts(value: str) -> tuple[str, ...]:
+    return tuple(part.casefold() for part in value.strip("/").split("/") if part and part != ".")
+
+
+def _roots_overlap(first: _DraftRootKey, second: _DraftRootKey) -> bool:
+    if first.anchor != second.anchor:
+        return False
+    shorter, longer = (
+        (first.parts, second.parts)
+        if len(first.parts) <= len(second.parts)
+        else (second.parts, first.parts)
+    )
+    return longer[: len(shorter)] == shorter

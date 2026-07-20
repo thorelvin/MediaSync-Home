@@ -74,6 +74,48 @@ def test_standard_backup_draft_reports_duplicate_and_blank_targets() -> None:
     assert draft.can_create() is False
 
 
+def test_standard_backup_draft_blocks_same_or_nested_source_target_roots() -> None:
+    nested_target = (
+        StandardBackupJobDraft.new("draft-overlap-a")
+        .with_source(name="Pictures", path_label="C:/Users/Ada/Pictures")
+        .with_added_target(name="Nested target", path_label="C:/Users/Ada/Pictures/Phone")
+    )
+    parent_target = (
+        StandardBackupJobDraft.new("draft-overlap-b")
+        .with_source(name="Pictures", path_label="file:///C:/Users/Ada/Pictures")
+        .with_added_target(name="Parent target", path_label="C:\\Users\\Ada")
+    )
+
+    assert [issue.code for issue in nested_target.validation_issues()] == [
+        DraftValidationCode.TARGET_ROOT_OVERLAPS_SOURCE,
+    ]
+    assert [issue.field for issue in nested_target.validation_issues()] == [
+        "targets[0].path_label",
+    ]
+    assert nested_target.can_create() is False
+    assert [issue.code for issue in parent_target.validation_issues()] == [
+        DraftValidationCode.TARGET_ROOT_OVERLAPS_SOURCE,
+    ]
+    assert parent_target.can_create() is False
+
+
+def test_standard_backup_draft_blocks_overlapping_target_roots() -> None:
+    draft = (
+        StandardBackupJobDraft.new("draft-overlap-c")
+        .with_source(name="Pictures", path_label="C:/Users/Ada/Pictures")
+        .with_added_target(name="USB 1", path_label="//nas/backup/Ada")
+        .with_added_target(name="USB 2", path_label="\\\\NAS\\Backup\\Ada\\Pictures")
+    )
+
+    assert [issue.code for issue in draft.validation_issues()] == [
+        DraftValidationCode.TARGET_ROOT_OVERLAPS_TARGET,
+    ]
+    assert [issue.field for issue in draft.validation_issues()] == [
+        "targets[1].path_label",
+    ]
+    assert draft.can_create() is False
+
+
 def test_standard_backup_draft_rejects_more_than_three_targets() -> None:
     draft = (
         StandardBackupJobDraft.new("draft-4")
