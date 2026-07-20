@@ -39,6 +39,9 @@ class InMemoryStandardBackupJobCatalog(StandardBackupJobCatalog):
     def load_standard_backup_job(self, job_id: str) -> SealedStandardBackupJob | None:
         return self.jobs.get(job_id)
 
+    def list_active_standard_backup_jobs(self) -> tuple[SealedStandardBackupJob, ...]:
+        return tuple(self.jobs[job_id] for job_id in sorted(self.jobs))
+
     def load_standard_backup_job_by_idempotency_key(
         self,
         idempotency_key: str,
@@ -50,16 +53,23 @@ class InMemoryStandardBackupJobCatalog(StandardBackupJobCatalog):
 
 
 class FixedStandardBackupJobIdFactory(StandardBackupJobIdFactory):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        ids: tuple[StandardBackupJobIds, ...] = (
+            StandardBackupJobIds(
+                job_id="job-a",
+                job_revision_id="job-rev-a",
+                filter_set_id="filter-a",
+            ),
+        ),
+    ) -> None:
         self.calls = 0
+        self._ids = ids
 
     def new_standard_backup_job_ids(self) -> StandardBackupJobIds:
+        ids = self._ids[min(self.calls, len(self._ids) - 1)]
         self.calls += 1
-        return StandardBackupJobIds(
-            job_id="job-a",
-            job_revision_id="job-rev-a",
-            filter_set_id="filter-a",
-        )
+        return ids
 
 
 def test_parse_create_standard_backup_job_command_requires_draft_id() -> None:
@@ -250,6 +260,89 @@ def test_create_standard_backup_job_replays_existing_idempotency_key() -> None:
     assert second.idempotent_replay is True
     assert second.job == first.job
     assert id_factory.calls == 1
+
+
+def test_create_standard_backup_job_blocks_overlap_with_existing_writable_root() -> None:
+    drafts = InMemoryJobDraftStore()
+    catalog = InMemoryStandardBackupJobCatalog()
+    id_factory = FixedStandardBackupJobIdFactory()
+    drafts.save_standard_backup_draft(_complete_draft())
+    first = create_standard_backup_job_from_draft(
+        command=_create_command(),
+        drafts=drafts,
+        catalog=catalog,
+        id_factory=id_factory,
+    )
+    assert first.created is True
+    drafts.save_standard_backup_draft(
+        StandardBackupJobDraft.new("draft-b")
+        .with_source(name="Camera", path_label="D:/Camera")
+        .with_added_target(name="Nested target", path_label="E:/Backup/Phone")
+    )
+
+    blocked = create_standard_backup_job_from_draft(
+        command=parse_create_standard_backup_job_command(
+            request_id="request-b",
+            idempotency_key="idempotency-b",
+            payload={"draft_id": "draft-b"},
+        ),
+        drafts=drafts,
+        catalog=catalog,
+        id_factory=id_factory,
+    )
+
+    assert blocked.created is False
+    assert blocked.job is None
+    assert blocked.readiness.validation_codes == ("STANDARD_BACKUP_JOB_ROOT_OVERLAPS_EXISTING_JOB",)
+    assert id_factory.calls == 1
+
+
+def test_create_standard_backup_job_allows_source_only_overlap_with_existing_job() -> None:
+    drafts = InMemoryJobDraftStore()
+    catalog = InMemoryStandardBackupJobCatalog()
+    id_factory = FixedStandardBackupJobIdFactory(
+        (
+            StandardBackupJobIds(
+                job_id="job-a",
+                job_revision_id="job-rev-a",
+                filter_set_id="filter-a",
+            ),
+            StandardBackupJobIds(
+                job_id="job-b",
+                job_revision_id="job-rev-b",
+                filter_set_id="filter-b",
+            ),
+        )
+    )
+    drafts.save_standard_backup_draft(_complete_draft())
+    first = create_standard_backup_job_from_draft(
+        command=_create_command(),
+        drafts=drafts,
+        catalog=catalog,
+        id_factory=id_factory,
+    )
+    assert first.created is True
+    drafts.save_standard_backup_draft(
+        StandardBackupJobDraft.new("draft-b")
+        .with_source(name="Pictures child", path_label="C:/Users/Ada/Pictures/Phone")
+        .with_added_target(name="USB 2", path_label="F:/Backup")
+    )
+
+    second = create_standard_backup_job_from_draft(
+        command=parse_create_standard_backup_job_command(
+            request_id="request-b",
+            idempotency_key="idempotency-b",
+            payload={"draft_id": "draft-b"},
+        ),
+        drafts=drafts,
+        catalog=catalog,
+        id_factory=id_factory,
+    )
+
+    assert second.created is True
+    assert second.job is not None
+    assert second.job.job_id == "job-b"
+    assert id_factory.calls == 2
 
 
 def _complete_draft() -> StandardBackupJobDraft:

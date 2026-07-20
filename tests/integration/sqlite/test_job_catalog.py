@@ -18,6 +18,7 @@ from mediasync_home.adapters.sqlite.migrations import apply_sqlite_migrations, c
 from mediasync_home.application.job_creation import (
     CreateStandardBackupJobCommand,
     SealedStandardBackupJob,
+    SealedStandardBackupTarget,
     StandardBackupJobIdFactory,
     StandardBackupJobIds,
     create_standard_backup_job_from_draft,
@@ -27,16 +28,23 @@ from mediasync_home.application.job_drafts import StandardBackupJobDraft
 
 
 class FixedStandardBackupJobIdFactory(StandardBackupJobIdFactory):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        ids: tuple[StandardBackupJobIds, ...] = (
+            StandardBackupJobIds(
+                job_id="job-a",
+                job_revision_id="job-rev-a",
+                filter_set_id="filter-a",
+            ),
+        ),
+    ) -> None:
         self.calls = 0
+        self._ids = ids
 
     def new_standard_backup_job_ids(self) -> StandardBackupJobIds:
+        ids = self._ids[min(self.calls, len(self._ids) - 1)]
         self.calls += 1
-        return StandardBackupJobIds(
-            job_id="job-a",
-            job_revision_id="job-rev-a",
-            filter_set_id="filter-a",
-        )
+        return ids
 
 
 def test_sqlite_catalog_persists_standard_backup_job_from_draft(tmp_path: Path) -> None:
@@ -126,6 +134,124 @@ def test_sqlite_catalog_does_not_create_job_from_overlapping_roots(tmp_path: Pat
         assert id_factory.calls == 0
 
 
+def test_sqlite_catalog_blocks_overlap_with_existing_writable_root(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        drafts = SqliteJobDraftStore(connection)
+        catalog = SqliteStandardBackupJobCatalog(connection)
+        id_factory = FixedStandardBackupJobIdFactory()
+        drafts.save_standard_backup_draft(_complete_draft())
+        first = create_standard_backup_job_from_draft(
+            command=_create_command(),
+            drafts=drafts,
+            catalog=catalog,
+            id_factory=id_factory,
+        )
+        assert first.created is True
+        drafts.save_standard_backup_draft(
+            StandardBackupJobDraft.new("draft-b")
+            .with_source(name="Camera", path_label="D:/Camera")
+            .with_added_target(name="Nested target", path_label="E:/Backup/Phone")
+        )
+
+        blocked = create_standard_backup_job_from_draft(
+            command=parse_create_standard_backup_job_command(
+                request_id="request-b",
+                idempotency_key="idempotency-b",
+                payload={"draft_id": "draft-b"},
+            ),
+            drafts=drafts,
+            catalog=catalog,
+            id_factory=id_factory,
+        )
+
+        assert blocked.created is False
+        assert blocked.job is None
+        assert blocked.readiness.validation_codes == ("STANDARD_BACKUP_JOB_ROOT_OVERLAPS_EXISTING_JOB",)
+        assert _row_count(connection, "jobs") == 1
+        assert id_factory.calls == 1
+
+
+def test_sqlite_catalog_allows_source_only_overlap_with_existing_job(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        drafts = SqliteJobDraftStore(connection)
+        catalog = SqliteStandardBackupJobCatalog(connection)
+        id_factory = FixedStandardBackupJobIdFactory(
+            (
+                StandardBackupJobIds(
+                    job_id="job-a",
+                    job_revision_id="job-rev-a",
+                    filter_set_id="filter-a",
+                ),
+                StandardBackupJobIds(
+                    job_id="job-b",
+                    job_revision_id="job-rev-b",
+                    filter_set_id="filter-b",
+                ),
+            )
+        )
+        drafts.save_standard_backup_draft(_complete_draft())
+        first = create_standard_backup_job_from_draft(
+            command=_create_command(),
+            drafts=drafts,
+            catalog=catalog,
+            id_factory=id_factory,
+        )
+        assert first.created is True
+        drafts.save_standard_backup_draft(
+            StandardBackupJobDraft.new("draft-b")
+            .with_source(name="Pictures child", path_label="C:/Users/Ada/Pictures/Phone")
+            .with_added_target(name="USB 2", path_label="F:/Backup")
+        )
+
+        second = create_standard_backup_job_from_draft(
+            command=parse_create_standard_backup_job_command(
+                request_id="request-b",
+                idempotency_key="idempotency-b",
+                payload={"draft_id": "draft-b"},
+            ),
+            drafts=drafts,
+            catalog=catalog,
+            id_factory=id_factory,
+        )
+
+        assert second.created is True
+        assert second.job is not None
+        assert second.job.job_id == "job-b"
+        assert _row_count(connection, "jobs") == 2
+        assert tuple(job.job_id for job in catalog.list_active_standard_backup_jobs()) == ("job-a", "job-b")
+        assert id_factory.calls == 2
+
+
+def test_sqlite_catalog_direct_save_rejects_cross_job_root_overlap(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        drafts = SqliteJobDraftStore(connection)
+        catalog = SqliteStandardBackupJobCatalog(connection)
+        drafts.save_standard_backup_draft(_complete_draft())
+        existing = create_standard_backup_job_from_draft(
+            command=_create_command(),
+            drafts=drafts,
+            catalog=catalog,
+            id_factory=FixedStandardBackupJobIdFactory(),
+        )
+        assert existing.created is True
+        drafts.save_standard_backup_draft(
+            StandardBackupJobDraft.new("draft-b")
+            .with_source(name="Camera", path_label="D:/Camera")
+            .with_added_target(name="Nested target", path_label="E:/Backup/Phone")
+        )
+
+        with pytest.raises(SqliteJobCatalogError, match="STANDARD_BACKUP_JOB_ROOT_OVERLAP"):
+            catalog.save_standard_backup_job(_sealed_job_b())
+
+        assert _row_count(connection, "jobs") == 1
+
+
 def test_sqlite_catalog_requires_source_draft_row(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
@@ -167,6 +293,33 @@ def _create_command() -> CreateStandardBackupJobCommand:
         request_id="request-a",
         idempotency_key="idempotency-a",
         payload={"draft_id": "draft-a"},
+    )
+
+
+def _sealed_job_b() -> SealedStandardBackupJob:
+    return SealedStandardBackupJob(
+        job_id="job-b",
+        job_revision_id="job-rev-b",
+        filter_set_id="filter-b",
+        draft_id="draft-b",
+        command_request_id="request-b",
+        idempotency_key="idempotency-b",
+        source_name="Camera",
+        source_path_label="D:/Camera",
+        targets=(
+            _target(
+                name="Nested target",
+                path_label="E:/Backup/Phone",
+            ),
+        ),
+        defaults=StandardBackupJobDraft.new("draft-b").defaults,
+    )
+
+
+def _target(*, name: str, path_label: str) -> SealedStandardBackupTarget:
+    return SealedStandardBackupTarget(
+        name=name,
+        path_label=path_label,
     )
 
 

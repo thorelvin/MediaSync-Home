@@ -9,6 +9,7 @@ from mediasync_home.application.job_drafts import (
     JobDraftStore,
     StandardBackupDefaults,
     StandardBackupJobDraft,
+    draft_path_labels_overlap,
 )
 
 
@@ -18,6 +19,9 @@ class JobCreationCommandName(str, Enum):
 
 class JobCreationPayloadError(ValueError):
     pass
+
+
+STANDARD_BACKUP_JOB_ROOT_OVERLAPS_EXISTING_JOB = "STANDARD_BACKUP_JOB_ROOT_OVERLAPS_EXISTING_JOB"
 
 
 @dataclass(frozen=True)
@@ -85,6 +89,8 @@ class StandardBackupJobCatalog(Protocol):
     def save_standard_backup_job(self, job: SealedStandardBackupJob) -> None: ...
 
     def load_standard_backup_job(self, job_id: str) -> SealedStandardBackupJob | None: ...
+
+    def list_active_standard_backup_jobs(self) -> tuple[SealedStandardBackupJob, ...]: ...
 
     def load_standard_backup_job_by_idempotency_key(
         self,
@@ -184,6 +190,23 @@ def create_standard_backup_job_from_draft(
             ),
         )
 
+    existing_overlap_codes = _existing_job_overlap_validation_codes(
+        draft,
+        catalog.list_active_standard_backup_jobs(),
+    )
+    if existing_overlap_codes:
+        return JobCreationOutcome(
+            created=False,
+            idempotent_replay=False,
+            readiness=JobCreationReadiness(
+                draft_id=command.draft_id,
+                draft_found=True,
+                draft_valid=False,
+                validation_codes=existing_overlap_codes,
+                next_action="Choose source and target roots that do not overlap existing backup jobs.",
+            ),
+        )
+
     ids = id_factory.new_standard_backup_job_ids()
     job = _seal_standard_backup_job(command=command, draft=draft, ids=ids)
     catalog.save_standard_backup_job(job)
@@ -221,6 +244,36 @@ def _sealed_target(target: DraftTarget) -> SealedStandardBackupTarget:
         path_label=target.path_label,
         independent_device_id=target.independent_device_id,
     )
+
+
+def _existing_job_overlap_validation_codes(
+    draft: StandardBackupJobDraft,
+    existing_jobs: tuple[SealedStandardBackupJob, ...],
+) -> tuple[str, ...]:
+    new_roots = _draft_job_roots(draft)
+    for existing_job in existing_jobs:
+        existing_roots = _sealed_job_roots(existing_job)
+        for new_root in new_roots:
+            for existing_root in existing_roots:
+                if not new_root[1] and not existing_root[1]:
+                    continue
+                if draft_path_labels_overlap(new_root[0], existing_root[0]):
+                    return (STANDARD_BACKUP_JOB_ROOT_OVERLAPS_EXISTING_JOB,)
+    return ()
+
+
+def _draft_job_roots(draft: StandardBackupJobDraft) -> tuple[tuple[str, bool], ...]:
+    roots: list[tuple[str, bool]] = []
+    if draft.source_path_label is not None:
+        roots.append((draft.source_path_label, False))
+    roots.extend((target.path_label, True) for target in draft.targets)
+    return tuple(roots)
+
+
+def _sealed_job_roots(job: SealedStandardBackupJob) -> tuple[tuple[str, bool], ...]:
+    roots: list[tuple[str, bool]] = [(job.source_path_label, False)]
+    roots.extend((target.path_label, True) for target in job.targets)
+    return tuple(roots)
 
 
 def _missing_draft(draft_id: str) -> JobCreationReadiness:

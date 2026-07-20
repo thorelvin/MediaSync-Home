@@ -17,6 +17,7 @@ from mediasync_home.application.job_drafts import (
     RetentionPreset,
     StandardBackupDefaults,
     VerificationPreset,
+    draft_path_labels_overlap,
 )
 
 
@@ -33,6 +34,7 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
         try:
             if not outer_transaction:
                 self._connection.execute("BEGIN IMMEDIATE")
+            self._reject_active_standard_backup_root_overlap(job)
             self._connection.execute(
                 "INSERT INTO jobs (id, kind) VALUES (?, 'multi_target_backup')",
                 (job.job_id,),
@@ -84,6 +86,10 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
             )
             if not outer_transaction:
                 self._connection.execute("COMMIT")
+        except SqliteJobCatalogError:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
         except sqlite3.Error as exc:
             if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
@@ -115,6 +121,32 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
             (job_id,),
         )
 
+    def list_active_standard_backup_jobs(self) -> tuple[SealedStandardBackupJob, ...]:
+        return self._load_many(
+            """
+            SELECT
+                details.job_id,
+                details.job_revision_id,
+                revisions.filter_set_id,
+                details.draft_id,
+                details.command_request_id,
+                details.idempotency_key,
+                details.source_name,
+                details.source_path_label,
+                details.defaults_json,
+                details.targets_json
+            FROM standard_backup_job_revision_details AS details
+            INNER JOIN job_revisions AS revisions
+                ON revisions.job_id = details.job_id
+                AND revisions.id = details.job_revision_id
+            INNER JOIN job_heads AS heads
+                ON heads.job_id = details.job_id
+                AND heads.active_revision_id = details.job_revision_id
+            ORDER BY details.job_id
+            """,
+            (),
+        )
+
     def load_standard_backup_job_by_idempotency_key(
         self,
         idempotency_key: str,
@@ -141,6 +173,14 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
             (idempotency_key,),
         )
 
+    def _load_many(
+        self,
+        query: str,
+        parameters: tuple[object, ...],
+    ) -> tuple[SealedStandardBackupJob, ...]:
+        rows = self._connection.execute(query, parameters).fetchall()
+        return tuple(_job_from_row(row) for row in rows)
+
     def _load_one(
         self,
         query: str,
@@ -149,18 +189,38 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
         row = self._connection.execute(query, parameters).fetchone()
         if row is None:
             return None
-        return SealedStandardBackupJob(
-            job_id=str(row[0]),
-            job_revision_id=str(row[1]),
-            filter_set_id=str(row[2]),
-            draft_id=str(row[3]),
-            command_request_id=str(row[4]),
-            idempotency_key=str(row[5]),
-            source_name=str(row[6]),
-            source_path_label=str(row[7]),
-            defaults=_deserialize_defaults(str(row[8])),
-            targets=_deserialize_targets(str(row[9])),
-        )
+        return _job_from_row(row)
+
+    def _reject_active_standard_backup_root_overlap(self, job: SealedStandardBackupJob) -> None:
+        new_roots = _job_roots(job)
+        for existing_job in self.list_active_standard_backup_jobs():
+            for new_root in new_roots:
+                for existing_root in _job_roots(existing_job):
+                    if not new_root[1] and not existing_root[1]:
+                        continue
+                    if draft_path_labels_overlap(new_root[0], existing_root[0]):
+                        raise SqliteJobCatalogError("STANDARD_BACKUP_JOB_ROOT_OVERLAP")
+
+
+def _job_from_row(row: sqlite3.Row | tuple[object, ...]) -> SealedStandardBackupJob:
+    return SealedStandardBackupJob(
+        job_id=str(row[0]),
+        job_revision_id=str(row[1]),
+        filter_set_id=str(row[2]),
+        draft_id=str(row[3]),
+        command_request_id=str(row[4]),
+        idempotency_key=str(row[5]),
+        source_name=str(row[6]),
+        source_path_label=str(row[7]),
+        defaults=_deserialize_defaults(str(row[8])),
+        targets=_deserialize_targets(str(row[9])),
+    )
+
+
+def _job_roots(job: SealedStandardBackupJob) -> tuple[tuple[str, bool], ...]:
+    roots: list[tuple[str, bool]] = [(job.source_path_label, False)]
+    roots.extend((target.path_label, True) for target in job.targets)
+    return tuple(roots)
 
 
 def _serialize_defaults(defaults: StandardBackupDefaults) -> str:

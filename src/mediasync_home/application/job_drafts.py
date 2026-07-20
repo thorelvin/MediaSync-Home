@@ -181,6 +181,12 @@ class JobDraftStore(Protocol):
     def load_standard_backup_draft(self, draft_id: str) -> StandardBackupJobDraft | None: ...
 
 
+def draft_path_labels_overlap(first_path_label: str | None, second_path_label: str | None) -> bool:
+    first = _draft_root_key(first_path_label)
+    second = _draft_root_key(second_path_label)
+    return first is not None and second is not None and _roots_overlap(first, second)
+
+
 @dataclass(frozen=True)
 class _DraftRootKey:
     anchor: str

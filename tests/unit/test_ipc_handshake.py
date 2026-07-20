@@ -137,6 +137,9 @@ class _InMemoryStandardBackupJobCatalog(StandardBackupJobCatalog):
     def load_standard_backup_job(self, job_id: str) -> SealedStandardBackupJob | None:
         return self.jobs.get(job_id)
 
+    def list_active_standard_backup_jobs(self) -> tuple[SealedStandardBackupJob, ...]:
+        return tuple(self.jobs[job_id] for job_id in sorted(self.jobs))
+
     def load_standard_backup_job_by_idempotency_key(
         self,
         idempotency_key: str,
