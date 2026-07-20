@@ -110,6 +110,41 @@ def test_ui_pipe_action_queries_plan_operations_after_handshake() -> None:
     }
 
 
+def test_ui_pipe_action_queries_snapshot_entries_after_handshake() -> None:
+    client = _FakeGuiIpcClient()
+    args = build_parser().parse_args(
+        [
+            "--pipe-name",
+            "pipe-a",
+            "--query-snapshot-entries",
+            "--snapshot-id",
+            "snapshot-a",
+            "--limit",
+            "5",
+            "--after-json",
+            (
+                '{"comparison_key":"010:Pictures/A.jpg",'
+                '"relative_path":"Pictures/A.jpg",'
+                '"entry_id":"file-a"}'
+            ),
+        ]
+    )
+
+    response = _run_pipe_action(args, client)
+
+    assert response.payload == {"snapshot_entries": "ok"}
+    assert client.calls == ("connect", "query_snapshot_entries")
+    assert client.snapshot_entries_query == {
+        "snapshot_id": "snapshot-a",
+        "limit": 5,
+        "after": {
+            "comparison_key": "010:Pictures/A.jpg",
+            "relative_path": "Pictures/A.jpg",
+            "entry_id": "file-a",
+        },
+    }
+
+
 def test_ui_pipe_action_submits_command_after_handshake() -> None:
     client = _FakeGuiIpcClient()
     args = build_parser().parse_args(
@@ -195,6 +230,7 @@ class _FakeGuiIpcClient:
         self.overview_query: dict[str, object] | None = None
         self.activity_query: dict[str, object] | None = None
         self.plan_operations_query: dict[str, object] | None = None
+        self.snapshot_entries_query: dict[str, object] | None = None
 
     def connect(self) -> IpcResponse:
         self.calls = (*self.calls, "connect")
@@ -248,6 +284,21 @@ class _FakeGuiIpcClient:
             "after": after,
         }
         return IpcResponse.accepted({"plan_operations": "ok"})
+
+    def query_snapshot_entries(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        self.calls = (*self.calls, "query_snapshot_entries")
+        self.snapshot_entries_query = {
+            "snapshot_id": snapshot_id,
+            "limit": limit,
+            "after": after,
+        }
+        return IpcResponse.accepted({"snapshot_entries": "ok"})
 
     def submit_command(
         self,

@@ -39,6 +39,15 @@ class StatusIpcClient(Protocol):
     ) -> IpcResponse:
         pass
 
+    def query_snapshot_entries(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        pass
+
 
 class EngineClient:
     def __init__(self, ipc_client: StatusIpcClient) -> None:
@@ -85,6 +94,19 @@ class EngineClient:
     ) -> IpcResponse:
         return self._ipc_client.query_plan_operations(
             plan_id=plan_id,
+            limit=limit,
+            after=after,
+        )
+
+    def get_snapshot_entries(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        return self._ipc_client.query_snapshot_entries(
+            snapshot_id=snapshot_id,
             limit=limit,
             after=after,
         )

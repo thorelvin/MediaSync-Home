@@ -117,6 +117,17 @@ def test_named_pipe_plan_operations_query_succeeds_after_handshake() -> None:
     assert page.payload["plan_operations"]["read_model_available"] is False
 
 
+def test_named_pipe_snapshot_entries_query_succeeds_after_handshake() -> None:
+    server, client = _server_and_client()
+
+    handshake = _roundtrip(server, client.connect)
+    page = _roundtrip(server, lambda: client.query_snapshot_entries(snapshot_id="snapshot-a"))
+
+    assert handshake.status is IpcStatus.ACCEPTED
+    assert page.status is IpcStatus.ACCEPTED
+    assert page.payload["snapshot_entries"]["read_model_available"] is False
+
+
 @pytest.mark.parametrize(
     ("protocol_version", "schema_version", "reason"),
     [

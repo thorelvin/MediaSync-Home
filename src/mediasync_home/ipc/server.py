@@ -55,6 +55,11 @@ from mediasync_home.application.runs import (
     parse_start_run_command,
     start_run_from_sealed_plan,
 )
+from mediasync_home.application.snapshot_read_models import (
+    SnapshotEntriesQueryError,
+    query_snapshot_entries,
+)
+from mediasync_home.application.snapshots import SnapshotEntryReadModelStore
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
 from mediasync_home.ipc.protocol import (
@@ -77,6 +82,7 @@ class EngineHostIpcService:
     standard_backup_job_read_store: StandardBackupJobReadModelStore | None = None
     run_activity_read_store: RunActivityReadModelStore | None = None
     plan_operation_read_store: PlanOperationReadModelStore | None = None
+    snapshot_entry_read_store: SnapshotEntryReadModelStore | None = None
     standard_backup_job_id_factory: StandardBackupJobIdFactory | None = None
     plan_store: PlanStore | None = None
     run_store: RunStore | None = None
@@ -180,6 +186,27 @@ class EngineHostIpcService:
         except PlanOperationsQueryError:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         return IpcResponse.accepted({"plan_operations": page.to_dict()})
+
+    def query_snapshot_entries(
+        self,
+        client_instance_id: str,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        if client_instance_id not in self._accepted_clients:
+            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        try:
+            page = query_snapshot_entries(
+                snapshot_read_store=self.snapshot_entry_read_store,
+                snapshot_id=snapshot_id,
+                limit=limit,
+                after=after,
+            )
+        except SnapshotEntriesQueryError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        return IpcResponse.accepted({"snapshot_entries": page.to_dict()})
 
     def submit_command(self, client_instance_id: str, command_name: str) -> IpcResponse:
         del command_name

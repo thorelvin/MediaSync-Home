@@ -415,6 +415,13 @@ class Win32NamedPipeServer:
                 limit=_optional_query_int(request.get("limit")),
                 after=_optional_query_object(request.get("after")),
             )
+        if message_type == "QUERY_SNAPSHOT_ENTRIES":
+            return self.service.query_snapshot_entries(
+                str(request["client_instance_id"]),
+                snapshot_id=str(request["snapshot_id"]),
+                limit=_optional_query_int(request.get("limit")),
+                after=_optional_query_object(request.get("after")),
+            )
         if message_type == "COMMAND":
             return self.service.submit_command_envelope(request)
         return IpcResponse.rejected(IpcReason.INVALID_FRAME)
@@ -503,6 +510,24 @@ class Win32NamedPipeClient:
             "message_type": "QUERY_PLAN_OPERATIONS",
             "client_instance_id": self.client_instance_id,
             "plan_id": plan_id,
+        }
+        if limit is not None:
+            request["limit"] = limit
+        if after is not None:
+            request["after"] = after
+        return self._roundtrip(request)
+
+    def query_snapshot_entries(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        request: dict[str, Any] = {
+            "message_type": "QUERY_SNAPSHOT_ENTRIES",
+            "client_instance_id": self.client_instance_id,
+            "snapshot_id": snapshot_id,
         }
         if limit is not None:
             request["limit"] = limit

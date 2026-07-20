@@ -56,6 +56,14 @@ from mediasync_home.application.runs import (
     StartedRun,
     StartedRunTarget,
 )
+from mediasync_home.application.snapshots import (
+    SnapshotEntryCursor,
+    SnapshotEntryPage,
+    SnapshotEntryPageQuery,
+    SnapshotEntryReadModel,
+    SnapshotEntryReadModelStore,
+    validate_snapshot_entry_page_query,
+)
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
@@ -251,6 +259,34 @@ class _InMemoryPlanStore(PlanStore, PlanOperationReadModelStore):
         )
 
 
+class _InMemorySnapshotEntryStore(SnapshotEntryReadModelStore):
+    def __init__(self, entries: tuple[SnapshotEntryReadModel, ...] = ()) -> None:
+        self.entries = entries
+
+    def page_snapshot_entries(self, query: SnapshotEntryPageQuery) -> SnapshotEntryPage:
+        validate_snapshot_entry_page_query(query)
+        entries = tuple(
+            sorted(
+                self.entries,
+                key=lambda entry: (entry.comparison_key, entry.relative_path, entry.entry_id),
+            )
+        )
+        if query.after is not None:
+            entries = tuple(
+                entry for entry in entries if _snapshot_entry_after_cursor(entry, query.after)
+            )
+        page_entries = entries[: query.limit]
+        has_more = len(entries) > query.limit
+        return SnapshotEntryPage(
+            snapshot_id=query.snapshot_id,
+            entries=page_entries,
+            next_cursor=_snapshot_entry_cursor(page_entries[-1])
+            if has_more and page_entries
+            else None,
+            has_more=has_more,
+        )
+
+
 class _InMemoryRunStore(RunStore, RunActivityReadModelStore):
     def __init__(self) -> None:
         self.runs: dict[str, StartedRun] = {}
@@ -434,6 +470,7 @@ def test_gui_client_handshake_and_status_query_succeed() -> None:
     overview = gui_client.get_backup_overview()
     activity = gui_client.get_activity_overview()
     plan_operations = gui_client.get_plan_operations(plan_id="plan-a")
+    snapshot_entries = gui_client.get_snapshot_entries(snapshot_id="snapshot-a")
 
     assert handshake.status is IpcStatus.ACCEPTED
     assert handshake.reason is None
@@ -447,6 +484,8 @@ def test_gui_client_handshake_and_status_query_succeed() -> None:
     assert activity.payload["activity_overview"]["read_model_available"] is False
     assert plan_operations.status is IpcStatus.ACCEPTED
     assert plan_operations.payload["plan_operations"]["read_model_available"] is False
+    assert snapshot_entries.status is IpcStatus.ACCEPTED
+    assert snapshot_entries.payload["snapshot_entries"]["read_model_available"] is False
 
 
 def test_backup_overview_query_requires_prior_handshake() -> None:
@@ -596,6 +635,67 @@ def test_plan_operations_query_returns_bounded_sealed_operation_page() -> None:
     assert second_page["has_more"] is False
     assert second_page["next_cursor"] is None
     assert [operation["operation_id"] for operation in second_page["operations"]] == ["op-b"]
+
+
+def test_snapshot_entries_query_requires_prior_handshake() -> None:
+    response = _client().query_snapshot_entries(snapshot_id="snapshot-a")
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.HANDSHAKE_REQUIRED
+
+
+def test_snapshot_entries_query_rejects_invalid_bounds() -> None:
+    ipc_client = _client()
+    ipc_client.connect()
+
+    response = ipc_client.query_snapshot_entries(snapshot_id="snapshot-a", limit=0)
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.INVALID_FRAME
+
+
+def test_snapshot_entries_query_returns_bounded_entry_page() -> None:
+    service = _service()
+    service.snapshot_entry_read_store = _InMemorySnapshotEntryStore(
+        (
+            _snapshot_entry("file-b", "Pictures/B.jpg", "020:pictures/b.jpg", None),
+            _snapshot_entry("file-a", "Pictures/A.jpg", "010:pictures/a.jpg", "case-group-a"),
+        )
+    )
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    first = ipc_client.query_snapshot_entries(snapshot_id="snapshot-a", limit=1)
+    first_page = first.payload["snapshot_entries"]
+    second = ipc_client.query_snapshot_entries(
+        snapshot_id="snapshot-a",
+        limit=1,
+        after=first_page["next_cursor"],
+    )
+    second_page = second.payload["snapshot_entries"]
+
+    assert first.status is IpcStatus.ACCEPTED
+    assert first_page["read_model_available"] is True
+    assert first_page["has_more"] is True
+    assert first_page["next_cursor"] == {
+        "comparison_key": "010:pictures/a.jpg",
+        "relative_path": "Pictures/A.jpg",
+        "entry_id": "file-a",
+    }
+    assert first_page["entries"] == [
+        {
+            "entry_id": "file-a",
+            "relative_path": "Pictures/A.jpg",
+            "comparison_key": "010:pictures/a.jpg",
+            "object_type": "file",
+            "size_bytes": 128,
+            "case_collision_group_id": "case-group-a",
+        }
+    ]
+    assert second.status is IpcStatus.ACCEPTED
+    assert second_page["has_more"] is False
+    assert second_page["next_cursor"] is None
+    assert [entry["entry_id"] for entry in second_page["entries"]] == ["file-b"]
 
 
 def test_handshake_uses_verified_identity_not_payload_claim() -> None:
@@ -1249,6 +1349,45 @@ def _plan_operation_cursor(operation: PlanOperationReadModel) -> PlanOperationCu
         execution_phase=operation.execution_phase,
         stable_order_key=operation.stable_order_key,
         operation_id=operation.operation_id,
+    )
+
+
+def _snapshot_entry(
+    entry_id: str,
+    relative_path: str,
+    comparison_key: str,
+    case_collision_group_id: str | None,
+) -> SnapshotEntryReadModel:
+    return SnapshotEntryReadModel(
+        entry_id=entry_id,
+        relative_path=relative_path,
+        comparison_key=comparison_key,
+        object_type="file",
+        size_bytes=128,
+        case_collision_group_id=case_collision_group_id,
+    )
+
+
+def _snapshot_entry_after_cursor(
+    entry: SnapshotEntryReadModel,
+    cursor: SnapshotEntryCursor,
+) -> bool:
+    return (
+        entry.comparison_key,
+        entry.relative_path,
+        entry.entry_id,
+    ) > (
+        cursor.comparison_key,
+        cursor.relative_path,
+        cursor.entry_id,
+    )
+
+
+def _snapshot_entry_cursor(entry: SnapshotEntryReadModel) -> SnapshotEntryCursor:
+    return SnapshotEntryCursor(
+        comparison_key=entry.comparison_key,
+        relative_path=entry.relative_path,
+        entry_id=entry.entry_id,
     )
 
 
