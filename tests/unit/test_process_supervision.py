@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from mediasync_home.adapters.process_supervisor import LocalSubprocessSupervisor
 from mediasync_home.application.process_supervision import (
     ChildContainmentPolicy,
     DllSearchPolicy,
@@ -51,6 +52,25 @@ def test_internal_role_launch_plan_is_safe_by_default() -> None:
     assert dict(plan.environment) == {"PYTHONUTF8": "1", "SystemRoot": "C:\\Windows"}
 
 
+def test_internal_role_launch_plan_preserves_systemroot_case_insensitively() -> None:
+    plan = build_internal_role_launch_plan(
+        role=ProcessRole.ENGINE_HOST,
+        executable=Path(sys.executable).resolve(),
+        role_runner=RUNNER,
+        repo_root=ROOT,
+        environment={
+            "PATH": "must-not-pass-through",
+            "SYSTEMROOT": "C:\\Windows",
+            "TEMP": "C:\\Temp",
+        },
+    )
+
+    assert dict(plan.environment) == {
+        "SystemRoot": "C:\\Windows",
+        "TEMP": "C:\\Temp",
+    }
+
+
 @pytest.mark.parametrize(
     ("mutation", "reason"),
     [
@@ -87,6 +107,13 @@ def test_transfer_child_policy_is_reserved_until_job_object_adapter_exists() -> 
 
     with pytest.raises(ProcessLaunchViolation, match="TRANSFER_CHILD_SUPERVISION_NOT_IMPLEMENTED"):
         validate_process_launch_plan(plan, repo_root=ROOT)
+
+
+def test_local_subprocess_supervisor_rejects_unvalidated_shell_plan_before_spawn() -> None:
+    plan = ProcessLaunchPlan(**(_safe_plan().__dict__ | {"shell": True}))
+
+    with pytest.raises(ProcessLaunchViolation, match="SHELL_EXECUTION_FORBIDDEN"):
+        LocalSubprocessSupervisor().start(plan)
 
 
 def _safe_plan() -> ProcessLaunchPlan:

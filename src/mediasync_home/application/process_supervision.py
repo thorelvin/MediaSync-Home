@@ -103,8 +103,19 @@ def validate_process_launch_plan(plan: ProcessLaunchPlan, *, repo_root: Path) ->
 
 
 def _minimal_environment(environment: dict[str, str]) -> tuple[tuple[str, str], ...]:
-    allowed_names = {"PYTHONUTF8", "QT_QPA_PLATFORM", "SystemRoot", "TEMP", "TMP"}
-    return tuple(sorted((name, value) for name, value in environment.items() if name in allowed_names))
+    allowed_names = {
+        "PYTHONUTF8": "PYTHONUTF8",
+        "QT_QPA_PLATFORM": "QT_QPA_PLATFORM",
+        "SYSTEMROOT": "SystemRoot",
+        "TEMP": "TEMP",
+        "TMP": "TMP",
+    }
+    sanitized: dict[str, str] = {}
+    for name, value in environment.items():
+        canonical = allowed_names.get(name.upper())
+        if canonical is not None:
+            sanitized[canonical] = value
+    return tuple(sorted(sanitized.items()))
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

@@ -123,6 +123,49 @@ def test_gui_can_disconnect_and_reconnect_without_stopping_engine_host() -> None
     assert host_events[-1]["served_requests"] == 4
 
 
+def test_launcher_local_preview_status_starts_host_and_queries_gui() -> None:
+    pipe_name = win32_named_pipe.make_pipe_name(
+        installation_id="launcher-preview-status-test",
+        suffix=uuid4().hex,
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_role.py",
+            "--role",
+            "launcher",
+            "--local-preview-status",
+            "--pipe-name",
+            pipe_name,
+        ],
+        cwd=Path(__file__).resolve().parents[3],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=True,
+    )
+
+    payload = json.loads(result.stdout)
+    host_events = payload["engine_host"]["events"]
+
+    assert result.stderr == ""
+    assert payload["accepted"] is True
+    assert payload["event"] == "LAUNCHER_LOCAL_PREVIEW_STATUS"
+    assert payload["pipe_name"] == pipe_name
+    assert payload["scope"] == "0B_SAME_USER_LOCAL_PREVIEW"
+    assert payload["gui"]["returncode"] == 0
+    assert payload["gui"]["response"]["status"] == "ACCEPTED"
+    assert payload["gui"]["response"]["payload"]["host_status"]["role"] == "engine-host"
+    assert payload["engine_host"]["returncode"] == 0
+    assert [event["event"] for event in host_events] == [
+        "ENGINE_HOST_PIPE_STARTING",
+        "ENGINE_HOST_PIPE_STOPPED",
+    ]
+    assert host_events[-1]["served_requests"] == 2
+    assert payload["engine_host"]["killed"] is False
+
+
 def test_engine_host_state_root_persists_gui_submitted_disabled_command(
     tmp_path: Path,
 ) -> None:
