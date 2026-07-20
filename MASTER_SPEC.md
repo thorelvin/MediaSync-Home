@@ -3306,7 +3306,7 @@ RUNNING         -> SUCCEEDED | FAILED | CANCELLED
 
 Engine Host-startupkoordinereren kjører command receipt-avstemming før nye muterende commands åpnes, og kan i samme oppstartspass kjøre outbox requeue bare når inaktive owner instance-ID-er er bevist av startupmiljøet.
 
-0B pipe-komposisjonen kan eksplisitt startes med `--state-root` for å opprette og migrere lokale `catalog.sqlite`/`recovery.sqlite` før serving. Uten denne flaggen beholdes den ikke-persistente status-previewen, og ingen lokal statefil opprettes av pipe-komposisjonen.
+0B pipe-komposisjonen kan eksplisitt startes med `--state-root` for å opprette og migrere lokale `catalog.sqlite`/`recovery.sqlite` før serving. GUI-rollen har en command-submit smoke mode for denne IPC-linjen, men Engine Host-policyen styrer fortsatt utfallet og skriver terminal receipt når muterende kommandoer er deaktivert. Uten denne flaggen beholdes den ikke-persistente status-previewen, og ingen lokal statefil opprettes av pipe-komposisjonen.
 
 Idempotency-retention:
 
