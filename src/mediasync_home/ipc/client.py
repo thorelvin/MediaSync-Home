@@ -58,6 +58,20 @@ class InProcessIpcClient:
             offset=offset,
         )
 
+    def query_activity_overview(
+        self,
+        *,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        return self.service.query_activity_overview(
+            self.client_instance_id,
+            job_id=job_id,
+            limit=limit,
+            offset=offset,
+        )
+
     def submit_command(
         self,
         command_name: str,

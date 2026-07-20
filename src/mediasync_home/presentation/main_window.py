@@ -29,6 +29,7 @@ from mediasync_home.presentation.view_models.backup_setup import (
     BackupSetupStepViewState,
     BackupJobStatusViewState,
     StandardBackupSetupViewState,
+    activity_overview_from_response,
     backup_overview_from_response,
     build_standard_backup_setup_state,
     empty_backup_job_status_state,
@@ -46,6 +47,16 @@ class BackupOverviewProvider(Protocol):
         self,
         *,
         draft_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse: ...
+
+
+class ActivityOverviewProvider(Protocol):
+    def get_activity_overview(
+        self,
+        *,
+        job_id: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse: ...
@@ -140,6 +151,7 @@ class MediaSyncWindow(QMainWindow):
             self._connected = True
         self.apply_engine_status(engine_status_from_response(self._engine_client.get_status()))
         self._refresh_backup_overview()
+        self._refresh_activity_overview()
 
     def apply_engine_status(self, state: EngineStatusViewState) -> None:
         self._engine_chip.setText(f"{state.connection_label}: {state.state_label}")
@@ -162,6 +174,15 @@ class MediaSyncWindow(QMainWindow):
             return
         provider = cast(BackupOverviewProvider, self._engine_client)
         self.apply_backup_overview(backup_overview_from_response(provider.get_backup_overview()))
+
+    def _refresh_activity_overview(self) -> None:
+        if self._engine_client is None or not hasattr(self._engine_client, "get_activity_overview"):
+            return
+        provider = cast(ActivityOverviewProvider, self._engine_client)
+        state = activity_overview_from_response(provider.get_activity_overview())
+        if state.job_status is not None:
+            self._job_status_state = state.job_status
+            self._apply_job_status_state(state.job_status)
 
     def _apply_backup_setup_state(self, state: StandardBackupSetupViewState) -> None:
         for label, step in zip(self._setup_step_labels, state.steps, strict=False):

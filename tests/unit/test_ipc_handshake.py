@@ -4,6 +4,11 @@ from dataclasses import replace
 
 import pytest
 
+from mediasync_home.application.activity_read_models import (
+    RunActivityReadModelStore,
+    RunActivitySummary,
+    RunTargetActivitySummary,
+)
 from mediasync_home.application.command_receipts import (
     CommandReceipt,
     CommandReceiptState,
@@ -41,6 +46,7 @@ from mediasync_home.application.runs import (
     RunState,
     RunStore,
     RunTargetState,
+    RunTriggerType,
     StartedRun,
     StartedRunTarget,
 )
@@ -207,7 +213,7 @@ class _InMemoryPlanStore(PlanStore):
         return None
 
 
-class _InMemoryRunStore(RunStore):
+class _InMemoryRunStore(RunStore, RunActivityReadModelStore):
     def __init__(self) -> None:
         self.runs: dict[str, StartedRun] = {}
         self.idempotency_keys: dict[str, str] = {}
@@ -224,6 +230,20 @@ class _InMemoryRunStore(RunStore):
         if run_id is None:
             return None
         return self.runs[run_id]
+
+    def list_recent_run_activity_summaries(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        job_id: str | None = None,
+    ) -> tuple[RunActivitySummary, ...]:
+        runs = tuple(
+            run
+            for run in sorted(self.runs.values(), key=lambda item: item.run_id, reverse=True)
+            if job_id is None or run.job_id == job_id
+        )
+        return tuple(_run_activity_summary(run) for run in runs[offset : offset + limit])
 
     def load_next_pending_run_target(self, run_id: str) -> StartedRunTarget | None:
         run = self.load_started_run(run_id)
@@ -308,6 +328,65 @@ def _client(
     )
 
 
+def _run_activity_summary(run: StartedRun) -> RunActivitySummary:
+    return RunActivitySummary(
+        run_id=run.run_id,
+        job_id=run.job_id,
+        job_revision_id=run.job_revision_id,
+        plan_id=run.plan_id,
+        state=run.state,
+        trigger_type=run.trigger_type,
+        started_utc="2026-07-20T12:00:00.000Z",
+        finished_utc=None,
+        planned_operations=run.planned_operations,
+        planned_bytes=run.planned_bytes,
+        warning_count=run.warning_count,
+        error_count=run.error_count,
+        targets=tuple(
+            RunTargetActivitySummary(
+                run_target_id=target.run_target_id,
+                endpoint_id=target.endpoint_id,
+                endpoint_revision_id=target.endpoint_revision_id,
+                state=target.state,
+                planned_operations=target.planned_operations,
+                completed_operations=0,
+                planned_bytes=target.planned_bytes,
+                completed_bytes=0,
+            )
+            for target in run.targets
+        ),
+    )
+
+
+def _started_run(run_id: str = "run-a", *, job_id: str = "job-a") -> StartedRun:
+    return StartedRun(
+        run_id=run_id,
+        job_id=job_id,
+        job_revision_id=f"{job_id}-rev",
+        plan_id=f"{job_id}-plan",
+        command_request_id=f"{run_id}-request",
+        idempotency_key=f"{run_id}-idempotency",
+        command_receipt_id=f"{run_id}-idempotency",
+        logical_run_group_id=f"{run_id}-group",
+        trigger_type=RunTriggerType.MANUAL_LOCAL_PREVIEW,
+        state=RunState.QUEUED,
+        app_version="0B-dev",
+        plan_checksum="a" * 64,
+        planned_operations=1,
+        planned_bytes=128,
+        targets=(
+            StartedRunTarget(
+                run_target_id=f"{run_id}-target-0000",
+                endpoint_id="target-a",
+                endpoint_revision_id="target-rev-a",
+                state=RunTargetState.PENDING,
+                planned_operations=1,
+                planned_bytes=128,
+            ),
+        ),
+    )
+
+
 def test_gui_client_handshake_and_status_query_succeed() -> None:
     ipc_client = _client()
     gui_client = EngineClient(ipc_client)
@@ -315,6 +394,7 @@ def test_gui_client_handshake_and_status_query_succeed() -> None:
     handshake = gui_client.connect()
     status = gui_client.get_status()
     overview = gui_client.get_backup_overview()
+    activity = gui_client.get_activity_overview()
 
     assert handshake.status is IpcStatus.ACCEPTED
     assert handshake.reason is None
@@ -324,6 +404,8 @@ def test_gui_client_handshake_and_status_query_succeed() -> None:
     assert status.payload["host_status"]["mutations_enabled"] is False
     assert overview.status is IpcStatus.ACCEPTED
     assert overview.payload["backup_overview"]["read_model_available"] is False
+    assert activity.status is IpcStatus.ACCEPTED
+    assert activity.payload["activity_overview"]["read_model_available"] is False
 
 
 def test_backup_overview_query_requires_prior_handshake() -> None:
@@ -386,6 +468,42 @@ def test_backup_overview_query_returns_bounded_draft_and_job_read_model() -> Non
     assert overview["draft"]["can_create"] is True
     assert overview["jobs"][0]["job_id"] == "job-a"
     assert overview["jobs"][0]["configured_target_count"] == 1
+
+
+def test_activity_overview_query_requires_prior_handshake() -> None:
+    response = _client().query_activity_overview()
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.HANDSHAKE_REQUIRED
+
+
+def test_activity_overview_query_rejects_invalid_bounds() -> None:
+    ipc_client = _client()
+    ipc_client.connect()
+
+    response = ipc_client.query_activity_overview(limit=0)
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.INVALID_FRAME
+
+
+def test_activity_overview_query_returns_bounded_run_read_model() -> None:
+    runs = _InMemoryRunStore()
+    runs.save_started_run(_started_run("run-a", job_id="job-a"))
+    runs.save_started_run(_started_run("run-b", job_id="job-a"))
+    service = _service()
+    service.run_activity_read_store = runs
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.query_activity_overview(job_id="job-a", limit=1, offset=0)
+
+    overview = response.payload["activity_overview"]
+    assert response.status is IpcStatus.ACCEPTED
+    assert overview["read_model_available"] is True
+    assert overview["has_more"] is True
+    assert overview["runs"][0]["run_id"] == "run-b"
+    assert overview["runs"][0]["targets"][0]["state"] == RunTargetState.PENDING.value
 
 
 def test_handshake_uses_verified_identity_not_payload_claim() -> None:

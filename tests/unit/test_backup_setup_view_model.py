@@ -9,6 +9,7 @@ from mediasync_home.presentation.view_models.backup_setup import (
     BackupSetupStep,
     BackupTargetDraft,
     FreshnessState,
+    activity_overview_from_response,
     backup_overview_from_response,
     build_backup_job_status_state,
     build_standard_backup_setup_state,
@@ -173,3 +174,54 @@ def test_backup_overview_view_model_renders_draft_and_first_job_summary() -> Non
     assert state.job_status.title == "Pictures"
     assert state.job_status.configured_target_count == 1
     assert state.job_status.target_statuses[0].freshness_label == "Ukjent"
+
+
+def test_activity_overview_view_model_renders_latest_run_status() -> None:
+    response = IpcResponse.accepted(
+        {
+            "activity_overview": {
+                "read_model_available": True,
+                "has_more": True,
+                "runs": [
+                    {
+                        "run_id": "run-a",
+                        "job_id": "job-a",
+                        "job_revision_id": "job-rev-a",
+                        "plan_id": "plan-a",
+                        "state": "PREFLIGHT",
+                        "trigger_type": "MANUAL_LOCAL_PREVIEW",
+                        "started_utc": "2026-07-20T12:00:00.000Z",
+                        "finished_utc": None,
+                        "planned_operations": 1,
+                        "planned_bytes": 128,
+                        "warning_count": 0,
+                        "error_count": 0,
+                        "targets": [
+                            {
+                                "run_target_id": "run-a-target-0000",
+                                "endpoint_id": "target-a",
+                                "endpoint_revision_id": "target-rev-a",
+                                "state": "REVALIDATING",
+                                "planned_operations": 1,
+                                "completed_operations": 0,
+                                "planned_bytes": 128,
+                                "completed_bytes": 0,
+                                "warning_count": 0,
+                                "error_count": 0,
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+    )
+
+    state = activity_overview_from_response(response)
+
+    assert state.read_model_available is True
+    assert state.has_more_runs is True
+    assert state.job_status is not None
+    assert state.job_status.title == "Siste kjøring: run-a"
+    assert state.job_status.activity_label == "Kontrollerer"
+    assert state.job_status.attention_label == "Venter"
+    assert state.job_status.target_statuses[0].activity_label == "Kontrollerer"

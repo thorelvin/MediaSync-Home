@@ -401,6 +401,13 @@ class Win32NamedPipeServer:
                 limit=_optional_query_int(request.get("limit")),
                 offset=_optional_query_int(request.get("offset")),
             )
+        if message_type == "QUERY_ACTIVITY_OVERVIEW":
+            return self.service.query_activity_overview(
+                str(request["client_instance_id"]),
+                job_id=_optional_query_str(request.get("job_id")),
+                limit=_optional_query_int(request.get("limit")),
+                offset=_optional_query_int(request.get("offset")),
+            )
         if message_type == "COMMAND":
             return self.service.submit_command_envelope(request)
         return IpcResponse.rejected(IpcReason.INVALID_FRAME)
@@ -453,6 +460,25 @@ class Win32NamedPipeClient:
         }
         if draft_id is not None:
             request["draft_id"] = draft_id
+        if limit is not None:
+            request["limit"] = limit
+        if offset is not None:
+            request["offset"] = offset
+        return self._roundtrip(request)
+
+    def query_activity_overview(
+        self,
+        *,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        request: dict[str, Any] = {
+            "message_type": "QUERY_ACTIVITY_OVERVIEW",
+            "client_instance_id": self.client_instance_id,
+        }
+        if job_id is not None:
+            request["job_id"] = job_id
         if limit is not None:
             request["limit"] = limit
         if offset is not None:

@@ -4,6 +4,11 @@ import json
 import sqlite3
 from typing import Any
 
+from mediasync_home.application.activity_read_models import (
+    RunActivityReadModelStore,
+    RunActivitySummary,
+    RunTargetActivitySummary,
+)
 from mediasync_home.application.runs import (
     RunState,
     RunStore,
@@ -18,7 +23,7 @@ class SqliteRunStoreError(ValueError):
     pass
 
 
-class SqliteRunStore(RunStore):
+class SqliteRunStore(RunStore, RunActivityReadModelStore):
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
@@ -167,6 +172,79 @@ class SqliteRunStore(RunStore):
             WHERE idempotency_key = ?
             """,
             (idempotency_key,),
+        )
+
+    def list_recent_run_activity_summaries(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        job_id: str | None = None,
+    ) -> tuple[RunActivitySummary, ...]:
+        if limit < 1 or offset < 0:
+            raise SqliteRunStoreError("RUN_ACTIVITY_QUERY_BOUNDS_INVALID")
+        if job_id is None:
+            rows = self._connection.execute(
+                """
+                SELECT
+                    id,
+                    job_id,
+                    job_revision_id,
+                    plan_id,
+                    trigger_type,
+                    state,
+                    started_utc,
+                    finished_utc,
+                    planned_operations,
+                    planned_bytes,
+                    warning_count,
+                    error_count
+                FROM runs
+                ORDER BY started_utc DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
+            ).fetchall()
+        else:
+            rows = self._connection.execute(
+                """
+                SELECT
+                    id,
+                    job_id,
+                    job_revision_id,
+                    plan_id,
+                    trigger_type,
+                    state,
+                    started_utc,
+                    finished_utc,
+                    planned_operations,
+                    planned_bytes,
+                    warning_count,
+                    error_count
+                FROM runs
+                WHERE job_id = ?
+                ORDER BY started_utc DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (job_id, limit, offset),
+            ).fetchall()
+        return tuple(
+            RunActivitySummary(
+                run_id=str(row[0]),
+                job_id=str(row[1]),
+                job_revision_id=str(row[2]),
+                plan_id=str(row[3]),
+                trigger_type=RunTriggerType(str(row[4])),
+                state=RunState(str(row[5])),
+                started_utc=str(row[6]),
+                finished_utc=None if row[7] is None else str(row[7]),
+                planned_operations=int(row[8]),
+                planned_bytes=int(row[9]),
+                warning_count=int(row[10]),
+                error_count=int(row[11]),
+                targets=self._load_target_activity_summaries(str(row[0])),
+            )
+            for row in rows
         )
 
     def load_next_pending_run_target(self, run_id: str) -> StartedRunTarget | None:
@@ -411,6 +489,45 @@ class SqliteRunStore(RunStore):
                 last_fencing_token=None if row[9] is None else int(row[9]),
                 planned_operations=int(row[10]),
                 planned_bytes=int(row[11]),
+            )
+            for row in rows
+        )
+
+    def _load_target_activity_summaries(
+        self,
+        run_id: str,
+    ) -> tuple[RunTargetActivitySummary, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                id,
+                endpoint_id,
+                endpoint_revision_id,
+                state,
+                planned_operations,
+                completed_operations,
+                planned_bytes,
+                completed_bytes,
+                warning_count,
+                error_count
+            FROM run_targets
+            WHERE run_id = ?
+            ORDER BY id
+            """,
+            (run_id,),
+        ).fetchall()
+        return tuple(
+            RunTargetActivitySummary(
+                run_target_id=str(row[0]),
+                endpoint_id=str(row[1]),
+                endpoint_revision_id=str(row[2]),
+                state=RunTargetState(str(row[3])),
+                planned_operations=int(row[4]),
+                completed_operations=int(row[5]),
+                planned_bytes=int(row[6]),
+                completed_bytes=int(row[7]),
+                warning_count=int(row[8]),
+                error_count=int(row[9]),
             )
             for row in rows
         )

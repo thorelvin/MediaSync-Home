@@ -155,8 +155,9 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         target = window.findChild(QLabel, "setupTargetValue")
         create_backup = window.findChild(QPushButton, "createBackupButton")
         activity_title = window.findChild(QLabel, "activityStatusTitle")
+        activity_rows = window.findChildren(QLabel, "activityDimensionLabel")
 
-        assert provider.calls == ["connect", "get_status", "get_backup_overview"]
+        assert provider.calls == ["connect", "get_status", "get_backup_overview", "get_activity_overview"]
         assert source is not None
         assert source.text() == "C:/Users/Ada/Pictures"
         assert target is not None
@@ -164,7 +165,9 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert create_backup is not None
         assert create_backup.isEnabled() is True
         assert activity_title is not None
-        assert activity_title.text() == "Pictures"
+        assert activity_title.text() == "Siste kjøring: run-a"
+        assert activity_rows[0].text() == "Aktivitet: Kontrollerer"
+        assert activity_rows[1].text() == "Oppmerksomhet: Venter"
     finally:
         window.close()
         window.deleteLater()
@@ -245,6 +248,54 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                                     "name": "USB 1",
                                     "path_label": "E:/Backup",
                                     "independent_device_id": "disk-a",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        )
+
+    def get_activity_overview(
+        self,
+        *,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        del job_id, limit, offset
+        self.calls.append("get_activity_overview")
+        return IpcResponse.accepted(
+            {
+                "activity_overview": {
+                    "read_model_available": True,
+                    "has_more": False,
+                    "runs": [
+                        {
+                            "run_id": "run-a",
+                            "job_id": "job-a",
+                            "job_revision_id": "job-rev-a",
+                            "plan_id": "plan-a",
+                            "state": "PREFLIGHT",
+                            "trigger_type": "MANUAL_LOCAL_PREVIEW",
+                            "started_utc": "2026-07-20T12:00:00.000Z",
+                            "finished_utc": None,
+                            "planned_operations": 1,
+                            "planned_bytes": 128,
+                            "warning_count": 0,
+                            "error_count": 0,
+                            "targets": [
+                                {
+                                    "run_target_id": "run-a-target-0000",
+                                    "endpoint_id": "target-a",
+                                    "endpoint_revision_id": "target-rev-a",
+                                    "state": "REVALIDATING",
+                                    "planned_operations": 1,
+                                    "completed_operations": 0,
+                                    "planned_bytes": 128,
+                                    "completed_bytes": 0,
+                                    "warning_count": 0,
+                                    "error_count": 0,
                                 }
                             ],
                         }

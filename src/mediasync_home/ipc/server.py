@@ -5,6 +5,11 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
+from mediasync_home.application.activity_read_models import (
+    ActivityOverviewQueryError,
+    RunActivityReadModelStore,
+    query_activity_overview,
+)
 from mediasync_home.application.command_receipts import (
     CommandReceipt,
     CommandReceiptConflict,
@@ -66,6 +71,7 @@ class EngineHostIpcService:
     job_draft_store: JobDraftStore | None = None
     standard_backup_job_catalog: StandardBackupJobCatalog | None = None
     standard_backup_job_read_store: StandardBackupJobReadModelStore | None = None
+    run_activity_read_store: RunActivityReadModelStore | None = None
     standard_backup_job_id_factory: StandardBackupJobIdFactory | None = None
     plan_store: PlanStore | None = None
     run_store: RunStore | None = None
@@ -127,6 +133,27 @@ class EngineHostIpcService:
         except BackupOverviewQueryError:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         return IpcResponse.accepted({"backup_overview": overview.to_dict()})
+
+    def query_activity_overview(
+        self,
+        client_instance_id: str,
+        *,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        if client_instance_id not in self._accepted_clients:
+            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        try:
+            overview = query_activity_overview(
+                run_read_store=self.run_activity_read_store,
+                job_id=job_id,
+                limit=limit,
+                offset=offset,
+            )
+        except ActivityOverviewQueryError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        return IpcResponse.accepted({"activity_overview": overview.to_dict()})
 
     def submit_command(self, client_instance_id: str, command_name: str) -> IpcResponse:
         del command_name

@@ -21,6 +21,15 @@ class StatusIpcClient(Protocol):
     ) -> IpcResponse:
         pass
 
+    def query_activity_overview(
+        self,
+        *,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        pass
+
 
 class EngineClient:
     def __init__(self, ipc_client: StatusIpcClient) -> None:
@@ -41,6 +50,19 @@ class EngineClient:
     ) -> IpcResponse:
         return self._ipc_client.query_backup_overview(
             draft_id=draft_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def get_activity_overview(
+        self,
+        *,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        return self._ipc_client.query_activity_overview(
+            job_id=job_id,
             limit=limit,
             offset=offset,
         )

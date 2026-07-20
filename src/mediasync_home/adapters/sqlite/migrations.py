@@ -112,6 +112,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_command_receipt_tombstones",
                 statements=CATALOG_COMMAND_RECEIPT_TOMBSTONES,
             ),
+            SqliteMigration(
+                version=18,
+                name="catalog_run_activity_read_model_indexes",
+                statements=CATALOG_RUN_ACTIVITY_READ_MODEL_INDEXES,
+            ),
         ),
     )
 
@@ -1384,6 +1389,17 @@ CATALOG_SNAPSHOT_COVERAGE_ISSUE_READ_MODEL_INDEXES = (
     """
     CREATE INDEX idx_snapshot_issues_snapshot_blocking_path_type_id
         ON snapshot_issues (snapshot_id, blocks_destructive_actions, relative_path, issue_type, id)
+    """,
+)
+
+CATALOG_RUN_ACTIVITY_READ_MODEL_INDEXES = (
+    """
+    CREATE INDEX idx_runs_started_id
+        ON runs (started_utc DESC, id DESC)
+    """,
+    """
+    CREATE INDEX idx_runs_job_started_id
+        ON runs (job_id, started_utc DESC, id DESC)
     """,
 )
 

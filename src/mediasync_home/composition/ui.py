@@ -24,6 +24,14 @@ class GuiIpcClient(Protocol):
         offset: int | None = None,
     ) -> IpcResponse: ...
 
+    def query_activity_overview(
+        self,
+        *,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse: ...
+
     def submit_command(
         self,
         command_name: str,
@@ -41,8 +49,10 @@ def build_parser() -> argparse.ArgumentParser:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--query-status", action="store_true")
     mode.add_argument("--query-backup-overview", action="store_true")
+    mode.add_argument("--query-activity-overview", action="store_true")
     mode.add_argument("--submit-command", metavar="NAME")
     parser.add_argument("--draft-id")
+    parser.add_argument("--job-id")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--offset", type=int)
     parser.add_argument("--request-id")
@@ -87,6 +97,12 @@ def _run_pipe_action(args: argparse.Namespace, client: GuiIpcClient) -> IpcRespo
     if args.query_backup_overview:
         return client.query_backup_overview(
             draft_id=args.draft_id,
+            limit=args.limit,
+            offset=args.offset,
+        )
+    if args.query_activity_overview:
+        return client.query_activity_overview(
+            job_id=args.job_id,
             limit=args.limit,
             offset=args.offset,
         )

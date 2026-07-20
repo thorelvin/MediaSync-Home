@@ -103,7 +103,8 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.recovery_connection is not None
         assert runtime.service.job_draft_store is not None
         assert runtime.service.standard_backup_job_read_store is not None
-        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 17
+        assert runtime.service.run_activity_read_store is not None
+        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 18
         assert current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY) == 5
         assert runtime.startup_reconciliation is not None
         assert runtime.startup_reconciliation.reconciler_instance_id == "host-new"
@@ -125,6 +126,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         )
 
         overview = ipc_client.query_backup_overview(draft_id="draft-a")
+        activity = ipc_client.query_activity_overview(limit=5)
 
         response = ipc_client.submit_command(
             "UNKNOWN_MUTATION",
@@ -143,6 +145,10 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert overview.status is IpcStatus.ACCEPTED
         assert overview.payload["backup_overview"]["read_model_available"] is True
         assert overview.payload["backup_overview"]["draft"]["can_create"] is True
+        assert activity.status is IpcStatus.ACCEPTED
+        assert activity.payload["activity_overview"]["read_model_available"] is True
+        assert activity.payload["activity_overview"]["limit"] == 5
+        assert activity.payload["activity_overview"]["runs"] == []
         assert response.status is IpcStatus.REJECTED
         assert response.reason is IpcReason.MUTATING_COMMANDS_DISABLED
         assert row == (

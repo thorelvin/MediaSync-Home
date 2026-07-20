@@ -289,6 +289,70 @@ def test_sqlite_run_store_records_acquired_run_target_lease(tmp_path: Path) -> N
         ]
 
 
+def test_sqlite_run_store_lists_recent_run_activity_summaries(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        plans = SqlitePlanStore(connection)
+        runs = SqliteRunStore(connection)
+        plan = _sealed_plan()
+        plans.save_sealed_plan(plan)
+        first = start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        assert first.run is not None
+        _insert_receipt_with_id(connection, idempotency_key="idempotency-b", request_id="request-b")
+        second = replace(
+            first.run,
+            run_id="run-b",
+            command_request_id="request-b",
+            idempotency_key="idempotency-b",
+            command_receipt_id="idempotency-b",
+            logical_run_group_id="run-group-b",
+            targets=(
+                replace(
+                    first.run.targets[0],
+                    run_target_id="run-b-target-0000",
+                    state=RunTargetState.REVALIDATING,
+                ),
+            ),
+        )
+        runs.save_started_run(second)
+        connection.execute(
+            "UPDATE runs SET started_utc = '2026-07-20T10:00:00.000Z' WHERE id = 'run-a'"
+        )
+        connection.execute(
+            "UPDATE runs SET started_utc = '2026-07-20T11:00:00.000Z' WHERE id = 'run-b'"
+        )
+        connection.execute(
+            """
+            UPDATE run_targets
+            SET completed_operations = 1,
+                completed_bytes = 128,
+                warning_count = 1
+            WHERE id = 'run-b-target-0000'
+            """
+        )
+
+        page = runs.list_recent_run_activity_summaries(limit=1, offset=0, job_id="job-a")
+
+        assert [run.run_id for run in page] == ["run-b"]
+        assert page[0].started_utc == "2026-07-20T11:00:00.000Z"
+        assert page[0].targets[0].state is RunTargetState.REVALIDATING
+        assert page[0].targets[0].completed_operations == 1
+        assert page[0].targets[0].completed_bytes == 128
+        assert page[0].targets[0].warning_count == 1
+
+
 def test_sqlite_run_store_requires_sealed_plan_binding(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
@@ -441,11 +505,24 @@ def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
 
 
 def _insert_receipt(connection: sqlite3.Connection) -> None:
-    receipt = CommandReceipt(
+    _insert_receipt_with_id(
+        connection,
+        idempotency_key="idempotency-a",
         request_id="request-a",
+    )
+
+
+def _insert_receipt_with_id(
+    connection: sqlite3.Connection,
+    *,
+    idempotency_key: str,
+    request_id: str,
+) -> None:
+    receipt = CommandReceipt(
+        request_id=request_id,
         client_instance_id="client-a",
         principal_fingerprint="principal-a",
-        idempotency_key="idempotency-a",
+        idempotency_key=idempotency_key,
         command_name="START_RUN",
         payload_hash="a" * 64,
         protocol_version=1,

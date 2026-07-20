@@ -43,6 +43,33 @@ def test_ui_pipe_action_queries_backup_overview_after_handshake() -> None:
     }
 
 
+def test_ui_pipe_action_queries_activity_overview_after_handshake() -> None:
+    client = _FakeGuiIpcClient()
+    args = build_parser().parse_args(
+        [
+            "--pipe-name",
+            "pipe-a",
+            "--query-activity-overview",
+            "--job-id",
+            "job-a",
+            "--limit",
+            "5",
+            "--offset",
+            "10",
+        ]
+    )
+
+    response = _run_pipe_action(args, client)
+
+    assert response.payload == {"activity": "ok"}
+    assert client.calls == ("connect", "query_activity_overview")
+    assert client.activity_query == {
+        "job_id": "job-a",
+        "limit": 5,
+        "offset": 10,
+    }
+
+
 def test_ui_pipe_action_submits_command_after_handshake() -> None:
     client = _FakeGuiIpcClient()
     args = build_parser().parse_args(
@@ -117,6 +144,7 @@ class _FakeGuiIpcClient:
         self.calls: tuple[str, ...] = ()
         self.submitted: dict[str, object] | None = None
         self.overview_query: dict[str, object] | None = None
+        self.activity_query: dict[str, object] | None = None
 
     def connect(self) -> IpcResponse:
         self.calls = (*self.calls, "connect")
@@ -140,6 +168,21 @@ class _FakeGuiIpcClient:
             "offset": offset,
         }
         return IpcResponse.accepted({"overview": "ok"})
+
+    def query_activity_overview(
+        self,
+        *,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        self.calls = (*self.calls, "query_activity_overview")
+        self.activity_query = {
+            "job_id": job_id,
+            "limit": limit,
+            "offset": offset,
+        }
+        return IpcResponse.accepted({"activity": "ok"})
 
     def submit_command(
         self,

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
+from mediasync_home.application.runs import RunState, RunTargetState
 from mediasync_home.ipc.protocol import IpcResponse, IpcStatus
 
 
@@ -126,6 +127,13 @@ class BackupOverviewViewState:
     job_status: BackupJobStatusViewState
     read_model_available: bool
     has_more_jobs: bool
+
+
+@dataclass(frozen=True)
+class ActivityOverviewViewState:
+    job_status: BackupJobStatusViewState | None
+    read_model_available: bool
+    has_more_runs: bool
 
 
 STEP_TITLES = {
@@ -278,6 +286,30 @@ def backup_overview_from_response(response: IpcResponse | None) -> BackupOvervie
     )
 
 
+def activity_overview_from_response(response: IpcResponse | None) -> ActivityOverviewViewState:
+    if response is None or response.status is IpcStatus.REJECTED:
+        return ActivityOverviewViewState(
+            job_status=None,
+            read_model_available=False,
+            has_more_runs=False,
+        )
+    overview = response.payload.get("activity_overview")
+    if not isinstance(overview, dict):
+        return ActivityOverviewViewState(
+            job_status=None,
+            read_model_available=False,
+            has_more_runs=False,
+        )
+
+    runs = overview.get("runs")
+    run_payloads = tuple(item for item in runs if isinstance(item, dict)) if isinstance(runs, list) else ()
+    return ActivityOverviewViewState(
+        job_status=_activity_status_from_run_payload(run_payloads[0]) if run_payloads else None,
+        read_model_available=bool(overview.get("read_model_available", False)),
+        has_more_runs=bool(overview.get("has_more", False)),
+    )
+
+
 def _build_steps(
     draft: BackupSetupDraft,
     current_step: BackupSetupStep,
@@ -416,6 +448,143 @@ def _job_status_from_payload(payload: dict[object, object]) -> BackupJobStatusVi
         target_statuses=tuple(targets),
         recommended_action="Kontroller backupen nÃ¥r analysefunksjonen er tilgjengelig.",
     )
+
+
+def _activity_status_from_run_payload(payload: dict[object, object]) -> BackupJobStatusViewState:
+    state = _run_state(payload.get("state"))
+    targets_payload = payload.get("targets")
+    targets: list[TargetStatusViewState] = []
+    if isinstance(targets_payload, list):
+        for item in targets_payload:
+            if not isinstance(item, dict):
+                continue
+            target_state = _run_target_state(item.get("state"))
+            endpoint_id = _required_text(item.get("endpoint_id")) or "mål"
+            targets.append(
+                target_status(
+                    name=endpoint_id,
+                    activity=_target_activity(target_state),
+                    attention=_target_attention(target_state),
+                    freshness=_target_freshness(target_state),
+                    recommended_action=_target_next_action(target_state),
+                    independent_device_id=endpoint_id,
+                )
+            )
+    run_id = _required_text(payload.get("run_id")) or "ukjent"
+    return build_backup_job_status_state(
+        title=f"Siste kjøring: {run_id}",
+        activity=_run_activity(state),
+        attention=_run_attention(state),
+        target_statuses=tuple(targets),
+        recommended_action=_run_next_action(state),
+    )
+
+
+def _run_state(value: object) -> RunState:
+    if isinstance(value, str):
+        try:
+            return RunState(value)
+        except ValueError:
+            return RunState.CREATED
+    return RunState.CREATED
+
+
+def _run_target_state(value: object) -> RunTargetState:
+    if isinstance(value, str):
+        try:
+            return RunTargetState(value)
+        except ValueError:
+            return RunTargetState.PENDING
+    return RunTargetState.PENDING
+
+
+def _run_activity(state: RunState) -> ActivityState:
+    return {
+        RunState.CREATED: ActivityState.CHECKING,
+        RunState.QUEUED: ActivityState.CHECKING,
+        RunState.PREFLIGHT: ActivityState.CHECKING,
+        RunState.EXECUTING: ActivityState.COPYING,
+        RunState.PAUSING: ActivityState.PAUSED,
+        RunState.PAUSED: ActivityState.PAUSED,
+        RunState.COMPLETED: ActivityState.INACTIVE,
+        RunState.COMPLETED_WITH_WARNINGS: ActivityState.INACTIVE,
+        RunState.PARTIAL_FAILURE: ActivityState.INACTIVE,
+        RunState.FAILED: ActivityState.INACTIVE,
+        RunState.CANCELLED: ActivityState.INACTIVE,
+        RunState.BLOCKED_BY_SAFETY: ActivityState.INACTIVE,
+        RunState.RECOVERY_REQUIRED: ActivityState.RESTORING,
+    }[state]
+
+
+def _run_attention(state: RunState) -> AttentionState:
+    if state in {RunState.FAILED, RunState.BLOCKED_BY_SAFETY, RunState.RECOVERY_REQUIRED}:
+        return AttentionState.BLOCKED
+    if state in {RunState.COMPLETED_WITH_WARNINGS, RunState.PARTIAL_FAILURE, RunState.CANCELLED}:
+        return AttentionState.NEEDS_ATTENTION
+    if state in {RunState.CREATED, RunState.QUEUED, RunState.PREFLIGHT, RunState.PAUSING, RunState.PAUSED}:
+        return AttentionState.WAITING
+    return AttentionState.NORMAL
+
+
+def _run_next_action(state: RunState) -> str:
+    if state is RunState.QUEUED:
+        return "Venter på lokal 0B-kjøringsmotor."
+    if state is RunState.PREFLIGHT:
+        return "Kontrollerer mål før lease og revalidering."
+    if state is RunState.EXECUTING:
+        return "Følg fremdrift per mål."
+    if state in {RunState.FAILED, RunState.BLOCKED_BY_SAFETY, RunState.RECOVERY_REQUIRED}:
+        return "Se gjennom blokkeringen før ny kjøring."
+    if state in {RunState.COMPLETED, RunState.COMPLETED_WITH_WARNINGS}:
+        return "Kontroller resultatet før neste backup."
+    return "Vent på neste statusoppdatering."
+
+
+def _target_activity(state: RunTargetState) -> ActivityState:
+    if state in {RunTargetState.ACQUIRING_LEASE, RunTargetState.REVALIDATING}:
+        return ActivityState.CHECKING
+    if state is RunTargetState.EXECUTING:
+        return ActivityState.COPYING
+    if state is RunTargetState.PAUSED:
+        return ActivityState.PAUSED
+    if state is RunTargetState.RECOVERY_REQUIRED:
+        return ActivityState.RESTORING
+    return ActivityState.INACTIVE
+
+
+def _target_attention(state: RunTargetState) -> AttentionState:
+    if state in {RunTargetState.FAILED, RunTargetState.BLOCKED, RunTargetState.RECOVERY_REQUIRED}:
+        return AttentionState.BLOCKED
+    if state in {
+        RunTargetState.WAITING_FOR_ENDPOINT,
+        RunTargetState.NEEDS_REVIEW,
+        RunTargetState.SUCCEEDED_WITH_WARNINGS,
+        RunTargetState.CANCELLED,
+    }:
+        return AttentionState.NEEDS_ATTENTION
+    if state in {RunTargetState.PENDING, RunTargetState.ACQUIRING_LEASE, RunTargetState.REVALIDATING}:
+        return AttentionState.WAITING
+    return AttentionState.NORMAL
+
+
+def _target_freshness(state: RunTargetState) -> FreshnessState:
+    if state is RunTargetState.SUCCEEDED:
+        return FreshnessState.UP_TO_DATE
+    if state is RunTargetState.SUCCEEDED_WITH_WARNINGS:
+        return FreshnessState.LAST_BACKED_UP
+    return FreshnessState.UNKNOWN
+
+
+def _target_next_action(state: RunTargetState) -> str:
+    if state is RunTargetState.PENDING:
+        return "Venter på målbehandling."
+    if state in {RunTargetState.ACQUIRING_LEASE, RunTargetState.REVALIDATING}:
+        return "Kontrollerer måltilgang."
+    if state is RunTargetState.EXECUTING:
+        return "Kopiering pågår."
+    if state in {RunTargetState.FAILED, RunTargetState.BLOCKED, RunTargetState.RECOVERY_REQUIRED}:
+        return "Se gjennom målfeilen."
+    return "Ingen handling kreves nå."
 
 
 def _optional_text(value: object) -> str | None:
