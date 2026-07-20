@@ -59,7 +59,22 @@ from mediasync_home.presentation.view_models.plan_endpoints import (
     empty_plan_endpoint_preview_state,
     plan_endpoint_preview_from_response,
 )
+from mediasync_home.presentation.view_models.snapshot_health import (
+    SnapshotHealthPreviewState,
+    empty_snapshot_health_preview_state,
+    snapshot_health_preview_from_responses,
+)
 from mediasync_home.ipc.protocol import IpcResponse
+
+
+SNAPSHOT_HEALTH_COVERAGE_STATES = (
+    "VOLATILE",
+    "UNREADABLE",
+    "DISAPPEARED",
+    "REPARSE_BLOCKED",
+    "CASE_CONTEXT_UNKNOWN",
+    "CANCELLED",
+)
 
 
 class BackupOverviewProvider(Protocol):
@@ -106,6 +121,26 @@ class PlanEndpointsProvider(Protocol):
     ) -> IpcResponse: ...
 
 
+class SnapshotHealthProvider(Protocol):
+    def get_snapshot_coverage(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        coverage_states: tuple[str, ...] = (),
+    ) -> IpcResponse: ...
+
+    def get_snapshot_issues(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        blocking_only: bool = False,
+    ) -> IpcResponse: ...
+
+
 class MediaSyncWindow(QMainWindow):
     def __init__(
         self,
@@ -123,6 +158,7 @@ class MediaSyncWindow(QMainWindow):
         self._job_detail_state = empty_backup_job_detail_state()
         self._plan_preview_state = empty_plan_operation_preview_state()
         self._plan_endpoint_preview_state = empty_plan_endpoint_preview_state()
+        self._snapshot_health_preview_state = empty_snapshot_health_preview_state()
         self._engine_status_state = initial_state
         self._subtitle_label: QLabel | None = None
         self._navigation_items: list[QListWidgetItem] = []
@@ -164,6 +200,9 @@ class MediaSyncWindow(QMainWindow):
         self._plan_endpoint_title: QLabel | None = None
         self._plan_endpoint_summary: QLabel | None = None
         self._plan_endpoint_rows: list[QLabel] = []
+        self._snapshot_health_title: QLabel | None = None
+        self._snapshot_health_summary: QLabel | None = None
+        self._snapshot_health_rows: list[QLabel] = []
         self._language_options = (
             ("nb", "Norsk"),
             ("en", "English"),
@@ -268,6 +307,10 @@ class MediaSyncWindow(QMainWindow):
         self._plan_endpoint_preview_state = state
         self._apply_plan_endpoint_preview_state(state)
 
+    def apply_snapshot_health_preview(self, state: SnapshotHealthPreviewState) -> None:
+        self._snapshot_health_preview_state = state
+        self._apply_snapshot_health_preview_state(state)
+
     def _refresh_backup_overview(self) -> None:
         if self._engine_client is None or not hasattr(self._engine_client, "get_backup_overview"):
             return
@@ -296,9 +339,14 @@ class MediaSyncWindow(QMainWindow):
         if state.latest_plan_id is None:
             self.apply_plan_operation_preview(empty_plan_operation_preview_state())
             self.apply_plan_endpoint_preview(empty_plan_endpoint_preview_state())
+            self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
             return
         self._refresh_plan_operation_preview(state.latest_plan_id)
-        self._refresh_plan_endpoint_preview(state.latest_plan_id)
+        endpoint_state = self._refresh_plan_endpoint_preview(state.latest_plan_id)
+        if endpoint_state.source_snapshot_id is None:
+            self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
+            return
+        self._refresh_snapshot_health_preview(endpoint_state.source_snapshot_id)
 
     def _refresh_plan_operation_preview(self, plan_id: str) -> None:
         if self._engine_client is None or not hasattr(self._engine_client, "get_plan_operations"):
@@ -308,12 +356,39 @@ class MediaSyncWindow(QMainWindow):
             plan_operation_preview_from_response(provider.get_plan_operations(plan_id=plan_id, limit=3))
         )
 
-    def _refresh_plan_endpoint_preview(self, plan_id: str) -> None:
+    def _refresh_plan_endpoint_preview(self, plan_id: str) -> PlanEndpointPreviewState:
         if self._engine_client is None or not hasattr(self._engine_client, "get_plan_endpoints"):
-            return
+            state = empty_plan_endpoint_preview_state()
+            self.apply_plan_endpoint_preview(state)
+            return state
         provider = cast(PlanEndpointsProvider, self._engine_client)
-        self.apply_plan_endpoint_preview(
-            plan_endpoint_preview_from_response(provider.get_plan_endpoints(plan_id=plan_id, limit=4))
+        state = plan_endpoint_preview_from_response(provider.get_plan_endpoints(plan_id=plan_id, limit=4))
+        self.apply_plan_endpoint_preview(state)
+        return state
+
+    def _refresh_snapshot_health_preview(self, snapshot_id: str) -> None:
+        if (
+            self._engine_client is None
+            or not hasattr(self._engine_client, "get_snapshot_issues")
+            or not hasattr(self._engine_client, "get_snapshot_coverage")
+        ):
+            self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
+            return
+        provider = cast(SnapshotHealthProvider, self._engine_client)
+        self.apply_snapshot_health_preview(
+            snapshot_health_preview_from_responses(
+                snapshot_id=snapshot_id,
+                blocking_issues_response=provider.get_snapshot_issues(
+                    snapshot_id=snapshot_id,
+                    limit=2,
+                    blocking_only=True,
+                ),
+                coverage_response=provider.get_snapshot_coverage(
+                    snapshot_id=snapshot_id,
+                    limit=2,
+                    coverage_states=SNAPSHOT_HEALTH_COVERAGE_STATES,
+                ),
+            )
         )
 
     def _apply_backup_setup_state(self, state: StandardBackupSetupViewState) -> None:
@@ -404,6 +479,22 @@ class MediaSyncWindow(QMainWindow):
             "No endpoint rows.",
         )
         for index, row in enumerate(self._plan_endpoint_rows):
+            if index < len(lines):
+                row.setText(self._display(lines[index]))
+                row.setVisible(True)
+            else:
+                row.setText("")
+                row.setVisible(False)
+
+    def _apply_snapshot_health_preview_state(self, state: SnapshotHealthPreviewState) -> None:
+        if self._snapshot_health_title is not None:
+            self._snapshot_health_title.setText(self._display(state.title))
+        if self._snapshot_health_summary is not None:
+            self._snapshot_health_summary.setText(self._display(state.summary_label))
+        lines = tuple(row.display_line for row in state.rows) or (
+            "No snapshot health rows.",
+        )
+        for index, row in enumerate(self._snapshot_health_rows):
             if index < len(lines):
                 row.setText(self._display(lines[index]))
                 row.setVisible(True)
@@ -681,6 +772,8 @@ class MediaSyncWindow(QMainWindow):
         self._add_plan_operation_preview(layout, self._plan_preview_state)
         layout.addSpacing(8)
         self._add_plan_endpoint_preview(layout, self._plan_endpoint_preview_state)
+        layout.addSpacing(8)
+        self._add_snapshot_health_preview(layout, self._snapshot_health_preview_state)
         if self._show_component_gallery:
             layout.addWidget(self._build_component_gallery())
         layout.addStretch(1)
@@ -759,6 +852,32 @@ class MediaSyncWindow(QMainWindow):
             row.setWordWrap(True)
             row.setVisible(index < len(lines))
             self._plan_endpoint_rows.append(row)
+            layout.addWidget(row)
+
+    def _add_snapshot_health_preview(
+        self,
+        layout: QVBoxLayout,
+        state: SnapshotHealthPreviewState,
+    ) -> None:
+        title = QLabel(self._display(state.title))
+        title.setObjectName("snapshotHealthTitle")
+        self._snapshot_health_title = title
+        summary = QLabel(self._display(state.summary_label))
+        summary.setObjectName("snapshotHealthSummary")
+        summary.setWordWrap(True)
+        self._snapshot_health_summary = summary
+        layout.addWidget(title)
+        layout.addWidget(summary)
+        self._snapshot_health_rows = []
+        lines = tuple(row.display_line for row in state.rows) or (
+            "No snapshot health rows.",
+        )
+        for index in range(3):
+            row = QLabel(self._display(lines[index]) if index < len(lines) else "")
+            row.setObjectName("snapshotHealthRow")
+            row.setWordWrap(True)
+            row.setVisible(index < len(lines))
+            self._snapshot_health_rows.append(row)
             layout.addWidget(row)
 
     def _build_component_gallery(self) -> QFrame:
@@ -855,6 +974,7 @@ class MediaSyncWindow(QMainWindow):
         self._apply_job_status_state(self._job_status_state)
         self._apply_plan_operation_preview_state(self._plan_preview_state)
         self._apply_plan_endpoint_preview_state(self._plan_endpoint_preview_state)
+        self._apply_snapshot_health_preview_state(self._snapshot_health_preview_state)
 
 
 def _add_key_value(layout: QGridLayout, row: int, label_text: str, value: QLabel) -> QLabel:

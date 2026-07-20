@@ -61,6 +61,7 @@ def test_main_window_displays_engine_status(qapp) -> None:
         detail_title = window.findChild(QLabel, "jobDetailTitle")
         plan_preview_title = window.findChild(QLabel, "planPreviewTitle")
         plan_endpoint_title = window.findChild(QLabel, "planEndpointTitle")
+        snapshot_health_title = window.findChild(QLabel, "snapshotHealthTitle")
 
         assert nav is not None
         assert nav.count() == 4
@@ -112,6 +113,8 @@ def test_main_window_displays_engine_status(qapp) -> None:
         assert plan_preview_title.text() == "Planforhåndsvisning"
         assert plan_endpoint_title is not None
         assert plan_endpoint_title.text() == "Planendepunkter"
+        assert snapshot_health_title is not None
+        assert snapshot_health_title.text() == "Snapshothelse"
     finally:
         window.close()
         window.deleteLater()
@@ -129,6 +132,7 @@ def test_language_selector_updates_selected_flag(qapp) -> None:
         detail_title = window.findChild(QLabel, "jobDetailTitle")
         plan_preview_title = window.findChild(QLabel, "planPreviewTitle")
         plan_endpoint_title = window.findChild(QLabel, "planEndpointTitle")
+        snapshot_health_title = window.findChild(QLabel, "snapshotHealthTitle")
 
         assert language is not None
         assert language.menu() is not None
@@ -164,6 +168,8 @@ def test_language_selector_updates_selected_flag(qapp) -> None:
         assert plan_preview_title.text() == "Plan preview"
         assert plan_endpoint_title is not None
         assert plan_endpoint_title.text() == "Plan endpoints"
+        assert snapshot_health_title is not None
+        assert snapshot_health_title.text() == "Snapshot health"
     finally:
         window.close()
         window.deleteLater()
@@ -214,6 +220,8 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         plan_preview_rows = window.findChildren(QLabel, "planPreviewRow")
         plan_endpoint_summary = window.findChild(QLabel, "planEndpointSummary")
         plan_endpoint_rows = window.findChildren(QLabel, "planEndpointRow")
+        snapshot_health_summary = window.findChild(QLabel, "snapshotHealthSummary")
+        snapshot_health_rows = window.findChildren(QLabel, "snapshotHealthRow")
         language = window.findChild(QToolButton, "languageSelectorButton")
 
         assert provider.calls == [
@@ -224,6 +232,8 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
             "get_activity_overview",
             "get_plan_operations",
             "get_plan_endpoints",
+            "get_snapshot_issues",
+            "get_snapshot_coverage",
         ]
         assert source is not None
         assert source.text() == "C:/Users/Ada/Pictures"
@@ -250,6 +260,10 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert plan_endpoint_summary.text() == "2 endepunkter fra plan-a."
         assert plan_endpoint_rows[0].text() == "Kildeendepunkt: source-a · snapshot source-snapshot-a"
         assert plan_endpoint_rows[1].text() == "Målendepunkt 1: target-a · snapshot target-snapshot-a"
+        assert snapshot_health_summary is not None
+        assert snapshot_health_summary.text() == "1 blokkerende problem i source-snapshot-a."
+        assert snapshot_health_rows[0].text() == "Blokkerende problem: Archive · UNREADABLE_DIRECTORY"
+        assert snapshot_health_rows[1].text() == "Dekningsadvarsel: Videos · VOLATILE"
         assert activity_title is not None
         assert activity_title.text() == "Siste kjøring: run-a"
         assert activity_rows[0].text() == "Aktivitet: Kontrollerer"
@@ -268,6 +282,9 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert plan_endpoint_summary.text() == "2 endpoints from plan-a."
         assert plan_endpoint_rows[0].text() == "Source endpoint: source-a · snapshot source-snapshot-a"
         assert plan_endpoint_rows[1].text() == "Target endpoint 1: target-a · snapshot target-snapshot-a"
+        assert snapshot_health_summary.text() == "1 blocking issue in source-snapshot-a."
+        assert snapshot_health_rows[0].text() == "Blocking issue: Archive · UNREADABLE_DIRECTORY"
+        assert snapshot_health_rows[1].text() == "Coverage warning: Videos · VOLATILE"
         assert activity_title.text() == "Latest run: run-a"
         assert activity_rows[0].text() == "Activity: Checking"
         assert activity_rows[1].text() == "Attention: Waiting"
@@ -537,6 +554,77 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                             "planned_operations": 2,
                             "planned_bytes": 2048,
                         },
+                    ],
+                }
+            }
+        )
+
+    def get_snapshot_issues(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        blocking_only: bool = False,
+    ) -> IpcResponse:
+        del limit, after
+        self.calls.append("get_snapshot_issues")
+        assert snapshot_id == "source-snapshot-a"
+        assert blocking_only is True
+        return IpcResponse.accepted(
+            {
+                "snapshot_issues": {
+                    "snapshot_id": snapshot_id,
+                    "limit": 2,
+                    "has_more": False,
+                    "read_model_available": True,
+                    "blocking_only": True,
+                    "next_cursor": None,
+                    "issues": [
+                        {
+                            "issue_id": 1,
+                            "relative_path": "Archive",
+                            "issue_type": "UNREADABLE_DIRECTORY",
+                            "blocks_destructive_actions": True,
+                            "error_code": "ERROR_ACCESS_DENIED",
+                            "sanitized_message": "access denied",
+                        }
+                    ],
+                }
+            }
+        )
+
+    def get_snapshot_coverage(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        coverage_states: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        del limit, after
+        self.calls.append("get_snapshot_coverage")
+        assert snapshot_id == "source-snapshot-a"
+        assert "COMPLETE" not in coverage_states
+        return IpcResponse.accepted(
+            {
+                "snapshot_coverage": {
+                    "snapshot_id": snapshot_id,
+                    "limit": 2,
+                    "has_more": False,
+                    "read_model_available": True,
+                    "coverage_states": list(coverage_states),
+                    "next_cursor": None,
+                    "coverage": [
+                        {
+                            "relative_path": "Videos",
+                            "comparison_key": "videos",
+                            "coverage_state": "VOLATILE",
+                            "case_mode": "CASE_INSENSITIVE",
+                            "case_mode_evidence": "probe-ok",
+                            "case_context_hash": "a" * 64,
+                            "case_probe_error": None,
+                        }
                     ],
                 }
             }

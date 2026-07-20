@@ -11,6 +11,7 @@ def test_empty_plan_endpoint_preview_state_is_read_only_placeholder() -> None:
     state = empty_plan_endpoint_preview_state()
 
     assert state.plan_id is None
+    assert state.source_snapshot_id is None
     assert state.title == "Plan endpoints"
     assert state.summary_label == "No sealed plan endpoints to show."
     assert state.read_model_available is False
@@ -53,6 +54,7 @@ def test_plan_endpoint_preview_from_response_renders_endpoint_snapshot_rows() ->
     )
 
     assert state.plan_id == "plan-a"
+    assert state.source_snapshot_id == "source-snapshot-a"
     assert state.summary_label == "2 endpoints from plan-a."
     assert [row.display_line for row in state.rows] == [
         "Source endpoint: source-a · snapshot source-snapshot-a",

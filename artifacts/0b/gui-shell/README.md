@@ -16,9 +16,10 @@ The evidence is intentionally limited to the 0B shell frame: navigation,
 action bar, workspace, activity bar, theme tokens/QSS, icon registry, Engine
 Host status display, the non-mutating standard backup setup surface,
 flag-based language selector label switching, and the read-only backup job
-detail panel plus activity-bar plan operation and endpoint/snapshot previews.
-It does not claim completion of real job creation, the full GUI workflow, full
-localization matrix, accessibility review, or final visual acceptance suite.
+detail panel plus activity-bar plan operation, endpoint/snapshot, and source
+snapshot-health previews. It does not claim completion of real job creation,
+the full GUI workflow, full localization matrix, accessibility review, or final
+visual acceptance suite.
 
 The render command uses the native Windows Qt platform by default on Windows.
 Qt's `offscreen` platform is still used by automated smoke tests, but this

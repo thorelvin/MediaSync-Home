@@ -118,6 +118,8 @@ _NB_TO_EN = {
     "Avvist": "Rejected",
     "Bevaring": "Retention",
     "Blokkert": "Blocked",
+    "Blokkerende problem": "Blocking issue",
+    "Dekningsadvarsel": "Coverage warning",
     "Ekstra filer på målet beholdes": "Extra files on the target are kept",
     "Fortsett": "Continue",
     "Følg fremdrift per mål.": "Follow progress per target.",
@@ -131,12 +133,14 @@ _NB_TO_EN = {
     "Ingen forseglede planendepunkter å vise.": "No sealed plan endpoints to show.",
     "Ingen handling kreves nå.": "No action is required now.",
     "Ingen kilde valgt": "No source selected",
+    "Ingen kildesnapshot å vise.": "No source snapshot to inspect.",
     "Ingen lagret backupjobb": "No saved backup job",
     "Ingen mål konfigurert": "No targets configured",
     "Ingen mål valgt": "No targets selected",
     "Ingen mål å vise.": "No targets to show.",
     "Ingen endepunkter.": "No endpoint rows.",
     "Ingen planrader.": "No plan operations.",
+    "Ingen snapshothelserader.": "No snapshot health rows.",
     "Inaktiv": "Inactive",
     "Ikke konfigurert": "Not configured",
     "Innstillinger": "Settings",
@@ -186,6 +190,8 @@ _NB_TO_EN = {
     "Sist sikkerhetskopiert": "Last backed up",
     "Skrivebeskyttet lokal forhåndsvisning": "Read-only local preview",
     "Skrivebeskyttet målendepunkt": "Read-only target endpoint",
+    "Snapshothelse": "Snapshot health",
+    "Snapshothelsevisningen er ikke tilgjengelig.": "Snapshot health read model is not available.",
     "Standard": "Defaults",
     "Standard kontroll": "Standard verification",
     "Standardvalg ikke lastet": "Defaults not loaded",
@@ -228,12 +234,20 @@ _EN_TO_NB.update(
         ),
         "Engine status is unavailable.": "Motorstatus er utilgjengelig.",
         "High": "Høy",
+        "Blocking issue": "Blokkerende problem",
+        "Coverage warning": "Dekningsadvarsel",
         "No sealed plan to show.": "Ingen forseglet plan å vise.",
         "No sealed plan endpoints to show.": "Ingen forseglede planendepunkter å vise.",
         "No endpoint rows.": "Ingen endepunkter.",
         "No plan operations.": "Ingen planrader.",
+        "No source snapshot to inspect.": "Ingen kildesnapshot å vise.",
+        "No snapshot health rows.": "Ingen snapshothelserader.",
         "Operation": "Operasjon",
         "Endpoint": "Endepunkt",
+        "Snapshot health": "Snapshothelse",
+        "Snapshot health read model is not available.": (
+            "Snapshothelsevisningen er ikke tilgjengelig."
+        ),
         "Plan endpoints": "Planendepunkter",
         "Plan endpoint read model is not available.": "Planendepunktvisningen er ikke tilgjengelig.",
         "Plan preview": "Planforhåndsvisning",
@@ -290,6 +304,9 @@ def _to_english(value: str) -> str:
     translated = _translate_endpoint_role_to_english(value)
     if translated != value:
         return translated
+    translated = _translate_snapshot_summary_to_english(value)
+    if translated != value:
+        return translated
     return value
 
 
@@ -306,6 +323,9 @@ def _to_norwegian(value: str) -> str:
     if translated != value:
         return translated
     translated = _translate_endpoint_role_to_norwegian(value)
+    if translated != value:
+        return translated
+    translated = _translate_snapshot_summary_to_norwegian(value)
     if translated != value:
         return translated
     translated = _translate_delimited(value, " · ", _to_norwegian)
@@ -457,3 +477,49 @@ def _translate_endpoint_role_to_norwegian(value: str) -> str:
     if match is not None:
         return f"Målendepunkt {match.group('ordinal')}"
     return value
+
+
+def _translate_snapshot_summary_to_english(value: str) -> str:
+    if value.startswith("Ingen blokkerende snapshotproblemer i ") and value.endswith("."):
+        snapshot = value.removeprefix("Ingen blokkerende snapshotproblemer i ").removesuffix(".")
+        return f"No blocking snapshot issues in {snapshot}."
+    match = re.fullmatch(
+        r"(?P<count>\d+) blokkerende problem(?:er)? i (?P<snapshot>.+)\.(?P<more> Flere snapshoterader finnes\.)?",
+        value,
+    )
+    if match is not None:
+        issue_word = "issue" if match.group("count") == "1" else "issues"
+        more = " More snapshot rows exist." if match.group("more") else ""
+        return f"{match.group('count')} blocking {issue_word} in {match.group('snapshot')}.{more}"
+    match = re.fullmatch(
+        r"(?P<count>\d+) dekningsadvarsel(?:er)? i (?P<snapshot>.+)\.(?P<more> Flere snapshoterader finnes\.)?",
+        value,
+    )
+    if match is None:
+        return value
+    warning_word = "warning" if match.group("count") == "1" else "warnings"
+    more = " More snapshot rows exist." if match.group("more") else ""
+    return f"{match.group('count')} coverage {warning_word} in {match.group('snapshot')}.{more}"
+
+
+def _translate_snapshot_summary_to_norwegian(value: str) -> str:
+    if value.startswith("No blocking snapshot issues in ") and value.endswith("."):
+        snapshot = value.removeprefix("No blocking snapshot issues in ").removesuffix(".")
+        return f"Ingen blokkerende snapshotproblemer i {snapshot}."
+    match = re.fullmatch(
+        r"(?P<count>\d+) blocking issue(?:s)? in (?P<snapshot>.+)\.(?P<more> More snapshot rows exist\.)?",
+        value,
+    )
+    if match is not None:
+        issue_word = "problem" if match.group("count") == "1" else "problemer"
+        more = " Flere snapshoterader finnes." if match.group("more") else ""
+        return f"{match.group('count')} blokkerende {issue_word} i {match.group('snapshot')}.{more}"
+    match = re.fullmatch(
+        r"(?P<count>\d+) coverage warning(?:s)? in (?P<snapshot>.+)\.(?P<more> More snapshot rows exist\.)?",
+        value,
+    )
+    if match is None:
+        return value
+    warning_word = "dekningsadvarsel" if match.group("count") == "1" else "dekningsadvarsler"
+    more = " Flere snapshoterader finnes." if match.group("more") else ""
+    return f"{match.group('count')} {warning_word} i {match.group('snapshot')}.{more}"
