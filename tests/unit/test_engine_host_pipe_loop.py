@@ -104,6 +104,8 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.service.job_draft_store is not None
         assert runtime.service.standard_backup_job_read_store is not None
         assert runtime.service.snapshot_entry_read_store is not None
+        assert runtime.service.snapshot_coverage_read_store is not None
+        assert runtime.service.snapshot_issue_read_store is not None
         assert runtime.service.plan_store is not None
         assert runtime.service.plan_operation_read_store is not None
         assert runtime.service.run_activity_read_store is not None
@@ -132,6 +134,11 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         activity = ipc_client.query_activity_overview(limit=5)
         plan_operations = ipc_client.query_plan_operations(plan_id="plan-a", limit=5)
         snapshot_entries = ipc_client.query_snapshot_entries(snapshot_id="snapshot-a", limit=5)
+        snapshot_coverage = ipc_client.query_snapshot_coverage(
+            snapshot_id="snapshot-a",
+            limit=5,
+        )
+        snapshot_issues = ipc_client.query_snapshot_issues(snapshot_id="snapshot-a", limit=5)
 
         response = ipc_client.submit_command(
             "UNKNOWN_MUTATION",
@@ -162,6 +169,14 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert snapshot_entries.payload["snapshot_entries"]["read_model_available"] is True
         assert snapshot_entries.payload["snapshot_entries"]["limit"] == 5
         assert snapshot_entries.payload["snapshot_entries"]["entries"] == []
+        assert snapshot_coverage.status is IpcStatus.ACCEPTED
+        assert snapshot_coverage.payload["snapshot_coverage"]["read_model_available"] is True
+        assert snapshot_coverage.payload["snapshot_coverage"]["limit"] == 5
+        assert snapshot_coverage.payload["snapshot_coverage"]["coverage"] == []
+        assert snapshot_issues.status is IpcStatus.ACCEPTED
+        assert snapshot_issues.payload["snapshot_issues"]["read_model_available"] is True
+        assert snapshot_issues.payload["snapshot_issues"]["limit"] == 5
+        assert snapshot_issues.payload["snapshot_issues"]["issues"] == []
         assert response.status is IpcStatus.REJECTED
         assert response.reason is IpcReason.MUTATING_COMMANDS_DISABLED
         assert row == (

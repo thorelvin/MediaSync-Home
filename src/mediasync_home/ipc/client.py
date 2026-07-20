@@ -100,6 +100,38 @@ class InProcessIpcClient:
             after=after,
         )
 
+    def query_snapshot_coverage(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        coverage_states: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        return self.service.query_snapshot_coverage(
+            self.client_instance_id,
+            snapshot_id=snapshot_id,
+            limit=limit,
+            after=after,
+            coverage_states=coverage_states,
+        )
+
+    def query_snapshot_issues(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        blocking_only: bool = False,
+    ) -> IpcResponse:
+        return self.service.query_snapshot_issues(
+            self.client_instance_id,
+            snapshot_id=snapshot_id,
+            limit=limit,
+            after=after,
+            blocking_only=blocking_only,
+        )
+
     def submit_command(
         self,
         command_name: str,

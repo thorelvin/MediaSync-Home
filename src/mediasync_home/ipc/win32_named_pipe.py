@@ -422,6 +422,22 @@ class Win32NamedPipeServer:
                 limit=_optional_query_int(request.get("limit")),
                 after=_optional_query_object(request.get("after")),
             )
+        if message_type == "QUERY_SNAPSHOT_COVERAGE":
+            return self.service.query_snapshot_coverage(
+                str(request["client_instance_id"]),
+                snapshot_id=str(request["snapshot_id"]),
+                limit=_optional_query_int(request.get("limit")),
+                after=_optional_query_object(request.get("after")),
+                coverage_states=_optional_query_str_tuple(request.get("coverage_states")),
+            )
+        if message_type == "QUERY_SNAPSHOT_ISSUES":
+            return self.service.query_snapshot_issues(
+                str(request["client_instance_id"]),
+                snapshot_id=str(request["snapshot_id"]),
+                limit=_optional_query_int(request.get("limit")),
+                after=_optional_query_object(request.get("after")),
+                blocking_only=_optional_query_bool(request.get("blocking_only")),
+            )
         if message_type == "COMMAND":
             return self.service.submit_command_envelope(request)
         return IpcResponse.rejected(IpcReason.INVALID_FRAME)
@@ -535,6 +551,48 @@ class Win32NamedPipeClient:
             request["after"] = after
         return self._roundtrip(request)
 
+    def query_snapshot_coverage(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        coverage_states: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        request: dict[str, Any] = {
+            "message_type": "QUERY_SNAPSHOT_COVERAGE",
+            "client_instance_id": self.client_instance_id,
+            "snapshot_id": snapshot_id,
+        }
+        if limit is not None:
+            request["limit"] = limit
+        if after is not None:
+            request["after"] = after
+        if coverage_states:
+            request["coverage_states"] = list(coverage_states)
+        return self._roundtrip(request)
+
+    def query_snapshot_issues(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        blocking_only: bool = False,
+    ) -> IpcResponse:
+        request: dict[str, Any] = {
+            "message_type": "QUERY_SNAPSHOT_ISSUES",
+            "client_instance_id": self.client_instance_id,
+            "snapshot_id": snapshot_id,
+        }
+        if limit is not None:
+            request["limit"] = limit
+        if after is not None:
+            request["after"] = after
+        if blocking_only:
+            request["blocking_only"] = True
+        return self._roundtrip(request)
+
     def submit_command(
         self,
         command_name: str,
@@ -629,3 +687,23 @@ def _optional_query_object(value: object) -> dict[str, object] | None:
     if any(not isinstance(key, str) for key in value):
         raise ValueError("query object keys must be strings")
     return dict(value)
+
+
+def _optional_query_str_tuple(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        raise ValueError("query string tuple must be a JSON array")
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("query string tuple must be a JSON array")
+    if any(not isinstance(item, str) for item in value):
+        raise ValueError("query string tuple values must be strings")
+    return tuple(value)
+
+
+def _optional_query_bool(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    raise ValueError("query boolean must be a boolean")

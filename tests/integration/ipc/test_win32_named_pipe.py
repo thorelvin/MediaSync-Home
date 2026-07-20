@@ -128,6 +128,39 @@ def test_named_pipe_snapshot_entries_query_succeeds_after_handshake() -> None:
     assert page.payload["snapshot_entries"]["read_model_available"] is False
 
 
+def test_named_pipe_snapshot_coverage_query_succeeds_after_handshake() -> None:
+    server, client = _server_and_client()
+
+    handshake = _roundtrip(server, client.connect)
+    page = _roundtrip(
+        server,
+        lambda: client.query_snapshot_coverage(
+            snapshot_id="snapshot-a",
+            coverage_states=("COMPLETE",),
+        ),
+    )
+
+    assert handshake.status is IpcStatus.ACCEPTED
+    assert page.status is IpcStatus.ACCEPTED
+    assert page.payload["snapshot_coverage"]["read_model_available"] is False
+    assert page.payload["snapshot_coverage"]["coverage_states"] == ["COMPLETE"]
+
+
+def test_named_pipe_snapshot_issues_query_succeeds_after_handshake() -> None:
+    server, client = _server_and_client()
+
+    handshake = _roundtrip(server, client.connect)
+    page = _roundtrip(
+        server,
+        lambda: client.query_snapshot_issues(snapshot_id="snapshot-a", blocking_only=True),
+    )
+
+    assert handshake.status is IpcStatus.ACCEPTED
+    assert page.status is IpcStatus.ACCEPTED
+    assert page.payload["snapshot_issues"]["read_model_available"] is False
+    assert page.payload["snapshot_issues"]["blocking_only"] is True
+
+
 @pytest.mark.parametrize(
     ("protocol_version", "schema_version", "reason"),
     [

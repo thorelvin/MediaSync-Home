@@ -48,6 +48,24 @@ class GuiIpcClient(Protocol):
         after: dict[str, object] | None = None,
     ) -> IpcResponse: ...
 
+    def query_snapshot_coverage(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        coverage_states: tuple[str, ...] = (),
+    ) -> IpcResponse: ...
+
+    def query_snapshot_issues(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        blocking_only: bool = False,
+    ) -> IpcResponse: ...
+
     def submit_command(
         self,
         command_name: str,
@@ -68,6 +86,8 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--query-activity-overview", action="store_true")
     mode.add_argument("--query-plan-operations", action="store_true")
     mode.add_argument("--query-snapshot-entries", action="store_true")
+    mode.add_argument("--query-snapshot-coverage", action="store_true")
+    mode.add_argument("--query-snapshot-issues", action="store_true")
     mode.add_argument("--submit-command", metavar="NAME")
     parser.add_argument("--draft-id")
     parser.add_argument("--job-id")
@@ -76,6 +96,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--offset", type=int)
     parser.add_argument("--after-json")
+    parser.add_argument("--coverage-state", action="append")
+    parser.add_argument("--blocking-only", action="store_true")
     parser.add_argument("--request-id")
     parser.add_argument("--idempotency-key")
     parser.add_argument("--payload-json")
@@ -138,6 +160,20 @@ def _run_pipe_action(args: argparse.Namespace, client: GuiIpcClient) -> IpcRespo
             snapshot_id=args.snapshot_id or "",
             limit=args.limit,
             after=_parse_after_json(args.after_json),
+        )
+    if args.query_snapshot_coverage:
+        return client.query_snapshot_coverage(
+            snapshot_id=args.snapshot_id or "",
+            limit=args.limit,
+            after=_parse_after_json(args.after_json),
+            coverage_states=tuple(args.coverage_state or ()),
+        )
+    if args.query_snapshot_issues:
+        return client.query_snapshot_issues(
+            snapshot_id=args.snapshot_id or "",
+            limit=args.limit,
+            after=_parse_after_json(args.after_json),
+            blocking_only=args.blocking_only,
         )
     if args.query_status:
         return client.query_status()

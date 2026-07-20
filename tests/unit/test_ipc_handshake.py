@@ -57,12 +57,22 @@ from mediasync_home.application.runs import (
     StartedRunTarget,
 )
 from mediasync_home.application.snapshots import (
+    SnapshotCoverageCursor,
+    SnapshotCoveragePage,
+    SnapshotCoveragePageQuery,
+    SnapshotCoverageReadModel,
     SnapshotEntryCursor,
     SnapshotEntryPage,
     SnapshotEntryPageQuery,
     SnapshotEntryReadModel,
     SnapshotEntryReadModelStore,
+    SnapshotIssueCursor,
+    SnapshotIssuePage,
+    SnapshotIssuePageQuery,
+    SnapshotIssueReadModel,
+    validate_snapshot_coverage_page_query,
     validate_snapshot_entry_page_query,
+    validate_snapshot_issue_page_query,
 )
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
@@ -260,8 +270,15 @@ class _InMemoryPlanStore(PlanStore, PlanOperationReadModelStore):
 
 
 class _InMemorySnapshotEntryStore(SnapshotEntryReadModelStore):
-    def __init__(self, entries: tuple[SnapshotEntryReadModel, ...] = ()) -> None:
+    def __init__(
+        self,
+        entries: tuple[SnapshotEntryReadModel, ...] = (),
+        coverage: tuple[SnapshotCoverageReadModel, ...] = (),
+        issues: tuple[SnapshotIssueReadModel, ...] = (),
+    ) -> None:
         self.entries = entries
+        self.coverage = coverage
+        self.issues = issues
 
     def page_snapshot_entries(self, query: SnapshotEntryPageQuery) -> SnapshotEntryPage:
         validate_snapshot_entry_page_query(query)
@@ -283,6 +300,61 @@ class _InMemorySnapshotEntryStore(SnapshotEntryReadModelStore):
             next_cursor=_snapshot_entry_cursor(page_entries[-1])
             if has_more and page_entries
             else None,
+            has_more=has_more,
+        )
+
+    def page_snapshot_directory_coverage(
+        self,
+        query: SnapshotCoveragePageQuery,
+    ) -> SnapshotCoveragePage:
+        validate_snapshot_coverage_page_query(query)
+        coverage = tuple(
+            sorted(
+                (
+                    item
+                    for item in self.coverage
+                    if not query.coverage_states or item.coverage_state in query.coverage_states
+                ),
+                key=lambda item: (item.comparison_key, item.relative_path),
+            )
+        )
+        if query.after is not None:
+            coverage = tuple(
+                item for item in coverage if _snapshot_coverage_after_cursor(item, query.after)
+            )
+        page_coverage = coverage[: query.limit]
+        has_more = len(coverage) > query.limit
+        return SnapshotCoveragePage(
+            snapshot_id=query.snapshot_id,
+            coverage=page_coverage,
+            next_cursor=_snapshot_coverage_cursor(page_coverage[-1])
+            if has_more and page_coverage
+            else None,
+            has_more=has_more,
+        )
+
+    def page_snapshot_issues(self, query: SnapshotIssuePageQuery) -> SnapshotIssuePage:
+        validate_snapshot_issue_page_query(query)
+        issues = tuple(
+            sorted(
+                (
+                    issue
+                    for issue in self.issues
+                    if not query.blocking_only or issue.blocks_destructive_actions
+                ),
+                key=lambda issue: (issue.relative_path, issue.issue_type, issue.issue_id),
+            )
+        )
+        if query.after is not None:
+            issues = tuple(
+                issue for issue in issues if _snapshot_issue_after_cursor(issue, query.after)
+            )
+        page_issues = issues[: query.limit]
+        has_more = len(issues) > query.limit
+        return SnapshotIssuePage(
+            snapshot_id=query.snapshot_id,
+            issues=page_issues,
+            next_cursor=_snapshot_issue_cursor(page_issues[-1]) if has_more and page_issues else None,
             has_more=has_more,
         )
 
@@ -471,6 +543,8 @@ def test_gui_client_handshake_and_status_query_succeed() -> None:
     activity = gui_client.get_activity_overview()
     plan_operations = gui_client.get_plan_operations(plan_id="plan-a")
     snapshot_entries = gui_client.get_snapshot_entries(snapshot_id="snapshot-a")
+    snapshot_coverage = gui_client.get_snapshot_coverage(snapshot_id="snapshot-a")
+    snapshot_issues = gui_client.get_snapshot_issues(snapshot_id="snapshot-a")
 
     assert handshake.status is IpcStatus.ACCEPTED
     assert handshake.reason is None
@@ -486,6 +560,10 @@ def test_gui_client_handshake_and_status_query_succeed() -> None:
     assert plan_operations.payload["plan_operations"]["read_model_available"] is False
     assert snapshot_entries.status is IpcStatus.ACCEPTED
     assert snapshot_entries.payload["snapshot_entries"]["read_model_available"] is False
+    assert snapshot_coverage.status is IpcStatus.ACCEPTED
+    assert snapshot_coverage.payload["snapshot_coverage"]["read_model_available"] is False
+    assert snapshot_issues.status is IpcStatus.ACCEPTED
+    assert snapshot_issues.payload["snapshot_issues"]["read_model_available"] is False
 
 
 def test_backup_overview_query_requires_prior_handshake() -> None:
@@ -696,6 +774,144 @@ def test_snapshot_entries_query_returns_bounded_entry_page() -> None:
     assert second_page["has_more"] is False
     assert second_page["next_cursor"] is None
     assert [entry["entry_id"] for entry in second_page["entries"]] == ["file-b"]
+
+
+def test_snapshot_coverage_query_requires_prior_handshake() -> None:
+    response = _client().query_snapshot_coverage(snapshot_id="snapshot-a")
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.HANDSHAKE_REQUIRED
+
+
+def test_snapshot_coverage_query_rejects_invalid_bounds() -> None:
+    ipc_client = _client()
+    ipc_client.connect()
+
+    response = ipc_client.query_snapshot_coverage(snapshot_id="snapshot-a", limit=0)
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.INVALID_FRAME
+
+
+def test_snapshot_coverage_query_returns_bounded_filtered_coverage_page() -> None:
+    store = _InMemorySnapshotEntryStore(
+        coverage=(
+            _snapshot_coverage("Videos", "030:videos", "VOLATILE"),
+            _snapshot_coverage("Archive", "020:archive", "COMPLETE"),
+            _snapshot_coverage("Photos", "010:photos", "COMPLETE"),
+        )
+    )
+    service = _service()
+    service.snapshot_coverage_read_store = store
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    first = ipc_client.query_snapshot_coverage(
+        snapshot_id="snapshot-a",
+        limit=1,
+        coverage_states=("COMPLETE",),
+    )
+    first_page = first.payload["snapshot_coverage"]
+    second = ipc_client.query_snapshot_coverage(
+        snapshot_id="snapshot-a",
+        limit=1,
+        after=first_page["next_cursor"],
+        coverage_states=("COMPLETE",),
+    )
+    second_page = second.payload["snapshot_coverage"]
+
+    assert first.status is IpcStatus.ACCEPTED
+    assert first_page["read_model_available"] is True
+    assert first_page["coverage_states"] == ["COMPLETE"]
+    assert first_page["has_more"] is True
+    assert first_page["next_cursor"] == {
+        "comparison_key": "010:photos",
+        "relative_path": "Photos",
+    }
+    assert first_page["coverage"] == [
+        {
+            "relative_path": "Photos",
+            "comparison_key": "010:photos",
+            "coverage_state": "COMPLETE",
+            "case_mode": "CASE_INSENSITIVE",
+            "case_mode_evidence": "probe-ok",
+            "case_context_hash": "a" * 64,
+            "case_probe_error": None,
+        }
+    ]
+    assert second.status is IpcStatus.ACCEPTED
+    assert second_page["has_more"] is False
+    assert second_page["next_cursor"] is None
+    assert [coverage["relative_path"] for coverage in second_page["coverage"]] == ["Archive"]
+
+
+def test_snapshot_issues_query_requires_prior_handshake() -> None:
+    response = _client().query_snapshot_issues(snapshot_id="snapshot-a")
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.HANDSHAKE_REQUIRED
+
+
+def test_snapshot_issues_query_rejects_invalid_bounds() -> None:
+    ipc_client = _client()
+    ipc_client.connect()
+
+    response = ipc_client.query_snapshot_issues(snapshot_id="snapshot-a", limit=0)
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.INVALID_FRAME
+
+
+def test_snapshot_issues_query_returns_bounded_blocking_issue_page() -> None:
+    store = _InMemorySnapshotEntryStore(
+        issues=(
+            _snapshot_issue(3, "Videos", blocking=True),
+            _snapshot_issue(2, "Photos", blocking=False),
+            _snapshot_issue(1, "Archive", blocking=True),
+        )
+    )
+    service = _service()
+    service.snapshot_issue_read_store = store
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    first = ipc_client.query_snapshot_issues(
+        snapshot_id="snapshot-a",
+        limit=1,
+        blocking_only=True,
+    )
+    first_page = first.payload["snapshot_issues"]
+    second = ipc_client.query_snapshot_issues(
+        snapshot_id="snapshot-a",
+        limit=1,
+        after=first_page["next_cursor"],
+        blocking_only=True,
+    )
+    second_page = second.payload["snapshot_issues"]
+
+    assert first.status is IpcStatus.ACCEPTED
+    assert first_page["read_model_available"] is True
+    assert first_page["blocking_only"] is True
+    assert first_page["has_more"] is True
+    assert first_page["next_cursor"] == {
+        "relative_path": "Archive",
+        "issue_type": "UNREADABLE_DIRECTORY",
+        "issue_id": 1,
+    }
+    assert first_page["issues"] == [
+        {
+            "issue_id": 1,
+            "relative_path": "Archive",
+            "issue_type": "UNREADABLE_DIRECTORY",
+            "blocks_destructive_actions": True,
+            "error_code": "ERROR_ACCESS_DENIED",
+            "sanitized_message": "access denied",
+        }
+    ]
+    assert second.status is IpcStatus.ACCEPTED
+    assert second_page["has_more"] is False
+    assert second_page["next_cursor"] is None
+    assert [issue["relative_path"] for issue in second_page["issues"]] == ["Videos"]
 
 
 def test_handshake_uses_verified_identity_not_payload_claim() -> None:
@@ -1388,6 +1604,80 @@ def _snapshot_entry_cursor(entry: SnapshotEntryReadModel) -> SnapshotEntryCursor
         comparison_key=entry.comparison_key,
         relative_path=entry.relative_path,
         entry_id=entry.entry_id,
+    )
+
+
+def _snapshot_coverage(
+    relative_path: str,
+    comparison_key: str,
+    coverage_state: str,
+) -> SnapshotCoverageReadModel:
+    return SnapshotCoverageReadModel(
+        relative_path=relative_path,
+        comparison_key=comparison_key,
+        coverage_state=coverage_state,
+        case_mode="CASE_INSENSITIVE",
+        case_mode_evidence="probe-ok",
+        case_context_hash="a" * 64,
+    )
+
+
+def _snapshot_coverage_after_cursor(
+    coverage: SnapshotCoverageReadModel,
+    cursor: SnapshotCoverageCursor,
+) -> bool:
+    return (
+        coverage.comparison_key,
+        coverage.relative_path,
+    ) > (
+        cursor.comparison_key,
+        cursor.relative_path,
+    )
+
+
+def _snapshot_coverage_cursor(coverage: SnapshotCoverageReadModel) -> SnapshotCoverageCursor:
+    return SnapshotCoverageCursor(
+        comparison_key=coverage.comparison_key,
+        relative_path=coverage.relative_path,
+    )
+
+
+def _snapshot_issue(
+    issue_id: int,
+    relative_path: str,
+    *,
+    blocking: bool,
+) -> SnapshotIssueReadModel:
+    return SnapshotIssueReadModel(
+        issue_id=issue_id,
+        relative_path=relative_path,
+        issue_type="UNREADABLE_DIRECTORY",
+        blocks_destructive_actions=blocking,
+        error_code="ERROR_ACCESS_DENIED",
+        sanitized_message="access denied",
+    )
+
+
+def _snapshot_issue_after_cursor(
+    issue: SnapshotIssueReadModel,
+    cursor: SnapshotIssueCursor,
+) -> bool:
+    return (
+        issue.relative_path,
+        issue.issue_type,
+        issue.issue_id,
+    ) > (
+        cursor.relative_path,
+        cursor.issue_type,
+        cursor.issue_id,
+    )
+
+
+def _snapshot_issue_cursor(issue: SnapshotIssueReadModel) -> SnapshotIssueCursor:
+    return SnapshotIssueCursor(
+        relative_path=issue.relative_path,
+        issue_type=issue.issue_type,
+        issue_id=issue.issue_id,
     )
 
 

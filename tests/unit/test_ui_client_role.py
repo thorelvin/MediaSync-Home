@@ -145,6 +145,78 @@ def test_ui_pipe_action_queries_snapshot_entries_after_handshake() -> None:
     }
 
 
+def test_ui_pipe_action_queries_snapshot_coverage_after_handshake() -> None:
+    client = _FakeGuiIpcClient()
+    args = build_parser().parse_args(
+        [
+            "--pipe-name",
+            "pipe-a",
+            "--query-snapshot-coverage",
+            "--snapshot-id",
+            "snapshot-a",
+            "--limit",
+            "5",
+            "--after-json",
+            '{"comparison_key":"010:Photos","relative_path":"Photos"}',
+            "--coverage-state",
+            "COMPLETE",
+            "--coverage-state",
+            "VOLATILE",
+        ]
+    )
+
+    response = _run_pipe_action(args, client)
+
+    assert response.payload == {"snapshot_coverage": "ok"}
+    assert client.calls == ("connect", "query_snapshot_coverage")
+    assert client.snapshot_coverage_query == {
+        "snapshot_id": "snapshot-a",
+        "limit": 5,
+        "after": {
+            "comparison_key": "010:Photos",
+            "relative_path": "Photos",
+        },
+        "coverage_states": ("COMPLETE", "VOLATILE"),
+    }
+
+
+def test_ui_pipe_action_queries_snapshot_issues_after_handshake() -> None:
+    client = _FakeGuiIpcClient()
+    args = build_parser().parse_args(
+        [
+            "--pipe-name",
+            "pipe-a",
+            "--query-snapshot-issues",
+            "--snapshot-id",
+            "snapshot-a",
+            "--limit",
+            "5",
+            "--after-json",
+            (
+                '{"relative_path":"Archive",'
+                '"issue_type":"UNREADABLE_DIRECTORY",'
+                '"issue_id":1}'
+            ),
+            "--blocking-only",
+        ]
+    )
+
+    response = _run_pipe_action(args, client)
+
+    assert response.payload == {"snapshot_issues": "ok"}
+    assert client.calls == ("connect", "query_snapshot_issues")
+    assert client.snapshot_issues_query == {
+        "snapshot_id": "snapshot-a",
+        "limit": 5,
+        "after": {
+            "relative_path": "Archive",
+            "issue_type": "UNREADABLE_DIRECTORY",
+            "issue_id": 1,
+        },
+        "blocking_only": True,
+    }
+
+
 def test_ui_pipe_action_submits_command_after_handshake() -> None:
     client = _FakeGuiIpcClient()
     args = build_parser().parse_args(
@@ -231,6 +303,8 @@ class _FakeGuiIpcClient:
         self.activity_query: dict[str, object] | None = None
         self.plan_operations_query: dict[str, object] | None = None
         self.snapshot_entries_query: dict[str, object] | None = None
+        self.snapshot_coverage_query: dict[str, object] | None = None
+        self.snapshot_issues_query: dict[str, object] | None = None
 
     def connect(self) -> IpcResponse:
         self.calls = (*self.calls, "connect")
@@ -299,6 +373,40 @@ class _FakeGuiIpcClient:
             "after": after,
         }
         return IpcResponse.accepted({"snapshot_entries": "ok"})
+
+    def query_snapshot_coverage(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        coverage_states: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        self.calls = (*self.calls, "query_snapshot_coverage")
+        self.snapshot_coverage_query = {
+            "snapshot_id": snapshot_id,
+            "limit": limit,
+            "after": after,
+            "coverage_states": coverage_states,
+        }
+        return IpcResponse.accepted({"snapshot_coverage": "ok"})
+
+    def query_snapshot_issues(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        blocking_only: bool = False,
+    ) -> IpcResponse:
+        self.calls = (*self.calls, "query_snapshot_issues")
+        self.snapshot_issues_query = {
+            "snapshot_id": snapshot_id,
+            "limit": limit,
+            "after": after,
+            "blocking_only": blocking_only,
+        }
+        return IpcResponse.accepted({"snapshot_issues": "ok"})
 
     def submit_command(
         self,

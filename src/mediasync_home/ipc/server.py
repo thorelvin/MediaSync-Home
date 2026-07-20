@@ -56,10 +56,18 @@ from mediasync_home.application.runs import (
     start_run_from_sealed_plan,
 )
 from mediasync_home.application.snapshot_read_models import (
+    SnapshotCoverageQueryError,
     SnapshotEntriesQueryError,
+    SnapshotIssuesQueryError,
+    query_snapshot_coverage,
     query_snapshot_entries,
+    query_snapshot_issues,
 )
-from mediasync_home.application.snapshots import SnapshotEntryReadModelStore
+from mediasync_home.application.snapshots import (
+    SnapshotCoverageReadModelStore,
+    SnapshotEntryReadModelStore,
+    SnapshotIssueReadModelStore,
+)
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
 from mediasync_home.ipc.protocol import (
@@ -83,6 +91,8 @@ class EngineHostIpcService:
     run_activity_read_store: RunActivityReadModelStore | None = None
     plan_operation_read_store: PlanOperationReadModelStore | None = None
     snapshot_entry_read_store: SnapshotEntryReadModelStore | None = None
+    snapshot_coverage_read_store: SnapshotCoverageReadModelStore | None = None
+    snapshot_issue_read_store: SnapshotIssueReadModelStore | None = None
     standard_backup_job_id_factory: StandardBackupJobIdFactory | None = None
     plan_store: PlanStore | None = None
     run_store: RunStore | None = None
@@ -207,6 +217,52 @@ class EngineHostIpcService:
         except SnapshotEntriesQueryError:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         return IpcResponse.accepted({"snapshot_entries": page.to_dict()})
+
+    def query_snapshot_coverage(
+        self,
+        client_instance_id: str,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        coverage_states: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        if client_instance_id not in self._accepted_clients:
+            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        try:
+            page = query_snapshot_coverage(
+                snapshot_coverage_store=self.snapshot_coverage_read_store,
+                snapshot_id=snapshot_id,
+                limit=limit,
+                after=after,
+                coverage_states=coverage_states,
+            )
+        except SnapshotCoverageQueryError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        return IpcResponse.accepted({"snapshot_coverage": page.to_dict()})
+
+    def query_snapshot_issues(
+        self,
+        client_instance_id: str,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        blocking_only: bool = False,
+    ) -> IpcResponse:
+        if client_instance_id not in self._accepted_clients:
+            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        try:
+            page = query_snapshot_issues(
+                snapshot_issue_store=self.snapshot_issue_read_store,
+                snapshot_id=snapshot_id,
+                limit=limit,
+                after=after,
+                blocking_only=blocking_only,
+            )
+        except SnapshotIssuesQueryError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        return IpcResponse.accepted({"snapshot_issues": page.to_dict()})
 
     def submit_command(self, client_instance_id: str, command_name: str) -> IpcResponse:
         del command_name

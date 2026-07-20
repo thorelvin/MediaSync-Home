@@ -408,3 +408,98 @@ def test_engine_host_state_root_serves_snapshot_entries_query(
     assert gui_response["payload"]["snapshot_entries"]["entries"] == []
     assert host_events[0]["state_root"] == str(state_root)
     assert host_events[-1]["served_requests"] == 2
+
+
+def test_engine_host_state_root_serves_snapshot_health_queries(
+    tmp_path: Path,
+) -> None:
+    pipe_name = win32_named_pipe.make_pipe_name(
+        installation_id="role-snapshot-health-test",
+        suffix=uuid4().hex,
+    )
+    state_root = tmp_path / "state"
+    host = subprocess.Popen(
+        [
+            sys.executable,
+            "scripts/run_role.py",
+            "--role",
+            "engine-host",
+            "--pipe-name",
+            pipe_name,
+            "--serve-requests",
+            "4",
+            "--state-root",
+            str(state_root),
+        ],
+        cwd=Path(__file__).resolve().parents[3],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        coverage = subprocess.run(
+            [
+                sys.executable,
+                "scripts/run_role.py",
+                "--role",
+                "gui",
+                "--pipe-name",
+                pipe_name,
+                "--query-snapshot-coverage",
+                "--snapshot-id",
+                "snapshot-a",
+                "--limit",
+                "5",
+                "--coverage-state",
+                "COMPLETE",
+            ],
+            cwd=Path(__file__).resolve().parents[3],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        issues = subprocess.run(
+            [
+                sys.executable,
+                "scripts/run_role.py",
+                "--role",
+                "gui",
+                "--pipe-name",
+                pipe_name,
+                "--query-snapshot-issues",
+                "--snapshot-id",
+                "snapshot-a",
+                "--limit",
+                "5",
+                "--blocking-only",
+            ],
+            cwd=Path(__file__).resolve().parents[3],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        stdout, stderr = host.communicate(timeout=10)
+    finally:
+        if host.poll() is None:
+            host.kill()
+            host.communicate(timeout=5)
+
+    coverage_response = json.loads(coverage.stdout)
+    issues_response = json.loads(issues.stdout)
+    host_events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+
+    assert stderr == ""
+    assert coverage_response["status"] == "ACCEPTED"
+    assert coverage_response["payload"]["snapshot_coverage"]["read_model_available"] is True
+    assert coverage_response["payload"]["snapshot_coverage"]["limit"] == 5
+    assert coverage_response["payload"]["snapshot_coverage"]["coverage_states"] == ["COMPLETE"]
+    assert coverage_response["payload"]["snapshot_coverage"]["coverage"] == []
+    assert issues_response["status"] == "ACCEPTED"
+    assert issues_response["payload"]["snapshot_issues"]["read_model_available"] is True
+    assert issues_response["payload"]["snapshot_issues"]["limit"] == 5
+    assert issues_response["payload"]["snapshot_issues"]["blocking_only"] is True
+    assert issues_response["payload"]["snapshot_issues"]["issues"] == []
+    assert host_events[0]["state_root"] == str(state_root)
+    assert host_events[-1]["served_requests"] == 4

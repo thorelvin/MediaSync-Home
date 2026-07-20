@@ -48,6 +48,26 @@ class StatusIpcClient(Protocol):
     ) -> IpcResponse:
         pass
 
+    def query_snapshot_coverage(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        coverage_states: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        pass
+
+    def query_snapshot_issues(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        blocking_only: bool = False,
+    ) -> IpcResponse:
+        pass
+
 
 class EngineClient:
     def __init__(self, ipc_client: StatusIpcClient) -> None:
@@ -109,4 +129,34 @@ class EngineClient:
             snapshot_id=snapshot_id,
             limit=limit,
             after=after,
+        )
+
+    def get_snapshot_coverage(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        coverage_states: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        return self._ipc_client.query_snapshot_coverage(
+            snapshot_id=snapshot_id,
+            limit=limit,
+            after=after,
+            coverage_states=coverage_states,
+        )
+
+    def get_snapshot_issues(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        blocking_only: bool = False,
+    ) -> IpcResponse:
+        return self._ipc_client.query_snapshot_issues(
+            snapshot_id=snapshot_id,
+            limit=limit,
+            after=after,
+            blocking_only=blocking_only,
         )
