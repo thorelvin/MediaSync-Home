@@ -82,3 +82,20 @@ def load_local_engine_host_publication(
     return local_engine_host_publication_from_payload(
         {str(key): value for key, value in raw_payload.items()}
     )
+
+
+def clear_stale_local_engine_host_publication(
+    publication: LocalEngineHostPublication,
+) -> bool:
+    path = local_engine_host_publication_path(publication.state_root)
+    try:
+        current = load_local_engine_host_publication(publication.state_root)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    if current != publication:
+        return False
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True

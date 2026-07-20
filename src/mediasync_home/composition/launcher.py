@@ -59,6 +59,7 @@ class LocalPreviewStatusResult:
     host_locator_publication: dict[str, object] | None = None
     adoption_attempted: bool = False
     adopted_existing_host: bool = False
+    stale_host_locator_publication_cleared: bool = False
     killed_engine_host: bool = False
     error_type: str | None = None
 
@@ -105,6 +106,9 @@ class LocalPreviewStatusResult:
             "host_locator_publication": self.host_locator_publication,
             "pipe_name": self.pipe_name,
             "scope": "0B_SAME_USER_LOCAL_PREVIEW",
+            "stale_host_locator_publication_cleared": (
+                self.stale_host_locator_publication_cleared
+            ),
         }
 
 
@@ -194,6 +198,7 @@ def run_local_preview_status(
     timeout_seconds: float,
     existing_publication: LocalEngineHostPublication | None = None,
 ) -> LocalPreviewStatusResult:
+    stale_publication_cleared = False
     if existing_publication is not None:
         adopted = _try_adopt_existing_local_preview_host(
             launch,
@@ -203,6 +208,7 @@ def run_local_preview_status(
         )
         if adopted is not None:
             return adopted
+        stale_publication_cleared = _clear_stale_host_publication(existing_publication)
 
     host = supervisor.start(launch.engine_host)
     host_completed: CompletedRoleProcess | None = None
@@ -242,6 +248,7 @@ def run_local_preview_status(
         if existing_publication is None
         else existing_publication.to_payload(),
         adoption_attempted=existing_publication is not None,
+        stale_host_locator_publication_cleared=stale_publication_cleared,
         killed_engine_host=killed_engine_host,
         error_type=error_type,
     )
@@ -281,7 +288,21 @@ def _try_adopt_existing_local_preview_host(
         host_locator_publication=publication.to_payload(),
         adoption_attempted=True,
         adopted_existing_host=True,
+        stale_host_locator_publication_cleared=False,
     )
+
+
+def _clear_stale_host_publication(
+    publication: LocalEngineHostPublication,
+) -> bool:
+    from mediasync_home.adapters.local_host_locator import (
+        clear_stale_local_engine_host_publication,
+    )
+
+    try:
+        return clear_stale_local_engine_host_publication(publication)
+    except OSError:
+        return False
 
 
 def _run_local_preview_status_from_args(args: argparse.Namespace) -> LocalPreviewStatusResult:

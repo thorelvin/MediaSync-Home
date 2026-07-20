@@ -5,6 +5,10 @@ from pathlib import Path
 
 import pytest
 
+from mediasync_home.adapters.local_host_locator import (
+    load_local_engine_host_publication,
+    publish_local_engine_host_publication,
+)
 from mediasync_home.adapters.process_supervisor import CompletedRoleProcess
 from mediasync_home.application.host_locator import (
     build_local_engine_host_descriptor,
@@ -159,6 +163,7 @@ def test_local_preview_status_adopts_live_published_host_without_starting_host(
         state_root=tmp_path / "state",
         process_id=4321,
     )
+    publish_local_engine_host_publication(publication)
     launch = build_local_preview_status_launch(
         host_descriptor=descriptor,
         environment={"PYTHONUTF8": "1"},
@@ -177,6 +182,7 @@ def test_local_preview_status_adopts_live_published_host_without_starting_host(
     assert result.accepted is True
     assert result.adoption_attempted is True
     assert result.adopted_existing_host is True
+    assert result.stale_host_locator_publication_cleared is False
     assert result.engine_host_returncode is None
     assert result.engine_host_events == ()
     assert result.host_locator_publication == publication.to_payload()
@@ -197,6 +203,7 @@ def test_local_preview_status_falls_back_to_new_host_when_publication_is_stale(
         state_root=tmp_path / "state",
         process_id=4321,
     )
+    publish_local_engine_host_publication(publication)
     launch = build_local_preview_status_launch(
         host_descriptor=descriptor,
         environment={"PYTHONUTF8": "1"},
@@ -215,8 +222,10 @@ def test_local_preview_status_falls_back_to_new_host_when_publication_is_stale(
     assert result.accepted is True
     assert result.adoption_attempted is True
     assert result.adopted_existing_host is False
+    assert result.stale_host_locator_publication_cleared is True
     assert result.engine_host_returncode == 0
     assert result.host_locator_publication == publication.to_payload()
+    assert load_local_engine_host_publication(tmp_path / "state") is None
 
 
 class _SuccessfulPreviewSupervisor:

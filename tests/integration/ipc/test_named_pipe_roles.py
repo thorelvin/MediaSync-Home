@@ -11,7 +11,10 @@ from uuid import uuid4
 
 import pytest
 
-from mediasync_home.application.host_locator import LOCAL_ENGINE_HOST_PUBLICATION_FILENAME
+from mediasync_home.application.host_locator import (
+    LOCAL_ENGINE_HOST_PUBLICATION_FILENAME,
+    build_local_engine_host_publication,
+)
 
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="Win32 named-pipe role wiring is Windows-only")
@@ -19,7 +22,10 @@ pytestmark = pytest.mark.skipif(os.name != "nt", reason="Win32 named-pipe role w
 
 if os.name == "nt":
     from mediasync_home.adapters.host_mutex import LocalEngineHostMutex
-    from mediasync_home.adapters.local_host_locator import build_local_engine_host_descriptor_for_user
+    from mediasync_home.adapters.local_host_locator import (
+        build_local_engine_host_descriptor_for_user,
+        publish_local_engine_host_publication,
+    )
     from mediasync_home.ipc import win32_named_pipe
 
 
@@ -205,6 +211,7 @@ def test_launcher_local_preview_status_uses_host_locator_when_pipe_omitted(
     assert payload["accepted"] is True
     assert payload["adoption_attempted"] is False
     assert payload["adopted_existing_host"] is False
+    assert payload["stale_host_locator_publication_cleared"] is False
     assert payload["pipe_name"].startswith("MediaSyncHome-0B-")
     assert payload["host_locator"] == {
         "installation_id": installation_id,
@@ -309,6 +316,7 @@ def test_launcher_local_preview_status_adopts_live_published_host(
     assert payload["accepted"] is True
     assert payload["adoption_attempted"] is True
     assert payload["adopted_existing_host"] is True
+    assert payload["stale_host_locator_publication_cleared"] is False
     assert payload["pipe_name"] == descriptor.pipe_name
     assert payload["engine_host"] == {
         "events": [],
@@ -324,6 +332,63 @@ def test_launcher_local_preview_status_adopts_live_published_host(
         "ENGINE_HOST_PIPE_STOPPED",
     ]
     assert host_events[0]["host_locator"] == publication
+    assert host_events[-1]["served_requests"] == 2
+
+
+def test_launcher_local_preview_status_clears_stale_publication_before_fallback(
+    tmp_path: Path,
+) -> None:
+    installation_id = f"preview-{uuid4().hex}"
+    state_root = tmp_path / "state"
+    identity = win32_named_pipe.current_process_identity()
+    descriptor = build_local_engine_host_descriptor_for_user(
+        installation_id=installation_id,
+        user_scope_hash=identity.user_sid_hash,
+        state_root=state_root,
+    )
+    stale_publication = build_local_engine_host_publication(
+        installation_id=descriptor.installation_id,
+        pipe_name=descriptor.pipe_name,
+        mutex_name=descriptor.mutex_name,
+        state_root=state_root,
+        process_id=4321,
+    )
+    publication_path = publish_local_engine_host_publication(stale_publication)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_role.py",
+            "--role",
+            "launcher",
+            "--local-preview-status",
+            "--installation-id",
+            installation_id,
+            "--state-root",
+            str(state_root),
+            "--timeout-seconds",
+            "3",
+        ],
+        cwd=Path(__file__).resolve().parents[3],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    )
+
+    payload = json.loads(result.stdout)
+    host_events = payload["engine_host"]["events"]
+    final_publication = json.loads(publication_path.read_text(encoding="utf-8"))
+
+    assert result.stderr == ""
+    assert payload["accepted"] is True
+    assert payload["adoption_attempted"] is True
+    assert payload["adopted_existing_host"] is False
+    assert payload["stale_host_locator_publication_cleared"] is True
+    assert payload["host_locator_publication"] == stale_publication.to_payload()
+    assert host_events[0]["host_locator"]["process_id"] == final_publication["process_id"]
+    assert final_publication["process_id"] != 4321
+    assert final_publication["pipe_name"] == descriptor.pipe_name
     assert host_events[-1]["served_requests"] == 2
 
 

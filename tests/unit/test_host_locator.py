@@ -8,6 +8,7 @@ import pytest
 
 from mediasync_home.adapters.local_host_locator import (
     build_local_engine_host_descriptor_for_user,
+    clear_stale_local_engine_host_publication,
     default_local_preview_state_root,
     load_local_engine_host_publication,
     local_engine_host_publication_path,
@@ -257,3 +258,30 @@ def test_local_host_locator_adapter_publishes_roundtrippable_record(
     assert path == local_engine_host_publication_path(state_root)
     assert json.loads(path.read_text(encoding="utf-8")) == publication.to_payload()
     assert load_local_engine_host_publication(state_root) == publication
+
+
+def test_local_host_locator_adapter_clears_only_matching_stale_publication(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=state_root,
+        process_id=4321,
+    )
+    newer_publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=state_root,
+        process_id=9999,
+    )
+
+    publish_local_engine_host_publication(newer_publication)
+    assert clear_stale_local_engine_host_publication(publication) is False
+    assert load_local_engine_host_publication(state_root) == newer_publication
+
+    assert clear_stale_local_engine_host_publication(newer_publication) is True
+    assert load_local_engine_host_publication(state_root) is None
