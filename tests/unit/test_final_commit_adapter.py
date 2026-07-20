@@ -90,6 +90,9 @@ def test_lab_final_commit_revalidates_staging_hash(tmp_path: Path) -> None:
         "Photos/../secret.txt",
         "Photos//image.jpg",
         "Photos/name:stream.jpg",
+        "Photos/CON.txt",
+        "Photos/trailing-dot.",
+        "Photos/trailing-space ",
     ],
 )
 def test_lab_final_commit_rejects_unsafe_relative_paths(

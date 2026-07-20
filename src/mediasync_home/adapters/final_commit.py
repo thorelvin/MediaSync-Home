@@ -13,12 +13,12 @@ from mediasync_home.application.ports import (
     FinalCommitPort,
     VerifiedStagingArtifact,
 )
+from mediasync_home.application.safe_paths import SafePathViolation, parse_endpoint_relative_path
 from mediasync_home.domain.capabilities import MutationPermit
 
 
 HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 OBJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
 LAB_MARKER_NAME = ".mediasync_test_root"
 
 
@@ -146,24 +146,13 @@ def _final_path(target_root: Path, artifact: VerifiedStagingArtifact) -> Path:
 
 
 def _relative_path_parts(value: str) -> tuple[str, ...]:
-    normalized = value.replace("\\", "/")
-    if (
-        not normalized.strip()
-        or normalized.startswith("/")
-        or normalized.startswith("//")
-        or WINDOWS_DRIVE_PATTERN.match(normalized)
-    ):
+    try:
+        return parse_endpoint_relative_path(value).parts
+    except SafePathViolation as exc:
         raise FinalCommitAdapterError(
             "LAB_FINAL_COMMIT_REQUIRES_RELATIVE_PATH",
             "Provide an endpoint-relative final path before commit.",
-        )
-    parts = tuple(normalized.split("/"))
-    if any(part in {"", ".", ".."} or ":" in part for part in parts):
-        raise FinalCommitAdapterError(
-            "LAB_FINAL_COMMIT_REQUIRES_RELATIVE_PATH",
-            "Provide an endpoint-relative final path before commit.",
-        )
-    return parts
+        ) from exc
 
 
 def _reject_symlink_in_path(*, root: Path, relative_parts: tuple[str, ...]) -> None:
