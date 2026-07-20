@@ -28,7 +28,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 15
+        assert current_schema_version(connection, plan.store) == 16
         assert _table_names(connection) >= {
             "endpoint_heads",
             "job_heads",
@@ -52,7 +52,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 15
+        assert _row_count(connection, "schema_migrations") == 16
         assert _foreign_key(
             connection,
             "endpoint_heads",
@@ -114,6 +114,26 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             connection,
             "file_entries",
             ("snapshot_id", "comparison_key", "relative_path", "id"),
+        ) is False
+        assert _index_is_unique(
+            connection,
+            "directory_coverage",
+            ("snapshot_id", "comparison_key", "relative_path"),
+        ) is False
+        assert _index_is_unique(
+            connection,
+            "directory_coverage",
+            ("snapshot_id", "coverage_state", "comparison_key", "relative_path"),
+        ) is False
+        assert _index_is_unique(
+            connection,
+            "snapshot_issues",
+            ("snapshot_id", "relative_path", "issue_type", "id"),
+        ) is False
+        assert _index_is_unique(
+            connection,
+            "snapshot_issues",
+            ("snapshot_id", "blocks_destructive_actions", "relative_path", "issue_type", "id"),
         ) is False
         assert _index_is_unique(
             connection,

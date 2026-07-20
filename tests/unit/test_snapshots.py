@@ -3,17 +3,25 @@ from __future__ import annotations
 import pytest
 
 from mediasync_home.application.snapshots import (
+    MAX_SNAPSHOT_COVERAGE_PAGE_LIMIT,
     MAX_SNAPSHOT_ENTRY_PAGE_LIMIT,
+    MAX_SNAPSHOT_ISSUE_PAGE_LIMIT,
     SnapshotBatchSummary,
+    SnapshotCoverageCursor,
+    SnapshotCoveragePageQuery,
     SnapshotDirectoryCoverage,
     SnapshotEntryCursor,
     SnapshotFileEntry,
+    SnapshotIssueCursor,
+    SnapshotIssuePageQuery,
     SnapshotEntryPageQuery,
     SnapshotIssue,
     SnapshotMaterializationError,
     snapshot_entry_batch,
     snapshot_seal,
+    validate_snapshot_coverage_page_query,
     validate_snapshot_entry_page_query,
+    validate_snapshot_issue_page_query,
     verify_snapshot_checksum,
 )
 
@@ -123,6 +131,97 @@ def test_snapshot_entry_page_query_rejects_unbounded_limits() -> None:
             SnapshotEntryPageQuery(
                 snapshot_id="snapshot-a",
                 limit=MAX_SNAPSHOT_ENTRY_PAGE_LIMIT + 1,
+            )
+        )
+
+
+def test_snapshot_coverage_page_query_rejects_unbounded_limits_and_unknown_states() -> None:
+    validate_snapshot_coverage_page_query(
+        SnapshotCoveragePageQuery(
+            snapshot_id="snapshot-a",
+            limit=MAX_SNAPSHOT_COVERAGE_PAGE_LIMIT,
+            after=SnapshotCoverageCursor(
+                comparison_key="photos",
+                relative_path="Photos",
+            ),
+            coverage_states=("COMPLETE",),
+        )
+    )
+
+    with pytest.raises(
+        SnapshotMaterializationError,
+        match="SNAPSHOT_COVERAGE_READ_LIMIT_TOO_LARGE",
+    ):
+        validate_snapshot_coverage_page_query(
+            SnapshotCoveragePageQuery(
+                snapshot_id="snapshot-a",
+                limit=MAX_SNAPSHOT_COVERAGE_PAGE_LIMIT + 1,
+            )
+        )
+
+    with pytest.raises(
+        SnapshotMaterializationError,
+        match="SNAPSHOT_COVERAGE_READ_STATE_UNKNOWN",
+    ):
+        validate_snapshot_coverage_page_query(
+            SnapshotCoveragePageQuery(
+                snapshot_id="snapshot-a",
+                limit=10,
+                coverage_states=("COMPLETE", "UNKNOWN_NEW_STATE"),
+            )
+        )
+
+    with pytest.raises(
+        SnapshotMaterializationError,
+        match="SNAPSHOT_COVERAGE_READ_STATES_MUST_BE_UNIQUE",
+    ):
+        validate_snapshot_coverage_page_query(
+            SnapshotCoveragePageQuery(
+                snapshot_id="snapshot-a",
+                limit=10,
+                coverage_states=("VOLATILE", "VOLATILE"),
+            )
+        )
+
+
+def test_snapshot_issue_page_query_rejects_unbounded_limits_and_invalid_cursors() -> None:
+    validate_snapshot_issue_page_query(
+        SnapshotIssuePageQuery(
+            snapshot_id="snapshot-a",
+            limit=MAX_SNAPSHOT_ISSUE_PAGE_LIMIT,
+            after=SnapshotIssueCursor(
+                relative_path="Photos",
+                issue_type="UNREADABLE_DIRECTORY",
+                issue_id=1,
+            ),
+            blocking_only=True,
+        )
+    )
+
+    with pytest.raises(
+        SnapshotMaterializationError,
+        match="SNAPSHOT_ISSUE_READ_LIMIT_TOO_LARGE",
+    ):
+        validate_snapshot_issue_page_query(
+            SnapshotIssuePageQuery(
+                snapshot_id="snapshot-a",
+                limit=MAX_SNAPSHOT_ISSUE_PAGE_LIMIT + 1,
+            )
+        )
+
+    with pytest.raises(
+        SnapshotMaterializationError,
+        match="SNAPSHOT_ISSUE_READ_CURSOR_REQUIRES_POSITIVE_ID",
+    ):
+        validate_snapshot_issue_page_query(
+            SnapshotIssuePageQuery(
+                snapshot_id="snapshot-a",
+                limit=10,
+                after=SnapshotIssueCursor(
+                    relative_path="Photos",
+                    issue_type="UNREADABLE_DIRECTORY",
+                    issue_id=0,
+                ),
             )
         )
 

@@ -102,6 +102,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_outbox_reconciliation_indexes",
                 statements=CATALOG_OUTBOX_RECONCILIATION_INDEXES,
             ),
+            SqliteMigration(
+                version=16,
+                name="catalog_snapshot_coverage_issue_read_model_indexes",
+                statements=CATALOG_SNAPSHOT_COVERAGE_ISSUE_READ_MODEL_INDEXES,
+            ),
         ),
     )
 
@@ -1324,6 +1329,25 @@ CATALOG_OUTBOX_RECONCILIATION_INDEXES = (
     """
     CREATE INDEX idx_outbox_messages_state_owner_claim_started
         ON outbox_messages (state, claim_owner_instance_id, claim_started_utc, id)
+    """,
+)
+
+CATALOG_SNAPSHOT_COVERAGE_ISSUE_READ_MODEL_INDEXES = (
+    """
+    CREATE INDEX idx_directory_coverage_snapshot_comparison_path
+        ON directory_coverage (snapshot_id, comparison_key, relative_path)
+    """,
+    """
+    CREATE INDEX idx_directory_coverage_snapshot_state_comparison_path
+        ON directory_coverage (snapshot_id, coverage_state, comparison_key, relative_path)
+    """,
+    """
+    CREATE INDEX idx_snapshot_issues_snapshot_path_type_id
+        ON snapshot_issues (snapshot_id, relative_path, issue_type, id)
+    """,
+    """
+    CREATE INDEX idx_snapshot_issues_snapshot_blocking_path_type_id
+        ON snapshot_issues (snapshot_id, blocks_destructive_actions, relative_path, issue_type, id)
     """,
 )
 

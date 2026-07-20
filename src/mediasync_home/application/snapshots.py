@@ -14,6 +14,8 @@ SNAPSHOT_CHECKSUM_ALGORITHM = "SHA-256"
 SNAPSHOT_SERIALIZER_VERSION = "0B-SNAPSHOT-CANONICAL-JSON-V1"
 SNAPSHOT_COMPLETE_COVERAGE_STATE = "COMPLETE"
 MAX_SNAPSHOT_ENTRY_PAGE_LIMIT = 1000
+MAX_SNAPSHOT_COVERAGE_PAGE_LIMIT = 1000
+MAX_SNAPSHOT_ISSUE_PAGE_LIMIT = 1000
 SNAPSHOT_COVERAGE_STATES = frozenset(
     {
         "COMPLETE",
@@ -76,6 +78,35 @@ class SnapshotEntryPageQuery:
 
 
 @dataclass(frozen=True)
+class SnapshotCoverageCursor:
+    comparison_key: str
+    relative_path: str
+
+
+@dataclass(frozen=True)
+class SnapshotCoveragePageQuery:
+    snapshot_id: str
+    limit: int
+    after: SnapshotCoverageCursor | None = None
+    coverage_states: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SnapshotIssueCursor:
+    relative_path: str
+    issue_type: str
+    issue_id: int
+
+
+@dataclass(frozen=True)
+class SnapshotIssuePageQuery:
+    snapshot_id: str
+    limit: int
+    after: SnapshotIssueCursor | None = None
+    blocking_only: bool = False
+
+
+@dataclass(frozen=True)
 class SnapshotEntryReadModel:
     entry_id: str
     relative_path: str
@@ -90,6 +121,43 @@ class SnapshotEntryPage:
     snapshot_id: str
     entries: tuple[SnapshotEntryReadModel, ...]
     next_cursor: SnapshotEntryCursor | None
+    has_more: bool
+
+
+@dataclass(frozen=True)
+class SnapshotCoverageReadModel:
+    relative_path: str
+    comparison_key: str
+    coverage_state: str
+    case_mode: str
+    case_mode_evidence: str
+    case_context_hash: str
+    case_probe_error: str | None = None
+
+
+@dataclass(frozen=True)
+class SnapshotCoveragePage:
+    snapshot_id: str
+    coverage: tuple[SnapshotCoverageReadModel, ...]
+    next_cursor: SnapshotCoverageCursor | None
+    has_more: bool
+
+
+@dataclass(frozen=True)
+class SnapshotIssueReadModel:
+    issue_id: int
+    relative_path: str
+    issue_type: str
+    blocks_destructive_actions: bool
+    error_code: str | None = None
+    sanitized_message: str | None = None
+
+
+@dataclass(frozen=True)
+class SnapshotIssuePage:
+    snapshot_id: str
+    issues: tuple[SnapshotIssueReadModel, ...]
+    next_cursor: SnapshotIssueCursor | None
     has_more: bool
 
 
@@ -174,6 +242,14 @@ class SnapshotSealStore(Protocol):
 
 class SnapshotEntryReadModelStore(Protocol):
     def page_snapshot_entries(self, query: SnapshotEntryPageQuery) -> SnapshotEntryPage: ...
+
+
+class SnapshotCoverageReadModelStore(Protocol):
+    def page_snapshot_directory_coverage(self, query: SnapshotCoveragePageQuery) -> SnapshotCoveragePage: ...
+
+
+class SnapshotIssueReadModelStore(Protocol):
+    def page_snapshot_issues(self, query: SnapshotIssuePageQuery) -> SnapshotIssuePage: ...
 
 
 def snapshot_entry_batch(
@@ -328,6 +404,45 @@ def validate_snapshot_entry_page_query(query: SnapshotEntryPageQuery) -> None:
         raise SnapshotMaterializationError("SNAPSHOT_READ_CURSOR_REQUIRES_RELATIVE_PATH")
     if not query.after.entry_id.strip():
         raise SnapshotMaterializationError("SNAPSHOT_READ_CURSOR_REQUIRES_ENTRY_ID")
+
+
+def validate_snapshot_coverage_page_query(query: SnapshotCoveragePageQuery) -> None:
+    if not query.snapshot_id.strip():
+        raise SnapshotMaterializationError("SNAPSHOT_COVERAGE_READ_REQUIRES_SNAPSHOT_ID")
+    if query.limit <= 0:
+        raise SnapshotMaterializationError("SNAPSHOT_COVERAGE_READ_LIMIT_MUST_BE_POSITIVE")
+    if query.limit > MAX_SNAPSHOT_COVERAGE_PAGE_LIMIT:
+        raise SnapshotMaterializationError("SNAPSHOT_COVERAGE_READ_LIMIT_TOO_LARGE")
+    seen_states: set[str] = set()
+    for state in query.coverage_states:
+        if state not in SNAPSHOT_COVERAGE_STATES:
+            raise SnapshotMaterializationError("SNAPSHOT_COVERAGE_READ_STATE_UNKNOWN")
+        if state in seen_states:
+            raise SnapshotMaterializationError("SNAPSHOT_COVERAGE_READ_STATES_MUST_BE_UNIQUE")
+        seen_states.add(state)
+    if query.after is None:
+        return
+    if not query.after.comparison_key.strip():
+        raise SnapshotMaterializationError("SNAPSHOT_COVERAGE_READ_CURSOR_REQUIRES_COMPARISON_KEY")
+    if not _valid_coverage_path(query.after.relative_path):
+        raise SnapshotMaterializationError("SNAPSHOT_COVERAGE_READ_CURSOR_REQUIRES_RELATIVE_PATH")
+
+
+def validate_snapshot_issue_page_query(query: SnapshotIssuePageQuery) -> None:
+    if not query.snapshot_id.strip():
+        raise SnapshotMaterializationError("SNAPSHOT_ISSUE_READ_REQUIRES_SNAPSHOT_ID")
+    if query.limit <= 0:
+        raise SnapshotMaterializationError("SNAPSHOT_ISSUE_READ_LIMIT_MUST_BE_POSITIVE")
+    if query.limit > MAX_SNAPSHOT_ISSUE_PAGE_LIMIT:
+        raise SnapshotMaterializationError("SNAPSHOT_ISSUE_READ_LIMIT_TOO_LARGE")
+    if query.after is None:
+        return
+    if not _valid_coverage_path(query.after.relative_path):
+        raise SnapshotMaterializationError("SNAPSHOT_ISSUE_READ_CURSOR_REQUIRES_RELATIVE_PATH")
+    if not query.after.issue_type.strip():
+        raise SnapshotMaterializationError("SNAPSHOT_ISSUE_READ_CURSOR_REQUIRES_TYPE")
+    if query.after.issue_id <= 0:
+        raise SnapshotMaterializationError("SNAPSHOT_ISSUE_READ_CURSOR_REQUIRES_POSITIVE_ID")
 
 
 def validate_sealed_snapshot(snapshot: SealedSnapshot) -> None:

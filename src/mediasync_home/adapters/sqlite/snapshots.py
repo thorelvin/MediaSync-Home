@@ -8,6 +8,11 @@ from mediasync_home.application.snapshots import (
     SealedSnapshot,
     SnapshotBatchCommitReceipt,
     SnapshotBatchSummary,
+    SnapshotCoverageCursor,
+    SnapshotCoveragePage,
+    SnapshotCoveragePageQuery,
+    SnapshotCoverageReadModel,
+    SnapshotCoverageReadModelStore,
     SnapshotDirectoryCoverage,
     SnapshotEntryBatch,
     SnapshotEntryCursor,
@@ -17,10 +22,17 @@ from mediasync_home.application.snapshots import (
     SnapshotEntryReadModel,
     SnapshotEntryReadModelStore,
     SnapshotFileEntry,
+    SnapshotIssueCursor,
+    SnapshotIssuePage,
+    SnapshotIssuePageQuery,
+    SnapshotIssueReadModel,
+    SnapshotIssueReadModelStore,
     SnapshotIssue,
     SnapshotSealRequest,
     SnapshotSealStore,
+    validate_snapshot_coverage_page_query,
     snapshot_seal,
+    validate_snapshot_issue_page_query,
     validate_snapshot_entry_page_query,
     validate_snapshot_entry_batch,
     validate_snapshot_seal_request,
@@ -35,6 +47,8 @@ class SqliteSnapshotEntryStore(
     SnapshotEntryMaterializationStore,
     SnapshotSealStore,
     SnapshotEntryReadModelStore,
+    SnapshotCoverageReadModelStore,
+    SnapshotIssueReadModelStore,
 ):
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
@@ -308,6 +322,62 @@ class SqliteSnapshotEntryStore(
             snapshot_id=query.snapshot_id,
             entries=entries,
             next_cursor=next_cursor,
+            has_more=has_more,
+        )
+
+    def page_snapshot_directory_coverage(
+        self,
+        query: SnapshotCoveragePageQuery,
+    ) -> SnapshotCoveragePage:
+        validate_snapshot_coverage_page_query(query)
+        rows = self._connection.execute(
+            _snapshot_coverage_page_sql(query),
+            (*_snapshot_coverage_page_parameters(query), query.limit + 1),
+        ).fetchall()
+        page_rows = rows[: query.limit]
+        coverage = tuple(
+            SnapshotCoverageReadModel(
+                relative_path=str(row[0]),
+                comparison_key=str(row[1]),
+                coverage_state=str(row[2]),
+                case_mode=str(row[3]),
+                case_mode_evidence=str(row[4]),
+                case_context_hash=str(row[5]),
+                case_probe_error=None if row[6] is None else str(row[6]),
+            )
+            for row in page_rows
+        )
+        has_more = len(rows) > query.limit
+        return SnapshotCoveragePage(
+            snapshot_id=query.snapshot_id,
+            coverage=coverage,
+            next_cursor=_snapshot_coverage_cursor(coverage[-1]) if has_more and coverage else None,
+            has_more=has_more,
+        )
+
+    def page_snapshot_issues(self, query: SnapshotIssuePageQuery) -> SnapshotIssuePage:
+        validate_snapshot_issue_page_query(query)
+        rows = self._connection.execute(
+            _snapshot_issue_page_sql(query),
+            (*_snapshot_issue_page_parameters(query), query.limit + 1),
+        ).fetchall()
+        page_rows = rows[: query.limit]
+        issues = tuple(
+            SnapshotIssueReadModel(
+                issue_id=int(row[0]),
+                relative_path=str(row[1]),
+                issue_type=str(row[2]),
+                blocks_destructive_actions=bool(row[3]),
+                error_code=None if row[4] is None else str(row[4]),
+                sanitized_message=None if row[5] is None else str(row[5]),
+            )
+            for row in page_rows
+        )
+        has_more = len(rows) > query.limit
+        return SnapshotIssuePage(
+            snapshot_id=query.snapshot_id,
+            issues=issues,
+            next_cursor=_snapshot_issue_cursor(issues[-1]) if has_more and issues else None,
             has_more=has_more,
         )
 
@@ -756,4 +826,120 @@ def _snapshot_entry_cursor(entry: SnapshotEntryReadModel) -> SnapshotEntryCursor
         comparison_key=entry.comparison_key,
         relative_path=entry.relative_path,
         entry_id=entry.entry_id,
+    )
+
+
+def _snapshot_coverage_page_sql(query: SnapshotCoveragePageQuery) -> str:
+    state_clause = ""
+    if query.coverage_states:
+        placeholders = ", ".join("?" for _ in query.coverage_states)
+        state_clause = f"AND coverage.coverage_state IN ({placeholders})"
+    cursor_clause = ""
+    if query.after is not None:
+        cursor_clause = """
+                AND (
+                    coverage.comparison_key > ?
+                    OR (
+                        coverage.comparison_key = ?
+                        AND coverage.relative_path > ?
+                    )
+                )
+        """
+    return f"""
+            SELECT
+                coverage.relative_path,
+                coverage.comparison_key,
+                coverage.coverage_state,
+                coverage.case_mode,
+                coverage.case_mode_evidence,
+                coverage.case_context_hash,
+                coverage.case_probe_error
+            FROM directory_coverage AS coverage
+            WHERE coverage.snapshot_id = ?
+                {state_clause}
+                {cursor_clause}
+            ORDER BY coverage.comparison_key, coverage.relative_path
+            LIMIT ?
+            """
+
+
+def _snapshot_coverage_page_parameters(query: SnapshotCoveragePageQuery) -> tuple[object, ...]:
+    parameters: list[object] = [query.snapshot_id]
+    parameters.extend(query.coverage_states)
+    if query.after is not None:
+        parameters.extend(
+            (
+                query.after.comparison_key,
+                query.after.comparison_key,
+                query.after.relative_path,
+            )
+        )
+    return tuple(parameters)
+
+
+def _snapshot_coverage_cursor(coverage: SnapshotCoverageReadModel) -> SnapshotCoverageCursor:
+    return SnapshotCoverageCursor(
+        comparison_key=coverage.comparison_key,
+        relative_path=coverage.relative_path,
+    )
+
+
+def _snapshot_issue_page_sql(query: SnapshotIssuePageQuery) -> str:
+    blocking_clause = ""
+    if query.blocking_only:
+        blocking_clause = "AND issue.blocks_destructive_actions = 1"
+    cursor_clause = ""
+    if query.after is not None:
+        cursor_clause = """
+                AND (
+                    issue.relative_path > ?
+                    OR (
+                        issue.relative_path = ?
+                        AND issue.issue_type > ?
+                    )
+                    OR (
+                        issue.relative_path = ?
+                        AND issue.issue_type = ?
+                        AND issue.id > ?
+                    )
+                )
+        """
+    return f"""
+            SELECT
+                issue.id,
+                issue.relative_path,
+                issue.issue_type,
+                issue.blocks_destructive_actions,
+                issue.error_code,
+                issue.sanitized_message
+            FROM snapshot_issues AS issue
+            WHERE issue.snapshot_id = ?
+                {blocking_clause}
+                {cursor_clause}
+            ORDER BY issue.relative_path, issue.issue_type, issue.id
+            LIMIT ?
+            """
+
+
+def _snapshot_issue_page_parameters(query: SnapshotIssuePageQuery) -> tuple[object, ...]:
+    parameters: list[object] = [query.snapshot_id]
+    if query.after is not None:
+        parameters.extend(
+            (
+                query.after.relative_path,
+                query.after.relative_path,
+                query.after.issue_type,
+                query.after.relative_path,
+                query.after.issue_type,
+                query.after.issue_id,
+            )
+        )
+    return tuple(parameters)
+
+
+def _snapshot_issue_cursor(issue: SnapshotIssueReadModel) -> SnapshotIssueCursor:
+    return SnapshotIssueCursor(
+        relative_path=issue.relative_path,
+        issue_type=issue.issue_type,
+        issue_id=issue.issue_id,
     )

@@ -17,10 +17,12 @@ from mediasync_home.adapters.sqlite.snapshots import (
 from mediasync_home.application.snapshots import (
     SNAPSHOT_CHECKSUM_ALGORITHM,
     SNAPSHOT_SERIALIZER_VERSION,
+    SnapshotCoveragePageQuery,
     SnapshotBatchSummary,
     SnapshotDirectoryCoverage,
     SnapshotFileEntry,
     SnapshotEntryPageQuery,
+    SnapshotIssuePageQuery,
     SnapshotIssue,
     SnapshotSealRequest,
     snapshot_entry_batch,
@@ -104,6 +106,130 @@ def test_sqlite_snapshot_entry_read_model_pages_by_comparison_key(tmp_path: Path
         assert [entry.relative_path for entry in second_page.entries] == ["Readme.txt"]
         assert second_page.has_more is False
         assert second_page.next_cursor is None
+
+
+def test_sqlite_snapshot_coverage_read_model_pages_and_filters_by_state(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_snapshot_parent_rows(connection)
+        store = SqliteSnapshotEntryStore(connection)
+        store.commit_snapshot_entry_batch(_case_collision_batch())
+        store.commit_snapshot_entry_batch(
+            snapshot_entry_batch(
+                snapshot_id="snapshot-a",
+                sequence_no=1,
+                entries=(),
+                coverage_updates=(
+                    _coverage("Photos", "photos", "COMPLETE"),
+                    _coverage("Videos", "videos", "VOLATILE"),
+                ),
+            )
+        )
+
+        first_page = store.page_snapshot_directory_coverage(
+            SnapshotCoveragePageQuery(snapshot_id="snapshot-a", limit=2)
+        )
+
+        assert [coverage.relative_path for coverage in first_page.coverage] == [".", "Photos"]
+        assert first_page.has_more is True
+        assert first_page.next_cursor is not None
+        assert first_page.next_cursor.comparison_key == "photos"
+
+        second_page = store.page_snapshot_directory_coverage(
+            SnapshotCoveragePageQuery(
+                snapshot_id="snapshot-a",
+                limit=2,
+                after=first_page.next_cursor,
+            )
+        )
+        assert [coverage.relative_path for coverage in second_page.coverage] == ["Videos"]
+        assert second_page.has_more is False
+        assert second_page.next_cursor is None
+
+        volatile_page = store.page_snapshot_directory_coverage(
+            SnapshotCoveragePageQuery(
+                snapshot_id="snapshot-a",
+                limit=10,
+                coverage_states=("VOLATILE",),
+            )
+        )
+        assert [coverage.relative_path for coverage in volatile_page.coverage] == ["Videos"]
+        assert volatile_page.coverage[0].coverage_state == "VOLATILE"
+
+
+def test_sqlite_snapshot_issue_read_model_pages_and_filters_blocking_issues(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_snapshot_parent_rows(connection)
+        store = SqliteSnapshotEntryStore(connection)
+        store.commit_snapshot_entry_batch(
+            _case_collision_batch(
+                issues=(
+                    SnapshotIssue(
+                        relative_path="Archive",
+                        issue_type="UNREADABLE_DIRECTORY",
+                        blocks_destructive_actions=True,
+                        error_code="ERROR_ACCESS_DENIED",
+                        sanitized_message="access denied",
+                    ),
+                    SnapshotIssue(
+                        relative_path="Photos",
+                        issue_type="VOLATILE_DIRECTORY",
+                        blocks_destructive_actions=False,
+                    ),
+                    SnapshotIssue(
+                        relative_path="Videos",
+                        issue_type="REPARSE_BLOCKED",
+                        blocks_destructive_actions=True,
+                        error_code="IO_REPARSE_TAG_SYMLINK",
+                        sanitized_message="blocked reparse point",
+                    ),
+                )
+            )
+        )
+
+        first_page = store.page_snapshot_issues(
+            SnapshotIssuePageQuery(snapshot_id="snapshot-a", limit=2)
+        )
+
+        assert [issue.relative_path for issue in first_page.issues] == ["Archive", "Photos"]
+        assert all(issue.issue_id > 0 for issue in first_page.issues)
+        assert first_page.has_more is True
+        assert first_page.next_cursor is not None
+
+        second_page = store.page_snapshot_issues(
+            SnapshotIssuePageQuery(
+                snapshot_id="snapshot-a",
+                limit=2,
+                after=first_page.next_cursor,
+            )
+        )
+        assert [issue.relative_path for issue in second_page.issues] == ["Videos"]
+        assert second_page.has_more is False
+
+        blocking_first = store.page_snapshot_issues(
+            SnapshotIssuePageQuery(
+                snapshot_id="snapshot-a",
+                limit=1,
+                blocking_only=True,
+            )
+        )
+        assert [issue.relative_path for issue in blocking_first.issues] == ["Archive"]
+        assert blocking_first.has_more is True
+        assert blocking_first.next_cursor is not None
+
+        blocking_second = store.page_snapshot_issues(
+            SnapshotIssuePageQuery(
+                snapshot_id="snapshot-a",
+                limit=1,
+                after=blocking_first.next_cursor,
+                blocking_only=True,
+            )
+        )
+        assert [issue.relative_path for issue in blocking_second.issues] == ["Videos"]
+        assert blocking_second.has_more is False
 
 
 def test_sqlite_snapshot_entry_batch_rejects_sequence_hash_conflict(tmp_path: Path) -> None:
@@ -442,14 +568,22 @@ def _summary(batch) -> SnapshotBatchSummary:
 
 def _complete_root_coverage(coverage_state: str = "COMPLETE") -> tuple[SnapshotDirectoryCoverage, ...]:
     return (
-        SnapshotDirectoryCoverage(
-            relative_path=".",
-            comparison_key=".",
-            coverage_state=coverage_state,
-            case_mode="CASE_INSENSITIVE",
-            case_mode_evidence="probe",
-            case_context_hash="1" * 64,
-        ),
+        _coverage(".", ".", coverage_state),
+    )
+
+
+def _coverage(
+    relative_path: str,
+    comparison_key: str,
+    coverage_state: str = "COMPLETE",
+) -> SnapshotDirectoryCoverage:
+    return SnapshotDirectoryCoverage(
+        relative_path=relative_path,
+        comparison_key=comparison_key,
+        coverage_state=coverage_state,
+        case_mode="CASE_INSENSITIVE",
+        case_mode_evidence="probe",
+        case_context_hash="1" * 64,
     )
 
 
