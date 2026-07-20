@@ -129,6 +129,37 @@ def test_ui_pipe_action_queries_plan_operations_after_handshake() -> None:
     }
 
 
+def test_ui_pipe_action_queries_plan_endpoints_after_handshake() -> None:
+    client = _FakeGuiIpcClient()
+    args = build_parser().parse_args(
+        [
+            "--pipe-name",
+            "pipe-a",
+            "--query-plan-endpoints",
+            "--plan-id",
+            "plan-a",
+            "--limit",
+            "5",
+            "--after-json",
+            '{"role":"SOURCE","target_ordinal":null,"endpoint_id":"source-a"}',
+        ]
+    )
+
+    response = _run_pipe_action(args, client)
+
+    assert response.payload == {"plan_endpoints": "ok"}
+    assert client.calls == ("connect", "query_plan_endpoints")
+    assert client.plan_endpoints_query == {
+        "plan_id": "plan-a",
+        "limit": 5,
+        "after": {
+            "role": "SOURCE",
+            "target_ordinal": None,
+            "endpoint_id": "source-a",
+        },
+    }
+
+
 def test_ui_pipe_action_queries_snapshot_entries_after_handshake() -> None:
     client = _FakeGuiIpcClient()
     args = build_parser().parse_args(
@@ -322,6 +353,7 @@ class _FakeGuiIpcClient:
         self.backup_job_detail_query: dict[str, object] | None = None
         self.activity_query: dict[str, object] | None = None
         self.plan_operations_query: dict[str, object] | None = None
+        self.plan_endpoints_query: dict[str, object] | None = None
         self.snapshot_entries_query: dict[str, object] | None = None
         self.snapshot_coverage_query: dict[str, object] | None = None
         self.snapshot_issues_query: dict[str, object] | None = None
@@ -383,6 +415,21 @@ class _FakeGuiIpcClient:
             "after": after,
         }
         return IpcResponse.accepted({"plan_operations": "ok"})
+
+    def query_plan_endpoints(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        self.calls = (*self.calls, "query_plan_endpoints")
+        self.plan_endpoints_query = {
+            "plan_id": plan_id,
+            "limit": limit,
+            "after": after,
+        }
+        return IpcResponse.accepted({"plan_endpoints": "ok"})
 
     def query_snapshot_entries(
         self,

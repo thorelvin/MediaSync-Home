@@ -7,6 +7,11 @@ from typing import Any
 from mediasync_home.application.plans import (
     PlanDependency,
     PlanEndpoint,
+    PlanEndpointCursor,
+    PlanEndpointPage,
+    PlanEndpointPageQuery,
+    PlanEndpointReadModel,
+    PlanEndpointReadModelStore,
     PlanEndpointRole,
     PlanOperationCursor,
     PlanOperationPage,
@@ -19,6 +24,7 @@ from mediasync_home.application.plans import (
     PlanStore,
     SealedPlan,
     TargetPreconditionKind,
+    validate_plan_endpoint_page_query,
     validate_plan_operation_page_query,
 )
 
@@ -27,7 +33,7 @@ class SqlitePlanStoreError(ValueError):
     pass
 
 
-class SqlitePlanStore(PlanStore, PlanOperationReadModelStore):
+class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadModelStore):
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
@@ -259,6 +265,38 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore):
             has_more=has_more,
         )
 
+    def page_plan_endpoints(self, query: PlanEndpointPageQuery) -> PlanEndpointPage:
+        validate_plan_endpoint_page_query(query)
+        rows = self._connection.execute(
+            _plan_endpoint_page_sql(query.after),
+            (*_plan_endpoint_page_parameters(query), query.limit + 1),
+        ).fetchall()
+        page_rows = rows[: query.limit]
+        endpoints = tuple(
+            PlanEndpointReadModel(
+                endpoint_id=str(row[0]),
+                endpoint_revision_id=str(row[1]),
+                snapshot_id=str(row[2]),
+                role=PlanEndpointRole(str(row[3])),
+                target_ordinal=None if row[4] is None else int(row[4]),
+                capabilities_hash=str(row[5]),
+                root_case_context_hash=str(row[6]),
+                required_owner_installation_id=None if row[7] is None else str(row[7]),
+                required_ownership_epoch=None if row[8] is None else int(row[8]),
+                control_schema_version=None if row[9] is None else int(row[9]),
+                planned_operations=int(row[10]),
+                planned_bytes=int(row[11]),
+            )
+            for row in page_rows
+        )
+        has_more = len(rows) > query.limit
+        return PlanEndpointPage(
+            plan_id=query.plan_id,
+            endpoints=endpoints,
+            next_cursor=_plan_endpoint_cursor(endpoints[-1]) if has_more and endpoints else None,
+            has_more=has_more,
+        )
+
     def _load_endpoints(self, plan_id: str) -> tuple[PlanEndpoint, ...]:
         rows = self._connection.execute(
             """
@@ -435,4 +473,75 @@ def _plan_operation_cursor(operation: PlanOperationReadModel) -> PlanOperationCu
         execution_phase=operation.execution_phase,
         stable_order_key=operation.stable_order_key,
         operation_id=operation.operation_id,
+    )
+
+
+def _plan_endpoint_page_sql(after: PlanEndpointCursor | None) -> str:
+    cursor_clause = ""
+    if after is not None:
+        cursor_clause = """
+            AND (
+                role > ?
+                OR (
+                    role = ?
+                    AND COALESCE(target_ordinal, -1) > ?
+                )
+                OR (
+                    role = ?
+                    AND COALESCE(target_ordinal, -1) = ?
+                    AND endpoint_id > ?
+                )
+            )
+        """
+    return f"""
+        SELECT
+            endpoint_id,
+            endpoint_revision_id,
+            snapshot_id,
+            role,
+            target_ordinal,
+            capabilities_hash,
+            root_case_context_hash,
+            required_owner_installation_id,
+            required_ownership_epoch,
+            control_schema_version,
+            planned_operations,
+            planned_bytes
+        FROM plan_endpoints
+        WHERE plan_id = ?
+        {cursor_clause}
+        ORDER BY
+            role,
+            target_ordinal,
+            endpoint_id
+        LIMIT ?
+        """
+
+
+def _plan_endpoint_page_parameters(query: PlanEndpointPageQuery) -> tuple[object, ...]:
+    parameters: list[object] = [query.plan_id]
+    if query.after is not None:
+        ordinal = _endpoint_cursor_ordinal(query.after)
+        parameters.extend(
+            (
+                query.after.role.value,
+                query.after.role.value,
+                ordinal,
+                query.after.role.value,
+                ordinal,
+                query.after.endpoint_id,
+            )
+        )
+    return tuple(parameters)
+
+
+def _endpoint_cursor_ordinal(cursor: PlanEndpointCursor) -> int:
+    return -1 if cursor.target_ordinal is None else cursor.target_ordinal
+
+
+def _plan_endpoint_cursor(endpoint: PlanEndpointReadModel) -> PlanEndpointCursor:
+    return PlanEndpointCursor(
+        role=endpoint.role,
+        target_ordinal=endpoint.target_ordinal,
+        endpoint_id=endpoint.endpoint_id,
     )

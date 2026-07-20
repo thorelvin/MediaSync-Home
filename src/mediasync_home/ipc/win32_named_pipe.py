@@ -420,6 +420,13 @@ class Win32NamedPipeServer:
                 limit=_optional_query_int(request.get("limit")),
                 after=_optional_query_object(request.get("after")),
             )
+        if message_type == "QUERY_PLAN_ENDPOINTS":
+            return self.service.query_plan_endpoints(
+                str(request["client_instance_id"]),
+                plan_id=str(request["plan_id"]),
+                limit=_optional_query_int(request.get("limit")),
+                after=_optional_query_object(request.get("after")),
+            )
         if message_type == "QUERY_SNAPSHOT_ENTRIES":
             return self.service.query_snapshot_entries(
                 str(request["client_instance_id"]),
@@ -538,6 +545,24 @@ class Win32NamedPipeClient:
     ) -> IpcResponse:
         request: dict[str, Any] = {
             "message_type": "QUERY_PLAN_OPERATIONS",
+            "client_instance_id": self.client_instance_id,
+            "plan_id": plan_id,
+        }
+        if limit is not None:
+            request["limit"] = limit
+        if after is not None:
+            request["after"] = after
+        return self._roundtrip(request)
+
+    def query_plan_endpoints(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        request: dict[str, Any] = {
+            "message_type": "QUERY_PLAN_ENDPOINTS",
             "client_instance_id": self.client_instance_id,
             "plan_id": plan_id,
         }

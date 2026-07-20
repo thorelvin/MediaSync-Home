@@ -41,10 +41,16 @@ from mediasync_home.application.job_read_models import (
 )
 from mediasync_home.application.outbox import OutboxStore, command_effect_outbox_message
 from mediasync_home.application.plan_read_models import (
+    PlanEndpointsQueryError,
     PlanOperationsQueryError,
+    query_plan_endpoints,
     query_plan_operations,
 )
-from mediasync_home.application.plans import PlanOperationReadModelStore, PlanStore
+from mediasync_home.application.plans import (
+    PlanEndpointReadModelStore,
+    PlanOperationReadModelStore,
+    PlanStore,
+)
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
 from mediasync_home.application.runs import (
     RunCommandName,
@@ -94,6 +100,7 @@ class EngineHostIpcService:
     standard_backup_job_detail_store: StandardBackupJobDetailReadModelStore | None = None
     run_activity_read_store: RunActivityReadModelStore | None = None
     plan_operation_read_store: PlanOperationReadModelStore | None = None
+    plan_endpoint_read_store: PlanEndpointReadModelStore | None = None
     snapshot_entry_read_store: SnapshotEntryReadModelStore | None = None
     snapshot_coverage_read_store: SnapshotCoverageReadModelStore | None = None
     snapshot_issue_read_store: SnapshotIssueReadModelStore | None = None
@@ -217,6 +224,27 @@ class EngineHostIpcService:
         except PlanOperationsQueryError:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         return IpcResponse.accepted({"plan_operations": page.to_dict()})
+
+    def query_plan_endpoints(
+        self,
+        client_instance_id: str,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        if client_instance_id not in self._accepted_clients:
+            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        try:
+            page = query_plan_endpoints(
+                plan_read_store=self.plan_endpoint_read_store,
+                plan_id=plan_id,
+                limit=limit,
+                after=after,
+            )
+        except PlanEndpointsQueryError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        return IpcResponse.accepted({"plan_endpoints": page.to_dict()})
 
     def query_snapshot_entries(
         self,

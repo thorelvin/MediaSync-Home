@@ -220,6 +220,7 @@ def build_engine_host_runtime(
             snapshot_issue_read_store=snapshots,
             plan_store=plans,
             plan_operation_read_store=plans,
+            plan_endpoint_read_store=plans,
             run_store=runs,
             run_activity_read_store=runs,
             command_receipt_store=command_receipts,

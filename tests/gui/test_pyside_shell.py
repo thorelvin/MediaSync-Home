@@ -60,6 +60,7 @@ def test_main_window_displays_engine_status(qapp) -> None:
         detail_panel = window.findChild(QWidget, "backupJobDetailPanel")
         detail_title = window.findChild(QLabel, "jobDetailTitle")
         plan_preview_title = window.findChild(QLabel, "planPreviewTitle")
+        plan_endpoint_title = window.findChild(QLabel, "planEndpointTitle")
 
         assert nav is not None
         assert nav.count() == 4
@@ -109,6 +110,8 @@ def test_main_window_displays_engine_status(qapp) -> None:
         assert detail_title.text() == "Ingen lagret backupjobb"
         assert plan_preview_title is not None
         assert plan_preview_title.text() == "Planforhåndsvisning"
+        assert plan_endpoint_title is not None
+        assert plan_endpoint_title.text() == "Planendepunkter"
     finally:
         window.close()
         window.deleteLater()
@@ -125,6 +128,7 @@ def test_language_selector_updates_selected_flag(qapp) -> None:
         create_backup = window.findChild(QPushButton, "createBackupButton")
         detail_title = window.findChild(QLabel, "jobDetailTitle")
         plan_preview_title = window.findChild(QLabel, "planPreviewTitle")
+        plan_endpoint_title = window.findChild(QLabel, "planEndpointTitle")
 
         assert language is not None
         assert language.menu() is not None
@@ -158,6 +162,8 @@ def test_language_selector_updates_selected_flag(qapp) -> None:
         assert detail_title.text() == "No saved backup job"
         assert plan_preview_title is not None
         assert plan_preview_title.text() == "Plan preview"
+        assert plan_endpoint_title is not None
+        assert plan_endpoint_title.text() == "Plan endpoints"
     finally:
         window.close()
         window.deleteLater()
@@ -206,6 +212,8 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         job_detail_rows = window.findChildren(QLabel, "jobDetailTargetRow")
         plan_preview_summary = window.findChild(QLabel, "planPreviewSummary")
         plan_preview_rows = window.findChildren(QLabel, "planPreviewRow")
+        plan_endpoint_summary = window.findChild(QLabel, "planEndpointSummary")
+        plan_endpoint_rows = window.findChildren(QLabel, "planEndpointRow")
         language = window.findChild(QToolButton, "languageSelectorButton")
 
         assert provider.calls == [
@@ -215,6 +223,7 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
             "get_backup_job_detail",
             "get_activity_overview",
             "get_plan_operations",
+            "get_plan_endpoints",
         ]
         assert source is not None
         assert source.text() == "C:/Users/Ada/Pictures"
@@ -237,6 +246,10 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert plan_preview_summary.text() == "2 operasjoner fra plan-a."
         assert plan_preview_rows[0].text() == "Lav: Opprett mappe: Photos"
         assert plan_preview_rows[1].text() == "Lav: Kopier ny: Photos/2026/a.jpg - 2.0 KiB"
+        assert plan_endpoint_summary is not None
+        assert plan_endpoint_summary.text() == "2 endepunkter fra plan-a."
+        assert plan_endpoint_rows[0].text() == "Kildeendepunkt: source-a · snapshot source-snapshot-a"
+        assert plan_endpoint_rows[1].text() == "Målendepunkt 1: target-a · snapshot target-snapshot-a"
         assert activity_title is not None
         assert activity_title.text() == "Siste kjøring: run-a"
         assert activity_rows[0].text() == "Aktivitet: Kontrollerer"
@@ -252,6 +265,9 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert plan_preview_summary.text() == "2 operations from plan-a."
         assert plan_preview_rows[0].text() == "Low: Create folder: Photos"
         assert plan_preview_rows[1].text() == "Low: Copy new: Photos/2026/a.jpg - 2.0 KiB"
+        assert plan_endpoint_summary.text() == "2 endpoints from plan-a."
+        assert plan_endpoint_rows[0].text() == "Source endpoint: source-a · snapshot source-snapshot-a"
+        assert plan_endpoint_rows[1].text() == "Target endpoint 1: target-a · snapshot target-snapshot-a"
         assert activity_title.text() == "Latest run: run-a"
         assert activity_rows[0].text() == "Activity: Checking"
         assert activity_rows[1].text() == "Attention: Waiting"
@@ -468,6 +484,57 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                             "reason_code": "SOURCE_ONLY",
                             "risk_level": "LOW",
                             "target_relative_path": "Photos/2026/a.jpg",
+                            "planned_bytes": 2048,
+                        },
+                    ],
+                }
+            }
+        )
+
+    def get_plan_endpoints(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        del limit, after
+        self.calls.append("get_plan_endpoints")
+        return IpcResponse.accepted(
+            {
+                "plan_endpoints": {
+                    "plan_id": plan_id,
+                    "limit": 4,
+                    "has_more": False,
+                    "read_model_available": True,
+                    "next_cursor": None,
+                    "endpoints": [
+                        {
+                            "endpoint_id": "source-a",
+                            "endpoint_revision_id": "source-rev-a",
+                            "snapshot_id": "source-snapshot-a",
+                            "role": "SOURCE",
+                            "target_ordinal": None,
+                            "capabilities_hash": "capabilities-source",
+                            "root_case_context_hash": "case-source",
+                            "required_owner_installation_id": None,
+                            "required_ownership_epoch": None,
+                            "control_schema_version": None,
+                            "planned_operations": 0,
+                            "planned_bytes": 0,
+                        },
+                        {
+                            "endpoint_id": "target-a",
+                            "endpoint_revision_id": "target-rev-a",
+                            "snapshot_id": "target-snapshot-a",
+                            "role": "TARGET_WRITABLE",
+                            "target_ordinal": 0,
+                            "capabilities_hash": "capabilities-target",
+                            "root_case_context_hash": "case-target",
+                            "required_owner_installation_id": "owner-a",
+                            "required_ownership_epoch": 1,
+                            "control_schema_version": 1,
+                            "planned_operations": 2,
                             "planned_bytes": 2048,
                         },
                     ],

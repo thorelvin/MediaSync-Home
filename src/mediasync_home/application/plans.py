@@ -13,6 +13,7 @@ PLANNER_VERSION = "0B-plan-sealer-skeleton"
 PLAN_CHECKSUM_ALGORITHM = "SHA-256"
 PLAN_SERIALIZER_VERSION = "0B-CANONICAL-JSON-V1"
 MAX_PLAN_OPERATION_PAGE_LIMIT = 1000
+MAX_PLAN_ENDPOINT_PAGE_LIMIT = 100
 
 
 class PlanSealViolation(ValueError):
@@ -90,6 +91,44 @@ class PlanEndpoint:
 
 
 @dataclass(frozen=True)
+class PlanEndpointCursor:
+    role: PlanEndpointRole
+    target_ordinal: int | None
+    endpoint_id: str
+
+
+@dataclass(frozen=True)
+class PlanEndpointPageQuery:
+    plan_id: str
+    limit: int
+    after: PlanEndpointCursor | None = None
+
+
+@dataclass(frozen=True)
+class PlanEndpointReadModel:
+    endpoint_id: str
+    endpoint_revision_id: str
+    snapshot_id: str
+    role: PlanEndpointRole
+    target_ordinal: int | None
+    capabilities_hash: str
+    root_case_context_hash: str
+    required_owner_installation_id: str | None
+    required_ownership_epoch: int | None
+    control_schema_version: int | None
+    planned_operations: int
+    planned_bytes: int
+
+
+@dataclass(frozen=True)
+class PlanEndpointPage:
+    plan_id: str
+    endpoints: tuple[PlanEndpointReadModel, ...]
+    next_cursor: PlanEndpointCursor | None
+    has_more: bool
+
+
+@dataclass(frozen=True)
 class PlanOperationCursor:
     execution_phase: int
     stable_order_key: str
@@ -156,6 +195,10 @@ class PlanStore(Protocol):
 
 class PlanOperationReadModelStore(Protocol):
     def page_plan_operations(self, query: PlanOperationPageQuery) -> PlanOperationPage: ...
+
+
+class PlanEndpointReadModelStore(Protocol):
+    def page_plan_endpoints(self, query: PlanEndpointPageQuery) -> PlanEndpointPage: ...
 
 
 def seal_plan(
@@ -285,6 +328,21 @@ def validate_plan_operation_page_query(query: PlanOperationPageQuery) -> None:
         raise PlanSealViolation("PLAN_OPERATION_READ_CURSOR_REQUIRES_STABLE_ORDER_KEY")
     if not query.after.operation_id.strip():
         raise PlanSealViolation("PLAN_OPERATION_READ_CURSOR_REQUIRES_OPERATION_ID")
+
+
+def validate_plan_endpoint_page_query(query: PlanEndpointPageQuery) -> None:
+    if not query.plan_id.strip():
+        raise PlanSealViolation("PLAN_ENDPOINT_READ_REQUIRES_PLAN_ID")
+    if query.limit < 1:
+        raise PlanSealViolation("PLAN_ENDPOINT_READ_LIMIT_MUST_BE_POSITIVE")
+    if query.limit > MAX_PLAN_ENDPOINT_PAGE_LIMIT:
+        raise PlanSealViolation("PLAN_ENDPOINT_READ_LIMIT_TOO_LARGE")
+    if query.after is None:
+        return
+    if query.after.target_ordinal is not None and query.after.target_ordinal < 0:
+        raise PlanSealViolation("PLAN_ENDPOINT_READ_CURSOR_TARGET_ORDINAL_MUST_BE_NON_NEGATIVE")
+    if not query.after.endpoint_id.strip():
+        raise PlanSealViolation("PLAN_ENDPOINT_READ_CURSOR_REQUIRES_ENDPOINT_ID")
 
 
 def _validate_plan_identity(

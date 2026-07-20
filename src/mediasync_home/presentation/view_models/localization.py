@@ -128,12 +128,14 @@ _NB_TO_EN = {
     "Ingen aktive kjøringer": "No active runs",
     "Ingen backupjobb": "No backup job",
     "Ingen forseglet plan å vise.": "No sealed plan to show.",
+    "Ingen forseglede planendepunkter å vise.": "No sealed plan endpoints to show.",
     "Ingen handling kreves nå.": "No action is required now.",
     "Ingen kilde valgt": "No source selected",
     "Ingen lagret backupjobb": "No saved backup job",
     "Ingen mål konfigurert": "No targets configured",
     "Ingen mål valgt": "No targets selected",
     "Ingen mål å vise.": "No targets to show.",
+    "Ingen endepunkter.": "No endpoint rows.",
     "Ingen planrader.": "No plan operations.",
     "Inaktiv": "Inactive",
     "Ikke konfigurert": "Not configured",
@@ -141,6 +143,7 @@ _NB_TO_EN = {
     "Jobben finnes ikke": "Job not found",
     "Jobber": "Jobs",
     "Kilde": "Source",
+    "Kildeendepunkt": "Source endpoint",
     "Kilde mangler": "Source missing",
     "Klar": "Ready",
     "Koble til NAS.": "Connect NAS.",
@@ -158,6 +161,7 @@ _NB_TO_EN = {
     "Lav": "Low",
     "Lokal forhåndsvisning": "Local preview",
     "Mål": "Target",
+    "Målendepunkt": "Target endpoint",
     "Målsteder": "Target locations",
     "Mutasjoner aktivert": "Mutations enabled",
     "Mutasjonspolicy": "Mutation policy",
@@ -171,6 +175,8 @@ _NB_TO_EN = {
     "Opprett mappe": "Create folder",
     "Pauset": "Paused",
     "Planforhåndsvisning": "Plan preview",
+    "Planendepunkter": "Plan endpoints",
+    "Planendepunktvisningen er ikke tilgjengelig.": "Plan endpoint read model is not available.",
     "Planvisningen er ikke tilgjengelig.": "Plan read model is not available.",
     "Protokoll utilgjengelig": "Protocol unavailable",
     "Protokoll venter": "Protocol pending",
@@ -179,6 +185,7 @@ _NB_TO_EN = {
     "Se gjennom målfeilen.": "Review the target error.",
     "Sist sikkerhetskopiert": "Last backed up",
     "Skrivebeskyttet lokal forhåndsvisning": "Read-only local preview",
+    "Skrivebeskyttet målendepunkt": "Read-only target endpoint",
     "Standard": "Defaults",
     "Standard kontroll": "Standard verification",
     "Standardvalg ikke lastet": "Defaults not loaded",
@@ -222,8 +229,13 @@ _EN_TO_NB.update(
         "Engine status is unavailable.": "Motorstatus er utilgjengelig.",
         "High": "Høy",
         "No sealed plan to show.": "Ingen forseglet plan å vise.",
+        "No sealed plan endpoints to show.": "Ingen forseglede planendepunkter å vise.",
+        "No endpoint rows.": "Ingen endepunkter.",
         "No plan operations.": "Ingen planrader.",
         "Operation": "Operasjon",
+        "Endpoint": "Endepunkt",
+        "Plan endpoints": "Planendepunkter",
+        "Plan endpoint read model is not available.": "Planendepunktvisningen er ikke tilgjengelig.",
         "Plan preview": "Planforhåndsvisning",
         "Plan read model is not available.": "Planvisningen er ikke tilgjengelig.",
         "Rejected": "Avvist",
@@ -272,6 +284,12 @@ def _to_english(value: str) -> str:
     translated = _translate_plan_summary_to_english(value)
     if translated != value:
         return translated
+    translated = _translate_endpoint_summary_to_english(value)
+    if translated != value:
+        return translated
+    translated = _translate_endpoint_role_to_english(value)
+    if translated != value:
+        return translated
     return value
 
 
@@ -282,6 +300,12 @@ def _to_norwegian(value: str) -> str:
     if translated != value:
         return translated
     translated = _translate_plan_summary_to_norwegian(value)
+    if translated != value:
+        return translated
+    translated = _translate_endpoint_summary_to_norwegian(value)
+    if translated != value:
+        return translated
+    translated = _translate_endpoint_role_to_norwegian(value)
     if translated != value:
         return translated
     translated = _translate_delimited(value, " · ", _to_norwegian)
@@ -395,3 +419,41 @@ def _translate_plan_summary_to_norwegian(value: str) -> str:
     operation_word = "operasjon" if match.group("count") == "1" else "operasjoner"
     more = " Flere operasjoner finnes." if match.group("more") else ""
     return f"{match.group('count')} {operation_word} fra {match.group('plan')}.{more}"
+
+
+def _translate_endpoint_summary_to_english(value: str) -> str:
+    match = re.fullmatch(
+        r"(?P<count>\d+) endepunkt(?:er)? fra (?P<plan>.+)\.(?P<more> Flere endepunkter finnes\.)?",
+        value,
+    )
+    if match is None:
+        return value
+    endpoint_word = "endpoint" if match.group("count") == "1" else "endpoints"
+    more = " More endpoints exist." if match.group("more") else ""
+    return f"{match.group('count')} {endpoint_word} from {match.group('plan')}.{more}"
+
+
+def _translate_endpoint_summary_to_norwegian(value: str) -> str:
+    match = re.fullmatch(
+        r"(?P<count>\d+) endpoint(?:s)? from (?P<plan>.+)\.(?P<more> More endpoints exist\.)?",
+        value,
+    )
+    if match is None:
+        return value
+    endpoint_word = "endepunkt" if match.group("count") == "1" else "endepunkter"
+    more = " Flere endepunkter finnes." if match.group("more") else ""
+    return f"{match.group('count')} {endpoint_word} fra {match.group('plan')}.{more}"
+
+
+def _translate_endpoint_role_to_english(value: str) -> str:
+    match = re.fullmatch(r"Målendepunkt (?P<ordinal>\d+)", value)
+    if match is not None:
+        return f"Target endpoint {match.group('ordinal')}"
+    return value
+
+
+def _translate_endpoint_role_to_norwegian(value: str) -> str:
+    match = re.fullmatch(r"Target endpoint (?P<ordinal>\d+)", value)
+    if match is not None:
+        return f"Målendepunkt {match.group('ordinal')}"
+    return value

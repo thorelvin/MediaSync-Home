@@ -143,6 +143,11 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         ) is False
         assert _index_is_unique(
             connection,
+            "plan_endpoints",
+            ("plan_id", "role", "target_ordinal", "endpoint_id"),
+        ) is False
+        assert _index_is_unique(
+            connection,
             "case_collision_groups",
             ("snapshot_id", "comparison_key"),
         ) is True

@@ -54,6 +54,11 @@ from mediasync_home.presentation.view_models.plan_preview import (
     empty_plan_operation_preview_state,
     plan_operation_preview_from_response,
 )
+from mediasync_home.presentation.view_models.plan_endpoints import (
+    PlanEndpointPreviewState,
+    empty_plan_endpoint_preview_state,
+    plan_endpoint_preview_from_response,
+)
 from mediasync_home.ipc.protocol import IpcResponse
 
 
@@ -91,6 +96,16 @@ class PlanOperationsProvider(Protocol):
     ) -> IpcResponse: ...
 
 
+class PlanEndpointsProvider(Protocol):
+    def get_plan_endpoints(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse: ...
+
+
 class MediaSyncWindow(QMainWindow):
     def __init__(
         self,
@@ -107,6 +122,7 @@ class MediaSyncWindow(QMainWindow):
         self._job_status_state = empty_backup_job_status_state()
         self._job_detail_state = empty_backup_job_detail_state()
         self._plan_preview_state = empty_plan_operation_preview_state()
+        self._plan_endpoint_preview_state = empty_plan_endpoint_preview_state()
         self._engine_status_state = initial_state
         self._subtitle_label: QLabel | None = None
         self._navigation_items: list[QListWidgetItem] = []
@@ -145,6 +161,9 @@ class MediaSyncWindow(QMainWindow):
         self._plan_preview_title: QLabel | None = None
         self._plan_preview_summary: QLabel | None = None
         self._plan_preview_rows: list[QLabel] = []
+        self._plan_endpoint_title: QLabel | None = None
+        self._plan_endpoint_summary: QLabel | None = None
+        self._plan_endpoint_rows: list[QLabel] = []
         self._language_options = (
             ("nb", "Norsk"),
             ("en", "English"),
@@ -245,6 +264,10 @@ class MediaSyncWindow(QMainWindow):
         self._plan_preview_state = state
         self._apply_plan_operation_preview_state(state)
 
+    def apply_plan_endpoint_preview(self, state: PlanEndpointPreviewState) -> None:
+        self._plan_endpoint_preview_state = state
+        self._apply_plan_endpoint_preview_state(state)
+
     def _refresh_backup_overview(self) -> None:
         if self._engine_client is None or not hasattr(self._engine_client, "get_backup_overview"):
             return
@@ -272,8 +295,10 @@ class MediaSyncWindow(QMainWindow):
             self._apply_job_status_state(state.job_status)
         if state.latest_plan_id is None:
             self.apply_plan_operation_preview(empty_plan_operation_preview_state())
+            self.apply_plan_endpoint_preview(empty_plan_endpoint_preview_state())
             return
         self._refresh_plan_operation_preview(state.latest_plan_id)
+        self._refresh_plan_endpoint_preview(state.latest_plan_id)
 
     def _refresh_plan_operation_preview(self, plan_id: str) -> None:
         if self._engine_client is None or not hasattr(self._engine_client, "get_plan_operations"):
@@ -281,6 +306,14 @@ class MediaSyncWindow(QMainWindow):
         provider = cast(PlanOperationsProvider, self._engine_client)
         self.apply_plan_operation_preview(
             plan_operation_preview_from_response(provider.get_plan_operations(plan_id=plan_id, limit=3))
+        )
+
+    def _refresh_plan_endpoint_preview(self, plan_id: str) -> None:
+        if self._engine_client is None or not hasattr(self._engine_client, "get_plan_endpoints"):
+            return
+        provider = cast(PlanEndpointsProvider, self._engine_client)
+        self.apply_plan_endpoint_preview(
+            plan_endpoint_preview_from_response(provider.get_plan_endpoints(plan_id=plan_id, limit=4))
         )
 
     def _apply_backup_setup_state(self, state: StandardBackupSetupViewState) -> None:
@@ -355,6 +388,22 @@ class MediaSyncWindow(QMainWindow):
             "No plan operations.",
         )
         for index, row in enumerate(self._plan_preview_rows):
+            if index < len(lines):
+                row.setText(self._display(lines[index]))
+                row.setVisible(True)
+            else:
+                row.setText("")
+                row.setVisible(False)
+
+    def _apply_plan_endpoint_preview_state(self, state: PlanEndpointPreviewState) -> None:
+        if self._plan_endpoint_title is not None:
+            self._plan_endpoint_title.setText(self._display(state.title))
+        if self._plan_endpoint_summary is not None:
+            self._plan_endpoint_summary.setText(self._display(state.summary_label))
+        lines = tuple(row.display_line for row in state.rows) or (
+            "No endpoint rows.",
+        )
+        for index, row in enumerate(self._plan_endpoint_rows):
             if index < len(lines):
                 row.setText(self._display(lines[index]))
                 row.setVisible(True)
@@ -630,6 +679,8 @@ class MediaSyncWindow(QMainWindow):
         self._add_activity_status(layout, self._job_status_state)
         layout.addSpacing(8)
         self._add_plan_operation_preview(layout, self._plan_preview_state)
+        layout.addSpacing(8)
+        self._add_plan_endpoint_preview(layout, self._plan_endpoint_preview_state)
         if self._show_component_gallery:
             layout.addWidget(self._build_component_gallery())
         layout.addStretch(1)
@@ -682,6 +733,32 @@ class MediaSyncWindow(QMainWindow):
             row.setWordWrap(True)
             row.setVisible(index < len(lines))
             self._plan_preview_rows.append(row)
+            layout.addWidget(row)
+
+    def _add_plan_endpoint_preview(
+        self,
+        layout: QVBoxLayout,
+        state: PlanEndpointPreviewState,
+    ) -> None:
+        title = QLabel(self._display(state.title))
+        title.setObjectName("planEndpointTitle")
+        self._plan_endpoint_title = title
+        summary = QLabel(self._display(state.summary_label))
+        summary.setObjectName("planEndpointSummary")
+        summary.setWordWrap(True)
+        self._plan_endpoint_summary = summary
+        layout.addWidget(title)
+        layout.addWidget(summary)
+        self._plan_endpoint_rows = []
+        lines = tuple(row.display_line for row in state.rows) or (
+            "No endpoint rows.",
+        )
+        for index in range(4):
+            row = QLabel(self._display(lines[index]) if index < len(lines) else "")
+            row.setObjectName("planEndpointRow")
+            row.setWordWrap(True)
+            row.setVisible(index < len(lines))
+            self._plan_endpoint_rows.append(row)
             layout.addWidget(row)
 
     def _build_component_gallery(self) -> QFrame:
@@ -777,6 +854,7 @@ class MediaSyncWindow(QMainWindow):
         self._apply_backup_job_detail_state(self._job_detail_state)
         self._apply_job_status_state(self._job_status_state)
         self._apply_plan_operation_preview_state(self._plan_preview_state)
+        self._apply_plan_endpoint_preview_state(self._plan_endpoint_preview_state)
 
 
 def _add_key_value(layout: QGridLayout, row: int, label_text: str, value: QLabel) -> QLabel:

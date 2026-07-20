@@ -42,6 +42,15 @@ class StatusIpcClient(Protocol):
     ) -> IpcResponse:
         pass
 
+    def query_plan_endpoints(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        pass
+
     def query_snapshot_entries(
         self,
         *,
@@ -119,6 +128,19 @@ class EngineClient:
         after: dict[str, object] | None = None,
     ) -> IpcResponse:
         return self._ipc_client.query_plan_operations(
+            plan_id=plan_id,
+            limit=limit,
+            after=after,
+        )
+
+    def get_plan_endpoints(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        return self._ipc_client.query_plan_endpoints(
             plan_id=plan_id,
             limit=limit,
             after=after,

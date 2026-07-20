@@ -109,6 +109,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.service.snapshot_issue_read_store is not None
         assert runtime.service.plan_store is not None
         assert runtime.service.plan_operation_read_store is not None
+        assert runtime.service.plan_endpoint_read_store is not None
         assert runtime.service.run_activity_read_store is not None
         assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 18
         assert current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY) == 5
@@ -135,6 +136,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         backup_job_detail = ipc_client.query_backup_job_detail(job_id="job-a")
         activity = ipc_client.query_activity_overview(limit=5)
         plan_operations = ipc_client.query_plan_operations(plan_id="plan-a", limit=5)
+        plan_endpoints = ipc_client.query_plan_endpoints(plan_id="plan-a", limit=5)
         snapshot_entries = ipc_client.query_snapshot_entries(snapshot_id="snapshot-a", limit=5)
         snapshot_coverage = ipc_client.query_snapshot_coverage(
             snapshot_id="snapshot-a",
@@ -171,6 +173,10 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert plan_operations.payload["plan_operations"]["read_model_available"] is True
         assert plan_operations.payload["plan_operations"]["limit"] == 5
         assert plan_operations.payload["plan_operations"]["operations"] == []
+        assert plan_endpoints.status is IpcStatus.ACCEPTED
+        assert plan_endpoints.payload["plan_endpoints"]["read_model_available"] is True
+        assert plan_endpoints.payload["plan_endpoints"]["limit"] == 5
+        assert plan_endpoints.payload["plan_endpoints"]["endpoints"] == []
         assert snapshot_entries.status is IpcStatus.ACCEPTED
         assert snapshot_entries.payload["snapshot_entries"]["read_model_available"] is True
         assert snapshot_entries.payload["snapshot_entries"]["limit"] == 5

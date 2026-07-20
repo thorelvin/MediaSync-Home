@@ -14,6 +14,7 @@ from mediasync_home.adapters.sqlite.plans import SqlitePlanStore, SqlitePlanStor
 from mediasync_home.application.plans import (
     PlanDependency,
     PlanEndpoint,
+    PlanEndpointPageQuery,
     PlanEndpointRole,
     PlanOperation,
     PlanOperationPageQuery,
@@ -75,6 +76,37 @@ def test_sqlite_plan_store_pages_operations_by_stable_order(tmp_path: Path) -> N
         )
 
         assert [operation.operation_id for operation in second_page.operations] == ["op-c"]
+        assert second_page.has_more is False
+        assert second_page.next_cursor is None
+
+
+def test_sqlite_plan_store_pages_endpoints_by_role_and_target_order(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        store = SqlitePlanStore(connection)
+        store.save_sealed_plan(_endpoint_page_plan())
+
+        first_page = store.page_plan_endpoints(PlanEndpointPageQuery(plan_id="plan-endpoints", limit=1))
+
+        assert [endpoint.endpoint_id for endpoint in first_page.endpoints] == ["source-a"]
+        assert first_page.has_more is True
+        assert first_page.next_cursor is not None
+        assert first_page.next_cursor.role is PlanEndpointRole.SOURCE
+        assert first_page.next_cursor.target_ordinal is None
+        assert first_page.next_cursor.endpoint_id == "source-a"
+
+        second_page = store.page_plan_endpoints(
+            PlanEndpointPageQuery(
+                plan_id="plan-endpoints",
+                limit=2,
+                after=first_page.next_cursor,
+            )
+        )
+
+        assert [endpoint.endpoint_id for endpoint in second_page.endpoints] == ["target-a"]
+        assert [endpoint.snapshot_id for endpoint in second_page.endpoints] == ["target-snapshot-a"]
         assert second_page.has_more is False
         assert second_page.next_cursor is None
 
@@ -193,6 +225,25 @@ def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
             VALUES ('analysis-a', 'job-a', 'job-rev-a')
         """
     )
+    connection.execute("INSERT INTO endpoints (id) VALUES ('source-a')")
+    connection.execute(
+        """
+        INSERT INTO endpoint_revisions (endpoint_id, id, display_name, root_uri)
+            VALUES ('source-a', 'source-rev-a', 'Pictures', 'file:///C:/Users/Ada/Pictures')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO analysis_targets (analysis_id, endpoint_id, endpoint_revision_id)
+            VALUES ('analysis-a', 'source-a', 'source-rev-a')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO snapshots (id, analysis_id, endpoint_id, endpoint_revision_id)
+            VALUES ('source-snapshot-a', 'analysis-a', 'source-a', 'source-rev-a')
+        """
+    )
     connection.execute("INSERT INTO endpoints (id) VALUES ('target-a')")
     connection.execute(
         """
@@ -283,6 +334,25 @@ def _operation_page_plan() -> SealedPlan:
     )
 
 
+def _endpoint_page_plan() -> SealedPlan:
+    return seal_plan(
+        plan_id="plan-endpoints",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(_target_endpoint(), _source_endpoint()),
+        operations=(
+            _read_model_operation(
+                operation_id="op-a",
+                sequence_no=10,
+                execution_phase=10,
+                stable_order_key="010:Pictures/A.jpg",
+                target_relative_path="Pictures/A.jpg",
+            ),
+        ),
+    )
+
+
 def _target_endpoint() -> PlanEndpoint:
     return PlanEndpoint(
         endpoint_id="target-a",
@@ -297,6 +367,17 @@ def _target_endpoint() -> PlanEndpoint:
         control_schema_version=1,
         planned_operations=1,
         planned_bytes=128,
+    )
+
+
+def _source_endpoint() -> PlanEndpoint:
+    return PlanEndpoint(
+        endpoint_id="source-a",
+        endpoint_revision_id="source-rev-a",
+        snapshot_id="source-snapshot-a",
+        role=PlanEndpointRole.SOURCE,
+        capabilities_hash="capabilities-source",
+        root_case_context_hash="case-source",
     )
 
 

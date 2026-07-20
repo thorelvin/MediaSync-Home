@@ -42,6 +42,14 @@ class GuiIpcClient(Protocol):
         after: dict[str, object] | None = None,
     ) -> IpcResponse: ...
 
+    def query_plan_endpoints(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse: ...
+
     def query_snapshot_entries(
         self,
         *,
@@ -88,6 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--query-backup-job-detail", action="store_true")
     mode.add_argument("--query-activity-overview", action="store_true")
     mode.add_argument("--query-plan-operations", action="store_true")
+    mode.add_argument("--query-plan-endpoints", action="store_true")
     mode.add_argument("--query-snapshot-entries", action="store_true")
     mode.add_argument("--query-snapshot-coverage", action="store_true")
     mode.add_argument("--query-snapshot-issues", action="store_true")
@@ -156,6 +165,12 @@ def _run_pipe_action(args: argparse.Namespace, client: GuiIpcClient) -> IpcRespo
         )
     if args.query_plan_operations:
         return client.query_plan_operations(
+            plan_id=args.plan_id or "",
+            limit=args.limit,
+            after=_parse_after_json(args.after_json),
+        )
+    if args.query_plan_endpoints:
+        return client.query_plan_endpoints(
             plan_id=args.plan_id or "",
             limit=args.limit,
             after=_parse_after_json(args.after_json),

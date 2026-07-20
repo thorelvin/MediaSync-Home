@@ -863,6 +863,10 @@ CATALOG_PLAN_ENDPOINT_BINDINGS = (
     )
     """,
     """
+    CREATE INDEX idx_plan_endpoints_read_page
+        ON plan_endpoints (plan_id, role, target_ordinal, endpoint_id)
+    """,
+    """
     CREATE TRIGGER trg_plan_endpoints_no_insert_after_seal
     BEFORE INSERT ON plan_endpoints
     WHEN EXISTS (SELECT 1 FROM plan_seal_details WHERE plan_id = NEW.plan_id)

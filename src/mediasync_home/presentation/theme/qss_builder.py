@@ -127,7 +127,8 @@ QLabel#jobDetailTitle {{
     font-weight: 600;
 }}
 
-QLabel#planPreviewTitle {{
+QLabel#planPreviewTitle,
+QLabel#planEndpointTitle {{
     font-weight: 600;
 }}
 
@@ -140,7 +141,9 @@ QLabel#jobDetailTargetRow {{
 }}
 
 QLabel#planPreviewSummary,
-QLabel#planPreviewRow {{
+QLabel#planPreviewRow,
+QLabel#planEndpointSummary,
+QLabel#planEndpointRow {{
     color: {tokens.text_muted};
 }}
 
