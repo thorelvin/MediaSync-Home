@@ -72,6 +72,20 @@ class InProcessIpcClient:
             offset=offset,
         )
 
+    def query_plan_operations(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        return self.service.query_plan_operations(
+            self.client_instance_id,
+            plan_id=plan_id,
+            limit=limit,
+            after=after,
+        )
+
     def submit_command(
         self,
         command_name: str,

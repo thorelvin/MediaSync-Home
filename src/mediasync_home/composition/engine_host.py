@@ -26,6 +26,7 @@ from mediasync_home.adapters.sqlite.migrations import (
     recovery_migration_plan,
 )
 from mediasync_home.adapters.sqlite.outbox import SqliteOutboxStore
+from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
 from mediasync_home.adapters.sqlite.runs import SqliteRunStore
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
 from mediasync_home.application.startup_reconciliation import (
@@ -195,6 +196,7 @@ def build_engine_host_runtime(
         outbox = SqliteOutboxStore(catalog_connection)
         job_drafts = SqliteJobDraftStore(catalog_connection)
         standard_backup_jobs = SqliteStandardBackupJobCatalog(catalog_connection)
+        plans = SqlitePlanStore(catalog_connection)
         runs = SqliteRunStore(catalog_connection)
         startup_reconciliation = reconcile_engine_host_after_startup(
             EngineHostStartupReconciliationRequest(
@@ -210,6 +212,8 @@ def build_engine_host_runtime(
             job_draft_store=job_drafts,
             standard_backup_job_catalog=standard_backup_jobs,
             standard_backup_job_read_store=standard_backup_jobs,
+            plan_store=plans,
+            plan_operation_read_store=plans,
             run_store=runs,
             run_activity_read_store=runs,
             command_receipt_store=command_receipts,

@@ -32,12 +32,18 @@ from mediasync_home.application.plans import (
     PlanEndpoint,
     PlanEndpointRole,
     PlanOperation,
+    PlanOperationCursor,
+    PlanOperationPage,
+    PlanOperationPageQuery,
+    PlanOperationReadModel,
+    PlanOperationReadModelStore,
     PlanOperationType,
     PlanRiskLevel,
     PlanStore,
     SealedPlan,
     TargetPreconditionKind,
     seal_plan,
+    validate_plan_operation_page_query,
 )
 from mediasync_home.application.runs import (
     RunCommandName,
@@ -200,7 +206,7 @@ class _FixedStandardBackupJobIdFactory(StandardBackupJobIdFactory):
         )
 
 
-class _InMemoryPlanStore(PlanStore):
+class _InMemoryPlanStore(PlanStore, PlanOperationReadModelStore):
     def __init__(self, plan: SealedPlan | None = None) -> None:
         self.plan = plan
 
@@ -211,6 +217,38 @@ class _InMemoryPlanStore(PlanStore):
         if self.plan is not None and self.plan.plan_id == plan_id:
             return self.plan
         return None
+
+    def page_plan_operations(self, query: PlanOperationPageQuery) -> PlanOperationPage:
+        validate_plan_operation_page_query(query)
+        plan = self.load_sealed_plan(query.plan_id)
+        operations: tuple[PlanOperationReadModel, ...] = ()
+        if plan is not None:
+            operations = tuple(
+                sorted(
+                    (_plan_operation_read_model(operation) for operation in plan.operations),
+                    key=lambda operation: (
+                        operation.execution_phase,
+                        operation.stable_order_key,
+                        operation.operation_id,
+                    ),
+                )
+            )
+        if query.after is not None:
+            operations = tuple(
+                operation
+                for operation in operations
+                if _operation_after_cursor(operation, query.after)
+            )
+        page_operations = operations[: query.limit]
+        has_more = len(operations) > query.limit
+        return PlanOperationPage(
+            plan_id=query.plan_id,
+            operations=page_operations,
+            next_cursor=_plan_operation_cursor(page_operations[-1])
+            if has_more and page_operations
+            else None,
+            has_more=has_more,
+        )
 
 
 class _InMemoryRunStore(RunStore, RunActivityReadModelStore):
@@ -395,6 +433,7 @@ def test_gui_client_handshake_and_status_query_succeed() -> None:
     status = gui_client.get_status()
     overview = gui_client.get_backup_overview()
     activity = gui_client.get_activity_overview()
+    plan_operations = gui_client.get_plan_operations(plan_id="plan-a")
 
     assert handshake.status is IpcStatus.ACCEPTED
     assert handshake.reason is None
@@ -406,6 +445,8 @@ def test_gui_client_handshake_and_status_query_succeed() -> None:
     assert overview.payload["backup_overview"]["read_model_available"] is False
     assert activity.status is IpcStatus.ACCEPTED
     assert activity.payload["activity_overview"]["read_model_available"] is False
+    assert plan_operations.status is IpcStatus.ACCEPTED
+    assert plan_operations.payload["plan_operations"]["read_model_available"] is False
 
 
 def test_backup_overview_query_requires_prior_handshake() -> None:
@@ -504,6 +545,57 @@ def test_activity_overview_query_returns_bounded_run_read_model() -> None:
     assert overview["has_more"] is True
     assert overview["runs"][0]["run_id"] == "run-b"
     assert overview["runs"][0]["targets"][0]["state"] == RunTargetState.PENDING.value
+
+
+def test_plan_operations_query_requires_prior_handshake() -> None:
+    response = _client().query_plan_operations(plan_id="plan-a")
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.HANDSHAKE_REQUIRED
+
+
+def test_plan_operations_query_rejects_invalid_bounds() -> None:
+    ipc_client = _client()
+    ipc_client.connect()
+
+    response = ipc_client.query_plan_operations(plan_id="plan-a", limit=0)
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.INVALID_FRAME
+
+
+def test_plan_operations_query_returns_bounded_sealed_operation_page() -> None:
+    service = _service()
+    service.plan_operation_read_store = _InMemoryPlanStore(_sealed_plan_for_operation_pages())
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    first = ipc_client.query_plan_operations(plan_id="plan-page", limit=1)
+    first_page = first.payload["plan_operations"]
+    second = ipc_client.query_plan_operations(
+        plan_id="plan-page",
+        limit=1,
+        after=first_page["next_cursor"],
+    )
+    second_page = second.payload["plan_operations"]
+
+    assert first.status is IpcStatus.ACCEPTED
+    assert first_page["read_model_available"] is True
+    assert first_page["has_more"] is True
+    assert first_page["next_cursor"] == {
+        "execution_phase": 10,
+        "stable_order_key": "010:Pictures/A.jpg",
+        "operation_id": "op-a",
+    }
+    assert [operation["operation_id"] for operation in first_page["operations"]] == ["op-a"]
+    assert first_page["operations"][0]["operation_type"] == PlanOperationType.COPY_NEW.value
+    assert first_page["operations"][0]["target_precondition_kind"] == (
+        TargetPreconditionKind.ABSENT.value
+    )
+    assert second.status is IpcStatus.ACCEPTED
+    assert second_page["has_more"] is False
+    assert second_page["next_cursor"] is None
+    assert [operation["operation_id"] for operation in second_page["operations"]] == ["op-b"]
 
 
 def test_handshake_uses_verified_identity_not_payload_claim() -> None:
@@ -1083,6 +1175,80 @@ def _sealed_plan() -> SealedPlan:
                 risk_level=PlanRiskLevel.LOW,
             ),
         ),
+    )
+
+
+def _sealed_plan_for_operation_pages() -> SealedPlan:
+    return seal_plan(
+        plan_id="plan-page",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(_target_endpoint(),),
+        operations=(
+            PlanOperation(
+                operation_id="op-b",
+                operation_type=PlanOperationType.SKIP_IDENTICAL,
+                sequence_no=20,
+                execution_phase=20,
+                stable_order_key="020:Pictures/B.jpg",
+                target_precondition_kind=TargetPreconditionKind.NONE,
+                target_relative_path="Pictures/B.jpg",
+                planned_bytes=0,
+                reason_code="SKIP_IDENTICAL",
+                risk_level=PlanRiskLevel.LOW,
+            ),
+            PlanOperation(
+                operation_id="op-a",
+                operation_type=PlanOperationType.COPY_NEW,
+                sequence_no=10,
+                execution_phase=10,
+                stable_order_key="010:Pictures/A.jpg",
+                target_precondition_kind=TargetPreconditionKind.ABSENT,
+                target_relative_path="Pictures/A.jpg",
+                planned_bytes=128,
+                reason_code="COPY_NEW",
+                risk_level=PlanRiskLevel.LOW,
+            ),
+        ),
+    )
+
+
+def _plan_operation_read_model(operation: PlanOperation) -> PlanOperationReadModel:
+    return PlanOperationReadModel(
+        operation_id=operation.operation_id,
+        operation_type=operation.operation_type,
+        sequence_no=operation.sequence_no,
+        execution_phase=operation.execution_phase,
+        stable_order_key=operation.stable_order_key,
+        target_precondition_kind=operation.target_precondition_kind,
+        reason_code=operation.reason_code,
+        risk_level=operation.risk_level,
+        target_relative_path=operation.target_relative_path,
+        planned_bytes=operation.planned_bytes,
+    )
+
+
+def _operation_after_cursor(
+    operation: PlanOperationReadModel,
+    cursor: PlanOperationCursor,
+) -> bool:
+    return (
+        operation.execution_phase,
+        operation.stable_order_key,
+        operation.operation_id,
+    ) > (
+        cursor.execution_phase,
+        cursor.stable_order_key,
+        cursor.operation_id,
+    )
+
+
+def _plan_operation_cursor(operation: PlanOperationReadModel) -> PlanOperationCursor:
+    return PlanOperationCursor(
+        execution_phase=operation.execution_phase,
+        stable_order_key=operation.stable_order_key,
+        operation_id=operation.operation_id,
     )
 
 

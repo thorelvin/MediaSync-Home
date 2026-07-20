@@ -30,6 +30,15 @@ class StatusIpcClient(Protocol):
     ) -> IpcResponse:
         pass
 
+    def query_plan_operations(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        pass
+
 
 class EngineClient:
     def __init__(self, ipc_client: StatusIpcClient) -> None:
@@ -65,4 +74,17 @@ class EngineClient:
             job_id=job_id,
             limit=limit,
             offset=offset,
+        )
+
+    def get_plan_operations(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        return self._ipc_client.query_plan_operations(
+            plan_id=plan_id,
+            limit=limit,
+            after=after,
         )

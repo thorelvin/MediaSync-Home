@@ -32,6 +32,14 @@ class GuiIpcClient(Protocol):
         offset: int | None = None,
     ) -> IpcResponse: ...
 
+    def query_plan_operations(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse: ...
+
     def submit_command(
         self,
         command_name: str,
@@ -50,11 +58,14 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--query-status", action="store_true")
     mode.add_argument("--query-backup-overview", action="store_true")
     mode.add_argument("--query-activity-overview", action="store_true")
+    mode.add_argument("--query-plan-operations", action="store_true")
     mode.add_argument("--submit-command", metavar="NAME")
     parser.add_argument("--draft-id")
     parser.add_argument("--job-id")
+    parser.add_argument("--plan-id")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--offset", type=int)
+    parser.add_argument("--after-json")
     parser.add_argument("--request-id")
     parser.add_argument("--idempotency-key")
     parser.add_argument("--payload-json")
@@ -106,6 +117,12 @@ def _run_pipe_action(args: argparse.Namespace, client: GuiIpcClient) -> IpcRespo
             limit=args.limit,
             offset=args.offset,
         )
+    if args.query_plan_operations:
+        return client.query_plan_operations(
+            plan_id=args.plan_id or "",
+            limit=args.limit,
+            after=_parse_after_json(args.after_json),
+        )
     if args.query_status:
         return client.query_status()
     return handshake
@@ -122,6 +139,20 @@ def _parse_payload_json(payload_json: str | None) -> dict[str, object] | None:
         raise IpcProtocolError("command payload JSON must be an object")
     if any(not isinstance(key, str) for key in payload):
         raise IpcProtocolError("command payload JSON object keys must be strings")
+    return dict(payload)
+
+
+def _parse_after_json(after_json: str | None) -> dict[str, object] | None:
+    if after_json is None:
+        return None
+    try:
+        payload = json.loads(after_json)
+    except json.JSONDecodeError as exc:
+        raise IpcProtocolError("cursor JSON must be valid") from exc
+    if not isinstance(payload, dict):
+        raise IpcProtocolError("cursor JSON must be an object")
+    if any(not isinstance(key, str) for key in payload):
+        raise IpcProtocolError("cursor JSON object keys must be strings")
     return dict(payload)
 
 

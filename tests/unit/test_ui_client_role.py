@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from mediasync_home.composition.ui import build_parser, _parse_payload_json, _run_pipe_action
+from mediasync_home.composition.ui import (
+    build_parser,
+    _parse_after_json,
+    _parse_payload_json,
+    _run_pipe_action,
+)
 from mediasync_home.ipc.protocol import IpcProtocolError, IpcReason, IpcResponse
 
 
@@ -67,6 +72,41 @@ def test_ui_pipe_action_queries_activity_overview_after_handshake() -> None:
         "job_id": "job-a",
         "limit": 5,
         "offset": 10,
+    }
+
+
+def test_ui_pipe_action_queries_plan_operations_after_handshake() -> None:
+    client = _FakeGuiIpcClient()
+    args = build_parser().parse_args(
+        [
+            "--pipe-name",
+            "pipe-a",
+            "--query-plan-operations",
+            "--plan-id",
+            "plan-a",
+            "--limit",
+            "5",
+            "--after-json",
+            (
+                '{"execution_phase":10,'
+                '"stable_order_key":"010:Pictures/A.jpg",'
+                '"operation_id":"op-a"}'
+            ),
+        ]
+    )
+
+    response = _run_pipe_action(args, client)
+
+    assert response.payload == {"plan_operations": "ok"}
+    assert client.calls == ("connect", "query_plan_operations")
+    assert client.plan_operations_query == {
+        "plan_id": "plan-a",
+        "limit": 5,
+        "after": {
+            "execution_phase": 10,
+            "stable_order_key": "010:Pictures/A.jpg",
+            "operation_id": "op-a",
+        },
     }
 
 
@@ -138,6 +178,15 @@ def test_parse_payload_json_requires_object() -> None:
         _parse_payload_json("{")
 
 
+def test_parse_after_json_requires_object() -> None:
+    assert _parse_after_json(None) is None
+    assert _parse_after_json('{"execution_phase":1}') == {"execution_phase": 1}
+    with pytest.raises(IpcProtocolError, match="cursor JSON must be an object"):
+        _parse_after_json("[]")
+    with pytest.raises(IpcProtocolError, match="cursor JSON must be valid"):
+        _parse_after_json("{")
+
+
 class _FakeGuiIpcClient:
     def __init__(self, *, handshake: IpcResponse | None = None) -> None:
         self._handshake = handshake or IpcResponse.accepted({"handshake": "ok"})
@@ -145,6 +194,7 @@ class _FakeGuiIpcClient:
         self.submitted: dict[str, object] | None = None
         self.overview_query: dict[str, object] | None = None
         self.activity_query: dict[str, object] | None = None
+        self.plan_operations_query: dict[str, object] | None = None
 
     def connect(self) -> IpcResponse:
         self.calls = (*self.calls, "connect")
@@ -183,6 +233,21 @@ class _FakeGuiIpcClient:
             "offset": offset,
         }
         return IpcResponse.accepted({"activity": "ok"})
+
+    def query_plan_operations(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        self.calls = (*self.calls, "query_plan_operations")
+        self.plan_operations_query = {
+            "plan_id": plan_id,
+            "limit": limit,
+            "after": after,
+        }
+        return IpcResponse.accepted({"plan_operations": "ok"})
 
     def submit_command(
         self,

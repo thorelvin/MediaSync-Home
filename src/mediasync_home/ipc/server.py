@@ -37,7 +37,11 @@ from mediasync_home.application.job_read_models import (
     query_backup_overview,
 )
 from mediasync_home.application.outbox import OutboxStore, command_effect_outbox_message
-from mediasync_home.application.plans import PlanStore
+from mediasync_home.application.plan_read_models import (
+    PlanOperationsQueryError,
+    query_plan_operations,
+)
+from mediasync_home.application.plans import PlanOperationReadModelStore, PlanStore
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
 from mediasync_home.application.runs import (
     RunCommandName,
@@ -72,6 +76,7 @@ class EngineHostIpcService:
     standard_backup_job_catalog: StandardBackupJobCatalog | None = None
     standard_backup_job_read_store: StandardBackupJobReadModelStore | None = None
     run_activity_read_store: RunActivityReadModelStore | None = None
+    plan_operation_read_store: PlanOperationReadModelStore | None = None
     standard_backup_job_id_factory: StandardBackupJobIdFactory | None = None
     plan_store: PlanStore | None = None
     run_store: RunStore | None = None
@@ -154,6 +159,27 @@ class EngineHostIpcService:
         except ActivityOverviewQueryError:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         return IpcResponse.accepted({"activity_overview": overview.to_dict()})
+
+    def query_plan_operations(
+        self,
+        client_instance_id: str,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        if client_instance_id not in self._accepted_clients:
+            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        try:
+            page = query_plan_operations(
+                plan_read_store=self.plan_operation_read_store,
+                plan_id=plan_id,
+                limit=limit,
+                after=after,
+            )
+        except PlanOperationsQueryError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        return IpcResponse.accepted({"plan_operations": page.to_dict()})
 
     def submit_command(self, client_instance_id: str, command_name: str) -> IpcResponse:
         del command_name
