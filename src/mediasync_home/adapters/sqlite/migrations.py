@@ -122,6 +122,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_trigger_occurrence_dedup",
                 statements=CATALOG_TRIGGER_OCCURRENCE_DEDUP,
             ),
+            SqliteMigration(
+                version=20,
+                name="catalog_schedule_desired_state",
+                statements=CATALOG_SCHEDULE_DESIRED_STATE,
+            ),
         ),
     )
 
@@ -1014,6 +1019,50 @@ CATALOG_TRIGGER_OCCURRENCE_DEDUP = (
     """
     CREATE INDEX idx_trigger_occurrences_job_received
         ON trigger_occurrences (job_id, received_utc)
+    """,
+)
+
+CATALOG_SCHEDULE_DESIRED_STATE = (
+    """
+    CREATE TABLE schedules (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        plan_id TEXT NOT NULL,
+        plan_checksum TEXT NOT NULL CHECK (length(plan_checksum) = 64),
+        trigger_type TEXT NOT NULL CHECK (
+            trigger_type IN (
+                'SCHEDULED_TIME',
+                'LOGON',
+                'STARTUP',
+                'EVENT',
+                'VOLUME_CONNECTED',
+                'MANUAL_LOCAL_PREVIEW'
+            )
+        ),
+        configuration_json TEXT NOT NULL,
+        definition_generation INTEGER NOT NULL CHECK (definition_generation >= 1),
+        desired_definition_hash TEXT NOT NULL CHECK (length(desired_definition_hash) = 64),
+        time_zone_id TEXT,
+        dst_policy TEXT NOT NULL,
+        misfire_policy TEXT NOT NULL,
+        coalescing_window_seconds INTEGER NOT NULL CHECK (coalescing_window_seconds >= 0),
+        task_logon_type TEXT NOT NULL,
+        requires_network INTEGER NOT NULL CHECK (requires_network IN (0, 1)),
+        run_only_when_logged_on INTEGER NOT NULL CHECK (run_only_when_logged_on IN (0, 1)),
+        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+        row_version INTEGER NOT NULL CHECK (row_version >= 1),
+        last_triggered_utc TEXT,
+        FOREIGN KEY (job_id)
+            REFERENCES jobs (id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (plan_id)
+            REFERENCES plan_seal_details (plan_id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_schedules_job_enabled
+        ON schedules (job_id, enabled)
     """,
 )
 

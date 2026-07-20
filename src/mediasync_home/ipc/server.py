@@ -57,6 +57,7 @@ from mediasync_home.application.plans import (
     PlanStore,
 )
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
+from mediasync_home.application.schedules import ScheduleStore
 from mediasync_home.application.runs import (
     RunCommandName,
     RunIdFactory,
@@ -120,6 +121,7 @@ class EngineHostIpcService:
     plan_store: PlanStore | None = None
     run_store: RunStore | None = None
     run_id_factory: RunIdFactory | None = None
+    schedule_store: ScheduleStore | None = None
     trigger_occurrence_store: TriggerOccurrenceStore | None = None
     command_receipt_store: CommandReceiptStore | None = None
     command_effect_transaction: CommandEffectTransaction | None = None

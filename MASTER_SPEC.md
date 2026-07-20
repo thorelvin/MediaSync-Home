@@ -5088,6 +5088,8 @@ Lagrer ønsket Task Scheduler-tilstand.
 
 - `id TEXT PRIMARY KEY`
 - `job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT`
+- `plan_id TEXT NOT NULL REFERENCES plan_seal_details(plan_id) ON DELETE RESTRICT` — 0B active sealed-plan binding
+- `plan_checksum TEXT NOT NULL` — 0B run-start checksum binding
 - `trigger_type TEXT NOT NULL`
 - `configuration_json TEXT NOT NULL`
 - `definition_generation INTEGER NOT NULL`

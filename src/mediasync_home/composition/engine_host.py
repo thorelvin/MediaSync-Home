@@ -29,6 +29,7 @@ from mediasync_home.adapters.sqlite.migrations import (
 from mediasync_home.adapters.sqlite.outbox import SqliteOutboxStore
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
 from mediasync_home.adapters.sqlite.runs import SqliteRunStore
+from mediasync_home.adapters.sqlite.schedules import SqliteScheduleStore
 from mediasync_home.adapters.sqlite.snapshots import SqliteSnapshotEntryStore
 from mediasync_home.adapters.sqlite.trigger_occurrences import SqliteTriggerOccurrenceStore
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
@@ -238,6 +239,7 @@ def build_engine_host_runtime(
         snapshots = SqliteSnapshotEntryStore(catalog_connection)
         plans = SqlitePlanStore(catalog_connection)
         runs = SqliteRunStore(catalog_connection)
+        schedules = SqliteScheduleStore(catalog_connection)
         trigger_occurrences = SqliteTriggerOccurrenceStore(catalog_connection)
         catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
         startup_reconciliation = reconcile_engine_host_after_startup(
@@ -263,6 +265,7 @@ def build_engine_host_runtime(
             plan_endpoint_read_store=plans,
             run_store=runs,
             run_activity_read_store=runs,
+            schedule_store=schedules,
             trigger_occurrence_store=trigger_occurrences,
             cataloged_file_read_store=catalog_handoffs,
             command_receipt_store=command_receipts,

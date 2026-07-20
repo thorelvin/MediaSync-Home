@@ -28,7 +28,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 19
+        assert current_schema_version(connection, plan.store) == 20
         assert _table_names(connection) >= {
             "endpoint_heads",
             "job_heads",
@@ -48,13 +48,14 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "outbox_messages",
             "effect_dedup_tombstones",
             "trigger_occurrences",
+            "schedules",
             "final_file_catalog_handoffs",
             "runs",
             "run_targets",
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 19
+        assert _row_count(connection, "schema_migrations") == 20
         assert _foreign_key(
             connection,
             "endpoint_heads",
@@ -125,6 +126,20 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             ("run_id",),
             ("id",),
         )
+        assert _foreign_key(
+            connection,
+            "schedules",
+            "jobs",
+            ("job_id",),
+            ("id",),
+        )
+        assert _foreign_key(
+            connection,
+            "schedules",
+            "plan_seal_details",
+            ("plan_id",),
+            ("plan_id",),
+        )
         assert _index_is_unique(connection, "file_entries", ("snapshot_id", "comparison_key")) is False
         assert _index_is_unique(
             connection,
@@ -180,6 +195,11 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             connection,
             "trigger_occurrences",
             ("job_id", "received_utc"),
+        ) is False
+        assert _index_is_unique(
+            connection,
+            "schedules",
+            ("job_id", "enabled"),
         ) is False
         assert _index_is_unique(
             connection,
