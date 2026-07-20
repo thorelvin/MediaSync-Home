@@ -28,6 +28,22 @@ TERMINAL_COMMAND_RECEIPT_STATES = {
     CommandReceiptState.CANCELLED,
 }
 
+EARLY_RECONCILABLE_COMMAND_RECEIPT_STATES = {
+    CommandReceiptState.RECEIVED,
+    CommandReceiptState.VALIDATED,
+}
+
+PENDING_EFFECT_RECONCILIATION_COMMAND_RECEIPT_STATES = {
+    CommandReceiptState.EFFECT_PREPARED,
+    CommandReceiptState.ACCEPTED,
+    CommandReceiptState.RUNNING,
+}
+
+MAX_COMMAND_RECEIPT_STARTUP_RECONCILIATION_LIMIT = 1000
+COMMAND_RECEIPT_REJECTED_AFTER_STARTUP_RECONCILIATION = (
+    "COMMAND_RECEIPT_REJECTED_AFTER_STARTUP_RECONCILIATION"
+)
+
 COMMAND_RECEIPT_TRANSITIONS = {
     CommandReceiptState.RECEIVED: (CommandReceiptState.VALIDATED, CommandReceiptState.REJECTED),
     CommandReceiptState.VALIDATED: (
@@ -60,6 +76,10 @@ class CommandReceiptTransitionViolation(ValueError):
     pass
 
 
+class CommandReceiptReconciliationViolation(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class CommandReceipt:
     request_id: str
@@ -80,6 +100,20 @@ class CommandReceipt:
     rejection_reason: str | None = None
 
 
+@dataclass(frozen=True)
+class CommandReceiptStartupReconciliationRequest:
+    reconciler_instance_id: str
+    limit: int
+
+
+@dataclass(frozen=True)
+class CommandReceiptStartupReconciliationReport:
+    reconciler_instance_id: str
+    scanned: int
+    rejected_idempotency_keys: tuple[str, ...]
+    pending_effect_reconciliation_keys: tuple[str, ...]
+
+
 class CommandReceiptStore(Protocol):
     def record_received(self, receipt: CommandReceipt) -> CommandReceipt: ...
 
@@ -90,6 +124,13 @@ class CommandReceiptStore(Protocol):
 
 class CommandEffectTransaction(Protocol):
     def run(self, work: Callable[[], _T]) -> _T: ...
+
+
+class CommandReceiptStartupReconciliationStore(Protocol):
+    def reconcile_non_terminal_after_startup(
+        self,
+        request: CommandReceiptStartupReconciliationRequest,
+    ) -> CommandReceiptStartupReconciliationReport: ...
 
 
 def ensure_idempotency_compatible(
@@ -112,6 +153,39 @@ def ensure_idempotency_compatible(
         if getattr(existing, field_name) != getattr(incoming, field_name):
             raise CommandReceiptConflict(f"COMMAND_IDEMPOTENCY_CONFLICT:{field_name}")
     return existing
+
+
+def validate_command_receipt_startup_reconciliation_request(
+    request: CommandReceiptStartupReconciliationRequest,
+) -> None:
+    if not request.reconciler_instance_id.strip():
+        raise CommandReceiptReconciliationViolation(
+            "COMMAND_RECEIPT_RECONCILIATION_REQUIRES_RECONCILER"
+        )
+    if request.limit < 1:
+        raise CommandReceiptReconciliationViolation(
+            "COMMAND_RECEIPT_RECONCILIATION_LIMIT_MUST_BE_POSITIVE"
+        )
+    if request.limit > MAX_COMMAND_RECEIPT_STARTUP_RECONCILIATION_LIMIT:
+        raise CommandReceiptReconciliationViolation(
+            "COMMAND_RECEIPT_RECONCILIATION_LIMIT_TOO_LARGE"
+        )
+
+
+def reject_early_command_receipt_after_startup(
+    receipt: CommandReceipt,
+    request: CommandReceiptStartupReconciliationRequest,
+) -> CommandReceipt:
+    validate_command_receipt_startup_reconciliation_request(request)
+    if receipt.state not in EARLY_RECONCILABLE_COMMAND_RECEIPT_STATES:
+        raise CommandReceiptReconciliationViolation(
+            "COMMAND_RECEIPT_RECONCILIATION_REQUIRES_EARLY_STATE"
+        )
+    return transition_command_receipt(
+        receipt,
+        CommandReceiptState.REJECTED,
+        rejection_reason=COMMAND_RECEIPT_REJECTED_AFTER_STARTUP_RECONCILIATION,
+    )
 
 
 def transition_command_receipt(

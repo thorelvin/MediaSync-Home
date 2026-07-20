@@ -735,6 +735,8 @@ RUNNING         -> SUCCEEDED | FAILED | CANCELLED
 
 `ACCEPTED` for en langvarig kommando betyr at riktig run/work item og alle nødvendige autoritative bindingssteg er varig opprettet, ikke at arbeidet er ferdig. En run som krever recoverydatabase kan derfor ikke få `ACCEPTED` før matching peer-handoff er committet og catalogkilden er `SOURCE_CONFIRMED`/run er eksplisitt kjørbar. Ved hostkrasj må ikke-terminale receipts gjenopptas eller avstemmes mot den persisterte effekten; de kan ikke bare markeres «failed» og kjøres på nytt. `client_id` brukes til audit/rate limiting, ikke som idempotencynamespace.
 
+0B-startupavstemming behandler bare `RECEIVED` og `VALIDATED` som trygt avvisbare tidligtilstander, fordi ingen autoritativ effekt er forberedt. `EFFECT_PREPARED`, `ACCEPTED` og `RUNNING` rapporteres fortsatt som ventende effektavstemming og beholdes uendret til en effektspesifikk reconciler kan bevise om effekten skal fullføres, feiles eller gjenopptas.
+
 Idempotency-retention:
 
 - command dispatcher slår opp både full receipt og `command_dedup_tombstones` før validering av ny effekt;

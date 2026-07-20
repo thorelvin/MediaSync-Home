@@ -6,11 +6,18 @@ import sqlite3
 from collections.abc import Sequence
 
 from mediasync_home.application.command_receipts import (
+    COMMAND_RECEIPT_REJECTED_AFTER_STARTUP_RECONCILIATION,
     CommandReceipt,
     CommandReceiptState,
     CommandReceiptStore,
+    CommandReceiptStartupReconciliationReport,
+    CommandReceiptStartupReconciliationRequest,
+    CommandReceiptStartupReconciliationStore,
+    EARLY_RECONCILABLE_COMMAND_RECEIPT_STATES,
+    PENDING_EFFECT_RECONCILIATION_COMMAND_RECEIPT_STATES,
     TERMINAL_COMMAND_RECEIPT_STATES,
     ensure_idempotency_compatible,
+    validate_command_receipt_startup_reconciliation_request,
 )
 
 
@@ -18,7 +25,7 @@ class SqliteCommandReceiptStoreError(ValueError):
     pass
 
 
-class SqliteCommandReceiptStore(CommandReceiptStore):
+class SqliteCommandReceiptStore(CommandReceiptStore, CommandReceiptStartupReconciliationStore):
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
@@ -165,6 +172,83 @@ class SqliteCommandReceiptStore(CommandReceiptStore):
             if isinstance(exc, SqliteCommandReceiptStoreError):
                 raise
             raise SqliteCommandReceiptStoreError("COMMAND_RECEIPT_COMPACTION_FAILED") from exc
+
+    def reconcile_non_terminal_after_startup(
+        self,
+        request: CommandReceiptStartupReconciliationRequest,
+    ) -> CommandReceiptStartupReconciliationReport:
+        validate_command_receipt_startup_reconciliation_request(request)
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            rows = self._connection.execute(
+                """
+                SELECT idempotency_key, state
+                FROM command_receipts
+                WHERE state IN (
+                    'RECEIVED',
+                    'VALIDATED',
+                    'EFFECT_PREPARED',
+                    'ACCEPTED',
+                    'RUNNING'
+                )
+                ORDER BY updated_utc, idempotency_key
+                LIMIT ?
+                """,
+                (request.limit,),
+            ).fetchall()
+
+            rejected: list[str] = []
+            pending_effect_reconciliation: list[str] = []
+            for row in rows:
+                idempotency_key = str(row[0])
+                state = CommandReceiptState(str(row[1]))
+                if state in EARLY_RECONCILABLE_COMMAND_RECEIPT_STATES:
+                    cursor = self._connection.execute(
+                        """
+                        UPDATE command_receipts
+                        SET
+                            state = 'REJECTED',
+                            rejection_reason = ?,
+                            updated_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                        WHERE idempotency_key = ?
+                            AND state = ?
+                        """,
+                        (
+                            COMMAND_RECEIPT_REJECTED_AFTER_STARTUP_RECONCILIATION,
+                            idempotency_key,
+                            state.value,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise SqliteCommandReceiptStoreError(
+                            "COMMAND_RECEIPT_RECONCILIATION_STATE_CONFLICT"
+                        )
+                    rejected.append(idempotency_key)
+                elif state in PENDING_EFFECT_RECONCILIATION_COMMAND_RECEIPT_STATES:
+                    pending_effect_reconciliation.append(idempotency_key)
+                else:
+                    raise SqliteCommandReceiptStoreError(
+                        "COMMAND_RECEIPT_RECONCILIATION_STATE_UNSUPPORTED"
+                    )
+
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return CommandReceiptStartupReconciliationReport(
+                reconciler_instance_id=request.reconciler_instance_id,
+                scanned=len(rows),
+                rejected_idempotency_keys=tuple(rejected),
+                pending_effect_reconciliation_keys=tuple(pending_effect_reconciliation),
+            )
+        except (sqlite3.Error, SqliteCommandReceiptStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteCommandReceiptStoreError):
+                raise
+            raise SqliteCommandReceiptStoreError(
+                "COMMAND_RECEIPT_RECONCILIATION_FAILED"
+            ) from exc
 
     def _load_active_command_receipt(self, idempotency_key: str) -> CommandReceipt | None:
         row = self._connection.execute(

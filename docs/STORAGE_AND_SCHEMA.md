@@ -1059,6 +1059,8 @@ Samme key med annen principal, `command_name`, schema, `expected_entity_revision
 
 `REJECTED` er terminal avvisning før en autoritativ effekt er akseptert. Etter `EFFECT_PREPARED` brukes `FAILED` dersom en delvis autoritativ effekt må avstemmes eller aborteres. `RUNNING` er valgfri for langvarige kommandoer; korte kommandoer kan gå direkte fra `ACCEPTED` til `SUCCEEDED`, `FAILED` eller `CANCELLED`.
 
+0B-avstemmingen avviser bare tidlige `RECEIVED`/`VALIDATED`-receipts med `COMMAND_RECEIPT_REJECTED_AFTER_STARTUP_RECONCILIATION`; `EFFECT_PREPARED`, `ACCEPTED` og `RUNNING` beholdes og rapporteres som ventende effektavstemming.
+
 #### `command_dedup_tombstones`
 
 Kompakt, append-only dedupliseringsindeks etter at detaljert command receipt ikke lenger må beholdes.

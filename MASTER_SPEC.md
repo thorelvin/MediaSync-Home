@@ -3302,6 +3302,8 @@ RUNNING         -> SUCCEEDED | FAILED | CANCELLED
 
 `ACCEPTED` for en langvarig kommando betyr at riktig run/work item og alle nødvendige autoritative bindingssteg er varig opprettet, ikke at arbeidet er ferdig. En run som krever recoverydatabase kan derfor ikke få `ACCEPTED` før matching peer-handoff er committet og catalogkilden er `SOURCE_CONFIRMED`/run er eksplisitt kjørbar. Ved hostkrasj må ikke-terminale receipts gjenopptas eller avstemmes mot den persisterte effekten; de kan ikke bare markeres «failed» og kjøres på nytt. `client_id` brukes til audit/rate limiting, ikke som idempotencynamespace.
 
+0B-startupavstemming behandler bare `RECEIVED` og `VALIDATED` som trygt avvisbare tidligtilstander, fordi ingen autoritativ effekt er forberedt. `EFFECT_PREPARED`, `ACCEPTED` og `RUNNING` rapporteres fortsatt som ventende effektavstemming og beholdes uendret til en effektspesifikk reconciler kan bevise om effekten skal fullføres, feiles eller gjenopptas.
+
 Idempotency-retention:
 
 - command dispatcher slår opp både full receipt og `command_dedup_tombstones` før validering av ny effekt;
@@ -5169,6 +5171,8 @@ Durable command inbox og idempotencylogg. `idempotency_key` er global innen inst
 Samme key med annen principal, `command_name`, schema, `expected_entity_revision` eller payloadhash avvises. For command og første catalogeffekt brukes samme transaksjon. Commands som krever recoverydatabase binder `handoff_id` og følger §4.5.4. Ikke-terminale receipts avstemmes ved hostoppstart før nye muterende commands tas imot. Destruktive, run-startende og restore-relaterte kommandoer bruker `permanent_key`: detaljpayload/resultat kan komprimeres, men idempotency key, payloadhash, command schema og terminal effect hash bevares i en tombstone.
 
 `REJECTED` er terminal avvisning før en autoritativ effekt er akseptert. Etter `EFFECT_PREPARED` brukes `FAILED` dersom en delvis autoritativ effekt må avstemmes eller aborteres. `RUNNING` er valgfri for langvarige kommandoer; korte kommandoer kan gå direkte fra `ACCEPTED` til `SUCCEEDED`, `FAILED` eller `CANCELLED`.
+
+0B-avstemmingen avviser bare tidlige `RECEIVED`/`VALIDATED`-receipts med `COMMAND_RECEIPT_REJECTED_AFTER_STARTUP_RECONCILIATION`; `EFFECT_PREPARED`, `ACCEPTED` og `RUNNING` beholdes og rapporteres som ventende effektavstemming.
 
 #### `command_dedup_tombstones`
 

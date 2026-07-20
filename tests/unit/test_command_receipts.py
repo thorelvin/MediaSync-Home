@@ -5,12 +5,18 @@ from dataclasses import replace
 import pytest
 
 from mediasync_home.application.command_receipts import (
+    COMMAND_RECEIPT_REJECTED_AFTER_STARTUP_RECONCILIATION,
+    MAX_COMMAND_RECEIPT_STARTUP_RECONCILIATION_LIMIT,
     CommandReceipt,
     CommandReceiptConflict,
+    CommandReceiptReconciliationViolation,
     CommandReceiptState,
+    CommandReceiptStartupReconciliationRequest,
     CommandReceiptTransitionViolation,
     ensure_idempotency_compatible,
+    reject_early_command_receipt_after_startup,
     transition_command_receipt,
+    validate_command_receipt_startup_reconciliation_request,
 )
 
 
@@ -69,6 +75,69 @@ def test_command_receipt_same_state_transition_is_idempotent() -> None:
     receipt = _receipt()
 
     assert transition_command_receipt(receipt, CommandReceiptState.RECEIVED) is receipt
+
+
+def test_startup_reconciliation_request_requires_reconciler_and_bounded_limit() -> None:
+    validate_command_receipt_startup_reconciliation_request(
+        CommandReceiptStartupReconciliationRequest(
+            reconciler_instance_id="host-a",
+            limit=MAX_COMMAND_RECEIPT_STARTUP_RECONCILIATION_LIMIT,
+        )
+    )
+
+    with pytest.raises(
+        CommandReceiptReconciliationViolation,
+        match="COMMAND_RECEIPT_RECONCILIATION_REQUIRES_RECONCILER",
+    ):
+        validate_command_receipt_startup_reconciliation_request(
+            CommandReceiptStartupReconciliationRequest(reconciler_instance_id=" ", limit=10)
+        )
+    with pytest.raises(
+        CommandReceiptReconciliationViolation,
+        match="COMMAND_RECEIPT_RECONCILIATION_LIMIT_MUST_BE_POSITIVE",
+    ):
+        validate_command_receipt_startup_reconciliation_request(
+            CommandReceiptStartupReconciliationRequest(reconciler_instance_id="host-a", limit=0)
+        )
+    with pytest.raises(
+        CommandReceiptReconciliationViolation,
+        match="COMMAND_RECEIPT_RECONCILIATION_LIMIT_TOO_LARGE",
+    ):
+        validate_command_receipt_startup_reconciliation_request(
+            CommandReceiptStartupReconciliationRequest(
+                reconciler_instance_id="host-a",
+                limit=MAX_COMMAND_RECEIPT_STARTUP_RECONCILIATION_LIMIT + 1,
+            )
+        )
+
+
+def test_startup_reconciliation_rejects_early_receipt_after_restart() -> None:
+    rejected = reject_early_command_receipt_after_startup(
+        transition_command_receipt(_receipt(), CommandReceiptState.VALIDATED),
+        CommandReceiptStartupReconciliationRequest(reconciler_instance_id="host-a", limit=10),
+    )
+
+    assert rejected.state is CommandReceiptState.REJECTED
+    assert rejected.rejection_reason == COMMAND_RECEIPT_REJECTED_AFTER_STARTUP_RECONCILIATION
+
+
+def test_startup_reconciliation_leaves_prepared_effects_for_specific_recovery() -> None:
+    validated = transition_command_receipt(_receipt(), CommandReceiptState.VALIDATED)
+    prepared = transition_command_receipt(
+        validated,
+        CommandReceiptState.EFFECT_PREPARED,
+        result_entity_type="standard_backup_job",
+        result_entity_id="job-a",
+    )
+
+    with pytest.raises(
+        CommandReceiptReconciliationViolation,
+        match="COMMAND_RECEIPT_RECONCILIATION_REQUIRES_EARLY_STATE",
+    ):
+        reject_early_command_receipt_after_startup(
+            prepared,
+            CommandReceiptStartupReconciliationRequest(reconciler_instance_id="host-a", limit=10),
+        )
 
 
 def _receipt() -> CommandReceipt:

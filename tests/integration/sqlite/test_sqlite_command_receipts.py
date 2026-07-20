@@ -20,9 +20,11 @@ from mediasync_home.adapters.sqlite.migrations import apply_sqlite_migrations, c
 from mediasync_home.adapters.sqlite.outbox import SqliteOutboxStore, SqliteOutboxStoreError
 from mediasync_home.adapters.sqlite.transactions import SqliteImmediateTransactionRunner
 from mediasync_home.application.command_receipts import (
+    COMMAND_RECEIPT_REJECTED_AFTER_STARTUP_RECONCILIATION,
     CommandReceipt,
     CommandReceiptConflict,
     CommandReceiptState,
+    CommandReceiptStartupReconciliationRequest,
     transition_command_receipt,
 )
 from mediasync_home.application.job_creation import (
@@ -171,6 +173,114 @@ def test_sqlite_command_receipts_compaction_requires_terminal_receipt(
 
         assert _row_count(connection, "command_receipts") == 1
         assert _row_count(connection, "command_dedup_tombstones") == 0
+
+
+def test_sqlite_command_receipts_startup_reconciliation_rejects_early_receipts_bounded(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        store = SqliteCommandReceiptStore(connection)
+        first = store.record_received(_receipt_with_key("idempotency-a"))
+        second = store.record_received(_receipt_with_key("idempotency-b"))
+        store.update_command_receipt(
+            transition_command_receipt(second, CommandReceiptState.VALIDATED)
+        )
+
+        first_report = store.reconcile_non_terminal_after_startup(
+            CommandReceiptStartupReconciliationRequest(
+                reconciler_instance_id="host-a",
+                limit=1,
+            )
+        )
+        first_loaded = store.load_command_receipt(first.idempotency_key)
+        second_loaded = store.load_command_receipt(second.idempotency_key)
+
+        assert first_loaded is not None
+        assert second_loaded is not None
+        assert first_report.reconciler_instance_id == "host-a"
+        assert first_report.scanned == 1
+        assert len(first_report.rejected_idempotency_keys) == 1
+        assert first_report.pending_effect_reconciliation_keys == ()
+        assert [first_loaded.state, second_loaded.state].count(CommandReceiptState.REJECTED) == 1
+        assert {first_loaded.state, second_loaded.state} <= {
+            CommandReceiptState.RECEIVED,
+            CommandReceiptState.VALIDATED,
+            CommandReceiptState.REJECTED,
+        }
+
+        second_report = store.reconcile_non_terminal_after_startup(
+            CommandReceiptStartupReconciliationRequest(
+                reconciler_instance_id="host-a",
+                limit=10,
+            )
+        )
+
+        assert second_report.scanned == 1
+        assert set(second_report.rejected_idempotency_keys) == (
+            {first.idempotency_key, second.idempotency_key}
+            - set(first_report.rejected_idempotency_keys)
+        )
+        assert _load_receipt(store, first.idempotency_key).rejection_reason == (
+            COMMAND_RECEIPT_REJECTED_AFTER_STARTUP_RECONCILIATION
+        )
+        assert _load_receipt(store, second.idempotency_key).rejection_reason == (
+            COMMAND_RECEIPT_REJECTED_AFTER_STARTUP_RECONCILIATION
+        )
+
+
+def test_sqlite_command_receipts_startup_reconciliation_reports_prepared_effects(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        store = SqliteCommandReceiptStore(connection)
+        prepared = _stored_receipt_in_state(
+            store,
+            "idempotency-prepared",
+            CommandReceiptState.EFFECT_PREPARED,
+        )
+        accepted = _stored_receipt_in_state(
+            store,
+            "idempotency-accepted",
+            CommandReceiptState.ACCEPTED,
+        )
+        running = _stored_receipt_in_state(
+            store,
+            "idempotency-running",
+            CommandReceiptState.RUNNING,
+        )
+        succeeded = _succeeded_receipt(store.record_received(_receipt_with_key("idempotency-done")))
+        store.update_command_receipt(succeeded)
+
+        report = store.reconcile_non_terminal_after_startup(
+            CommandReceiptStartupReconciliationRequest(
+                reconciler_instance_id="host-a",
+                limit=10,
+            )
+        )
+
+        assert report.scanned == 3
+        assert report.rejected_idempotency_keys == ()
+        assert set(report.pending_effect_reconciliation_keys) == {
+            prepared.idempotency_key,
+            accepted.idempotency_key,
+            running.idempotency_key,
+        }
+        assert _load_receipt(store, prepared.idempotency_key).state is (
+            CommandReceiptState.EFFECT_PREPARED
+        )
+        assert _load_receipt(store, accepted.idempotency_key).state is (
+            CommandReceiptState.ACCEPTED
+        )
+        assert _load_receipt(store, running.idempotency_key).state is (
+            CommandReceiptState.RUNNING
+        )
+        assert _load_receipt(store, succeeded.idempotency_key).state is (
+            CommandReceiptState.SUCCEEDED
+        )
 
 
 def test_sqlite_command_receipts_update_requires_existing_row(tmp_path: Path) -> None:
@@ -453,6 +563,51 @@ def _receipt() -> CommandReceipt:
     )
 
 
+def _receipt_with_key(idempotency_key: str) -> CommandReceipt:
+    return replace(
+        _receipt(),
+        request_id=f"request-{idempotency_key}",
+        idempotency_key=idempotency_key,
+    )
+
+
+def _stored_receipt_in_state(
+    store: SqliteCommandReceiptStore,
+    idempotency_key: str,
+    state: CommandReceiptState,
+) -> CommandReceipt:
+    receipt = store.record_received(_receipt_with_key(idempotency_key))
+    if state is CommandReceiptState.RECEIVED:
+        return receipt
+
+    validated = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
+    if state is CommandReceiptState.VALIDATED:
+        store.update_command_receipt(validated)
+        return validated
+
+    prepared = transition_command_receipt(
+        validated,
+        CommandReceiptState.EFFECT_PREPARED,
+        result_entity_type="standard_backup_job",
+        result_entity_id=f"job-{idempotency_key}",
+    )
+    if state is CommandReceiptState.EFFECT_PREPARED:
+        store.update_command_receipt(prepared)
+        return prepared
+
+    accepted = transition_command_receipt(prepared, CommandReceiptState.ACCEPTED)
+    if state is CommandReceiptState.ACCEPTED:
+        store.update_command_receipt(accepted)
+        return accepted
+
+    running = transition_command_receipt(accepted, CommandReceiptState.RUNNING)
+    if state is CommandReceiptState.RUNNING:
+        store.update_command_receipt(running)
+        return running
+
+    raise AssertionError(f"unsupported test receipt state: {state.value}")
+
+
 def _succeeded_receipt(receipt: CommandReceipt) -> CommandReceipt:
     validated = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
     prepared = transition_command_receipt(validated, CommandReceiptState.EFFECT_PREPARED)
@@ -477,3 +632,9 @@ def _row_count(connection: sqlite3.Connection, table: str) -> int:
     row = connection.execute(f"SELECT count(*) FROM {table}").fetchone()
     assert row is not None
     return int(row[0])
+
+
+def _load_receipt(store: SqliteCommandReceiptStore, idempotency_key: str) -> CommandReceipt:
+    receipt = store.load_command_receipt(idempotency_key)
+    assert receipt is not None
+    return receipt
