@@ -166,6 +166,52 @@ def test_launcher_local_preview_status_starts_host_and_queries_gui() -> None:
     assert payload["engine_host"]["killed"] is False
 
 
+def test_launcher_local_preview_status_uses_host_locator_when_pipe_omitted(
+    tmp_path: Path,
+) -> None:
+    installation_id = f"preview-{uuid4().hex}"
+    state_root = tmp_path / "state"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_role.py",
+            "--role",
+            "launcher",
+            "--local-preview-status",
+            "--installation-id",
+            installation_id,
+            "--state-root",
+            str(state_root),
+        ],
+        cwd=Path(__file__).resolve().parents[3],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=True,
+    )
+
+    payload = json.loads(result.stdout)
+    host_events = payload["engine_host"]["events"]
+
+    assert result.stderr == ""
+    assert payload["accepted"] is True
+    assert payload["pipe_name"].startswith("MediaSyncHome-0B-")
+    assert payload["host_locator"] == {
+        "installation_id": installation_id,
+        "locator_key": payload["pipe_name"].removeprefix("MediaSyncHome-0B-"),
+        "mutex_name": f"Local\\{payload['pipe_name']}",
+        "pipe_name": payload["pipe_name"],
+        "scope": "0B_SAME_USER_LOCAL_PREVIEW",
+        "state_root": str(state_root),
+    }
+    assert payload["gui"]["response"]["status"] == "ACCEPTED"
+    assert payload["engine_host"]["returncode"] == 0
+    assert host_events[0]["pipe_name"] == payload["pipe_name"]
+    assert host_events[0]["state_root"] == str(state_root)
+    assert host_events[-1]["served_requests"] == 2
+
+
 def test_engine_host_state_root_persists_gui_submitted_disabled_command(
     tmp_path: Path,
 ) -> None:

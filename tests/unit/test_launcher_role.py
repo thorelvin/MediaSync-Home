@@ -3,7 +3,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 from mediasync_home.adapters.process_supervisor import CompletedRoleProcess
+from mediasync_home.application.host_locator import build_local_engine_host_descriptor
 from mediasync_home.composition.launcher import (
     build_local_preview_status_launch,
     run_local_preview_status,
@@ -59,6 +62,63 @@ def test_local_preview_status_launch_builds_safe_engine_and_gui_plans(tmp_path: 
     assert launch.gui_status.shell is False
     assert launch.engine_host.requires_elevation is False
     assert launch.gui_status.requires_elevation is False
+
+
+def test_local_preview_status_launch_uses_host_locator_descriptor(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    descriptor = build_local_engine_host_descriptor(
+        installation_id="preview-a",
+        user_scope_hash="b" * 64,
+        state_root=state_root,
+    )
+
+    launch = build_local_preview_status_launch(
+        host_descriptor=descriptor,
+        environment={"PYTHONUTF8": "1"},
+    )
+
+    assert launch.pipe_name == descriptor.pipe_name
+    assert launch.host_descriptor is descriptor
+    assert launch.engine_host.command_line_vector() == (
+        str(Path(sys.executable).resolve()),
+        str(Path(__file__).resolve().parents[2] / "scripts/run_role.py"),
+        "--role",
+        "engine-host",
+        "--pipe-name",
+        descriptor.pipe_name,
+        "--serve-requests",
+        "2",
+        "--installation-id",
+        "preview-a",
+        "--state-root",
+        str(state_root.resolve()),
+    )
+    assert launch.gui_status.command_line_vector() == (
+        str(Path(sys.executable).resolve()),
+        str(Path(__file__).resolve().parents[2] / "scripts/run_role.py"),
+        "--role",
+        "gui",
+        "--pipe-name",
+        descriptor.pipe_name,
+        "--query-status",
+    )
+
+
+def test_local_preview_status_launch_rejects_pipe_name_mismatched_with_locator(
+    tmp_path: Path,
+) -> None:
+    descriptor = build_local_engine_host_descriptor(
+        installation_id="preview-a",
+        user_scope_hash="b" * 64,
+        state_root=tmp_path / "state",
+    )
+
+    with pytest.raises(ValueError, match="HOST_LOCATOR_PIPE_NAME_MISMATCH"):
+        build_local_preview_status_launch(
+            pipe_name="different-pipe",
+            host_descriptor=descriptor,
+            environment={"PYTHONUTF8": "1"},
+        )
 
 
 def test_local_preview_status_result_accepts_successful_host_and_gui_roundtrip() -> None:

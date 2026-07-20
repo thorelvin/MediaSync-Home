@@ -20,6 +20,7 @@ from mediasync_home.application.process_supervision import (
     ProcessLaunchPlan,
     build_internal_role_launch_plan,
 )
+from mediasync_home.application.host_locator import LocalEngineHostDescriptor
 from mediasync_home.domain.process_roles import ProcessRole
 
 
@@ -38,6 +39,7 @@ class LocalPreviewStatusLaunch:
     pipe_name: str
     engine_host: ProcessLaunchPlan
     gui_status: ProcessLaunchPlan
+    host_descriptor: LocalEngineHostDescriptor | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,7 @@ class LocalPreviewStatusResult:
     gui_returncode: int | None
     gui_response: dict[str, object] | None
     gui_stderr: str
+    host_locator: dict[str, object] | None = None
     killed_engine_host: bool = False
     error_type: str | None = None
 
@@ -80,6 +83,7 @@ class LocalPreviewStatusResult:
                 "returncode": self.gui_returncode,
                 "stderr": self.gui_stderr,
             },
+            "host_locator": self.host_locator,
             "pipe_name": self.pipe_name,
             "scope": "0B_SAME_USER_LOCAL_PREVIEW",
         }
@@ -111,12 +115,24 @@ def run_launcher(argv: Sequence[str] | None = None, *, emit: Emit | None = None)
 
 def build_local_preview_status_launch(
     *,
-    pipe_name: str,
+    pipe_name: str | None = None,
     state_root: Path | None = None,
+    host_descriptor: LocalEngineHostDescriptor | None = None,
     executable: Path | None = None,
     environment: dict[str, str] | None = None,
 ) -> LocalPreviewStatusLaunch:
+    if host_descriptor is not None:
+        if pipe_name is not None and pipe_name != host_descriptor.pipe_name:
+            raise ValueError("HOST_LOCATOR_PIPE_NAME_MISMATCH")
+        pipe_name = host_descriptor.pipe_name
+        if state_root is None:
+            state_root = host_descriptor.state_root
+    if pipe_name is None:
+        raise ValueError("PIPE_NAME_REQUIRED")
+
     engine_args = ["--pipe-name", pipe_name, "--serve-requests", "2"]
+    if host_descriptor is not None:
+        engine_args.extend(("--installation-id", host_descriptor.installation_id))
     if state_root is not None:
         engine_args.extend(("--state-root", str(state_root.resolve())))
     engine_host = build_internal_role_launch_plan(
@@ -139,6 +155,7 @@ def build_local_preview_status_launch(
         pipe_name=pipe_name,
         engine_host=engine_host,
         gui_status=gui_status,
+        host_descriptor=host_descriptor,
     )
 
 
@@ -179,6 +196,9 @@ def run_local_preview_status(
         gui_returncode=None if gui_completed is None else gui_completed.returncode,
         gui_response=None if gui_completed is None else _parse_json_object(gui_completed.stdout),
         gui_stderr="" if gui_completed is None else gui_completed.stderr,
+        host_locator=None
+        if launch.host_descriptor is None
+        else launch.host_descriptor.to_payload(),
         killed_engine_host=killed_engine_host,
         error_type=error_type,
     )
@@ -188,12 +208,30 @@ def _run_local_preview_status_from_args(args: argparse.Namespace) -> LocalPrevie
     if os.name != "nt":
         raise RuntimeError("local preview launcher IPC mode is Windows-only")
 
-    from mediasync_home.ipc.win32_named_pipe import make_pipe_name
+    from mediasync_home.ipc.win32_named_pipe import current_process_identity, make_pipe_name
 
-    pipe_name = args.pipe_name or make_pipe_name(installation_id=args.installation_id)
+    host_descriptor = None
+    if args.pipe_name is None:
+        from mediasync_home.adapters.local_host_locator import (
+            build_local_engine_host_descriptor_for_user,
+        )
+
+        identity = current_process_identity()
+        host_descriptor = build_local_engine_host_descriptor_for_user(
+            installation_id=args.installation_id,
+            user_scope_hash=identity.user_sid_hash,
+            state_root=args.state_root,
+            environ=os.environ,
+        )
+        pipe_name = host_descriptor.pipe_name
+        state_root = host_descriptor.state_root
+    else:
+        pipe_name = args.pipe_name or make_pipe_name(installation_id=args.installation_id)
+        state_root = args.state_root
     launch = build_local_preview_status_launch(
         pipe_name=pipe_name,
-        state_root=args.state_root,
+        state_root=state_root,
+        host_descriptor=host_descriptor,
         environment=dict(os.environ),
     )
     return run_local_preview_status(
