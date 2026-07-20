@@ -127,11 +127,20 @@ QLabel#jobDetailTitle {{
     font-weight: 600;
 }}
 
+QLabel#planPreviewTitle {{
+    font-weight: 600;
+}}
+
 QLabel#activityDimensionLabel {{
     color: {tokens.text_muted};
 }}
 
 QLabel#jobDetailTargetRow {{
+    color: {tokens.text_muted};
+}}
+
+QLabel#planPreviewSummary,
+QLabel#planPreviewRow {{
     color: {tokens.text_muted};
 }}
 

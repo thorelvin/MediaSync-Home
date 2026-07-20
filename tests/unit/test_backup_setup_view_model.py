@@ -311,6 +311,7 @@ def test_activity_overview_view_model_renders_latest_run_status() -> None:
 
     assert state.read_model_available is True
     assert state.has_more_runs is True
+    assert state.latest_plan_id == "plan-a"
     assert state.job_status is not None
     assert state.job_status.title == "Siste kjøring: run-a"
     assert state.job_status.activity_label == "Kontrollerer"

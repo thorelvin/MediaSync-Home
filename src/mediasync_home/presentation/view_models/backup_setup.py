@@ -155,6 +155,7 @@ class ActivityOverviewViewState:
     job_status: BackupJobStatusViewState | None
     read_model_available: bool
     has_more_runs: bool
+    latest_plan_id: str | None = None
 
 
 STEP_TITLES = {
@@ -372,6 +373,7 @@ def activity_overview_from_response(response: IpcResponse | None) -> ActivityOve
         job_status=_activity_status_from_run_payload(run_payloads[0]) if run_payloads else None,
         read_model_available=bool(overview.get("read_model_available", False)),
         has_more_runs=bool(overview.get("has_more", False)),
+        latest_plan_id=_required_text(run_payloads[0].get("plan_id")) if run_payloads else None,
     )
 
 

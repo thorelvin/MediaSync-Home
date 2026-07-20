@@ -59,6 +59,7 @@ def test_main_window_displays_engine_status(qapp) -> None:
         create_backup = window.findChild(QPushButton, "createBackupButton")
         detail_panel = window.findChild(QWidget, "backupJobDetailPanel")
         detail_title = window.findChild(QLabel, "jobDetailTitle")
+        plan_preview_title = window.findChild(QLabel, "planPreviewTitle")
 
         assert nav is not None
         assert nav.count() == 4
@@ -99,6 +100,8 @@ def test_main_window_displays_engine_status(qapp) -> None:
         assert detail_panel is not None
         assert detail_title is not None
         assert detail_title.text() == "Ingen lagret backupjobb"
+        assert plan_preview_title is not None
+        assert plan_preview_title.text() == "Plan preview"
     finally:
         window.close()
         window.deleteLater()
@@ -167,6 +170,8 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         job_detail_defaults = window.findChild(QLabel, "jobDetailDefaultsValue")
         job_detail_revision = window.findChild(QLabel, "jobDetailRevisionValue")
         job_detail_rows = window.findChildren(QLabel, "jobDetailTargetRow")
+        plan_preview_summary = window.findChild(QLabel, "planPreviewSummary")
+        plan_preview_rows = window.findChildren(QLabel, "planPreviewRow")
 
         assert provider.calls == [
             "connect",
@@ -174,6 +179,7 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
             "get_backup_overview",
             "get_backup_job_detail",
             "get_activity_overview",
+            "get_plan_operations",
         ]
         assert source is not None
         assert source.text() == "C:/Users/Ada/Pictures"
@@ -192,6 +198,10 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert job_detail_revision is not None
         assert job_detail_revision.text() == "Revisjon: job-rev-a - Filter: filter-a"
         assert job_detail_rows[0].text() == "USB 1: E:/Backup"
+        assert plan_preview_summary is not None
+        assert plan_preview_summary.text() == "2 operations from plan-a."
+        assert plan_preview_rows[0].text() == "Low: Create folder: Photos"
+        assert plan_preview_rows[1].text() == "Low: Copy new: Photos/2026/a.jpg - 2.0 KiB"
         assert activity_title is not None
         assert activity_title.text() == "Siste kjøring: run-a"
         assert activity_rows[0].text() == "Aktivitet: Kontrollerer"
@@ -364,6 +374,53 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                                 }
                             ],
                         }
+                    ],
+                }
+            }
+        )
+
+    def get_plan_operations(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        del limit, after
+        self.calls.append("get_plan_operations")
+        return IpcResponse.accepted(
+            {
+                "plan_operations": {
+                    "plan_id": plan_id,
+                    "limit": 3,
+                    "has_more": False,
+                    "read_model_available": True,
+                    "next_cursor": None,
+                    "operations": [
+                        {
+                            "operation_id": "op-a",
+                            "operation_type": "CREATE_DIRECTORY",
+                            "sequence_no": 0,
+                            "execution_phase": 10,
+                            "stable_order_key": "photos",
+                            "target_precondition_kind": "ABSENT",
+                            "reason_code": "TARGET_DIRECTORY_MISSING",
+                            "risk_level": "LOW",
+                            "target_relative_path": "Photos",
+                            "planned_bytes": 0,
+                        },
+                        {
+                            "operation_id": "op-b",
+                            "operation_type": "COPY_NEW",
+                            "sequence_no": 1,
+                            "execution_phase": 20,
+                            "stable_order_key": "photos/2026",
+                            "target_precondition_kind": "ABSENT",
+                            "reason_code": "SOURCE_ONLY",
+                            "risk_level": "LOW",
+                            "target_relative_path": "Photos/2026/a.jpg",
+                            "planned_bytes": 2048,
+                        },
                     ],
                 }
             }

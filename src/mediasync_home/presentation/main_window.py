@@ -42,6 +42,11 @@ from mediasync_home.presentation.view_models.engine_status import (
     EngineStatusViewState,
     engine_status_from_response,
 )
+from mediasync_home.presentation.view_models.plan_preview import (
+    PlanOperationPreviewState,
+    empty_plan_operation_preview_state,
+    plan_operation_preview_from_response,
+)
 from mediasync_home.ipc.protocol import IpcResponse
 
 
@@ -69,6 +74,16 @@ class BackupJobDetailProvider(Protocol):
     def get_backup_job_detail(self, *, job_id: str) -> IpcResponse: ...
 
 
+class PlanOperationsProvider(Protocol):
+    def get_plan_operations(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse: ...
+
+
 class MediaSyncWindow(QMainWindow):
     def __init__(
         self,
@@ -84,6 +99,7 @@ class MediaSyncWindow(QMainWindow):
         self._setup_state = build_standard_backup_setup_state(BackupSetupDraft.empty())
         self._job_status_state = empty_backup_job_status_state()
         self._job_detail_state = empty_backup_job_detail_state()
+        self._plan_preview_state = empty_plan_operation_preview_state()
         self._setup_step_labels: list[QLabel] = []
         self._setup_source_value: QLabel | None = None
         self._setup_target_value: QLabel | None = None
@@ -98,6 +114,9 @@ class MediaSyncWindow(QMainWindow):
         self._job_detail_target_rows: list[QLabel] = []
         self._activity_status_title: QLabel | None = None
         self._activity_dimension_rows: list[QLabel] = []
+        self._plan_preview_title: QLabel | None = None
+        self._plan_preview_summary: QLabel | None = None
+        self._plan_preview_rows: list[QLabel] = []
         self._language_options = (
             ("nb", "Norsk"),
             ("en", "English"),
@@ -187,6 +206,10 @@ class MediaSyncWindow(QMainWindow):
         self._job_detail_state = state
         self._apply_backup_job_detail_state(state)
 
+    def apply_plan_operation_preview(self, state: PlanOperationPreviewState) -> None:
+        self._plan_preview_state = state
+        self._apply_plan_operation_preview_state(state)
+
     def _refresh_backup_overview(self) -> None:
         if self._engine_client is None or not hasattr(self._engine_client, "get_backup_overview"):
             return
@@ -212,6 +235,18 @@ class MediaSyncWindow(QMainWindow):
         if state.job_status is not None:
             self._job_status_state = state.job_status
             self._apply_job_status_state(state.job_status)
+        if state.latest_plan_id is None:
+            self.apply_plan_operation_preview(empty_plan_operation_preview_state())
+            return
+        self._refresh_plan_operation_preview(state.latest_plan_id)
+
+    def _refresh_plan_operation_preview(self, plan_id: str) -> None:
+        if self._engine_client is None or not hasattr(self._engine_client, "get_plan_operations"):
+            return
+        provider = cast(PlanOperationsProvider, self._engine_client)
+        self.apply_plan_operation_preview(
+            plan_operation_preview_from_response(provider.get_plan_operations(plan_id=plan_id, limit=3))
+        )
 
     def _apply_backup_setup_state(self, state: StandardBackupSetupViewState) -> None:
         for label, step in zip(self._setup_step_labels, state.steps, strict=False):
@@ -267,6 +302,22 @@ class MediaSyncWindow(QMainWindow):
         )
         for row, (label, value) in zip(self._activity_dimension_rows, values, strict=False):
             row.setText(f"{label}: {value}")
+
+    def _apply_plan_operation_preview_state(self, state: PlanOperationPreviewState) -> None:
+        if self._plan_preview_title is not None:
+            self._plan_preview_title.setText(state.title)
+        if self._plan_preview_summary is not None:
+            self._plan_preview_summary.setText(state.summary_label)
+        lines = tuple(f"{row.risk_label}: {row.display_line}" for row in state.rows) or (
+            "No plan operations.",
+        )
+        for index, row in enumerate(self._plan_preview_rows):
+            if index < len(lines):
+                row.setText(lines[index])
+                row.setVisible(True)
+            else:
+                row.setText("")
+                row.setVisible(False)
 
     def _build_layout(self) -> None:
         root = QWidget()
@@ -478,6 +529,8 @@ class MediaSyncWindow(QMainWindow):
         layout.addWidget(empty)
         layout.addSpacing(8)
         self._add_activity_status(layout, self._job_status_state)
+        layout.addSpacing(8)
+        self._add_plan_operation_preview(layout, self._plan_preview_state)
         if self._show_component_gallery:
             layout.addWidget(self._build_component_gallery())
         layout.addStretch(1)
@@ -503,6 +556,32 @@ class MediaSyncWindow(QMainWindow):
             row.setObjectName("activityDimensionLabel")
             row.setWordWrap(True)
             self._activity_dimension_rows.append(row)
+            layout.addWidget(row)
+
+    def _add_plan_operation_preview(
+        self,
+        layout: QVBoxLayout,
+        state: PlanOperationPreviewState,
+    ) -> None:
+        title = QLabel(state.title)
+        title.setObjectName("planPreviewTitle")
+        self._plan_preview_title = title
+        summary = QLabel(state.summary_label)
+        summary.setObjectName("planPreviewSummary")
+        summary.setWordWrap(True)
+        self._plan_preview_summary = summary
+        layout.addWidget(title)
+        layout.addWidget(summary)
+        self._plan_preview_rows = []
+        lines = tuple(f"{row.risk_label}: {row.display_line}" for row in state.rows) or (
+            "No plan operations.",
+        )
+        for index in range(3):
+            row = QLabel(lines[index] if index < len(lines) else "")
+            row.setObjectName("planPreviewRow")
+            row.setWordWrap(True)
+            row.setVisible(index < len(lines))
+            self._plan_preview_rows.append(row)
             layout.addWidget(row)
 
     def _build_component_gallery(self) -> QFrame:
