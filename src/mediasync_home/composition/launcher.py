@@ -140,6 +140,8 @@ def build_local_preview_status_launch(
                 host_descriptor.mutex_name,
             )
         )
+    if host_descriptor is not None and state_root is not None:
+        engine_args.append("--publish-host-locator")
     if state_root is not None:
         engine_args.extend(("--state-root", str(state_root.resolve())))
     engine_host = build_internal_role_launch_plan(

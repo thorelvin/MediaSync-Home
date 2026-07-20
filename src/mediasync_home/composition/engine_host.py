@@ -85,6 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-root", type=Path, help="optional local preview state root")
     parser.add_argument("--host-mutex-name", help="optional local Engine Host singleton mutex")
     parser.add_argument(
+        "--publish-host-locator",
+        action="store_true",
+        help="publish a local-preview host locator after acquiring the singleton mutex",
+    )
+    parser.add_argument(
         "--inactive-outbox-owner-instance-id",
         action="append",
         help="owner instance proven inactive before startup outbox requeue",
@@ -110,8 +115,18 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
     host_mutex = _acquire_host_mutex(args.host_mutex_name, output=output, pipe_name=args.pipe_name)
     if args.host_mutex_name and host_mutex is None:
         return 3
+    host_locator_payload: dict[str, object] | None = None
+    host_locator_path: Path | None = None
     runtime: EngineHostRuntime | None = None
     try:
+        if args.publish_host_locator:
+            host_locator_payload, host_locator_path = _publish_local_host_locator(
+                installation_id=args.installation_id,
+                pipe_name=args.pipe_name,
+                mutex_name=args.host_mutex_name,
+                state_root=args.state_root,
+                process_id=os.getpid(),
+            )
         runtime = build_engine_host_runtime(
             authorization=current_user_policy(),
             service_status=service_status,
@@ -135,6 +150,10 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                     "host_mutex": None
                     if host_mutex is None
                     else {"acquired": True, "name": host_mutex.name},
+                    "host_locator": host_locator_payload,
+                    "host_locator_path": None
+                    if host_locator_path is None
+                    else str(host_locator_path),
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -327,6 +346,33 @@ def _acquire_host_mutex(
             )
         )
         return None
+
+
+def _publish_local_host_locator(
+    *,
+    installation_id: str,
+    pipe_name: str,
+    mutex_name: str | None,
+    state_root: Path | None,
+    process_id: int,
+) -> tuple[dict[str, object], Path]:
+    if mutex_name is None:
+        raise RuntimeError("HOST_LOCATOR_MUTEX_REQUIRED")
+    if state_root is None:
+        raise RuntimeError("HOST_LOCATOR_STATE_ROOT_REQUIRED")
+
+    from mediasync_home.adapters.local_host_locator import publish_local_engine_host_publication
+    from mediasync_home.application.host_locator import build_local_engine_host_publication
+
+    publication = build_local_engine_host_publication(
+        installation_id=installation_id,
+        pipe_name=pipe_name,
+        mutex_name=mutex_name,
+        state_root=state_root,
+        process_id=process_id,
+    )
+    path = publish_local_engine_host_publication(publication)
+    return publication.to_payload(), path
 
 
 def _positive_int(value: str) -> int:

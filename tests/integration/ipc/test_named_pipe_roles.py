@@ -10,6 +10,8 @@ from uuid import uuid4
 
 import pytest
 
+from mediasync_home.application.host_locator import LOCAL_ENGINE_HOST_PUBLICATION_FILENAME
+
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="Win32 named-pipe role wiring is Windows-only")
 
@@ -194,6 +196,8 @@ def test_launcher_local_preview_status_uses_host_locator_when_pipe_omitted(
 
     payload = json.loads(result.stdout)
     host_events = payload["engine_host"]["events"]
+    publication_path = state_root / LOCAL_ENGINE_HOST_PUBLICATION_FILENAME
+    publication = json.loads(publication_path.read_text(encoding="utf-8"))
 
     assert result.stderr == ""
     assert payload["accepted"] is True
@@ -209,20 +213,35 @@ def test_launcher_local_preview_status_uses_host_locator_when_pipe_omitted(
     assert payload["gui"]["response"]["status"] == "ACCEPTED"
     assert payload["engine_host"]["returncode"] == 0
     assert host_events[0]["pipe_name"] == payload["pipe_name"]
+    assert publication["process_id"] > 0
+    assert publication == {
+        "installation_id": installation_id,
+        "locator_key": payload["pipe_name"].removeprefix("MediaSyncHome-0B-"),
+        "mutex_name": f"Local\\{payload['pipe_name']}",
+        "pipe_name": payload["pipe_name"],
+        "process_id": publication["process_id"],
+        "schema_version": 1,
+        "scope": "0B_SAME_USER_LOCAL_PREVIEW",
+        "state_root": str(state_root),
+        "status": "STARTING",
+    }
     assert host_events[0]["host_mutex"] == {
         "acquired": True,
         "name": payload["host_locator"]["mutex_name"],
     }
+    assert host_events[0]["host_locator"] == publication
+    assert host_events[0]["host_locator_path"] == str(publication_path)
     assert host_events[0]["state_root"] == str(state_root)
     assert host_events[-1]["served_requests"] == 2
 
 
-def test_engine_host_mutex_rejects_when_same_user_mutex_is_owned() -> None:
+def test_engine_host_mutex_rejects_when_same_user_mutex_is_owned(tmp_path: Path) -> None:
     pipe_name = win32_named_pipe.make_pipe_name(
         installation_id="role-mutex-reject-test",
         suffix=uuid4().hex,
     )
     mutex_name = f"Local\\MediaSyncHome-0B-{uuid4().hex[:24]}"
+    state_root = tmp_path / "state"
     mutex = LocalEngineHostMutex.acquire(mutex_name)
     try:
         result = subprocess.run(
@@ -237,6 +256,9 @@ def test_engine_host_mutex_rejects_when_same_user_mutex_is_owned() -> None:
                 "1",
                 "--host-mutex-name",
                 mutex_name,
+                "--publish-host-locator",
+                "--state-root",
+                str(state_root),
             ],
             cwd=Path(__file__).resolve().parents[3],
             capture_output=True,
@@ -260,6 +282,7 @@ def test_engine_host_mutex_rejects_when_same_user_mutex_is_owned() -> None:
             "scope": "0B_SAME_USER_LOCAL_PREVIEW",
         }
     ]
+    assert not (state_root / LOCAL_ENGINE_HOST_PUBLICATION_FILENAME).exists()
 
 
 def test_engine_host_state_root_persists_gui_submitted_disabled_command(

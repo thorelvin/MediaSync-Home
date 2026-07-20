@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,7 +11,9 @@ INSTALLATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 USER_SCOPE_HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 LOCAL_PREVIEW_SCOPE = "0B_SAME_USER_LOCAL_PREVIEW"
 LOCAL_PREVIEW_PIPE_PREFIX = "MediaSyncHome-0B"
-LOCAL_PREVIEW_MUTEX_PATTERN = re.compile(r"^Local\\MediaSyncHome-0B-[0-9a-f]{24}$")
+LOCAL_PREVIEW_PIPE_PATTERN = re.compile(r"^MediaSyncHome-0B-([0-9a-f]{24})$")
+LOCAL_PREVIEW_MUTEX_PATTERN = re.compile(r"^Local\\MediaSyncHome-0B-([0-9a-f]{24})$")
+LOCAL_ENGINE_HOST_PUBLICATION_FILENAME = "engine-host.locator.json"
 
 
 class HostLocatorViolation(ValueError):
@@ -38,6 +41,32 @@ class LocalEngineHostDescriptor:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class LocalEngineHostPublication:
+    installation_id: str
+    locator_key: str
+    pipe_name: str
+    mutex_name: str
+    state_root: Path
+    process_id: int
+    scope: str = LOCAL_PREVIEW_SCOPE
+    status: str = "STARTING"
+    schema_version: int = 1
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "installation_id": self.installation_id,
+            "locator_key": self.locator_key,
+            "mutex_name": self.mutex_name,
+            "pipe_name": self.pipe_name,
+            "process_id": self.process_id,
+            "schema_version": self.schema_version,
+            "scope": self.scope,
+            "state_root": str(self.state_root),
+            "status": self.status,
+        }
+
+
 def build_local_engine_host_descriptor(
     *,
     installation_id: str,
@@ -62,13 +91,63 @@ def build_local_engine_host_descriptor(
     )
 
 
+def build_local_engine_host_publication(
+    *,
+    installation_id: str,
+    pipe_name: str,
+    mutex_name: str,
+    state_root: Path,
+    process_id: int,
+) -> LocalEngineHostPublication:
+    normalized_installation_id = _normalize_installation_id(installation_id)
+    _validate_state_root(state_root)
+    locator_key = _locator_key_from_pipe_name(pipe_name)
+    mutex_locator_key = _locator_key_from_mutex_name(mutex_name)
+    if locator_key != mutex_locator_key:
+        raise HostLocatorViolation("HOST_LOCATOR_PIPE_MUTEX_MISMATCH")
+    normalized_process_id = _normalize_process_id(process_id)
+    return LocalEngineHostPublication(
+        installation_id=normalized_installation_id,
+        locator_key=locator_key,
+        pipe_name=pipe_name,
+        mutex_name=mutex_name,
+        state_root=state_root,
+        process_id=normalized_process_id,
+    )
+
+
+def local_engine_host_publication_from_payload(
+    payload: Mapping[str, object],
+) -> LocalEngineHostPublication:
+    if payload.get("schema_version") != 1:
+        raise HostLocatorViolation("HOST_LOCATOR_PUBLICATION_SCHEMA_UNSUPPORTED")
+    if payload.get("scope") != LOCAL_PREVIEW_SCOPE:
+        raise HostLocatorViolation("HOST_LOCATOR_PUBLICATION_SCOPE_UNSUPPORTED")
+    if payload.get("status") != "STARTING":
+        raise HostLocatorViolation("HOST_LOCATOR_PUBLICATION_STATUS_UNSUPPORTED")
+
+    publication = build_local_engine_host_publication(
+        installation_id=_require_string(payload.get("installation_id"), "INSTALLATION_ID"),
+        pipe_name=_require_string(payload.get("pipe_name"), "PIPE_NAME"),
+        mutex_name=_require_string(payload.get("mutex_name"), "MUTEX_NAME"),
+        state_root=Path(_require_string(payload.get("state_root"), "STATE_ROOT")),
+        process_id=_normalize_process_id(payload.get("process_id")),
+    )
+    if payload.get("locator_key") != publication.locator_key:
+        raise HostLocatorViolation("HOST_LOCATOR_PUBLICATION_LOCATOR_KEY_MISMATCH")
+    return publication
+
+
 def validate_installation_id(installation_id: str) -> None:
     _normalize_installation_id(installation_id)
 
 
+def validate_local_preview_pipe_name(pipe_name: str) -> None:
+    _locator_key_from_pipe_name(pipe_name)
+
+
 def validate_local_preview_mutex_name(mutex_name: str) -> None:
-    if LOCAL_PREVIEW_MUTEX_PATTERN.fullmatch(mutex_name) is None:
-        raise HostLocatorViolation("HOST_LOCATOR_INVALID_MUTEX_NAME")
+    _locator_key_from_mutex_name(mutex_name)
 
 
 def _normalize_installation_id(installation_id: str) -> str:
@@ -82,6 +161,32 @@ def _normalize_user_scope_hash(user_scope_hash: str) -> str:
     if USER_SCOPE_HASH_PATTERN.fullmatch(normalized) is None:
         raise HostLocatorViolation("HOST_LOCATOR_INVALID_USER_SCOPE_HASH")
     return normalized
+
+
+def _normalize_process_id(process_id: object) -> int:
+    if not isinstance(process_id, int) or isinstance(process_id, bool) or process_id < 1:
+        raise HostLocatorViolation("HOST_LOCATOR_INVALID_PROCESS_ID")
+    return process_id
+
+
+def _require_string(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise HostLocatorViolation(f"HOST_LOCATOR_PUBLICATION_INVALID_{field_name}")
+    return value
+
+
+def _locator_key_from_pipe_name(pipe_name: str) -> str:
+    match = LOCAL_PREVIEW_PIPE_PATTERN.fullmatch(pipe_name)
+    if match is None:
+        raise HostLocatorViolation("HOST_LOCATOR_INVALID_PIPE_NAME")
+    return match.group(1)
+
+
+def _locator_key_from_mutex_name(mutex_name: str) -> str:
+    match = LOCAL_PREVIEW_MUTEX_PATTERN.fullmatch(mutex_name)
+    if match is None:
+        raise HostLocatorViolation("HOST_LOCATOR_INVALID_MUTEX_NAME")
+    return match.group(1)
 
 
 def _validate_state_root(state_root: Path) -> None:

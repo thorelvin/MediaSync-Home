@@ -61,6 +61,7 @@ def test_engine_host_parser_accepts_optional_state_root_and_inactive_outbox_owne
             str(tmp_path),
             "--host-mutex-name",
             "Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+            "--publish-host-locator",
             "--inactive-outbox-owner-instance-id",
             "host-old",
         ]
@@ -68,6 +69,7 @@ def test_engine_host_parser_accepts_optional_state_root_and_inactive_outbox_owne
 
     assert args.state_root == tmp_path
     assert args.host_mutex_name == "Local\\MediaSyncHome-0B-1234567890abcdef12345678"
+    assert args.publish_host_locator is True
     assert args.inactive_outbox_owner_instance_id == ["host-old"]
 
 

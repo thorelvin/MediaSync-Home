@@ -92,6 +92,7 @@ def test_local_preview_status_launch_uses_host_locator_descriptor(tmp_path: Path
         "preview-a",
         "--host-mutex-name",
         descriptor.mutex_name,
+        "--publish-host-locator",
         "--state-root",
         str(state_root.resolve()),
     )

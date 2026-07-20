@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -8,10 +9,17 @@ import pytest
 from mediasync_home.adapters.local_host_locator import (
     build_local_engine_host_descriptor_for_user,
     default_local_preview_state_root,
+    load_local_engine_host_publication,
+    local_engine_host_publication_path,
+    publish_local_engine_host_publication,
 )
 from mediasync_home.application.host_locator import (
+    LOCAL_ENGINE_HOST_PUBLICATION_FILENAME,
     HostLocatorViolation,
     build_local_engine_host_descriptor,
+    build_local_engine_host_publication,
+    local_engine_host_publication_from_payload,
+    validate_local_preview_pipe_name,
     validate_local_preview_mutex_name,
 )
 
@@ -107,3 +115,119 @@ def test_local_preview_mutex_name_validation_allows_only_locator_names() -> None
 
     with pytest.raises(HostLocatorViolation, match="HOST_LOCATOR_INVALID_MUTEX_NAME"):
         validate_local_preview_mutex_name("Global\\MediaSyncHome-0B-1234567890abcdef12345678")
+
+
+def test_local_preview_pipe_name_validation_allows_only_locator_names() -> None:
+    validate_local_preview_pipe_name("MediaSyncHome-0B-1234567890abcdef12345678")
+
+    with pytest.raises(HostLocatorViolation, match="HOST_LOCATOR_INVALID_PIPE_NAME"):
+        validate_local_preview_pipe_name("MediaSyncHome-local-dev-1234567890abcdef12345678")
+
+
+def test_local_engine_host_publication_payload_binds_pipe_mutex_and_process(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=state_root,
+        process_id=4321,
+    )
+
+    assert publication.to_payload() == {
+        "installation_id": "local-dev",
+        "locator_key": "1234567890abcdef12345678",
+        "mutex_name": "Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        "pipe_name": "MediaSyncHome-0B-1234567890abcdef12345678",
+        "process_id": 4321,
+        "schema_version": 1,
+        "scope": "0B_SAME_USER_LOCAL_PREVIEW",
+        "state_root": str(state_root),
+        "status": "STARTING",
+    }
+    assert local_engine_host_publication_from_payload(publication.to_payload()) == publication
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "reason"),
+    [
+        (
+            {
+                "installation_id": "local-dev",
+                "pipe_name": "MediaSyncHome-0B-1234567890abcdef12345678",
+                "mutex_name": "Local\\MediaSyncHome-0B-ffffffffffffffffffffffff",
+                "process_id": 4321,
+            },
+            "PIPE_MUTEX_MISMATCH",
+        ),
+        (
+            {
+                "installation_id": "local-dev",
+                "pipe_name": "MediaSyncHome-other-1234567890abcdef12345678",
+                "mutex_name": "Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+                "process_id": 4321,
+            },
+            "INVALID_PIPE_NAME",
+        ),
+        (
+            {
+                "installation_id": "local-dev",
+                "pipe_name": "MediaSyncHome-0B-1234567890abcdef12345678",
+                "mutex_name": "Global\\MediaSyncHome-0B-1234567890abcdef12345678",
+                "process_id": 4321,
+            },
+            "INVALID_MUTEX_NAME",
+        ),
+        (
+            {
+                "installation_id": "local-dev",
+                "pipe_name": "MediaSyncHome-0B-1234567890abcdef12345678",
+                "mutex_name": "Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+                "process_id": 0,
+            },
+            "INVALID_PROCESS_ID",
+        ),
+    ],
+)
+def test_local_engine_host_publication_rejects_ambiguous_inputs(
+    kwargs: dict[str, object],
+    reason: str,
+) -> None:
+    with pytest.raises(HostLocatorViolation, match=reason):
+        build_local_engine_host_publication(
+            state_root=Path("C:/Users/Ada/AppData/Local/MediaSyncHome/0b-local-preview/local-dev"),
+            **kwargs,
+        )  # type: ignore[arg-type]
+
+
+def test_local_engine_host_publication_rejects_relative_state_root() -> None:
+    with pytest.raises(HostLocatorViolation, match="STATE_ROOT_MUST_BE_ABSOLUTE"):
+        build_local_engine_host_publication(
+            installation_id="local-dev",
+            pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+            mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+            state_root=Path("relative"),
+            process_id=4321,
+        )
+
+
+def test_local_host_locator_adapter_publishes_roundtrippable_record(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=state_root,
+        process_id=4321,
+    )
+
+    path = publish_local_engine_host_publication(publication)
+
+    assert path == state_root / LOCAL_ENGINE_HOST_PUBLICATION_FILENAME
+    assert path == local_engine_host_publication_path(state_root)
+    assert json.loads(path.read_text(encoding="utf-8")) == publication.to_payload()
+    assert load_local_engine_host_publication(state_root) == publication
