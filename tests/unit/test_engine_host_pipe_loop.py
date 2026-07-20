@@ -1,8 +1,25 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from mediasync_home.composition.engine_host import build_parser, serve_bounded_pipe_requests
+from mediasync_home.adapters.sqlite.connection_policy import SqliteStore
+from mediasync_home.adapters.sqlite.migrations import current_schema_version
+from mediasync_home.composition.engine_host import (
+    build_engine_host_runtime,
+    build_parser,
+    serve_bounded_pipe_requests,
+)
+from mediasync_home.domain.process_roles import ProcessRole
+from mediasync_home.ipc.client import InProcessIpcClient
+from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
+from mediasync_home.ipc.protocol import IpcReason, IpcStatus
+from mediasync_home.application.runtime_status import startup_status
+
+
+EXPECTED_USER = "same-user"
+EXPECTED_SESSION = 42
 
 
 def test_bounded_pipe_loop_serves_exact_request_limit() -> None:
@@ -32,6 +49,97 @@ def test_engine_host_parser_requires_positive_serve_request_limit() -> None:
         build_parser().parse_args(["--serve-requests", "0"])
 
 
+def test_engine_host_parser_accepts_optional_state_root_and_inactive_outbox_owner(
+    tmp_path: Path,
+) -> None:
+    args = build_parser().parse_args(
+        [
+            "--pipe-name",
+            "pipe-a",
+            "--state-root",
+            str(tmp_path),
+            "--inactive-outbox-owner-instance-id",
+            "host-old",
+        ]
+    )
+
+    assert args.state_root == tmp_path
+    assert args.inactive_outbox_owner_instance_id == ["host-old"]
+
+
+def test_engine_host_runtime_without_state_root_preserves_non_persistent_service() -> None:
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=startup_status(ProcessRole.ENGINE_HOST),
+    )
+
+    try:
+        assert runtime.state_layout is None
+        assert runtime.startup_reconciliation is None
+        assert runtime.catalog_connection is None
+        assert runtime.recovery_connection is None
+        assert runtime.service.command_receipt_store is None
+        assert runtime.service.outbox_store is None
+    finally:
+        runtime.close()
+
+
+def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts(
+    tmp_path: Path,
+) -> None:
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=startup_status(ProcessRole.ENGINE_HOST),
+        state_root=tmp_path / "state",
+        reconciler_instance_id="host-new",
+    )
+
+    try:
+        assert runtime.state_layout is not None
+        assert runtime.state_layout.catalog.is_file()
+        assert runtime.state_layout.recovery.is_file()
+        assert runtime.catalog_connection is not None
+        assert runtime.recovery_connection is not None
+        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 17
+        assert current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY) == 5
+        assert runtime.startup_reconciliation is not None
+        assert runtime.startup_reconciliation.reconciler_instance_id == "host-new"
+        assert runtime.startup_reconciliation.skipped_outbox_requeue_reason == (
+            "OUTBOX_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF"
+        )
+
+        ipc_client = InProcessIpcClient(
+            service=runtime.service,
+            identity=_identity(),
+            role=ProcessRole.GUI,
+            client_instance_id="55555555-5555-4555-8555-555555555555",
+        )
+        assert ipc_client.connect().status is IpcStatus.ACCEPTED
+
+        response = ipc_client.submit_command(
+            "UNKNOWN_MUTATION",
+            request_id="44444444-4444-4444-8444-444444444444",
+            idempotency_key="66666666-6666-4666-8666-666666666666",
+        )
+
+        row = runtime.catalog_connection.execute(
+            """
+            SELECT state, rejection_reason
+            FROM command_receipts
+            WHERE idempotency_key = ?
+            """,
+            ("66666666-6666-4666-8666-666666666666",),
+        ).fetchone()
+        assert response.status is IpcStatus.REJECTED
+        assert response.reason is IpcReason.MUTATING_COMMANDS_DISABLED
+        assert row == (
+            "REJECTED",
+            IpcReason.MUTATING_COMMANDS_DISABLED.value,
+        )
+    finally:
+        runtime.close()
+
+
 class _FakePipeServer:
     def __init__(self, *, fail_on_call: int | None = None) -> None:
         self.calls = 0
@@ -41,3 +149,19 @@ class _FakePipeServer:
         self.calls += 1
         if self.calls == self._fail_on_call:
             raise RuntimeError("internal detail must not leak")
+
+
+def _authorization() -> ClientAuthorizationPolicy:
+    return ClientAuthorizationPolicy(
+        expected_user_sid_hash=EXPECTED_USER,
+        expected_session_id=EXPECTED_SESSION,
+    )
+
+
+def _identity() -> VerifiedClientIdentity:
+    return VerifiedClientIdentity(
+        user_sid_hash=EXPECTED_USER,
+        session_id=EXPECTED_SESSION,
+        is_remote=False,
+        transport="in-process-engine-host-runtime-test",
+    )

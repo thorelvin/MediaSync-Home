@@ -739,6 +739,8 @@ RUNNING         -> SUCCEEDED | FAILED | CANCELLED
 
 Engine Host-startupkoordinereren kjører command receipt-avstemming før nye muterende commands åpnes, og kan i samme oppstartspass kjøre outbox requeue bare når inaktive owner instance-ID-er er bevist av startupmiljøet.
 
+0B pipe-komposisjonen kan eksplisitt startes med `--state-root` for å opprette og migrere lokale `catalog.sqlite`/`recovery.sqlite` før serving. Uten denne flaggen beholdes den ikke-persistente status-previewen, og ingen lokal statefil opprettes av pipe-komposisjonen.
+
 Idempotency-retention:
 
 - command dispatcher slår opp både full receipt og `command_dedup_tombstones` før validering av ny effekt;
