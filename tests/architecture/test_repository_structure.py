@@ -11,6 +11,8 @@ from mediasync_home.domain.capabilities import MutationPermit
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "src/mediasync_home"
 TESTS = ROOT / "tests"
+FORBIDDEN_ROBOCOPY_FLAGS = {"/MIR", "/MOV", "/MOVE", "/PURGE"}
+DYNAMIC_CODE_BUILTINS = {"__import__", "compile", "eval", "exec"}
 
 
 def _python_files(relative: str) -> Iterable[Path]:
@@ -22,7 +24,7 @@ def _python_tree(root: Path) -> Iterable[Path]:
 
 
 def _imports(path: Path) -> set[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    tree = _syntax_tree(path)
     result: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -30,6 +32,32 @@ def _imports(path: Path) -> set[str]:
         elif isinstance(node, ast.ImportFrom) and node.module:
             result.add(node.module)
     return result
+
+
+def _syntax_tree(path: Path) -> ast.AST:
+    return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+
+def _production_package_files() -> Iterable[Path]:
+    return _python_tree(PACKAGE)
+
+
+def _relative_path(path: Path) -> str:
+    return path.relative_to(ROOT).as_posix()
+
+
+def _string_literals(path: Path) -> Iterable[str]:
+    for node in ast.walk(_syntax_tree(path)):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            yield node.value
+
+
+def _literal_tokens(value: str) -> set[str]:
+    separators = ",;[](){}"
+    normalized = value.upper()
+    for separator in separators:
+        normalized = normalized.replace(separator, " ")
+    return set(normalized.split())
 
 
 def test_0b_repository_skeleton_has_separate_role_entrypoints() -> None:
@@ -125,6 +153,44 @@ def test_python_code_does_not_import_forbidden_object_serializers() -> None:
         for path in _python_tree(root)
         if _imports(path) & forbidden
     ]
+
+    assert offenders == []
+
+
+def test_production_code_does_not_embed_forbidden_robocopy_flags() -> None:
+    offenders = [
+        f"{_relative_path(path)}: {sorted(_literal_tokens(value) & FORBIDDEN_ROBOCOPY_FLAGS)}"
+        for path in _production_package_files()
+        for value in _string_literals(path)
+        if _literal_tokens(value) & FORBIDDEN_ROBOCOPY_FLAGS
+    ]
+
+    assert offenders == []
+
+
+def test_production_code_does_not_pass_shell_true() -> None:
+    offenders: list[str] = []
+    for path in _production_package_files():
+        for node in ast.walk(_syntax_tree(path)):
+            if not isinstance(node, ast.Call):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg != "shell":
+                    continue
+                if isinstance(keyword.value, ast.Constant) and keyword.value.value is True:
+                    offenders.append(f"{_relative_path(path)}:{keyword.lineno}")
+
+    assert offenders == []
+
+
+def test_production_code_does_not_call_dynamic_python_execution() -> None:
+    offenders: list[str] = []
+    for path in _production_package_files():
+        for node in ast.walk(_syntax_tree(path)):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Name) and node.func.id in DYNAMIC_CODE_BUILTINS:
+                offenders.append(f"{_relative_path(path)}:{node.lineno}:{node.func.id}")
 
     assert offenders == []
 
