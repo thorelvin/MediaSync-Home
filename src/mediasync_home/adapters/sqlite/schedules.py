@@ -7,6 +7,7 @@ from mediasync_home.application.schedules import (
     ScheduleDefinition,
     ScheduleStore,
     ScheduleViolation,
+    validate_schedule_reconciliation_page_request,
     validate_schedule_definition,
 )
 from mediasync_home.application.trigger_occurrences import TriggerKind
@@ -105,6 +106,49 @@ class SqliteScheduleStore(ScheduleStore):
         if row is None:
             return None
         return _schedule_from_row(row)
+
+    def list_schedules_for_reconciliation(
+        self,
+        *,
+        limit: int,
+        after_schedule_id: str | None = None,
+    ) -> tuple[ScheduleDefinition, ...]:
+        try:
+            validate_schedule_reconciliation_page_request(
+                limit=limit,
+                after_schedule_id=after_schedule_id,
+            )
+        except ScheduleViolation as exc:
+            raise SqliteScheduleStoreError("SCHEDULE_RECONCILIATION_PAGE_INVALID") from exc
+        rows = self._connection.execute(
+            """
+            SELECT
+                id,
+                job_id,
+                plan_id,
+                plan_checksum,
+                trigger_type,
+                configuration_json,
+                definition_generation,
+                desired_definition_hash,
+                time_zone_id,
+                dst_policy,
+                misfire_policy,
+                coalescing_window_seconds,
+                task_logon_type,
+                requires_network,
+                run_only_when_logged_on,
+                enabled,
+                row_version,
+                last_triggered_utc
+            FROM schedules
+            WHERE (? IS NULL OR id > ?)
+            ORDER BY id
+            LIMIT ?
+            """,
+            (after_schedule_id, after_schedule_id, limit),
+        ).fetchall()
+        return tuple(_schedule_from_row(row) for row in rows)
 
 
 def _schedule_from_row(row: Sequence[object]) -> ScheduleDefinition:

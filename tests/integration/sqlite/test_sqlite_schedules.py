@@ -64,6 +64,30 @@ def test_sqlite_schedule_store_upserts_current_desired_definition(tmp_path: Path
         assert _row_count(connection, "schedules") == 1
 
 
+def test_sqlite_schedule_store_lists_schedules_for_reconciliation_bounded(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        store = SqliteScheduleStore(connection)
+        schedule_a = _schedule(schedule_id="schedule-a")
+        schedule_b = replace(_schedule(schedule_id="schedule-b"), enabled=False)
+        store.save_schedule(schedule_b)
+        store.save_schedule(schedule_a)
+
+        first_page = store.list_schedules_for_reconciliation(limit=1)
+        second_page = store.list_schedules_for_reconciliation(
+            limit=10,
+            after_schedule_id=first_page[-1].schedule_id,
+        )
+
+        assert first_page == (schedule_a,)
+        assert second_page == (schedule_b,)
+        assert second_page[0].enabled is False
+
+
 def test_sqlite_schedule_store_enforces_existing_job_and_plan(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
@@ -74,9 +98,9 @@ def test_sqlite_schedule_store_enforces_existing_job_and_plan(tmp_path: Path) ->
             store.save_schedule(_schedule())
 
 
-def _schedule() -> ScheduleDefinition:
+def _schedule(*, schedule_id: str = "schedule-a") -> ScheduleDefinition:
     return ScheduleDefinition(
-        schedule_id="schedule-a",
+        schedule_id=schedule_id,
         job_id="job-a",
         plan_id="plan-a",
         plan_checksum="a" * 64,

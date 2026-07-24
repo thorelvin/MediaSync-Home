@@ -10,6 +10,7 @@ from mediasync_home.application.trigger_occurrences import TriggerKind
 
 HEX_256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+MAX_SCHEDULE_RECONCILIATION_LIMIT = 500
 
 
 class ScheduleViolation(ValueError):
@@ -56,6 +57,13 @@ class ScheduleStore(Protocol):
 
     def load_schedule(self, schedule_id: str) -> ScheduleDefinition | None: ...
 
+    def list_schedules_for_reconciliation(
+        self,
+        *,
+        limit: int,
+        after_schedule_id: str | None = None,
+    ) -> tuple[ScheduleDefinition, ...]: ...
+
 
 def resolve_schedule_for_trigger(
     *,
@@ -101,6 +109,17 @@ def validate_schedule_definition(schedule: ScheduleDefinition) -> None:
         _identifier(value, field_name)
     if schedule.time_zone_id is not None and not schedule.time_zone_id.strip():
         raise ScheduleViolation("SCHEDULE_TIME_ZONE_ID_MUST_NOT_BE_EMPTY")
+
+
+def validate_schedule_reconciliation_page_request(
+    *,
+    limit: int,
+    after_schedule_id: str | None = None,
+) -> None:
+    if not 1 <= limit <= MAX_SCHEDULE_RECONCILIATION_LIMIT:
+        raise ScheduleViolation("SCHEDULE_RECONCILIATION_LIMIT_OUT_OF_RANGE")
+    if after_schedule_id is not None:
+        _identifier(after_schedule_id, "AFTER_SCHEDULE_ID")
 
 
 def _identifier(value: str, field_name: str) -> None:

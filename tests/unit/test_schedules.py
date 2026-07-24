@@ -8,6 +8,7 @@ from mediasync_home.application.schedules import (
     ScheduleViolation,
     resolve_schedule_for_trigger,
     validate_schedule_definition,
+    validate_schedule_reconciliation_page_request,
 )
 from mediasync_home.application.trigger_occurrences import TriggerKind
 
@@ -64,6 +65,18 @@ def test_schedule_definition_requires_stable_ids_and_hashes() -> None:
         validate_schedule_definition(_schedule(schedule_id="../schedule"))
     with pytest.raises(ScheduleViolation, match="SCHEDULE_INVALID_PLAN_CHECKSUM"):
         validate_schedule_definition(_schedule(plan_checksum="not-a-hash"))
+
+
+def test_schedule_reconciliation_page_request_is_bounded_and_keyset_safe() -> None:
+    validate_schedule_reconciliation_page_request(limit=1)
+    validate_schedule_reconciliation_page_request(limit=500, after_schedule_id="schedule-a")
+
+    with pytest.raises(ScheduleViolation, match="SCHEDULE_RECONCILIATION_LIMIT_OUT_OF_RANGE"):
+        validate_schedule_reconciliation_page_request(limit=0)
+    with pytest.raises(ScheduleViolation, match="SCHEDULE_RECONCILIATION_LIMIT_OUT_OF_RANGE"):
+        validate_schedule_reconciliation_page_request(limit=501)
+    with pytest.raises(ScheduleViolation, match="SCHEDULE_INVALID_AFTER_SCHEDULE_ID"):
+        validate_schedule_reconciliation_page_request(limit=1, after_schedule_id="../schedule")
 
 
 def _schedule(
