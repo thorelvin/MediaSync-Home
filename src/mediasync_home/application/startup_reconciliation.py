@@ -8,6 +8,13 @@ from mediasync_home.application.command_receipts import (
     CommandReceiptStartupReconciliationRequest,
     CommandReceiptStartupReconciliationStore,
 )
+from mediasync_home.application.external_resources import (
+    MAX_EXTERNAL_RESOURCE_STARTUP_RECONCILIATION_LIMIT,
+    ExternalResourceStartupReconciliationReport,
+    ExternalResourceStartupReconciliationRequest,
+    ExternalResourceStateStore,
+    ExternalResourceType,
+)
 from mediasync_home.application.catalog_handoff import FinalFileCatalogHandoffStore
 from mediasync_home.application.outbox import (
     MAX_OUTBOX_STARTUP_RECONCILIATION_LIMIT,
@@ -45,7 +52,9 @@ class EngineHostStartupReconciliationRequest:
     outbox_limit: int = MAX_OUTBOX_STARTUP_RECONCILIATION_LIMIT
     recovery_operation_limit: int = MAX_RECOVERY_OPERATION_STARTUP_RECONCILIATION_LIMIT
     recovery_resume_limit: int = MAX_RECOVERY_RESUME_STARTUP_LIMIT
+    external_resource_limit: int = MAX_EXTERNAL_RESOURCE_STARTUP_RECONCILIATION_LIMIT
     inactive_outbox_owner_instance_ids: tuple[str, ...] = ()
+    inactive_external_resource_owner_instance_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -53,9 +62,11 @@ class EngineHostStartupReconciliationReport:
     reconciler_instance_id: str
     command_receipts: CommandReceiptStartupReconciliationReport | None
     outbox: OutboxStartupReconciliationReport | None
+    external_resources: ExternalResourceStartupReconciliationReport | None
     recovery_operations: RecoveryOperationStartupReconciliationReport | None
     recovery_resume: RecoveryResumeStartupReport | None
     skipped_outbox_requeue_reason: str | None = None
+    skipped_external_resource_requeue_reason: str | None = None
 
 
 def reconcile_engine_host_after_startup(
@@ -63,6 +74,7 @@ def reconcile_engine_host_after_startup(
     *,
     command_receipts: CommandReceiptStartupReconciliationStore | None = None,
     outbox: OutboxStartupReconciliationStore | None = None,
+    external_resources: ExternalResourceStateStore | None = None,
     recovery_operations: RecoveryOperationStartupReconciliationStore | None = None,
     recovery_resume_operations: RecoveryResumeCatalogHandoffOperationStore | None = None,
     recovery_resume_catalog_handoffs: FinalFileCatalogHandoffStore | None = None,
@@ -93,6 +105,25 @@ def reconcile_engine_host_after_startup(
             )
         else:
             skipped_outbox_requeue_reason = "OUTBOX_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF"
+
+    external_resource_report = None
+    skipped_external_resource_requeue_reason = None
+    if external_resources is not None:
+        if request.inactive_external_resource_owner_instance_ids:
+            external_resource_report = external_resources.requeue_claimed_after_startup(
+                ExternalResourceStartupReconciliationRequest(
+                    reconciler_instance_id=request.reconciler_instance_id,
+                    resource_type=ExternalResourceType.TASK_SCHEDULER,
+                    inactive_owner_instance_ids=(
+                        request.inactive_external_resource_owner_instance_ids
+                    ),
+                    limit=request.external_resource_limit,
+                )
+            )
+        else:
+            skipped_external_resource_requeue_reason = (
+                "EXTERNAL_RESOURCE_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF"
+            )
 
     recovery_report = None
     if recovery_operations is not None:
@@ -129,9 +160,11 @@ def reconcile_engine_host_after_startup(
         reconciler_instance_id=request.reconciler_instance_id,
         command_receipts=command_report,
         outbox=outbox_report,
+        external_resources=external_resource_report,
         recovery_operations=recovery_report,
         recovery_resume=recovery_resume_report,
         skipped_outbox_requeue_reason=skipped_outbox_requeue_reason,
+        skipped_external_resource_requeue_reason=skipped_external_resource_requeue_reason,
     )
 
 
@@ -174,6 +207,14 @@ def validate_engine_host_startup_reconciliation_request(
         raise EngineHostStartupReconciliationViolation(
             "ENGINE_HOST_RECONCILIATION_RECOVERY_RESUME_LIMIT_TOO_LARGE"
         )
+    if request.external_resource_limit < 1:
+        raise EngineHostStartupReconciliationViolation(
+            "ENGINE_HOST_RECONCILIATION_EXTERNAL_RESOURCE_LIMIT_MUST_BE_POSITIVE"
+        )
+    if request.external_resource_limit > MAX_EXTERNAL_RESOURCE_STARTUP_RECONCILIATION_LIMIT:
+        raise EngineHostStartupReconciliationViolation(
+            "ENGINE_HOST_RECONCILIATION_EXTERNAL_RESOURCE_LIMIT_TOO_LARGE"
+        )
 
     owners = set()
     for owner_instance_id in request.inactive_outbox_owner_instance_ids:
@@ -187,6 +228,32 @@ def validate_engine_host_startup_reconciliation_request(
             )
         owners.add(owner_instance_id)
     if len(owners) != len(request.inactive_outbox_owner_instance_ids):
+        raise EngineHostStartupReconciliationViolation(
+            "ENGINE_HOST_RECONCILIATION_OWNERS_MUST_BE_UNIQUE"
+        )
+    _validate_inactive_owner_ids(
+        reconciler_instance_id=request.reconciler_instance_id,
+        inactive_owner_instance_ids=request.inactive_external_resource_owner_instance_ids,
+    )
+
+
+def _validate_inactive_owner_ids(
+    *,
+    reconciler_instance_id: str,
+    inactive_owner_instance_ids: tuple[str, ...],
+) -> None:
+    owners = set()
+    for owner_instance_id in inactive_owner_instance_ids:
+        if not owner_instance_id.strip():
+            raise EngineHostStartupReconciliationViolation(
+                "ENGINE_HOST_RECONCILIATION_REQUIRES_INACTIVE_OWNER_PROOF"
+            )
+        if owner_instance_id == reconciler_instance_id:
+            raise EngineHostStartupReconciliationViolation(
+                "ENGINE_HOST_RECONCILIATION_CANNOT_REQUEUE_CURRENT_OWNER"
+            )
+        owners.add(owner_instance_id)
+    if len(owners) != len(inactive_owner_instance_ids):
         raise EngineHostStartupReconciliationViolation(
             "ENGINE_HOST_RECONCILIATION_OWNERS_MUST_BE_UNIQUE"
         )

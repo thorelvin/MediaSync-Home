@@ -7,12 +7,15 @@ from mediasync_home.application.external_resources import (
     ExternalResourceRecord,
     ExternalResourceState,
     ExternalResourceStateStore,
+    ExternalResourceStartupReconciliationReport,
+    ExternalResourceStartupReconciliationRequest,
     ExternalResourceType,
     ExternalResourceViolation,
     validate_desired_external_resource_state,
     validate_external_resource_blocked,
     validate_external_resource_claim,
     validate_external_resource_completion,
+    validate_external_resource_startup_reconciliation_request,
 )
 
 
@@ -349,6 +352,86 @@ class SqliteExternalResourceStateStore(ExternalResourceStateStore):
                     "EXTERNAL_RESOURCE_VALIDATION_FAILED"
                 ) from exc
             raise SqliteExternalResourceStateStoreError("EXTERNAL_RESOURCE_BLOCK_FAILED") from exc
+
+    def requeue_claimed_after_startup(
+        self,
+        request: ExternalResourceStartupReconciliationRequest,
+    ) -> ExternalResourceStartupReconciliationReport:
+        try:
+            validate_external_resource_startup_reconciliation_request(request)
+            owner_placeholders = ", ".join("?" for _ in request.inactive_owner_instance_ids)
+            self._connection.execute("BEGIN IMMEDIATE")
+            rows = self._connection.execute(
+                f"""
+                SELECT resource_id, claim_generation
+                FROM external_resource_state
+                WHERE resource_type = ?
+                    AND state = 'CLAIMED'
+                    AND claim_owner_instance_id IN ({owner_placeholders})
+                ORDER BY claim_started_utc, resource_id
+                LIMIT ?
+                """,
+                (
+                    request.resource_type.value,
+                    *request.inactive_owner_instance_ids,
+                    request.limit,
+                ),
+            ).fetchall()
+
+            requeued: list[str] = []
+            for row in rows:
+                resource_id = str(row[0])
+                claim_generation = int(row[1])
+                cursor = self._connection.execute(
+                    f"""
+                    UPDATE external_resource_state
+                    SET
+                        state = 'PENDING',
+                        claim_owner_instance_id = NULL,
+                        claim_generation = claim_generation + 1,
+                        claim_token = NULL,
+                        claim_started_utc = NULL,
+                        claim_ttl_ms = NULL,
+                        last_error_code = 'EXTERNAL_RESOURCE_CLAIM_REQUEUED_AFTER_STARTUP',
+                        row_version = row_version + 1
+                    WHERE resource_type = ?
+                        AND resource_id = ?
+                        AND state = 'CLAIMED'
+                        AND claim_generation = ?
+                        AND claim_owner_instance_id IN ({owner_placeholders})
+                    """,
+                    (
+                        request.resource_type.value,
+                        resource_id,
+                        claim_generation,
+                        *request.inactive_owner_instance_ids,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise SqliteExternalResourceStateStoreError(
+                        "EXTERNAL_RESOURCE_RECONCILIATION_CLAIM_CONFLICT"
+                    )
+                requeued.append(resource_id)
+
+            self._connection.execute("COMMIT")
+            return ExternalResourceStartupReconciliationReport(
+                reconciler_instance_id=request.reconciler_instance_id,
+                resource_type=request.resource_type,
+                scanned=len(rows),
+                requeued_resource_ids=tuple(requeued),
+            )
+        except (sqlite3.Error, ExternalResourceViolation, SqliteExternalResourceStateStoreError) as exc:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteExternalResourceStateStoreError):
+                raise
+            if isinstance(exc, ExternalResourceViolation):
+                raise SqliteExternalResourceStateStoreError(
+                    "EXTERNAL_RESOURCE_VALIDATION_FAILED"
+                ) from exc
+            raise SqliteExternalResourceStateStoreError(
+                "EXTERNAL_RESOURCE_RECONCILIATION_FAILED"
+            ) from exc
 
 
 def _record_from_row(row: Sequence[object]) -> ExternalResourceRecord:

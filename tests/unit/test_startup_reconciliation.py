@@ -6,6 +6,11 @@ from mediasync_home.application.command_receipts import (
     CommandReceiptStartupReconciliationReport,
     CommandReceiptStartupReconciliationRequest,
 )
+from mediasync_home.application.external_resources import (
+    ExternalResourceStartupReconciliationReport,
+    ExternalResourceStartupReconciliationRequest,
+    ExternalResourceType,
+)
 from mediasync_home.application.outbox import (
     OutboxStartupReconciliationReport,
     OutboxStartupReconciliationRequest,
@@ -29,6 +34,7 @@ from mediasync_home.application.startup_reconciliation import (
 def test_engine_host_startup_reconciliation_runs_command_receipts_and_outbox() -> None:
     command_receipts = _CommandReceiptReconciler()
     outbox = _OutboxReconciler()
+    external_resources = _ExternalResourceReconciler()
     recovery_operations = _RecoveryOperationReconciler()
 
     report = reconcile_engine_host_after_startup(
@@ -36,11 +42,14 @@ def test_engine_host_startup_reconciliation_runs_command_receipts_and_outbox() -
             reconciler_instance_id="host-b",
             command_receipt_limit=17,
             outbox_limit=19,
+            external_resource_limit=11,
             recovery_operation_limit=23,
             inactive_outbox_owner_instance_ids=("host-a",),
+            inactive_external_resource_owner_instance_ids=("scheduler-a",),
         ),
         command_receipts=command_receipts,
         outbox=outbox,
+        external_resources=external_resources,
         recovery_operations=recovery_operations,
     )
 
@@ -57,11 +66,21 @@ def test_engine_host_startup_reconciliation_runs_command_receipts_and_outbox() -
             limit=19,
         ),
     )
+    assert external_resources.requests == (
+        ExternalResourceStartupReconciliationRequest(
+            reconciler_instance_id="host-b",
+            resource_type=ExternalResourceType.TASK_SCHEDULER,
+            inactive_owner_instance_ids=("scheduler-a",),
+            limit=11,
+        ),
+    )
     assert report.reconciler_instance_id == "host-b"
     assert report.command_receipts is not None
     assert report.command_receipts.rejected_idempotency_keys == ("idempotency-a",)
     assert report.outbox is not None
     assert report.outbox.requeued_message_ids == ("message-a",)
+    assert report.external_resources is not None
+    assert report.external_resources.requeued_resource_ids == ("schedule-a",)
     assert recovery_operations.requests == (
         (RecoveryOperationPhase.PLANNED, 23),
         (RecoveryOperationPhase.SOURCE_VALIDATED, 23),
@@ -86,23 +105,31 @@ def test_engine_host_startup_reconciliation_runs_command_receipts_and_outbox() -
     )
     assert report.recovery_resume is None
     assert report.skipped_outbox_requeue_reason is None
+    assert report.skipped_external_resource_requeue_reason is None
 
 
 def test_engine_host_startup_reconciliation_skips_outbox_without_inactive_owner_proof() -> None:
     outbox = _OutboxReconciler()
+    external_resources = _ExternalResourceReconciler()
 
     report = reconcile_engine_host_after_startup(
         EngineHostStartupReconciliationRequest(reconciler_instance_id="host-b"),
         outbox=outbox,
+        external_resources=external_resources,
     )
 
     assert outbox.requests == ()
+    assert external_resources.requests == ()
     assert report.command_receipts is None
     assert report.outbox is None
+    assert report.external_resources is None
     assert report.recovery_operations is None
     assert report.recovery_resume is None
     assert report.skipped_outbox_requeue_reason == (
         "OUTBOX_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF"
+    )
+    assert report.skipped_external_resource_requeue_reason == (
+        "EXTERNAL_RESOURCE_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF"
     )
 
 
@@ -114,9 +141,11 @@ def test_engine_host_startup_reconciliation_allows_no_optional_stores() -> None:
     assert report.reconciler_instance_id == "host-b"
     assert report.command_receipts is None
     assert report.outbox is None
+    assert report.external_resources is None
     assert report.recovery_operations is None
     assert report.recovery_resume is None
     assert report.skipped_outbox_requeue_reason is None
+    assert report.skipped_external_resource_requeue_reason is None
 
 
 @pytest.mark.parametrize(
@@ -157,6 +186,13 @@ def test_engine_host_startup_reconciliation_allows_no_optional_stores() -> None:
         (
             EngineHostStartupReconciliationRequest(
                 reconciler_instance_id="host-b",
+                external_resource_limit=0,
+            ),
+            "ENGINE_HOST_RECONCILIATION_EXTERNAL_RESOURCE_LIMIT_MUST_BE_POSITIVE",
+        ),
+        (
+            EngineHostStartupReconciliationRequest(
+                reconciler_instance_id="host-b",
                 inactive_outbox_owner_instance_ids=("host-a", "host-a"),
             ),
             "ENGINE_HOST_RECONCILIATION_OWNERS_MUST_BE_UNIQUE",
@@ -167,6 +203,13 @@ def test_engine_host_startup_reconciliation_allows_no_optional_stores() -> None:
                 inactive_outbox_owner_instance_ids=("host-b",),
             ),
             "ENGINE_HOST_RECONCILIATION_CANNOT_REQUEUE_CURRENT_OWNER",
+        ),
+        (
+            EngineHostStartupReconciliationRequest(
+                reconciler_instance_id="host-b",
+                inactive_external_resource_owner_instance_ids=("scheduler-a", "scheduler-a"),
+            ),
+            "ENGINE_HOST_RECONCILIATION_OWNERS_MUST_BE_UNIQUE",
         ),
     ],
 )
@@ -208,6 +251,23 @@ class _OutboxReconciler:
             reconciler_instance_id=request.reconciler_instance_id,
             scanned=1,
             requeued_message_ids=("message-a",),
+        )
+
+
+class _ExternalResourceReconciler:
+    def __init__(self) -> None:
+        self.requests: tuple[ExternalResourceStartupReconciliationRequest, ...] = ()
+
+    def requeue_claimed_after_startup(
+        self,
+        request: ExternalResourceStartupReconciliationRequest,
+    ) -> ExternalResourceStartupReconciliationReport:
+        self.requests = (*self.requests, request)
+        return ExternalResourceStartupReconciliationReport(
+            reconciler_instance_id=request.reconciler_instance_id,
+            resource_type=request.resource_type,
+            scanned=1,
+            requeued_resource_ids=("schedule-a",),
         )
 
 

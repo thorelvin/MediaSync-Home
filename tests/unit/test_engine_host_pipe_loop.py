@@ -478,6 +478,8 @@ def test_engine_host_parser_accepts_optional_state_root_and_inactive_outbox_owne
             "--publish-host-locator",
             "--inactive-outbox-owner-instance-id",
             "host-old",
+            "--inactive-external-resource-owner-instance-id",
+            "scheduler-old",
         ]
     )
 
@@ -485,6 +487,7 @@ def test_engine_host_parser_accepts_optional_state_root_and_inactive_outbox_owne
     assert args.host_mutex_name == "Local\\MediaSyncHome-0B-1234567890abcdef12345678"
     assert args.publish_host_locator is True
     assert args.inactive_outbox_owner_instance_id == ["host-old"]
+    assert args.inactive_external_resource_owner_instance_id == ["scheduler-old"]
 
 
 def test_engine_host_parser_accepts_bounded_task_scheduler_startup_pump(
@@ -526,6 +529,31 @@ def test_engine_host_parser_accepts_bounded_task_scheduler_startup_pump(
     assert args.task_scheduler_claim_token_prefix == "startup-a"
     assert args.task_scheduler_reconciliation_interval_ms == 300
     assert args.task_scheduler_reconciliation_max_interval_ms == 1200
+
+
+def test_engine_host_infers_inactive_scheduler_maintenance_owner_with_mutex(
+    tmp_path: Path,
+) -> None:
+    args = build_parser().parse_args(
+        [
+            "--pipe-name",
+            "pipe-a",
+            "--state-root",
+            str(tmp_path),
+            "--installation-id",
+            "install-a",
+            "--host-mutex-name",
+            "Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+            "--task-scheduler-executable-path",
+            TASK_SCHEDULER_EXECUTABLE,
+            "--task-scheduler-reconciliation-interval-ms",
+            "300",
+        ]
+    )
+
+    assert engine_host_module._inactive_external_resource_owner_instance_ids(args) == (
+        "install-a-task-scheduler-maintenance",
+    )
 
 
 def test_engine_host_runtime_without_state_root_preserves_non_persistent_service() -> None:
@@ -587,6 +615,9 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.startup_reconciliation.recovery_resume.scanned == 0
         assert runtime.startup_reconciliation.skipped_outbox_requeue_reason == (
             "OUTBOX_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF"
+        )
+        assert runtime.startup_reconciliation.skipped_external_resource_requeue_reason == (
+            "EXTERNAL_RESOURCE_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF"
         )
 
         ipc_client = InProcessIpcClient(

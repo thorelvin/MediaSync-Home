@@ -640,6 +640,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="owner instance proven inactive before startup outbox requeue",
     )
     parser.add_argument(
+        "--inactive-external-resource-owner-instance-id",
+        action="append",
+        help="external-resource owner instance proven inactive before startup requeue",
+    )
+    parser.add_argument(
         "--reconcile-task-scheduler-resources",
         action="store_true",
         help="run one bounded Task Scheduler desired-state pump before serving the pipe",
@@ -767,6 +772,9 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
             state_root=args.state_root,
             reconciler_instance_id=args.installation_id,
             inactive_outbox_owner_instance_ids=tuple(args.inactive_outbox_owner_instance_id or ()),
+            inactive_external_resource_owner_instance_ids=(
+                _inactive_external_resource_owner_instance_ids(args)
+            ),
         )
         if args.reconcile_task_scheduler_resources:
             try:
@@ -911,6 +919,7 @@ def build_engine_host_runtime(
     state_root: Path | None = None,
     reconciler_instance_id: str = "local-dev",
     inactive_outbox_owner_instance_ids: tuple[str, ...] = (),
+    inactive_external_resource_owner_instance_ids: tuple[str, ...] = (),
 ) -> EngineHostRuntime:
     if state_root is None:
         return EngineHostRuntime(
@@ -966,9 +975,13 @@ def build_engine_host_runtime(
             EngineHostStartupReconciliationRequest(
                 reconciler_instance_id=reconciler_instance_id,
                 inactive_outbox_owner_instance_ids=inactive_outbox_owner_instance_ids,
+                inactive_external_resource_owner_instance_ids=(
+                    inactive_external_resource_owner_instance_ids
+                ),
             ),
             command_receipts=command_receipts,
             outbox=outbox,
+            external_resources=external_resource_state,
             recovery_operations=recovery_operations,
             recovery_resume_operations=recovery_operations,
             recovery_resume_catalog_handoffs=catalog_handoffs,
@@ -1329,15 +1342,26 @@ def _startup_reconciliation_payload(
             "scanned": report.outbox.scanned,
             "requeued_message_ids": report.outbox.requeued_message_ids,
         }
+    external_resources = None
+    if report.external_resources is not None:
+        external_resources = {
+            "requeued_resource_ids": report.external_resources.requeued_resource_ids,
+            "resource_type": report.external_resources.resource_type.value,
+            "scanned": report.external_resources.scanned,
+        }
     return {
         "reconciler_instance_id": report.reconciler_instance_id,
         "command_receipts": command_receipts,
         "outbox": outbox,
+        "external_resources": external_resources,
         "recovery_operations": _recovery_operations_reconciliation_payload(
             report.recovery_operations
         ),
         "recovery_resume": _recovery_resume_payload(report.recovery_resume),
         "skipped_outbox_requeue_reason": report.skipped_outbox_requeue_reason,
+        "skipped_external_resource_requeue_reason": (
+            report.skipped_external_resource_requeue_reason
+        ),
     }
 
 
@@ -1399,6 +1423,17 @@ def _task_scheduler_resource_pump_payload(
             for finding in report.stage_findings
         ],
     }
+
+
+def _inactive_external_resource_owner_instance_ids(
+    args: argparse.Namespace,
+) -> tuple[str, ...]:
+    owner_ids = list(args.inactive_external_resource_owner_instance_id or ())
+    if args.task_scheduler_reconciliation_interval_ms is not None and args.host_mutex_name:
+        scheduler_owner = f"{args.installation_id}-task-scheduler-maintenance"
+        if scheduler_owner not in owner_ids:
+            owner_ids.append(scheduler_owner)
+    return tuple(owner_ids)
 
 
 def _recovery_operations_reconciliation_payload(
