@@ -165,6 +165,9 @@ def test_sqlite_run_operation_planning_records_recovery_operations(
             assert operation.lease_id == "lease-a"
             assert operation.fencing_token == 1
             assert operation.final_relative_path == "Pictures/A.jpg"
+            assert operation.source_endpoint_id == "source-a"
+            assert operation.source_endpoint_revision_id == "source-rev-a"
+            assert operation.source_relative_path == "Pictures/A.jpg"
             assert _row_count(recovery_connection, "recovery_events") == 1
         finally:
             recovery_connection.close()
@@ -197,6 +200,13 @@ def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
         """
     )
     connection.execute("INSERT INTO endpoints (id) VALUES ('target-a')")
+    connection.execute("INSERT INTO endpoints (id) VALUES ('source-a')")
+    connection.execute(
+        """
+        INSERT INTO endpoint_revisions (endpoint_id, id, display_name, root_uri)
+            VALUES ('source-a', 'source-rev-a', 'Source', 'file:///C:/Source')
+        """
+    )
     connection.execute(
         """
         INSERT INTO endpoint_revisions (endpoint_id, id, display_name, root_uri)
@@ -206,7 +216,19 @@ def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
         INSERT INTO analysis_targets (analysis_id, endpoint_id, endpoint_revision_id)
+            VALUES ('analysis-a', 'source-a', 'source-rev-a')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO analysis_targets (analysis_id, endpoint_id, endpoint_revision_id)
             VALUES ('analysis-a', 'target-a', 'target-rev-a')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO snapshots (id, analysis_id, endpoint_id, endpoint_revision_id)
+            VALUES ('source-snapshot-a', 'analysis-a', 'source-a', 'source-rev-a')
         """
     )
     connection.execute(
@@ -254,7 +276,7 @@ def _sealed_plan() -> SealedPlan:
         analysis_id="analysis-a",
         job_id="job-a",
         job_revision_id="job-rev-a",
-        endpoints=(_target_endpoint(),),
+        endpoints=(_source_endpoint(), _target_endpoint()),
         operations=(
             PlanOperation(
                 operation_id="op-copy",
@@ -269,6 +291,21 @@ def _sealed_plan() -> SealedPlan:
                 risk_level=PlanRiskLevel.LOW,
             ),
         ),
+    )
+
+
+def _source_endpoint() -> PlanEndpoint:
+    return PlanEndpoint(
+        endpoint_id="source-a",
+        endpoint_revision_id="source-rev-a",
+        snapshot_id="source-snapshot-a",
+        role=PlanEndpointRole.SOURCE,
+        target_ordinal=None,
+        capabilities_hash="capabilities-source-a",
+        root_case_context_hash="case-source-a",
+        control_schema_version=1,
+        planned_operations=0,
+        planned_bytes=0,
     )
 
 

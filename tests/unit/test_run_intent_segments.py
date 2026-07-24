@@ -147,6 +147,7 @@ class _FakeRecoveryOperationStore(RunTargetIntentOperationStore):
         intent_segment_id: str | None = None,
         intent_ordinal: int | None = None,
         catalog_handoff_id: str | None = None,
+        operation_metadata: object | None = None,
     ) -> RecoveryOperation | None:
         if operation_id == self.conflict_operation_id:
             return None

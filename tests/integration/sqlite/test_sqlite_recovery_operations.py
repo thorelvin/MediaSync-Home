@@ -19,6 +19,7 @@ from mediasync_home.adapters.sqlite.recovery_operations import (
 from mediasync_home.application.recovery_intents import durable_recovery_intent_segment
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationMetadata,
     RecoveryOperationPhase,
     RecoveryTargetPreconditionKind,
     planned_recovery_operation,
@@ -100,6 +101,41 @@ def test_sqlite_recovery_operation_store_appends_hash_chained_transition_events(
         ]
         assert rows[1][3] == rows[0][4]
         assert rows[2][3] == rows[1][4]
+    finally:
+        connection.close()
+
+
+def test_sqlite_recovery_operation_store_persists_transition_metadata(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _register_resource_lease(connection)
+        store = SqliteRecoveryOperationStore(connection)
+        store.record_planned_operation(_operation(), process_instance_id="host-a")
+
+        updated = store.record_operation_phase_transition(
+            run_id="run-a",
+            operation_id="operation-a",
+            expected_phase=RecoveryOperationPhase.PLANNED,
+            next_phase=RecoveryOperationPhase.SOURCE_VALIDATED,
+            process_instance_id="host-a",
+            payload={"phase": "source"},
+            operation_metadata=RecoveryOperationMetadata(
+                expected_source_fingerprint_json='{"byte_count":5,"content_hash":"'
+                + ("a" * 64)
+                + '"}',
+                source_hash_evidence_kind="SHA256_CURRENT_SOURCE_FILE",
+            ),
+        )
+
+        assert updated is not None
+        assert updated.expected_source_fingerprint_json == (
+            '{"byte_count":5,"content_hash":"' + ("a" * 64) + '"}'
+        )
+        assert updated.source_hash_evidence_kind == "SHA256_CURRENT_SOURCE_FILE"
+        loaded = store.load_operation(run_id="run-a", operation_id="operation-a")
+        assert loaded == updated
     finally:
         connection.close()
 

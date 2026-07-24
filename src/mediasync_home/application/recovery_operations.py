@@ -93,6 +93,22 @@ class RecoveryOperation:
     last_error_code: str | None = None
 
 
+@dataclass(frozen=True)
+class RecoveryOperationMetadata:
+    source_guard_kind: str | None = None
+    source_guard_evidence_hash: str | None = None
+    source_hash_evidence_kind: str | None = None
+    staging_object_id: str | None = None
+    expected_source_fingerprint_json: str | None = None
+    expected_target_fingerprint_json: str | None = None
+    expected_staging_fingerprint_json: str | None = None
+    expected_final_fingerprint_json: str | None = None
+    transfer_state: str | None = None
+    assurance_level: str | None = None
+    staging_durability_state: str | None = None
+    last_error_code: str | None = None
+
+
 class RecoveryOperationStore(Protocol):
     def record_planned_operation(
         self,
@@ -114,6 +130,7 @@ class RecoveryOperationStore(Protocol):
         intent_segment_id: str | None = None,
         intent_ordinal: int | None = None,
         catalog_handoff_id: str | None = None,
+        operation_metadata: RecoveryOperationMetadata | None = None,
     ) -> RecoveryOperation | None: ...
 
     def load_operation(self, *, run_id: str, operation_id: str) -> RecoveryOperation | None: ...

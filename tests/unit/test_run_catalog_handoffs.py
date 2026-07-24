@@ -137,6 +137,7 @@ class _FakeRecoveryOperationStore(RunTargetCatalogHandoffOperationStore):
         intent_segment_id: str | None = None,
         intent_ordinal: int | None = None,
         catalog_handoff_id: str | None = None,
+        operation_metadata: object | None = None,
     ) -> RecoveryOperation | None:
         operation = self.operations.get((run_id, operation_id))
         if operation is None or operation.phase is not expected_phase:

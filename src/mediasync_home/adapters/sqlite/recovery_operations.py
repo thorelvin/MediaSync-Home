@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationMetadata,
     RecoveryOperationPhase,
     RecoveryOperationStore,
     RecoveryTargetPreconditionKind,
@@ -92,6 +93,7 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         intent_segment_id: str | None = None,
         intent_ordinal: int | None = None,
         catalog_handoff_id: str | None = None,
+        operation_metadata: RecoveryOperationMetadata | None = None,
     ) -> RecoveryOperation | None:
         _validate_process_instance_id(process_instance_id)
         validate_recovery_phase_transition(expected_phase, next_phase)
@@ -112,6 +114,7 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                 intent_segment_id=intent_segment_id,
                 intent_ordinal=intent_ordinal,
                 catalog_handoff_id=catalog_handoff_id,
+                operation_metadata=operation_metadata,
             )
             self._require_active_matching_lease(updated)
             if next_phase is RecoveryOperationPhase.COMMIT_INTENT_RECORDED:
@@ -122,9 +125,21 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                 UPDATE recovery_operations
                 SET
                     phase = ?,
+                    source_guard_kind = ?,
+                    source_guard_evidence_hash = ?,
+                    source_hash_evidence_kind = ?,
+                    staging_object_id = ?,
                     intent_segment_id = ?,
                     intent_ordinal = ?,
+                    expected_source_fingerprint_json = ?,
+                    expected_target_fingerprint_json = ?,
+                    expected_staging_fingerprint_json = ?,
+                    expected_final_fingerprint_json = ?,
+                    transfer_state = ?,
+                    assurance_level = ?,
+                    staging_durability_state = ?,
                     catalog_handoff_id = ?,
+                    last_error_code = ?,
                     updated_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 WHERE run_id = ?
                     AND operation_id = ?
@@ -132,9 +147,21 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                 """,
                 (
                     updated.phase.value,
+                    updated.source_guard_kind,
+                    updated.source_guard_evidence_hash,
+                    updated.source_hash_evidence_kind,
+                    updated.staging_object_id,
                     updated.intent_segment_id,
                     updated.intent_ordinal,
+                    updated.expected_source_fingerprint_json,
+                    updated.expected_target_fingerprint_json,
+                    updated.expected_staging_fingerprint_json,
+                    updated.expected_final_fingerprint_json,
+                    updated.transfer_state,
+                    updated.assurance_level,
+                    updated.staging_durability_state,
                     updated.catalog_handoff_id,
+                    updated.last_error_code,
                     run_id,
                     operation_id,
                     expected_phase.value,
@@ -241,6 +268,7 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         intent_segment_id: str | None,
         intent_ordinal: int | None,
         catalog_handoff_id: str | None,
+        operation_metadata: RecoveryOperationMetadata | None,
     ) -> RecoveryOperation:
         if next_phase is RecoveryOperationPhase.COMMIT_INTENT_RECORDED:
             if intent_segment_id is None or intent_ordinal is None:
@@ -269,6 +297,7 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
             if catalog_handoff_id is not None:
                 raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_UNEXPECTED_CATALOG_HANDOFF")
             updated = replace(operation, phase=next_phase)
+        updated = _apply_operation_metadata(updated, operation_metadata)
         validate_recovery_operation(updated)
         return updated
 
@@ -549,6 +578,53 @@ def _operation_from_row(row: sqlite3.Row | tuple[Any, ...]) -> RecoveryOperation
         final_durability_state=None if row[38] is None else str(row[38]),
         catalog_handoff_id=None if row[39] is None else str(row[39]),
         last_error_code=None if row[40] is None else str(row[40]),
+    )
+
+
+def _apply_operation_metadata(
+    operation: RecoveryOperation,
+    metadata: RecoveryOperationMetadata | None,
+) -> RecoveryOperation:
+    if metadata is None:
+        return operation
+    return replace(
+        operation,
+        source_guard_kind=metadata.source_guard_kind
+        if metadata.source_guard_kind is not None
+        else operation.source_guard_kind,
+        source_guard_evidence_hash=metadata.source_guard_evidence_hash
+        if metadata.source_guard_evidence_hash is not None
+        else operation.source_guard_evidence_hash,
+        source_hash_evidence_kind=metadata.source_hash_evidence_kind
+        if metadata.source_hash_evidence_kind is not None
+        else operation.source_hash_evidence_kind,
+        staging_object_id=metadata.staging_object_id
+        if metadata.staging_object_id is not None
+        else operation.staging_object_id,
+        expected_source_fingerprint_json=metadata.expected_source_fingerprint_json
+        if metadata.expected_source_fingerprint_json is not None
+        else operation.expected_source_fingerprint_json,
+        expected_target_fingerprint_json=metadata.expected_target_fingerprint_json
+        if metadata.expected_target_fingerprint_json is not None
+        else operation.expected_target_fingerprint_json,
+        expected_staging_fingerprint_json=metadata.expected_staging_fingerprint_json
+        if metadata.expected_staging_fingerprint_json is not None
+        else operation.expected_staging_fingerprint_json,
+        expected_final_fingerprint_json=metadata.expected_final_fingerprint_json
+        if metadata.expected_final_fingerprint_json is not None
+        else operation.expected_final_fingerprint_json,
+        transfer_state=metadata.transfer_state
+        if metadata.transfer_state is not None
+        else operation.transfer_state,
+        assurance_level=metadata.assurance_level
+        if metadata.assurance_level is not None
+        else operation.assurance_level,
+        staging_durability_state=metadata.staging_durability_state
+        if metadata.staging_durability_state is not None
+        else operation.staging_durability_state,
+        last_error_code=metadata.last_error_code
+        if metadata.last_error_code is not None
+        else operation.last_error_code,
     )
 
 

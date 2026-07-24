@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
+import hashlib
 import sqlite3
-from dataclasses import replace
 from pathlib import Path
 
+from mediasync_home.adapters.staging import LocalFileStagingTransferAdapter
 from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
 from mediasync_home.adapters.sqlite.connection_policy import (
     apply_sqlite_connection_policy,
@@ -17,6 +17,7 @@ from mediasync_home.adapters.sqlite.migrations import (
     catalog_migration_plan,
     recovery_migration_plan,
 )
+from mediasync_home.adapters.sqlite.endpoint_roots import SqliteEndpointRootResolver
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
 from mediasync_home.adapters.sqlite.recovery_intents import SqliteRecoveryIntentSegmentStore
 from mediasync_home.adapters.sqlite.recovery_operations import SqliteRecoveryOperationStore
@@ -39,10 +40,7 @@ from mediasync_home.application.ports import (
     VerifiedStagingArtifact,
 )
 from mediasync_home.application.recovery_operations import (
-    RecoveryOperation,
     RecoveryOperationPhase,
-    RecoveryTargetPreconditionKind,
-    planned_recovery_operation,
 )
 from mediasync_home.application.run_executor import HeldRunTargetLeaseRegistry, RunExecutorPumpStopReason
 from mediasync_home.application.run_executor_cycle import (
@@ -110,10 +108,23 @@ class FixedLiveLease:
 def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
     tmp_path: Path,
 ) -> None:
+    payload = b"x" * 128
+    content_hash = hashlib.sha256(payload).hexdigest()
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    staging_root = tmp_path / "staging"
+    (source_root / "Pictures").mkdir(parents=True)
+    (target_root / "Pictures").mkdir(parents=True)
+    (source_root / "Pictures" / "A.jpg").write_bytes(payload)
+
     catalog_connection = _prepared_catalog_connection(tmp_path)
     recovery_connection = _prepared_recovery_connection(tmp_path)
     try:
-        _insert_plan_parent_rows(catalog_connection)
+        _insert_plan_parent_rows(
+            catalog_connection,
+            source_root=source_root,
+            target_root=target_root,
+        )
         _insert_receipt(catalog_connection)
         plans = SqlitePlanStore(catalog_connection)
         runs = SqliteRunStore(catalog_connection)
@@ -123,6 +134,10 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
         lease = FixedLiveLease()
         registry = HeldRunTargetLeaseRegistry()
         final_commit = _FakeFinalCommitPort()
+        staging = LocalFileStagingTransferAdapter(
+            root_resolver=SqliteEndpointRootResolver(catalog_connection),
+            staging_root=staging_root,
+        )
         plan = _sealed_plan()
         plans.save_sealed_plan(plan)
         start_run_from_sealed_plan(
@@ -135,9 +150,7 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
             runs=runs,
             id_factory=FixedRunIdFactory(),
         )
-        _mark_target_executing(runs=runs, lease=lease, registry=registry)
         _register_resource_lease(recovery_connection)
-        _record_staging_verified_operation(recovery_operations)
 
         outcome = execute_bounded_run_executor_cycle(
             runs=runs,
@@ -148,15 +161,16 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
             intent_segments=intent_segments,
             catalog_handoffs=catalog_handoffs,
             final_commit_port=final_commit,
+            staging_transfer_port=staging,
             process_instance_id="host-a",
-            max_steps=5,
+            max_steps=15,
         )
 
         loaded_run = runs.load_started_run("run-a")
         operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
         handoff = catalog_handoffs.load_final_file_handoff("final-file:run-a:op-a")
         assert outcome.stopped_reason is RunExecutorPumpStopReason.IDLE
-        assert outcome.steps_attempted == 5
+        assert outcome.steps_attempted == 15
         assert outcome.last_step is not None
         assert outcome.last_step.action is RunExecutorCycleAction.IDLE
         assert registry.retained_count == 0
@@ -168,15 +182,19 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
         assert loaded_run.targets[0].completed_bytes == 128
         assert operation is not None
         assert operation.phase is RecoveryOperationPhase.CATALOG_RECORDED
+        assert operation.staging_object_id == "op-a"
         assert operation.intent_segment_id == "run-a-target-0000-intent-000000"
         assert operation.catalog_handoff_id == "final-file:run-a:op-a"
+        assert operation.expected_source_fingerprint_json is not None
+        assert operation.expected_staging_fingerprint_json is not None
+        assert (staging_root / "op-a.payload").read_bytes() == payload
         assert handoff is not None
-        assert handoff.content_hash == "a" * 64
+        assert handoff.content_hash == content_hash
         assert final_commit.calls == (
             VerifiedStagingArtifact(
                 object_id="op-a",
                 relative_path=RelativePath("Pictures/A.jpg"),
-                content_hash="a" * 64,
+                content_hash=content_hash,
             ),
         )
     finally:
@@ -236,7 +254,12 @@ def _mark_target_executing(
     assert started is not None
 
 
-def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
+def _insert_plan_parent_rows(
+    connection: sqlite3.Connection,
+    *,
+    source_root: Path,
+    target_root: Path,
+) -> None:
     connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')")
     connection.execute("INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')")
     connection.execute(
@@ -252,17 +275,38 @@ def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
             VALUES ('analysis-a', 'job-a', 'job-rev-a')
         """
     )
+    connection.execute("INSERT INTO endpoints (id) VALUES ('source-a')")
     connection.execute("INSERT INTO endpoints (id) VALUES ('target-a')")
     connection.execute(
         """
         INSERT INTO endpoint_revisions (endpoint_id, id, display_name, root_uri)
-            VALUES ('target-a', 'target-rev-a', 'USB', 'file:///E:/Backup')
+            VALUES ('source-a', 'source-rev-a', 'Source', ?)
+        """,
+        (source_root.as_uri(),),
+    )
+    connection.execute(
+        """
+        INSERT INTO endpoint_revisions (endpoint_id, id, display_name, root_uri)
+            VALUES ('target-a', 'target-rev-a', 'USB', ?)
+        """,
+        (target_root.as_uri(),),
+    )
+    connection.execute(
+        """
+        INSERT INTO analysis_targets (analysis_id, endpoint_id, endpoint_revision_id)
+            VALUES ('analysis-a', 'source-a', 'source-rev-a')
         """
     )
     connection.execute(
         """
         INSERT INTO analysis_targets (analysis_id, endpoint_id, endpoint_revision_id)
             VALUES ('analysis-a', 'target-a', 'target-rev-a')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO snapshots (id, analysis_id, endpoint_id, endpoint_revision_id)
+            VALUES ('source-snapshot-a', 'analysis-a', 'source-a', 'source-rev-a')
         """
     )
     connection.execute(
@@ -335,7 +379,7 @@ def _sealed_plan() -> SealedPlan:
         analysis_id="analysis-a",
         job_id="job-a",
         job_revision_id="job-rev-a",
-        endpoints=(_target_endpoint(),),
+        endpoints=(_source_endpoint(), _target_endpoint()),
         operations=(
             PlanOperation(
                 operation_id="op-a",
@@ -350,6 +394,21 @@ def _sealed_plan() -> SealedPlan:
                 risk_level=PlanRiskLevel.LOW,
             ),
         ),
+    )
+
+
+def _source_endpoint() -> PlanEndpoint:
+    return PlanEndpoint(
+        endpoint_id="source-a",
+        endpoint_revision_id="source-rev-a",
+        snapshot_id="source-snapshot-a",
+        role=PlanEndpointRole.SOURCE,
+        target_ordinal=None,
+        capabilities_hash="capabilities-source-a",
+        root_case_context_hash="case-source-a",
+        control_schema_version=1,
+        planned_operations=0,
+        planned_bytes=0,
     )
 
 
@@ -383,55 +442,6 @@ def _register_resource_lease(connection: sqlite3.Connection) -> None:
         lease_mode="EXCLUSIVE",
         os_lock_kind="LOCAL_OS_HANDLE",
     ) == 1
-
-
-def _record_staging_verified_operation(store: SqliteRecoveryOperationStore) -> RecoveryOperation:
-    operation = store.record_planned_operation(_operation(), process_instance_id="host-a")
-    for next_phase in (
-        RecoveryOperationPhase.SOURCE_VALIDATED,
-        RecoveryOperationPhase.SOURCE_STABILITY_BOUND,
-        RecoveryOperationPhase.TARGET_PRECONDITION_VALIDATED,
-        RecoveryOperationPhase.STAGING_ALLOCATED,
-        RecoveryOperationPhase.TRANSFERRED,
-        RecoveryOperationPhase.STAGING_DURABLE,
-        RecoveryOperationPhase.STAGING_VERIFIED,
-    ):
-        updated = store.record_operation_phase_transition(
-            run_id=operation.run_id,
-            operation_id=operation.operation_id,
-            expected_phase=operation.phase,
-            next_phase=next_phase,
-            process_instance_id="host-a",
-        )
-        assert updated is not None
-        operation = updated
-    return operation
-
-
-def _operation() -> RecoveryOperation:
-    return replace(
-        planned_recovery_operation(
-            run_id="run-a",
-            run_target_id="run-a-target-0000",
-            operation_id="op-a",
-            target_endpoint_id="target-a",
-            target_endpoint_revision_id="target-rev-a",
-            endpoint_generation=1,
-            owner_installation_id="owner-a",
-            ownership_epoch=1,
-            lease_id="lease-a",
-            lease_resource_key="endpoint:target-a",
-            fencing_token=1,
-            final_relative_path="Pictures/A.jpg",
-            target_precondition_kind=RecoveryTargetPreconditionKind.ABSENT,
-        ),
-        staging_object_id="op-a",
-        expected_staging_fingerprint_json=json.dumps(
-            {"byte_count": 128, "content_hash": "a" * 64},
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-    )
 
 
 class _FakeFinalCommitPort(FinalCommitPort):

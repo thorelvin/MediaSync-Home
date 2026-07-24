@@ -228,6 +228,8 @@ class _FakeRecoveryOperationStore(RecoveryOperationStore):
         payload: Mapping[str, object] | None = None,
         intent_segment_id: str | None = None,
         intent_ordinal: int | None = None,
+        catalog_handoff_id: str | None = None,
+        operation_metadata: object | None = None,
     ) -> RecoveryOperation | None:
         if self._actions is not None:
             self._actions.append(f"transition:{next_phase.value}")
@@ -241,6 +243,7 @@ class _FakeRecoveryOperationStore(RecoveryOperationStore):
             or self.operation.phase is not expected_phase
             or intent_segment_id is not None
             or intent_ordinal is not None
+            or catalog_handoff_id is not None
             or process_instance_id != "host-a"
         ):
             return None

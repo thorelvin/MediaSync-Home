@@ -57,6 +57,9 @@ def test_plan_run_target_recovery_operations_records_mutating_plan_operations() 
     assert operation.fencing_token == 42
     assert operation.final_relative_path == "Pictures/A.jpg"
     assert operation.target_precondition_kind is RecoveryTargetPreconditionKind.ABSENT
+    assert operation.source_endpoint_id == "source-a"
+    assert operation.source_endpoint_revision_id == "source-rev-a"
+    assert operation.source_relative_path == "Pictures/A.jpg"
     assert recovery_operations.payloads == (
         {
             "operation_type": "COPY_NEW",
@@ -275,6 +278,7 @@ class _FakeRecoveryOperationStore(RecoveryOperationStore):
         intent_segment_id: str | None = None,
         intent_ordinal: int | None = None,
         catalog_handoff_id: str | None = None,
+        operation_metadata: object | None = None,
     ) -> RecoveryOperation | None:
         return None
 
@@ -325,7 +329,7 @@ def _sealed_plan() -> SealedPlan:
         analysis_id="analysis-a",
         job_id="job-a",
         job_revision_id="job-rev-a",
-        endpoints=(_target_endpoint(),),
+        endpoints=(_source_endpoint(), _target_endpoint()),
         operations=(
             PlanOperation(
                 operation_id="op-copy",
@@ -372,6 +376,21 @@ def _target_endpoint() -> PlanEndpoint:
     )
 
 
+def _source_endpoint() -> PlanEndpoint:
+    return PlanEndpoint(
+        endpoint_id="source-a",
+        endpoint_revision_id="source-rev-a",
+        snapshot_id="source-snapshot-a",
+        role=PlanEndpointRole.SOURCE,
+        target_ordinal=None,
+        capabilities_hash="capabilities-source-a",
+        root_case_context_hash="case-source-a",
+        control_schema_version=1,
+        planned_operations=0,
+        planned_bytes=0,
+    )
+
+
 def _multi_target_plan() -> SealedPlan:
     return seal_plan(
         plan_id="plan-a",
@@ -379,6 +398,7 @@ def _multi_target_plan() -> SealedPlan:
         job_id="job-a",
         job_revision_id="job-rev-a",
         endpoints=(
+            _source_endpoint(),
             _target_endpoint(),
             replace(
                 _target_endpoint(),

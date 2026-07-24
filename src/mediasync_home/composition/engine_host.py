@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from mediasync_home.adapters.endpoint_leases import LocalResolvingEndpointLeaseAuthority
 from mediasync_home.adapters.runtime_policy import current_process_runtime_policy
+from mediasync_home.adapters.staging import LocalFileStagingTransferAdapter
 from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
 from mediasync_home.adapters.sqlite.command_receipts import SqliteCommandReceiptStore
 from mediasync_home.adapters.sqlite.connection_policy import (
@@ -54,6 +55,7 @@ from mediasync_home.application.run_operation_planning import (
     RunTargetOperationPlanningOutcome,
     plan_run_target_recovery_operations,
 )
+from mediasync_home.application.run_staging import RunTargetStagingPort
 from mediasync_home.application.run_intent_segments import (
     RunTargetIntentOperationStore,
     RunTargetIntentSegmentOutcome,
@@ -121,6 +123,7 @@ class EngineHostRuntime:
     run_executor_recovery_operation_store: RunTargetIntentOperationStore | None = None
     run_executor_recovery_intent_segment_store: RecoveryIntentSegmentStore | None = None
     run_executor_catalog_handoff_store: FinalFileCatalogHandoffStore | None = None
+    run_executor_staging_transfer_port: RunTargetStagingPort | None = None
     run_executor_process_instance_id: str | None = None
     catalog_connection: sqlite3.Connection | None = None
     recovery_connection: sqlite3.Connection | None = None
@@ -228,6 +231,7 @@ class EngineHostRuntime:
         *,
         max_steps: int,
         final_commit_port: FinalCommitPort | None = None,
+        staging_transfer_port: RunTargetStagingPort | None = None,
     ) -> RunExecutorCyclePumpOutcome:
         if (
             self.run_executor_queue_store is None
@@ -251,6 +255,7 @@ class EngineHostRuntime:
             process_instance_id=self.run_executor_process_instance_id,
             max_steps=max_steps,
             final_commit_port=final_commit_port,
+            staging_transfer_port=staging_transfer_port or self.run_executor_staging_transfer_port,
         )
 
     def close(self) -> None:
@@ -430,9 +435,13 @@ def build_engine_host_runtime(
         resource_leases = SqliteResourceLeaseStore(recovery_connection)
         recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
         recovery_intent_segments = SqliteRecoveryIntentSegmentStore(recovery_connection)
+        endpoint_root_resolver = SqliteEndpointRootResolver(catalog_connection)
         run_executor_lease_authority = LocalResolvingEndpointLeaseAuthority(
-            root_resolver=SqliteEndpointRootResolver(catalog_connection),
+            root_resolver=endpoint_root_resolver,
             resource_lease_store=resource_leases,
+        )
+        run_executor_staging_transfer_port = LocalFileStagingTransferAdapter(
+            root_resolver=endpoint_root_resolver,
         )
         run_executor_lease_registry = HeldRunTargetLeaseRegistry()
         startup_reconciliation = reconcile_engine_host_after_startup(
@@ -481,6 +490,7 @@ def build_engine_host_runtime(
         run_executor_recovery_operation_store=recovery_operations,
         run_executor_recovery_intent_segment_store=recovery_intent_segments,
         run_executor_catalog_handoff_store=catalog_handoffs,
+        run_executor_staging_transfer_port=run_executor_staging_transfer_port,
         run_executor_process_instance_id=reconciler_instance_id,
         catalog_connection=catalog_connection,
         recovery_connection=recovery_connection,

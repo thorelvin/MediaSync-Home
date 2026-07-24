@@ -36,6 +36,15 @@ from mediasync_home.application.run_executor_cycle import (
     execute_bounded_run_executor_cycle,
     execute_one_run_executor_cycle,
 )
+from mediasync_home.application.run_staging import (
+    SourceStabilityEvidence,
+    SourceValidationEvidence,
+    StagingAllocation,
+    StagingDurabilityEvidence,
+    StagingTransferEvidence,
+    StagingVerificationEvidence,
+    TargetPreconditionEvidence,
+)
 from mediasync_home.application.runs import (
     EndpointLeaseAttempt,
     EndpointLeaseAuthority,
@@ -49,7 +58,45 @@ from mediasync_home.application.runs import (
 from mediasync_home.domain.capabilities import MutationPermit, _issue_mutation_permit
 
 
-def test_bounded_executor_cycle_progresses_queued_target_until_staging_gap() -> None:
+def test_bounded_executor_cycle_progresses_queued_target_through_staging() -> None:
+    plan = _sealed_plan()
+    runs = _InMemoryRunStore(_run(state=RunState.QUEUED, plan=plan))
+    lease = _FakeLiveLease()
+    registry = HeldRunTargetLeaseRegistry()
+    recovery_operations = _FakeRecoveryOperationStore(())
+
+    outcome = execute_bounded_run_executor_cycle(
+        runs=runs,
+        leases=_FakeLeaseAuthority(lease),
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=recovery_operations,
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        staging_transfer_port=_FakeStagingPort(),
+        process_instance_id="host-a",
+        max_steps=10,
+    )
+
+    loaded = runs.load_started_run("run-a")
+    assert outcome.steps_attempted == 10
+    assert outcome.stopped_reason is RunExecutorPumpStopReason.STEP_LIMIT_REACHED
+    assert outcome.last_step is not None
+    assert outcome.last_step.action is RunExecutorCycleAction.STAGING_ADVANCED
+    assert outcome.validation_codes == ()
+    assert registry.retained_count == 1
+    assert loaded is not None
+    assert loaded.state is RunState.EXECUTING
+    assert loaded.targets[0].state is RunTargetState.EXECUTING
+    operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    assert operation is not None
+    assert operation.phase is RecoveryOperationPhase.STAGING_VERIFIED
+    assert operation.staging_object_id == "op-a"
+    assert operation.expected_source_fingerprint_json == _fingerprint_json()
+    assert operation.expected_staging_fingerprint_json == _fingerprint_json()
+
+
+def test_bounded_executor_cycle_reports_missing_staging_port_after_planning() -> None:
     plan = _sealed_plan()
     runs = _InMemoryRunStore(_run(state=RunState.QUEUED, plan=plan))
     lease = _FakeLiveLease()
@@ -68,16 +115,10 @@ def test_bounded_executor_cycle_progresses_queued_target_until_staging_gap() -> 
         max_steps=4,
     )
 
-    loaded = runs.load_started_run("run-a")
-    assert outcome.steps_attempted == 4
     assert outcome.stopped_reason is RunExecutorPumpStopReason.BLOCKED
     assert outcome.last_step is not None
     assert outcome.last_step.action is RunExecutorCycleAction.WAITING_FOR_STAGING
-    assert outcome.validation_codes == ("RUN_EXECUTOR_STAGING_STEP_NOT_IMPLEMENTED",)
-    assert registry.retained_count == 1
-    assert loaded is not None
-    assert loaded.state is RunState.EXECUTING
-    assert loaded.targets[0].state is RunTargetState.EXECUTING
+    assert outcome.validation_codes == ("RUN_EXECUTOR_STAGING_PORT_NOT_CONFIGURED",)
     operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
     assert operation is not None
     assert operation.phase is RecoveryOperationPhase.PLANNED
@@ -303,16 +344,37 @@ class _FakeRecoveryOperationStore(RunExecutorCycleRecoveryOperationStore):
         intent_segment_id: str | None = None,
         intent_ordinal: int | None = None,
         catalog_handoff_id: str | None = None,
+        operation_metadata: object | None = None,
     ) -> RecoveryOperation | None:
         operation = self.operations.get((run_id, operation_id))
         if operation is None or operation.phase is not expected_phase:
             return None
+        metadata_updates: dict[str, object] = {}
+        if operation_metadata is not None:
+            for field_name in (
+                "source_guard_kind",
+                "source_guard_evidence_hash",
+                "source_hash_evidence_kind",
+                "staging_object_id",
+                "expected_source_fingerprint_json",
+                "expected_target_fingerprint_json",
+                "expected_staging_fingerprint_json",
+                "expected_final_fingerprint_json",
+                "transfer_state",
+                "assurance_level",
+                "staging_durability_state",
+                "last_error_code",
+            ):
+                value = getattr(operation_metadata, field_name, None)
+                if value is not None:
+                    metadata_updates[field_name] = value
         updated = replace(
             operation,
             phase=next_phase,
             intent_segment_id=intent_segment_id or operation.intent_segment_id,
             intent_ordinal=operation.intent_ordinal if intent_ordinal is None else intent_ordinal,
             catalog_handoff_id=catalog_handoff_id or operation.catalog_handoff_id,
+            **metadata_updates,
         )
         self.operations[(run_id, operation_id)] = updated
         return updated
@@ -348,6 +410,43 @@ class _SinglePlanStore(PlanStore):
         if self.plan.plan_id == plan_id:
             return self.plan
         return None
+
+
+class _FakeStagingPort:
+    def validate_source_file(self, operation: RecoveryOperation) -> SourceValidationEvidence:
+        return SourceValidationEvidence(
+            fingerprint_json=_fingerprint_json(),
+            hash_evidence_kind="SHA256_CURRENT_SOURCE_FILE",
+        )
+
+    def bind_source_stability(self, operation: RecoveryOperation) -> SourceStabilityEvidence:
+        return SourceStabilityEvidence(
+            guard_kind="POST_TRANSFER_HASH_ONLY",
+            guard_evidence_hash="a" * 64,
+        )
+
+    def validate_target_precondition(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> TargetPreconditionEvidence:
+        return TargetPreconditionEvidence(fingerprint_json='{"kind":"ABSENT"}')
+
+    def allocate_staging_object(self, operation: RecoveryOperation) -> StagingAllocation:
+        return StagingAllocation(staging_object_id=operation.operation_id)
+
+    def transfer_to_staging(self, operation: RecoveryOperation) -> StagingTransferEvidence:
+        return StagingTransferEvidence(transfer_state="TRANSFERRED_TO_STAGING")
+
+    def ensure_staging_durable(self, operation: RecoveryOperation) -> StagingDurabilityEvidence:
+        return StagingDurabilityEvidence(durability_state="FILE_FSYNC_COMPLETED")
+
+    def verify_staging_artifact(self, operation: RecoveryOperation) -> StagingVerificationEvidence:
+        return StagingVerificationEvidence(
+            fingerprint_json=_fingerprint_json(),
+            final_fingerprint_json=_fingerprint_json(),
+            assurance_level="STAGING_HASH_MATCHES_POST_TRANSFER_SOURCE_HASH",
+        )
 
 
 class _FakeLeaseAuthority(EndpointLeaseAuthority):
@@ -487,7 +586,7 @@ def _sealed_plan() -> SealedPlan:
         analysis_id="analysis-a",
         job_id="job-a",
         job_revision_id="job-rev-a",
-        endpoints=(_target_endpoint(),),
+        endpoints=(_source_endpoint(), _target_endpoint()),
         operations=(
             PlanOperation(
                 operation_id="op-a",
@@ -502,6 +601,21 @@ def _sealed_plan() -> SealedPlan:
                 risk_level=PlanRiskLevel.LOW,
             ),
         ),
+    )
+
+
+def _source_endpoint() -> PlanEndpoint:
+    return PlanEndpoint(
+        endpoint_id="source-a",
+        endpoint_revision_id="source-rev-a",
+        snapshot_id="source-snapshot-a",
+        role=PlanEndpointRole.SOURCE,
+        target_ordinal=None,
+        capabilities_hash="capabilities-source-a",
+        root_case_context_hash="case-source-a",
+        control_schema_version=1,
+        planned_operations=0,
+        planned_bytes=0,
     )
 
 
@@ -520,3 +634,7 @@ def _target_endpoint() -> PlanEndpoint:
         planned_operations=1,
         planned_bytes=128,
     )
+
+
+def _fingerprint_json() -> str:
+    return '{"byte_count":128,"content_hash":"' + ("a" * 64) + '"}'

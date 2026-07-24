@@ -270,6 +270,7 @@ class _FakeRecoveryOperationStore(RecoveryOperationStore):
         intent_segment_id: str | None = None,
         intent_ordinal: int | None = None,
         catalog_handoff_id: str | None = None,
+        operation_metadata: object | None = None,
     ) -> RecoveryOperation | None:
         if self._actions is not None:
             self._actions.append(f"transition:{next_phase.value}")

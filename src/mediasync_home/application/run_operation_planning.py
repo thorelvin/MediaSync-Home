@@ -7,6 +7,7 @@ from mediasync_home.application.plans import (
     PlanEndpoint,
     PlanEndpointRole,
     PlanOperation,
+    PlanOperationType,
     PlanStore,
     SealedPlan,
     verify_plan_checksum,
@@ -105,6 +106,13 @@ def plan_run_target_recovery_operations(
             validation_code="PLAN_OPERATION_PLANNING_REQUIRES_SINGLE_WRITABLE_TARGET",
             next_action="Add explicit operation-to-target bindings before executing multi-target plans.",
         )
+    source_endpoint = _single_source_endpoint(plan)
+    if _has_copy_operation(plan) and source_endpoint is None:
+        return _failed(
+            permit=permit,
+            validation_code="PLAN_OPERATION_PLANNING_REQUIRES_SINGLE_SOURCE",
+            next_action="Add explicit source endpoint binding before executing copy operations.",
+        )
     endpoint = _target_endpoint(plan=plan, target=target)
     if endpoint is None:
         return _failed(
@@ -134,6 +142,7 @@ def plan_run_target_recovery_operations(
             target=target,
             endpoint=endpoint,
             operation=operation,
+            source_endpoint=source_endpoint,
         )
         try:
             recorded = recovery_operations.record_planned_operation(
@@ -178,11 +187,21 @@ def _planned_recovery_operation(
     target: StartedRunTarget,
     endpoint: PlanEndpoint,
     operation: PlanOperation,
+    source_endpoint: PlanEndpoint | None,
 ) -> RecoveryOperation:
     if endpoint.control_schema_version is None:
         raise RunTargetOperationPlanningError("PLAN_TARGET_ENDPOINT_REQUIRES_GENERATION")
     if operation.target_relative_path is None:
         raise RunTargetOperationPlanningError("PLAN_OPERATION_MISSING_TARGET_PATH")
+    source_endpoint_id: str | None = None
+    source_endpoint_revision_id: str | None = None
+    source_relative_path: str | None = None
+    if operation.operation_type is PlanOperationType.COPY_NEW:
+        if source_endpoint is None:
+            raise RunTargetOperationPlanningError("PLAN_OPERATION_PLANNING_REQUIRES_SINGLE_SOURCE")
+        source_endpoint_id = source_endpoint.endpoint_id
+        source_endpoint_revision_id = source_endpoint.endpoint_revision_id
+        source_relative_path = operation.target_relative_path
     return planned_recovery_operation(
         run_id=permit.run_id,
         run_target_id=permit.run_target_id,
@@ -199,6 +218,9 @@ def _planned_recovery_operation(
         target_precondition_kind=RecoveryTargetPreconditionKind(
             operation.target_precondition_kind.value
         ),
+        source_endpoint_id=source_endpoint_id,
+        source_endpoint_revision_id=source_endpoint_revision_id,
+        source_relative_path=source_relative_path,
     )
 
 
@@ -249,6 +271,17 @@ def _writable_target_endpoints(plan: SealedPlan) -> tuple[PlanEndpoint, ...]:
         for endpoint in plan.endpoints
         if endpoint.role is PlanEndpointRole.TARGET_WRITABLE
     )
+
+
+def _single_source_endpoint(plan: SealedPlan) -> PlanEndpoint | None:
+    sources = tuple(endpoint for endpoint in plan.endpoints if endpoint.role is PlanEndpointRole.SOURCE)
+    if len(sources) != 1:
+        return None
+    return sources[0]
+
+
+def _has_copy_operation(plan: SealedPlan) -> bool:
+    return any(operation.operation_type is PlanOperationType.COPY_NEW for operation in plan.operations)
 
 
 def _failed(

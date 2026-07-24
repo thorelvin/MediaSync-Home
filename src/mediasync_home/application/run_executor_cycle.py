@@ -27,6 +27,10 @@ from mediasync_home.application.run_executor import (
 from mediasync_home.application.run_final_commits import commit_next_run_target_verified_artifact
 from mediasync_home.application.run_intent_segments import publish_run_target_recovery_intent_segment
 from mediasync_home.application.run_operation_planning import plan_run_target_recovery_operations
+from mediasync_home.application.run_staging import (
+    RunTargetStagingPort,
+    execute_next_run_target_staging_step,
+)
 from mediasync_home.application.runs import (
     EndpointLeaseAuthority,
     RunState,
@@ -45,6 +49,7 @@ class RunExecutorCycleAction(str, Enum):
     FINAL_COMMITTED = "FINAL_COMMITTED"
     CATALOG_HANDOFF_RECORDED = "CATALOG_HANDOFF_RECORDED"
     TARGET_COMPLETED = "TARGET_COMPLETED"
+    STAGING_ADVANCED = "STAGING_ADVANCED"
     WAITING_FOR_STAGING = "WAITING_FOR_STAGING"
     IDLE = "IDLE"
     BLOCKED = "BLOCKED"
@@ -104,6 +109,7 @@ def execute_bounded_run_executor_cycle(
     process_instance_id: str,
     max_steps: int,
     final_commit_port: FinalCommitPort | None = None,
+    staging_transfer_port: RunTargetStagingPort | None = None,
 ) -> RunExecutorCyclePumpOutcome:
     if max_steps < 1:
         raise RunExecutorViolation("RUN_EXECUTOR_CYCLE_REQUIRES_POSITIVE_STEP_LIMIT")
@@ -122,6 +128,7 @@ def execute_bounded_run_executor_cycle(
             catalog_handoffs=catalog_handoffs,
             process_instance_id=process_instance_id,
             final_commit_port=final_commit_port,
+            staging_transfer_port=staging_transfer_port,
         )
         if last_step.idle:
             return RunExecutorCyclePumpOutcome(
@@ -160,6 +167,7 @@ def execute_one_run_executor_cycle(
     catalog_handoffs: FinalFileCatalogHandoffStore,
     process_instance_id: str,
     final_commit_port: FinalCommitPort | None = None,
+    staging_transfer_port: RunTargetStagingPort | None = None,
 ) -> RunExecutorCycleOutcome:
     retained = _next_retained_executing_target(
         runs=runs,
@@ -175,6 +183,7 @@ def execute_one_run_executor_cycle(
             catalog_handoffs=catalog_handoffs,
             process_instance_id=process_instance_id,
             final_commit_port=final_commit_port,
+            staging_transfer_port=staging_transfer_port,
             retained=retained,
         )
 
@@ -251,6 +260,7 @@ def _advance_retained_target(
     catalog_handoffs: FinalFileCatalogHandoffStore,
     process_instance_id: str,
     final_commit_port: FinalCommitPort | None,
+    staging_transfer_port: RunTargetStagingPort | None,
     retained: _RetainedTarget,
 ) -> RunExecutorCycleOutcome:
     permit = retained.permit
@@ -419,6 +429,41 @@ def _advance_retained_target(
             next_action=completion_outcome.next_action,
         )
 
+    if _has_early_operation(
+        recovery_operations=recovery_operations,
+        permit=permit,
+        target=target,
+    ):
+        if staging_transfer_port is None:
+            return RunExecutorCycleOutcome(
+                action=RunExecutorCycleAction.WAITING_FOR_STAGING,
+                advanced=False,
+                idle=False,
+                run_id=permit.run_id,
+                run_target_id=permit.run_target_id,
+                validation_codes=("RUN_EXECUTOR_STAGING_PORT_NOT_CONFIGURED",),
+                next_action="Configure a staging transfer port before executing planned operations.",
+            )
+        staging_outcome = execute_next_run_target_staging_step(
+            permit=permit,
+            recovery_operations=recovery_operations,
+            staging_port=staging_transfer_port,
+            process_instance_id=process_instance_id,
+        )
+        if staging_outcome.advanced:
+            return _advanced(
+                action=RunExecutorCycleAction.STAGING_ADVANCED,
+                run_id=staging_outcome.run_id,
+                run_target_id=staging_outcome.run_target_id,
+                next_action=staging_outcome.next_action,
+            )
+        return _blocked(
+            run_id=staging_outcome.run_id,
+            run_target_id=staging_outcome.run_target_id,
+            validation_codes=staging_outcome.validation_codes,
+            next_action=staging_outcome.next_action,
+        )
+
     return RunExecutorCycleOutcome(
         action=RunExecutorCycleAction.WAITING_FOR_STAGING,
         advanced=False,
@@ -504,6 +549,23 @@ def _has_any_operation(
         RecoveryOperationPhase.FINAL_VERIFIED,
         RecoveryOperationPhase.CATALOG_RECORDED,
     ):
+        if _has_phase(
+            recovery_operations=recovery_operations,
+            permit=permit,
+            phase=phase,
+            limit=target.planned_operations + 1,
+        ):
+            return True
+    return False
+
+
+def _has_early_operation(
+    *,
+    recovery_operations: RunExecutorCycleRecoveryOperationStore,
+    permit: MutationPermit,
+    target: StartedRunTarget,
+) -> bool:
+    for phase in EARLY_OPERATION_PHASES:
         if _has_phase(
             recovery_operations=recovery_operations,
             permit=permit,
