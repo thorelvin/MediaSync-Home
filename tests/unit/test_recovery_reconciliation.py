@@ -45,8 +45,8 @@ def test_recovery_operation_startup_reconciliation_classifies_non_terminal_opera
     assert report.requires_recovery_mode is True
     assert report.manual_decision_operation_ids == ()
     assert [(finding.operation_id, finding.classification) for finding in report.findings] == [
-        ("op-planned", RecoveryOperationStartupClassification.DISCARD_UNVERIFIED_INBOX),
-        ("op-staged", RecoveryOperationStartupClassification.CONTINUE_FROM_VERIFIED_OBJECT),
+        ("op-planned", RecoveryOperationStartupClassification.REACQUIRE_AND_REBIND_PRE_COMMIT),
+        ("op-staged", RecoveryOperationStartupClassification.REACQUIRE_AND_REBIND_PRE_COMMIT),
         ("op-applied", RecoveryOperationStartupClassification.REVERIFY_FINAL),
         ("op-final", RecoveryOperationStartupClassification.FILESYSTEM_APPLIED_NEEDS_CATALOG),
         ("op-catalog", RecoveryOperationStartupClassification.CATALOG_RECORDED_NEEDS_RUN_COMPLETION),

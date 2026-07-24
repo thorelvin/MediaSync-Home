@@ -119,7 +119,7 @@ def test_sqlite_engine_host_startup_reconciliation_coordinates_stores(
             assert report.recovery_operations.scanned == 1
             assert report.recovery_operations.findings[0].operation_id == "op-a"
             assert report.recovery_operations.findings[0].classification is (
-                RecoveryOperationStartupClassification.DISCARD_UNVERIFIED_INBOX
+                RecoveryOperationStartupClassification.REACQUIRE_AND_REBIND_PRE_COMMIT
             )
             assert loaded_early is not None
             assert loaded_early.state is CommandReceiptState.REJECTED

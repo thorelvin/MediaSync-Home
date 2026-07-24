@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Protocol
 
 from mediasync_home.application.recovery_operations import (
+    PRE_COMMIT_LEASE_REBIND_PHASES,
     RecoveryOperation,
     RecoveryOperationPhase,
     TERMINAL_PHASES,
@@ -20,6 +21,7 @@ class RecoveryOperationReconciliationViolation(ValueError):
 
 class RecoveryOperationStartupClassification(str, Enum):
     DISCARD_UNVERIFIED_INBOX = "DISCARD_UNVERIFIED_INBOX"
+    REACQUIRE_AND_REBIND_PRE_COMMIT = "REACQUIRE_AND_REBIND_PRE_COMMIT"
     CONTINUE_FROM_VERIFIED_OBJECT = "CONTINUE_FROM_VERIFIED_OBJECT"
     REVERIFY_FINAL = "REVERIFY_FINAL"
     FILESYSTEM_APPLIED_NEEDS_CATALOG = "FILESYSTEM_APPLIED_NEEDS_CATALOG"
@@ -137,18 +139,9 @@ def _finding_for_operation(operation: RecoveryOperation) -> RecoveryOperationSta
 def _classification_for_phase(
     phase: RecoveryOperationPhase,
 ) -> RecoveryOperationStartupClassification:
+    if phase in PRE_COMMIT_LEASE_REBIND_PHASES:
+        return RecoveryOperationStartupClassification.REACQUIRE_AND_REBIND_PRE_COMMIT
     if phase in {
-        RecoveryOperationPhase.PLANNED,
-        RecoveryOperationPhase.SOURCE_VALIDATED,
-        RecoveryOperationPhase.SOURCE_STABILITY_BOUND,
-        RecoveryOperationPhase.TARGET_PRECONDITION_VALIDATED,
-        RecoveryOperationPhase.STAGING_ALLOCATED,
-        RecoveryOperationPhase.TRANSFERRED,
-        RecoveryOperationPhase.STAGING_DURABLE,
-    }:
-        return RecoveryOperationStartupClassification.DISCARD_UNVERIFIED_INBOX
-    if phase in {
-        RecoveryOperationPhase.STAGING_VERIFIED,
         RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
         RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
     }:
@@ -170,6 +163,8 @@ def _next_action_for_classification(
 ) -> str:
     if classification is RecoveryOperationStartupClassification.DISCARD_UNVERIFIED_INBOX:
         return "Reacquire the endpoint lease, discard unverified staging evidence and rerun staging."
+    if classification is RecoveryOperationStartupClassification.REACQUIRE_AND_REBIND_PRE_COMMIT:
+        return "Reacquire the endpoint lease and rebind pre-commit recovery operations before continuing."
     if classification is RecoveryOperationStartupClassification.CONTINUE_FROM_VERIFIED_OBJECT:
         return "Reacquire the endpoint lease and reverify the staged object before commit."
     if classification is RecoveryOperationStartupClassification.REVERIFY_FINAL:

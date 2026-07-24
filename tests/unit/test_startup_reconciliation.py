@@ -82,7 +82,7 @@ def test_engine_host_startup_reconciliation_runs_command_receipts_and_outbox() -
     assert report.recovery_operations is not None
     assert report.recovery_operations.scanned == 1
     assert report.recovery_operations.findings[0].classification is (
-        RecoveryOperationStartupClassification.CONTINUE_FROM_VERIFIED_OBJECT
+        RecoveryOperationStartupClassification.REACQUIRE_AND_REBIND_PRE_COMMIT
     )
     assert report.recovery_resume is None
     assert report.skipped_outbox_requeue_reason is None
