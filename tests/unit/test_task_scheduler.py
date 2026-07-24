@@ -9,10 +9,12 @@ from mediasync_home.application.task_scheduler import (
     ObservedTaskSchedulerDefinition,
     TaskSchedulerDefinitionViolation,
     TaskSchedulerReconciliationAction,
+    TaskSchedulerReconciliationRequest,
     bind_same_user_task_scheduler_definition_hash,
     build_same_user_task_scheduler_definition,
     classify_task_scheduler_reconciliation,
     parse_trigger_task_arguments,
+    reconcile_task_scheduler_page,
 )
 from mediasync_home.application.trigger_occurrences import TriggerKind
 
@@ -196,9 +198,142 @@ def test_trigger_task_argument_parser_rejects_extra_or_malformed_arguments() -> 
     )
 
 
-def _bound_schedule(*, configuration_json: str = '{"kind":"daily"}') -> ScheduleDefinition:
+def test_task_scheduler_reconciliation_page_applies_safe_actions_and_blocks_drift() -> None:
+    missing = _bound_schedule(schedule_id="schedule-a")
+    drifted = _bound_schedule(schedule_id="schedule-b")
+    blocked = _bound_schedule(schedule_id="schedule-c")
+    drifted_definition = build_same_user_task_scheduler_definition(
+        drifted,
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    blocked_definition = build_same_user_task_scheduler_definition(
+        blocked,
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    registry = _Registry(
+        _observed(drifted_definition, enabled=False),
+        _observed(blocked_definition, executable_path=r"C:\Other\App.exe"),
+    )
+
+    report = reconcile_task_scheduler_page(
+        TaskSchedulerReconciliationRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            limit=10,
+        ),
+        schedules=_ScheduleStore(missing, drifted, blocked),
+        registry=registry,
+    )
+
+    assert report.scanned == 3
+    assert report.applied == 2
+    assert report.blocked == 1
+    assert report.next_cursor is None
+    assert tuple(finding.action for finding in report.findings) == (
+        TaskSchedulerReconciliationAction.CREATE,
+        TaskSchedulerReconciliationAction.UPDATE_DRIFTED,
+        TaskSchedulerReconciliationAction.BLOCK_BINARY_DRIFT,
+    )
+    assert tuple(definition.task_path for definition in registry.applied) == (
+        r"\MediaSync Home\install-a\schedule-a",
+        r"\MediaSync Home\install-a\schedule-b",
+    )
+
+
+def test_task_scheduler_reconciliation_page_is_bounded_with_keyset_cursor() -> None:
+    schedules = _ScheduleStore(
+        _bound_schedule(schedule_id="schedule-a"),
+        _bound_schedule(schedule_id="schedule-b"),
+    )
+
+    report = reconcile_task_scheduler_page(
+        TaskSchedulerReconciliationRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            limit=1,
+        ),
+        schedules=schedules,
+        registry=_Registry(),
+    )
+
+    assert report.scanned == 1
+    assert report.next_cursor == "schedule-a"
+    assert report.findings[0].schedule_id == "schedule-a"
+
+
+def test_task_scheduler_reconciliation_reports_invalid_desired_hash() -> None:
+    report = reconcile_task_scheduler_page(
+        TaskSchedulerReconciliationRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            limit=10,
+        ),
+        schedules=_ScheduleStore(_schedule(desired_definition_hash="b" * 64)),
+        registry=_Registry(),
+    )
+
+    assert report.applied == 0
+    assert report.blocked == 1
+    assert report.findings[0].action is (
+        TaskSchedulerReconciliationAction.BLOCK_INVALID_DESIRED_STATE
+    )
+    assert report.findings[0].reason == "TASK_SCHEDULER_DESIRED_HASH_MISMATCH"
+
+
+class _ScheduleStore:
+    def __init__(self, *schedules: ScheduleDefinition) -> None:
+        self.schedules = sorted(schedules, key=lambda item: item.schedule_id)
+
+    def save_schedule(self, schedule: ScheduleDefinition) -> None:
+        self.schedules = [
+            existing
+            for existing in self.schedules
+            if existing.schedule_id != schedule.schedule_id
+        ]
+        self.schedules.append(schedule)
+        self.schedules.sort(key=lambda item: item.schedule_id)
+
+    def load_schedule(self, schedule_id: str) -> ScheduleDefinition | None:
+        for schedule in self.schedules:
+            if schedule.schedule_id == schedule_id:
+                return schedule
+        return None
+
+    def list_schedules_for_reconciliation(
+        self,
+        *,
+        limit: int,
+        after_schedule_id: str | None = None,
+    ) -> tuple[ScheduleDefinition, ...]:
+        page = [
+            schedule
+            for schedule in self.schedules
+            if after_schedule_id is None or schedule.schedule_id > after_schedule_id
+        ]
+        return tuple(page[:limit])
+
+
+class _Registry:
+    def __init__(self, *observed: ObservedTaskSchedulerDefinition) -> None:
+        self.observed = {definition.task_path: definition for definition in observed}
+        self.applied = []
+
+    def load_task(self, task_path: str) -> ObservedTaskSchedulerDefinition | None:
+        return self.observed.get(task_path)
+
+    def apply_task_definition(self, definition) -> None:
+        self.applied.append(definition)
+
+
+def _bound_schedule(
+    *,
+    schedule_id: str = "schedule-a",
+    configuration_json: str = '{"kind":"daily"}',
+) -> ScheduleDefinition:
     return bind_same_user_task_scheduler_definition_hash(
-        _schedule(configuration_json=configuration_json),
+        _schedule(schedule_id=schedule_id, configuration_json=configuration_json),
         installation_id="install-a",
         executable_path=EXECUTABLE,
     )
@@ -206,11 +341,12 @@ def _bound_schedule(*, configuration_json: str = '{"kind":"daily"}') -> Schedule
 
 def _schedule(
     *,
+    schedule_id: str = "schedule-a",
     desired_definition_hash: str = "0" * 64,
     configuration_json: str = '{"kind":"daily"}',
 ) -> ScheduleDefinition:
     return ScheduleDefinition(
-        schedule_id="schedule-a",
+        schedule_id=schedule_id,
         job_id="job-a",
         plan_id="plan-a",
         plan_checksum="a" * 64,
@@ -230,12 +366,17 @@ def _schedule(
     )
 
 
-def _observed(definition) -> ObservedTaskSchedulerDefinition:
+def _observed(
+    definition,
+    *,
+    executable_path: str | None = None,
+    enabled: bool | None = None,
+) -> ObservedTaskSchedulerDefinition:
     return ObservedTaskSchedulerDefinition(
         task_path=definition.task_path,
-        executable_path=definition.executable_path,
+        executable_path=definition.executable_path if executable_path is None else executable_path,
         arguments=definition.arguments,
-        enabled=definition.enabled,
+        enabled=definition.enabled if enabled is None else enabled,
         trigger_type=definition.trigger_type,
         configuration_json=definition.configuration_json,
         time_zone_id=definition.time_zone_id,

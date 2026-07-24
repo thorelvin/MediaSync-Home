@@ -5,8 +5,14 @@ import json
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import PureWindowsPath
+from typing import Protocol
 
-from mediasync_home.application.schedules import ScheduleDefinition, validate_schedule_definition
+from mediasync_home.application.schedules import (
+    ScheduleDefinition,
+    ScheduleStore,
+    validate_schedule_definition,
+    validate_schedule_reconciliation_page_request,
+)
 from mediasync_home.application.trigger_occurrences import TriggerKind
 
 
@@ -24,6 +30,7 @@ class TaskSchedulerReconciliationAction(str, Enum):
     UPDATE_DRIFTED = "UPDATE_DRIFTED"
     BLOCK_ARGUMENT_DRIFT = "BLOCK_ARGUMENT_DRIFT"
     BLOCK_BINARY_DRIFT = "BLOCK_BINARY_DRIFT"
+    BLOCK_INVALID_DESIRED_STATE = "BLOCK_INVALID_DESIRED_STATE"
     BLOCK_UNKNOWN_TASK = "BLOCK_UNKNOWN_TASK"
 
 
@@ -77,6 +84,38 @@ class TaskSchedulerReconciliationPlan:
     desired: TaskSchedulerDefinition
     observed: ObservedTaskSchedulerDefinition | None = None
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskSchedulerReconciliationRequest:
+    installation_id: str
+    executable_path: str
+    limit: int
+    after_schedule_id: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskSchedulerReconciliationFinding:
+    schedule_id: str
+    action: TaskSchedulerReconciliationAction
+    task_path: str | None = None
+    reason: str | None = None
+    applied: bool = False
+
+
+@dataclass(frozen=True)
+class TaskSchedulerReconciliationReport:
+    scanned: int
+    applied: int
+    blocked: int
+    next_cursor: str | None
+    findings: tuple[TaskSchedulerReconciliationFinding, ...]
+
+
+class TaskSchedulerRegistryPort(Protocol):
+    def load_task(self, task_path: str) -> ObservedTaskSchedulerDefinition | None: ...
+
+    def apply_task_definition(self, definition: TaskSchedulerDefinition) -> None: ...
 
 
 def bind_same_user_task_scheduler_definition_hash(
@@ -210,6 +249,77 @@ def classify_task_scheduler_reconciliation(
     )
 
 
+def reconcile_task_scheduler_page(
+    request: TaskSchedulerReconciliationRequest,
+    *,
+    schedules: ScheduleStore,
+    registry: TaskSchedulerRegistryPort,
+) -> TaskSchedulerReconciliationReport:
+    validate_schedule_reconciliation_page_request(
+        limit=request.limit,
+        after_schedule_id=request.after_schedule_id,
+    )
+    page = schedules.list_schedules_for_reconciliation(
+        limit=request.limit,
+        after_schedule_id=request.after_schedule_id,
+    )
+    findings: list[TaskSchedulerReconciliationFinding] = []
+    applied = 0
+    blocked = 0
+    for schedule in page:
+        try:
+            desired = build_same_user_task_scheduler_definition(
+                schedule,
+                installation_id=request.installation_id,
+                executable_path=request.executable_path,
+            )
+        except TaskSchedulerDefinitionViolation as exc:
+            blocked += 1
+            findings.append(
+                TaskSchedulerReconciliationFinding(
+                    schedule_id=schedule.schedule_id,
+                    action=TaskSchedulerReconciliationAction.BLOCK_INVALID_DESIRED_STATE,
+                    task_path=_task_path_or_none(request.installation_id, schedule.schedule_id),
+                    reason=str(exc),
+                )
+            )
+            continue
+
+        plan = classify_task_scheduler_reconciliation(
+            schedule,
+            installation_id=request.installation_id,
+            executable_path=request.executable_path,
+            observed=registry.load_task(desired.task_path),
+        )
+        did_apply = False
+        if plan.action in {
+            TaskSchedulerReconciliationAction.CREATE,
+            TaskSchedulerReconciliationAction.UPDATE_DRIFTED,
+        }:
+            registry.apply_task_definition(plan.desired)
+            applied += 1
+            did_apply = True
+        if plan.action.value.startswith("BLOCK_"):
+            blocked += 1
+        findings.append(
+            TaskSchedulerReconciliationFinding(
+                schedule_id=schedule.schedule_id,
+                action=plan.action,
+                task_path=plan.desired.task_path,
+                reason=plan.reason,
+                applied=did_apply,
+            )
+        )
+
+    return TaskSchedulerReconciliationReport(
+        scanned=len(page),
+        applied=applied,
+        blocked=blocked,
+        next_cursor=page[-1].schedule_id if len(page) == request.limit else None,
+        findings=tuple(findings),
+    )
+
+
 def parse_trigger_task_arguments(arguments: tuple[str, ...]) -> TriggerTaskArgumentBinding | None:
     parsed: dict[str, str | bool] = {}
     index = 0
@@ -315,6 +425,13 @@ def _trigger_task_arguments(
 def _task_path(installation_id: str, schedule_id: str) -> str:
     _non_empty_text(installation_id, "TASK_SCHEDULER_INSTALLATION_ID_REQUIRED")
     return f"\\MediaSync Home\\{installation_id}\\{schedule_id}"
+
+
+def _task_path_or_none(installation_id: str, schedule_id: str) -> str | None:
+    try:
+        return _task_path(installation_id, schedule_id)
+    except TaskSchedulerDefinitionViolation:
+        return None
 
 
 def _normalized_executable_path(executable_path: str) -> str:
