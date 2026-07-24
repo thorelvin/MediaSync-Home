@@ -2,9 +2,16 @@ from __future__ import annotations
 
 from typing import Mapping
 
-from mediasync_home.application.ports import CommitReceipt, FinalCommitPort, VerifiedStagingArtifact
+from mediasync_home.application.ports import (
+    CommitReceipt,
+    FinalCommitPort,
+    OldTargetPreservationPort,
+    OldTargetPreservationReceipt,
+    VerifiedStagingArtifact,
+)
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationMetadata,
     RecoveryOperationPhase,
     RecoveryOperationStore,
     RecoveryTargetPreconditionKind,
@@ -25,6 +32,7 @@ class JournaledFinalCommitPort(FinalCommitPort):
         *,
         recovery_operations: RecoveryOperationStore,
         final_commit_port: FinalCommitPort,
+        old_target_preservation_port: OldTargetPreservationPort | None = None,
         process_instance_id: str,
     ) -> None:
         if not process_instance_id.strip():
@@ -34,6 +42,7 @@ class JournaledFinalCommitPort(FinalCommitPort):
             )
         self._recovery_operations = recovery_operations
         self._final_commit_port = final_commit_port
+        self._old_target_preservation_port = old_target_preservation_port
         self._process_instance_id = process_instance_id
 
     def commit_verified_artifact(
@@ -51,14 +60,45 @@ class JournaledFinalCommitPort(FinalCommitPort):
                 "final_relative_path": artifact.relative_path.value,
             },
         )
+        commit_source = preconditions
+        if _requires_old_target_preservation(preconditions):
+            preservation_port = self._old_target_preservation_port
+            if preservation_port is None:
+                raise JournaledFinalCommitError(
+                    "RECOVERY_COMMIT_REQUIRES_OLD_TARGET_PRESERVATION_PORT",
+                    "Use a final commit adapter that preserves the old target before replacement.",
+                )
+            try:
+                preservation_receipt = preservation_port.preserve_old_target(permit, preconditions)
+                _validate_preservation_receipt(
+                    operation=preconditions,
+                    receipt=preservation_receipt,
+                )
+            except Exception as exc:
+                self._record_failure(operation=preconditions, exc=exc)
+                raise
+            commit_source = self._transition(
+                preconditions,
+                RecoveryOperationPhase.OLD_TARGET_PRESERVED,
+                payload={
+                    "final_relative_path": preservation_receipt.final_relative_path.value,
+                    "fingerprint_json": preservation_receipt.fingerprint_json,
+                    "quarantine_object_id": preservation_receipt.quarantine_object_id,
+                    "version_object_id": preservation_receipt.version_object_id,
+                },
+                operation_metadata=RecoveryOperationMetadata(
+                    quarantine_object_id=preservation_receipt.quarantine_object_id,
+                    version_object_id=preservation_receipt.version_object_id,
+                ),
+            )
         try:
             receipt = self._final_commit_port.commit_verified_artifact(permit, artifact)
         except Exception as exc:
-            self._record_failure(operation=preconditions, exc=exc)
+            self._record_failure(operation=commit_source, exc=exc)
             raise
 
         applied = self._transition(
-            preconditions,
+            commit_source,
             RecoveryOperationPhase.FILESYSTEM_APPLIED,
             payload={
                 "receipt_final_relative_path": receipt.final_relative_path.value,
@@ -75,6 +115,9 @@ class JournaledFinalCommitPort(FinalCommitPort):
             applied,
             RecoveryOperationPhase.FINAL_DURABLE,
             payload={"durability_state": "FINAL_COMMIT_ADAPTER_COMPLETED"},
+            operation_metadata=RecoveryOperationMetadata(
+                final_durability_state="FINAL_COMMIT_ADAPTER_COMPLETED",
+            ),
         )
         self._transition(
             durable,
@@ -102,6 +145,10 @@ class JournaledFinalCommitPort(FinalCommitPort):
                 "Record the recovery operation and durable commit intent before final commit.",
             )
         _validate_operation_binding(operation=operation, permit=permit, artifact=artifact)
+        _validate_target_precondition_support(
+            operation=operation,
+            old_target_preservation_port=self._old_target_preservation_port,
+        )
         return operation
 
     def _transition(
@@ -110,6 +157,7 @@ class JournaledFinalCommitPort(FinalCommitPort):
         next_phase: RecoveryOperationPhase,
         *,
         payload: Mapping[str, object],
+        operation_metadata: RecoveryOperationMetadata | None = None,
     ) -> RecoveryOperation:
         updated = self._recovery_operations.record_operation_phase_transition(
             run_id=operation.run_id,
@@ -118,6 +166,7 @@ class JournaledFinalCommitPort(FinalCommitPort):
             next_phase=next_phase,
             process_instance_id=self._process_instance_id,
             payload=payload,
+            operation_metadata=operation_metadata,
         )
         if updated is None:
             raise JournaledFinalCommitError(
@@ -156,11 +205,6 @@ def _validate_operation_binding(
             "RECOVERY_COMMIT_REQUIRES_COMMIT_INTENT",
             "Record durable commit intent before applying final filesystem changes.",
         )
-    if operation.target_precondition_kind is not RecoveryTargetPreconditionKind.ABSENT:
-        raise JournaledFinalCommitError(
-            "RECOVERY_COMMIT_REQUIRES_ABSENT_TARGET_PRECONDITION",
-            "Use a replace/version commit adapter for non-absent target preconditions.",
-        )
     if operation.staging_object_id is not None and operation.staging_object_id != artifact.object_id:
         raise JournaledFinalCommitError(
             "RECOVERY_COMMIT_STAGING_OBJECT_MISMATCH",
@@ -185,6 +229,57 @@ def _validate_operation_binding(
         raise JournaledFinalCommitError(
             "RECOVERY_COMMIT_PERMIT_MISMATCH",
             "Reject the permit and reacquire the endpoint lease for this operation.",
+        )
+
+
+def _validate_target_precondition_support(
+    *,
+    operation: RecoveryOperation,
+    old_target_preservation_port: OldTargetPreservationPort | None,
+) -> None:
+    if operation.target_precondition_kind is RecoveryTargetPreconditionKind.ABSENT:
+        return
+    if operation.target_precondition_kind is RecoveryTargetPreconditionKind.MATCH_FINGERPRINT:
+        if old_target_preservation_port is None:
+            raise JournaledFinalCommitError(
+                "RECOVERY_COMMIT_REQUIRES_OLD_TARGET_PRESERVATION_PORT",
+                "Use a final commit adapter that preserves the old target before replacement.",
+            )
+        return
+    if operation.target_precondition_kind is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY:
+        raise JournaledFinalCommitError(
+            "RECOVERY_COMMIT_REQUIRES_DIRECTORY_QUARANTINE_FLOW",
+            "Use the directory quarantine flow for directory-empty target preconditions.",
+        )
+    raise JournaledFinalCommitError(
+        "RECOVERY_COMMIT_REQUIRES_TARGET_PRECONDITION",
+        "Refresh the sealed operation with an explicit mutating target precondition.",
+    )
+
+
+def _requires_old_target_preservation(operation: RecoveryOperation) -> bool:
+    return operation.target_precondition_kind is RecoveryTargetPreconditionKind.MATCH_FINGERPRINT
+
+
+def _validate_preservation_receipt(
+    *,
+    operation: RecoveryOperation,
+    receipt: OldTargetPreservationReceipt,
+) -> None:
+    if receipt.operation_id != operation.operation_id:
+        raise JournaledFinalCommitError(
+            "RECOVERY_COMMIT_PRESERVATION_OPERATION_MISMATCH",
+            "Enter recovery because the old-target preservation receipt is inconsistent.",
+        )
+    if _relative_path(receipt.final_relative_path.value) != _relative_path(operation.final_relative_path):
+        raise JournaledFinalCommitError(
+            "RECOVERY_COMMIT_PRESERVATION_PATH_MISMATCH",
+            "Enter recovery because the old-target preservation receipt path is inconsistent.",
+        )
+    if receipt.version_object_id is None and receipt.quarantine_object_id is None:
+        raise JournaledFinalCommitError(
+            "RECOVERY_COMMIT_PRESERVATION_REQUIRES_OBJECT_ID",
+            "Record the preserved old target as a version or quarantine object before replacement.",
         )
 
 

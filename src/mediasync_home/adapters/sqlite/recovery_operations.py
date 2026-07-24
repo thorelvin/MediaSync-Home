@@ -130,6 +130,8 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                     source_guard_evidence_hash = ?,
                     source_hash_evidence_kind = ?,
                     staging_object_id = ?,
+                    version_object_id = ?,
+                    quarantine_object_id = ?,
                     intent_segment_id = ?,
                     intent_ordinal = ?,
                     expected_source_fingerprint_json = ?,
@@ -139,6 +141,7 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                     transfer_state = ?,
                     assurance_level = ?,
                     staging_durability_state = ?,
+                    final_durability_state = ?,
                     catalog_handoff_id = ?,
                     last_error_code = ?,
                     updated_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -152,6 +155,8 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                     updated.source_guard_evidence_hash,
                     updated.source_hash_evidence_kind,
                     updated.staging_object_id,
+                    updated.version_object_id,
+                    updated.quarantine_object_id,
                     updated.intent_segment_id,
                     updated.intent_ordinal,
                     updated.expected_source_fingerprint_json,
@@ -161,6 +166,7 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                     updated.transfer_state,
                     updated.assurance_level,
                     updated.staging_durability_state,
+                    updated.final_durability_state,
                     updated.catalog_handoff_id,
                     updated.last_error_code,
                     run_id,
@@ -827,6 +833,12 @@ def _apply_operation_metadata(
         staging_object_id=metadata.staging_object_id
         if metadata.staging_object_id is not None
         else operation.staging_object_id,
+        version_object_id=metadata.version_object_id
+        if metadata.version_object_id is not None
+        else operation.version_object_id,
+        quarantine_object_id=metadata.quarantine_object_id
+        if metadata.quarantine_object_id is not None
+        else operation.quarantine_object_id,
         expected_source_fingerprint_json=metadata.expected_source_fingerprint_json
         if metadata.expected_source_fingerprint_json is not None
         else operation.expected_source_fingerprint_json,
@@ -848,6 +860,9 @@ def _apply_operation_metadata(
         staging_durability_state=metadata.staging_durability_state
         if metadata.staging_durability_state is not None
         else operation.staging_durability_state,
+        final_durability_state=metadata.final_durability_state
+        if metadata.final_durability_state is not None
+        else operation.final_durability_state,
         last_error_code=metadata.last_error_code
         if metadata.last_error_code is not None
         else operation.last_error_code,

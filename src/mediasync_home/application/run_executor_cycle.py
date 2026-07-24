@@ -6,7 +6,7 @@ from typing import Protocol
 
 from mediasync_home.application.catalog_handoff import FinalFileCatalogHandoffStore
 from mediasync_home.application.plans import PlanStore
-from mediasync_home.application.ports import FinalCommitPort
+from mediasync_home.application.ports import FinalCommitPort, OldTargetPreservationPort
 from mediasync_home.application.recovery_intents import RecoveryIntentSegmentStore
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
@@ -119,6 +119,7 @@ def execute_bounded_run_executor_cycle(
     process_instance_id: str,
     max_steps: int,
     final_commit_port: FinalCommitPort | None = None,
+    old_target_preservation_port: OldTargetPreservationPort | None = None,
     staging_transfer_port: RunTargetStagingPort | None = None,
 ) -> RunExecutorCyclePumpOutcome:
     if max_steps < 1:
@@ -138,6 +139,7 @@ def execute_bounded_run_executor_cycle(
             catalog_handoffs=catalog_handoffs,
             process_instance_id=process_instance_id,
             final_commit_port=final_commit_port,
+            old_target_preservation_port=old_target_preservation_port,
             staging_transfer_port=staging_transfer_port,
         )
         if last_step.idle:
@@ -177,6 +179,7 @@ def execute_one_run_executor_cycle(
     catalog_handoffs: FinalFileCatalogHandoffStore,
     process_instance_id: str,
     final_commit_port: FinalCommitPort | None = None,
+    old_target_preservation_port: OldTargetPreservationPort | None = None,
     staging_transfer_port: RunTargetStagingPort | None = None,
 ) -> RunExecutorCycleOutcome:
     retained = _next_retained_executing_target(
@@ -193,6 +196,7 @@ def execute_one_run_executor_cycle(
             catalog_handoffs=catalog_handoffs,
             process_instance_id=process_instance_id,
             final_commit_port=final_commit_port,
+            old_target_preservation_port=old_target_preservation_port,
             staging_transfer_port=staging_transfer_port,
             retained=retained,
         )
@@ -291,6 +295,7 @@ def _advance_retained_target(
     catalog_handoffs: FinalFileCatalogHandoffStore,
     process_instance_id: str,
     final_commit_port: FinalCommitPort | None,
+    old_target_preservation_port: OldTargetPreservationPort | None,
     staging_transfer_port: RunTargetStagingPort | None,
     retained: _RetainedTarget,
 ) -> RunExecutorCycleOutcome:
@@ -361,6 +366,7 @@ def _advance_retained_target(
             permit=permit,
             recovery_operations=recovery_operations,
             final_commit_port=final_commit_port,
+            old_target_preservation_port=old_target_preservation_port,
             process_instance_id=process_instance_id,
         )
         if final_commit_outcome.committed:

@@ -77,7 +77,7 @@ from mediasync_home.application.run_catalog_handoffs import (
 from mediasync_home.application.run_completion import complete_run_target_after_catalog_handoffs
 from mediasync_home.application.catalog_handoff import FinalFileCatalogHandoffStore
 from mediasync_home.application.plans import PlanStore
-from mediasync_home.application.ports import FinalCommitPort
+from mediasync_home.application.ports import FinalCommitPort, OldTargetPreservationPort
 from mediasync_home.application.recovery_intents import RecoveryIntentSegmentStore
 from mediasync_home.application.recovery_reconciliation import (
     RecoveryOperationStartupReconciliationReport,
@@ -364,6 +364,7 @@ class EngineHostRuntime:
         *,
         max_steps: int,
         final_commit_port: FinalCommitPort | None = None,
+        old_target_preservation_port: OldTargetPreservationPort | None = None,
         staging_transfer_port: RunTargetStagingPort | None = None,
     ) -> RunExecutorCyclePumpOutcome:
         if (
@@ -388,6 +389,7 @@ class EngineHostRuntime:
             process_instance_id=self.run_executor_process_instance_id,
             max_steps=max_steps,
             final_commit_port=final_commit_port,
+            old_target_preservation_port=old_target_preservation_port,
             staging_transfer_port=staging_transfer_port or self.run_executor_staging_transfer_port,
         )
 

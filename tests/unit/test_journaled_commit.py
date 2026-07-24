@@ -13,9 +13,16 @@ from mediasync_home.application.journaled_commit import (
     JournaledFinalCommitError,
     JournaledFinalCommitPort,
 )
-from mediasync_home.application.ports import CommitReceipt, FinalCommitPort, RelativePath, VerifiedStagingArtifact
+from mediasync_home.application.ports import (
+    CommitReceipt,
+    FinalCommitPort,
+    OldTargetPreservationReceipt,
+    RelativePath,
+    VerifiedStagingArtifact,
+)
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationMetadata,
     RecoveryOperationPhase,
     RecoveryOperationStore,
     RecoveryTargetPreconditionKind,
@@ -97,6 +104,53 @@ def test_journaled_final_commit_wraps_lab_no_overwrite_adapter(tmp_path: Path) -
     assert store.operation.phase is RecoveryOperationPhase.FINAL_VERIFIED
 
 
+def test_journaled_final_commit_records_old_target_preservation_before_replace() -> None:
+    actions: list[str] = []
+    operation = replace(
+        _operation(),
+        target_precondition_kind=RecoveryTargetPreconditionKind.MATCH_FINGERPRINT,
+        expected_target_fingerprint_json='{"byte_count":5,"content_hash":"' + ("b" * 64) + '"}',
+    )
+    store = _FakeRecoveryOperationStore(operation, actions=actions)
+    preservation = _FakeOldTargetPreservationPort(actions=actions)
+    inner = _FakeFinalCommitPort(actions=actions)
+    runner = JournaledFinalCommitPort(
+        recovery_operations=store,
+        final_commit_port=inner,
+        old_target_preservation_port=preservation,
+        process_instance_id="host-a",
+    )
+    artifact = _artifact()
+    permit = _permit()
+
+    receipt = runner.commit_verified_artifact(permit, artifact)
+
+    assert receipt == CommitReceipt(
+        operation_id="operation-a",
+        final_relative_path=artifact.relative_path,
+    )
+    assert actions == [
+        "transition:COMMIT_PRECONDITIONS_REVALIDATED",
+        "preserve",
+        "transition:OLD_TARGET_PRESERVED",
+        "commit",
+        "transition:FILESYSTEM_APPLIED",
+        "transition:FINAL_DURABLE",
+        "transition:FINAL_VERIFIED",
+    ]
+    assert [transition.next_phase for transition in store.transitions] == [
+        RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
+        RecoveryOperationPhase.OLD_TARGET_PRESERVED,
+        RecoveryOperationPhase.FILESYSTEM_APPLIED,
+        RecoveryOperationPhase.FINAL_DURABLE,
+        RecoveryOperationPhase.FINAL_VERIFIED,
+    ]
+    assert preservation.calls == [(permit, RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED)]
+    assert store.operation is not None
+    assert store.operation.version_object_id == "version-a"
+    assert store.operation.final_durability_state == "FINAL_COMMIT_ADAPTER_COMPLETED"
+
+
 def test_journaled_final_commit_rejects_permit_mismatch_before_filesystem_call() -> None:
     store = _FakeRecoveryOperationStore(replace(_operation(), lease_id="lease-b"))
     inner = _FakeFinalCommitPort()
@@ -134,6 +188,29 @@ def test_journaled_final_commit_requires_durable_commit_intent() -> None:
         runner.commit_verified_artifact(_permit(), _artifact())
 
     assert exc_info.value.validation_code == "RECOVERY_COMMIT_REQUIRES_COMMIT_INTENT"
+    assert store.transitions == []
+    assert inner.calls == []
+
+
+def test_journaled_final_commit_requires_preservation_port_for_matching_target() -> None:
+    store = _FakeRecoveryOperationStore(
+        replace(
+            _operation(),
+            target_precondition_kind=RecoveryTargetPreconditionKind.MATCH_FINGERPRINT,
+            expected_target_fingerprint_json='{"byte_count":5,"content_hash":"' + ("b" * 64) + '"}',
+        )
+    )
+    inner = _FakeFinalCommitPort()
+    runner = JournaledFinalCommitPort(
+        recovery_operations=store,
+        final_commit_port=inner,
+        process_instance_id="host-a",
+    )
+
+    with pytest.raises(JournaledFinalCommitError) as exc_info:
+        runner.commit_verified_artifact(_permit(), _artifact())
+
+    assert exc_info.value.validation_code == "RECOVERY_COMMIT_REQUIRES_OLD_TARGET_PRESERVATION_PORT"
     assert store.transitions == []
     assert inner.calls == []
 
@@ -229,7 +306,7 @@ class _FakeRecoveryOperationStore(RecoveryOperationStore):
         intent_segment_id: str | None = None,
         intent_ordinal: int | None = None,
         catalog_handoff_id: str | None = None,
-        operation_metadata: object | None = None,
+        operation_metadata: RecoveryOperationMetadata | None = None,
     ) -> RecoveryOperation | None:
         if self._actions is not None:
             self._actions.append(f"transition:{next_phase.value}")
@@ -254,7 +331,21 @@ class _FakeRecoveryOperationStore(RecoveryOperationStore):
                 payload=payload,
             )
         )
-        self.operation = replace(self.operation, phase=next_phase)
+        updated = replace(self.operation, phase=next_phase)
+        if operation_metadata is not None:
+            updated = replace(
+                updated,
+                version_object_id=operation_metadata.version_object_id
+                if operation_metadata.version_object_id is not None
+                else updated.version_object_id,
+                quarantine_object_id=operation_metadata.quarantine_object_id
+                if operation_metadata.quarantine_object_id is not None
+                else updated.quarantine_object_id,
+                final_durability_state=operation_metadata.final_durability_state
+                if operation_metadata.final_durability_state is not None
+                else updated.final_durability_state,
+            )
+        self.operation = updated
         return self.operation
 
     def load_operation(self, *, run_id: str, operation_id: str) -> RecoveryOperation | None:
@@ -289,6 +380,27 @@ class _FakeFinalCommitPort(FinalCommitPort):
         return CommitReceipt(
             operation_id=artifact.object_id,
             final_relative_path=artifact.relative_path,
+        )
+
+
+class _FakeOldTargetPreservationPort:
+    def __init__(self, *, actions: list[str] | None = None) -> None:
+        self._actions = actions
+        self.calls: list[tuple[MutationPermit, RecoveryOperationPhase]] = []
+
+    def preserve_old_target(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> OldTargetPreservationReceipt:
+        if self._actions is not None:
+            self._actions.append("preserve")
+        self.calls.append((permit, operation.phase))
+        return OldTargetPreservationReceipt(
+            operation_id=operation.operation_id,
+            final_relative_path=RelativePath(operation.final_relative_path),
+            version_object_id="version-a",
+            fingerprint_json='{"byte_count":5,"content_hash":"' + ("b" * 64) + '"}',
         )
 
 

@@ -7,6 +7,7 @@ from typing import Protocol
 
 from mediasync_home.application.journaled_commit import JournaledFinalCommitPort
 from mediasync_home.application.ports import CommitReceipt, FinalCommitPort, RelativePath, VerifiedStagingArtifact
+from mediasync_home.application.ports import OldTargetPreservationPort
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
     RecoveryOperationPhase,
@@ -46,6 +47,7 @@ def commit_next_run_target_verified_artifact(
     permit: MutationPermit,
     recovery_operations: RunTargetFinalCommitOperationStore,
     final_commit_port: FinalCommitPort,
+    old_target_preservation_port: OldTargetPreservationPort | None = None,
     process_instance_id: str,
 ) -> RunTargetFinalCommitOutcome:
     if not process_instance_id.strip():
@@ -91,6 +93,7 @@ def commit_next_run_target_verified_artifact(
     journaled_commit = JournaledFinalCommitPort(
         recovery_operations=recovery_operations,
         final_commit_port=final_commit_port,
+        old_target_preservation_port=old_target_preservation_port,
         process_instance_id=process_instance_id,
     )
     try:

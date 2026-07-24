@@ -11,7 +11,13 @@ from uuid import uuid4
 from mediasync_home.application.ports import (
     CommitReceipt,
     FinalCommitPort,
+    OldTargetPreservationReceipt,
+    RelativePath,
     VerifiedStagingArtifact,
+)
+from mediasync_home.application.recovery_operations import (
+    RecoveryOperation,
+    RecoveryTargetPreconditionKind,
 )
 from mediasync_home.application.safe_paths import SafePathViolation, parse_endpoint_relative_path
 from mediasync_home.domain.capabilities import MutationPermit
@@ -70,6 +76,157 @@ class LabNoOverwriteFinalCommitAdapter(FinalCommitPort):
         )
 
 
+class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
+    def __init__(
+        self,
+        *,
+        target_root: Path,
+        staging_root: Path,
+        permit_validator: MutationPermitValidator,
+    ) -> None:
+        self._target_root = Path(target_root)
+        self._staging_root = Path(staging_root)
+        self._permit_validator = permit_validator
+
+    def preserve_old_target(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> OldTargetPreservationReceipt:
+        self._permit_validator.assert_mutation_permit_current(permit)
+        _require_endpoint_marker(
+            self._target_root,
+            permit,
+            validation_code="LOCAL_REPLACE_FINAL_COMMIT_ENDPOINT_MARKER_MISMATCH",
+            missing_code="LOCAL_REPLACE_FINAL_COMMIT_ENDPOINT_MARKER_MISSING",
+        )
+        _validate_replace_operation_binding(operation=operation, permit=permit)
+        if operation.target_precondition_kind is not RecoveryTargetPreconditionKind.MATCH_FINGERPRINT:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_REQUIRES_MATCH_FINGERPRINT_PRECONDITION",
+                "Use versioned replacement only for operations with a matching target fingerprint.",
+            )
+        if operation.version_object_id not in (None, operation.operation_id):
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_REQUIRES_DETERMINISTIC_VERSION_OBJECT_ID",
+                "Use the operation id as the local version object id for this preview adapter.",
+            )
+
+        expected = _expected_fingerprint(
+            operation.expected_target_fingerprint_json,
+            validation_code="LOCAL_REPLACE_FINAL_COMMIT_REQUIRES_EXPECTED_TARGET_FINGERPRINT",
+            next_action="Refresh analysis before replacing an existing target.",
+        )
+        final_path = _replace_final_path(self._target_root, operation.final_relative_path)
+        if not final_path.is_file() or final_path.is_symlink():
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_TARGET_MISSING",
+                "Refresh analysis because the target to replace is no longer a regular file.",
+            )
+        observed = _fingerprint_file(final_path)
+        if observed != expected:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_TARGET_FINGERPRINT_MISMATCH",
+                "Refresh analysis because the target changed before replacement.",
+            )
+
+        version_object_id = operation.operation_id
+        version_payload, version_manifest = _version_object_paths(
+            target_root=self._target_root,
+            version_object_id=version_object_id,
+        )
+        _preserve_version_payload(
+            source=final_path,
+            destination=version_payload,
+            expected_fingerprint=expected,
+        )
+        fingerprint_json = _canonical_json(expected)
+        _write_version_manifest(
+            manifest_path=version_manifest,
+            manifest={
+                "schema_version": 1,
+                "object_role": "OLD_TARGET_VERSION",
+                "version_object_id": version_object_id,
+                "operation_id": operation.operation_id,
+                "run_id": operation.run_id,
+                "run_target_id": operation.run_target_id,
+                "final_relative_path": _relative_path(operation.final_relative_path),
+                "fingerprint": expected,
+            },
+        )
+        return OldTargetPreservationReceipt(
+            operation_id=operation.operation_id,
+            final_relative_path=RelativePath(operation.final_relative_path),
+            version_object_id=version_object_id,
+            fingerprint_json=fingerprint_json,
+        )
+
+    def commit_verified_artifact(
+        self,
+        permit: MutationPermit,
+        artifact: VerifiedStagingArtifact,
+    ) -> CommitReceipt:
+        self._permit_validator.assert_mutation_permit_current(permit)
+        _require_endpoint_marker(
+            self._target_root,
+            permit,
+            validation_code="LOCAL_REPLACE_FINAL_COMMIT_ENDPOINT_MARKER_MISMATCH",
+            missing_code="LOCAL_REPLACE_FINAL_COMMIT_ENDPOINT_MARKER_MISSING",
+        )
+        staging_payload = _replace_staging_payload_path(self._staging_root, artifact)
+        final_path = _replace_final_path(self._target_root, artifact.relative_path.value)
+        if not final_path.is_file() or final_path.is_symlink():
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_TARGET_MISSING",
+                "Reload recovery state before retrying replacement.",
+            )
+        version_payload, version_manifest = _version_object_paths(
+            target_root=self._target_root,
+            version_object_id=artifact.object_id,
+            create=False,
+        )
+        manifest = _load_version_manifest(
+            manifest_path=version_manifest,
+            expected_operation_id=artifact.object_id,
+            expected_final_relative_path=artifact.relative_path.value,
+        )
+        expected_old = manifest.get("fingerprint")
+        if not isinstance(expected_old, dict):
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_VERSION_MANIFEST_INVALID",
+                "Reload recovery state before retrying replacement.",
+            )
+        if not version_payload.is_file() or version_payload.is_symlink():
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_VERSION_PAYLOAD_MISSING",
+                "Preserve the old target before replacing the final file.",
+            )
+        if _fingerprint_file(version_payload) != expected_old:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_VERSION_PAYLOAD_MISMATCH",
+                "Enter recovery because the preserved old target no longer matches its manifest.",
+            )
+        if _fingerprint_file(final_path) != expected_old:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE",
+                "Refresh analysis because the final target changed after old-target preservation.",
+            )
+        if _hash_file(staging_payload) != artifact.content_hash:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_STAGING_HASH_MISMATCH",
+                "Restage and verify the artifact before attempting replacement.",
+            )
+        _replace_with_verified_payload(
+            staging_payload=staging_payload,
+            final_path=final_path,
+            content_hash=artifact.content_hash,
+        )
+        return CommitReceipt(
+            operation_id=artifact.object_id,
+            final_relative_path=artifact.relative_path,
+        )
+
+
 def _require_lab_marker(target_root: Path, run_id: str) -> None:
     marker_path = target_root / LAB_MARKER_NAME
     try:
@@ -83,6 +240,37 @@ def _require_lab_marker(target_root: Path, run_id: str) -> None:
         raise FinalCommitAdapterError(
             "LAB_FINAL_COMMIT_TEST_ROOT_RUN_MISMATCH",
             "Use a lab target marker bound to the current run before mutating final paths.",
+        )
+
+
+def _require_endpoint_marker(
+    target_root: Path,
+    permit: MutationPermit,
+    *,
+    validation_code: str,
+    missing_code: str,
+) -> None:
+    marker_path = target_root / ".mediasync" / "endpoint.json"
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FinalCommitAdapterError(
+            missing_code,
+            "Adopt the target endpoint and write a valid endpoint marker before mutating final paths.",
+        ) from exc
+    if not isinstance(marker, dict):
+        raise FinalCommitAdapterError(
+            validation_code,
+            "Adopt the target endpoint and write a valid endpoint marker before mutating final paths.",
+        )
+    if (
+        marker.get("endpoint_id") != permit.endpoint_id
+        or marker.get("owner_installation_id") != permit.owner_installation_id
+        or marker.get("ownership_epoch") != permit.ownership_epoch
+    ):
+        raise FinalCommitAdapterError(
+            validation_code,
+            "Reacquire the endpoint lease for the currently adopted target endpoint.",
         )
 
 
@@ -108,6 +296,36 @@ def _staging_payload_path(staging_root: Path, artifact: VerifiedStagingArtifact)
     if not payload.is_file() or payload.is_symlink():
         raise FinalCommitAdapterError(
             "LAB_FINAL_COMMIT_STAGING_PAYLOAD_MISSING",
+            "Restage and verify the artifact before final commit.",
+        )
+    return payload
+
+
+def _replace_staging_payload_path(
+    staging_root: Path,
+    artifact: VerifiedStagingArtifact,
+) -> Path:
+    if OBJECT_ID_PATTERN.fullmatch(artifact.object_id) is None:
+        raise FinalCommitAdapterError(
+            "LOCAL_REPLACE_FINAL_COMMIT_REQUIRES_SAFE_OBJECT_ID",
+            "Restage the artifact with an opaque object id before final commit.",
+        )
+    if HASH_PATTERN.fullmatch(artifact.content_hash) is None:
+        raise FinalCommitAdapterError(
+            "LOCAL_REPLACE_FINAL_COMMIT_REQUIRES_CONTENT_HASH",
+            "Verify the staging artifact and provide a lowercase SHA-256 content hash.",
+        )
+    try:
+        root = staging_root.resolve(strict=True)
+    except OSError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_REPLACE_FINAL_COMMIT_STAGING_ROOT_MISSING",
+            "Create the staging root before final commit.",
+        ) from exc
+    payload = root / f"{artifact.object_id}.payload"
+    if not payload.is_file() or payload.is_symlink():
+        raise FinalCommitAdapterError(
+            "LOCAL_REPLACE_FINAL_COMMIT_STAGING_PAYLOAD_MISSING",
             "Restage and verify the artifact before final commit.",
         )
     return payload
@@ -145,13 +363,57 @@ def _final_path(target_root: Path, artifact: VerifiedStagingArtifact) -> Path:
     return final_path
 
 
+def _replace_final_path(target_root: Path, relative_path: str) -> Path:
+    parts = _relative_path_parts_for_adapter(
+        relative_path,
+        validation_code="LOCAL_REPLACE_FINAL_COMMIT_REQUIRES_RELATIVE_PATH",
+        next_action="Provide an endpoint-relative final path before replacement.",
+    )
+    try:
+        root = target_root.resolve(strict=True)
+    except OSError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_REPLACE_FINAL_COMMIT_TARGET_ROOT_MISSING",
+            "Create the target endpoint root before replacement.",
+        ) from exc
+    final_path = root.joinpath(*parts)
+    parent = final_path.parent
+    if not parent.is_dir():
+        raise FinalCommitAdapterError(
+            "LOCAL_REPLACE_FINAL_COMMIT_TARGET_PARENT_MISSING",
+            "Create and verify the final parent directory before replacement.",
+        )
+    _reject_symlink_in_path(root=root, relative_parts=parts[:-1])
+    try:
+        parent.resolve(strict=True).relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_REPLACE_FINAL_COMMIT_TARGET_ESCAPES_ROOT",
+            "Resolve the final path through a validated endpoint root before replacement.",
+        ) from exc
+    return final_path
+
+
 def _relative_path_parts(value: str) -> tuple[str, ...]:
+    return _relative_path_parts_for_adapter(
+        value,
+        validation_code="LAB_FINAL_COMMIT_REQUIRES_RELATIVE_PATH",
+        next_action="Provide an endpoint-relative final path before commit.",
+    )
+
+
+def _relative_path_parts_for_adapter(
+    value: str,
+    *,
+    validation_code: str,
+    next_action: str,
+) -> tuple[str, ...]:
     try:
         return parse_endpoint_relative_path(value).parts
     except SafePathViolation as exc:
         raise FinalCommitAdapterError(
-            "LAB_FINAL_COMMIT_REQUIRES_RELATIVE_PATH",
-            "Provide an endpoint-relative final path before commit.",
+            validation_code,
+            next_action,
         ) from exc
 
 
@@ -196,6 +458,199 @@ def _link_verified_payload_without_overwrite(
         temp_path.unlink(missing_ok=True)
 
 
+def _replace_with_verified_payload(
+    *,
+    staging_payload: Path,
+    final_path: Path,
+    content_hash: str,
+) -> None:
+    temp_path = final_path.parent / f".{final_path.name}.{uuid4().hex}.mediasync-replace.tmp"
+    try:
+        _copy_file_durable(source=staging_payload, destination=temp_path)
+        if _hash_file(temp_path) != content_hash:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_TEMP_HASH_MISMATCH",
+                "Restage and verify the artifact before attempting replacement.",
+            )
+        try:
+            os.replace(temp_path, final_path)
+        except OSError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_REPLACE_FAILED",
+                "Enter recovery and inspect final, staging and version-object postconditions.",
+            ) from exc
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _validate_replace_operation_binding(
+    *,
+    operation: RecoveryOperation,
+    permit: MutationPermit,
+) -> None:
+    if (
+        operation.run_id != permit.run_id
+        or operation.run_target_id != permit.run_target_id
+        or operation.target_endpoint_id != permit.endpoint_id
+        or operation.target_endpoint_revision_id != permit.endpoint_revision_id
+        or operation.owner_installation_id != permit.owner_installation_id
+        or operation.ownership_epoch != permit.ownership_epoch
+        or operation.lease_id != permit.lease_id
+        or operation.lease_resource_key != permit.resource_key
+        or operation.fencing_token != permit.fencing_token
+    ):
+        raise FinalCommitAdapterError(
+            "LOCAL_REPLACE_FINAL_COMMIT_PERMIT_MISMATCH",
+            "Reacquire the endpoint lease before preserving an old target.",
+        )
+
+
+def _version_object_paths(
+    *,
+    target_root: Path,
+    version_object_id: str,
+    create: bool = True,
+) -> tuple[Path, Path]:
+    if OBJECT_ID_PATTERN.fullmatch(version_object_id) is None:
+        raise FinalCommitAdapterError(
+            "LOCAL_REPLACE_FINAL_COMMIT_REQUIRES_SAFE_VERSION_OBJECT_ID",
+            "Use an opaque version object id before preserving an old target.",
+        )
+    try:
+        root = target_root.resolve(strict=True)
+    except OSError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_REPLACE_FINAL_COMMIT_TARGET_ROOT_MISSING",
+            "Create the target endpoint root before replacement.",
+        ) from exc
+    relative_parts = (".mediasync", "objects", "versions")
+    _reject_symlink_in_path(root=root, relative_parts=relative_parts)
+    version_root = root.joinpath(*relative_parts)
+    if create:
+        version_root.mkdir(parents=True, exist_ok=True)
+    try:
+        version_root.resolve(strict=create).relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_REPLACE_FINAL_COMMIT_VERSION_STORE_ESCAPES_ROOT",
+            "Revalidate the endpoint control area before preserving an old target.",
+        ) from exc
+    return (
+        version_root / f"{version_object_id}.payload",
+        version_root / f"{version_object_id}.manifest.json",
+    )
+
+
+def _preserve_version_payload(
+    *,
+    source: Path,
+    destination: Path,
+    expected_fingerprint: dict[str, object],
+) -> None:
+    if destination.exists():
+        if not destination.is_file() or destination.is_symlink():
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_VERSION_PAYLOAD_INVALID",
+                "Enter recovery because the version object path is not a regular file.",
+            )
+        if _fingerprint_file(destination) != expected_fingerprint:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_VERSION_PAYLOAD_MISMATCH",
+                "Enter recovery because the existing version object differs from the old target.",
+            )
+        return
+    temp_path = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+    try:
+        _copy_file_durable(source=source, destination=temp_path)
+        if _fingerprint_file(temp_path) != expected_fingerprint:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_VERSION_HASH_MISMATCH",
+                "Refresh analysis because the target changed while preserving the old version.",
+            )
+        os.replace(temp_path, destination)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _write_version_manifest(*, manifest_path: Path, manifest: dict[str, object]) -> None:
+    payload = _canonical_json(manifest)
+    if manifest_path.exists():
+        try:
+            existing = manifest_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_VERSION_MANIFEST_INVALID",
+                "Enter recovery because the version manifest cannot be read.",
+            ) from exc
+        if existing != payload:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_VERSION_MANIFEST_CONFLICT",
+                "Enter recovery because the existing version manifest differs from this operation.",
+            )
+        return
+    temp_path = manifest_path.with_name(f".{manifest_path.name}.{uuid4().hex}.tmp")
+    try:
+        with temp_path.open("x", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, manifest_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _load_version_manifest(
+    *,
+    manifest_path: Path,
+    expected_operation_id: str,
+    expected_final_relative_path: str,
+) -> dict[str, object]:
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_REPLACE_FINAL_COMMIT_VERSION_MANIFEST_MISSING",
+            "Preserve the old target before replacing the final file.",
+        ) from exc
+    if not isinstance(manifest, dict):
+        raise FinalCommitAdapterError(
+            "LOCAL_REPLACE_FINAL_COMMIT_VERSION_MANIFEST_INVALID",
+            "Enter recovery because the version manifest is invalid.",
+        )
+    if (
+        manifest.get("operation_id") != expected_operation_id
+        or manifest.get("final_relative_path") != _relative_path(expected_final_relative_path)
+    ):
+        raise FinalCommitAdapterError(
+            "LOCAL_REPLACE_FINAL_COMMIT_VERSION_MANIFEST_MISMATCH",
+            "Reload recovery state before retrying replacement.",
+        )
+    return manifest
+
+
+def _expected_fingerprint(
+    raw_payload: str | None,
+    *,
+    validation_code: str,
+    next_action: str,
+) -> dict[str, object]:
+    if raw_payload is None:
+        raise FinalCommitAdapterError(validation_code, next_action)
+    try:
+        payload = json.loads(raw_payload)
+    except json.JSONDecodeError as exc:
+        raise FinalCommitAdapterError(validation_code, next_action) from exc
+    if not isinstance(payload, dict):
+        raise FinalCommitAdapterError(validation_code, next_action)
+    content_hash = payload.get("content_hash")
+    byte_count = payload.get("byte_count")
+    if not isinstance(content_hash, str) or HASH_PATTERN.fullmatch(content_hash) is None:
+        raise FinalCommitAdapterError(validation_code, next_action)
+    if not isinstance(byte_count, int) or byte_count < 0:
+        raise FinalCommitAdapterError(validation_code, next_action)
+    return {"byte_count": byte_count, "content_hash": content_hash}
+
+
 def _copy_file_durable(*, source: Path, destination: Path) -> None:
     with source.open("rb") as reader, destination.open("xb") as writer:
         while True:
@@ -216,3 +671,24 @@ def _hash_file(path: Path) -> str:
                 break
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _fingerprint_file(path: Path) -> dict[str, object]:
+    digest = hashlib.sha256()
+    byte_count = 0
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            byte_count += len(chunk)
+    return {"byte_count": byte_count, "content_hash": digest.hexdigest()}
+
+
+def _canonical_json(payload: dict[str, object]) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _relative_path(value: str) -> str:
+    return value.replace("\\", "/")

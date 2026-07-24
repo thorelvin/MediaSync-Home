@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -16,8 +17,15 @@ from mediasync_home.adapters.endpoint_leases import (
 from mediasync_home.adapters.final_commit import (
     FinalCommitAdapterError,
     LabNoOverwriteFinalCommitAdapter,
+    LocalVersionedReplaceFinalCommitAdapter,
 )
 from mediasync_home.application.ports import RelativePath, VerifiedStagingArtifact
+from mediasync_home.application.recovery_operations import (
+    RecoveryOperation,
+    RecoveryOperationPhase,
+    RecoveryTargetPreconditionKind,
+    planned_recovery_operation,
+)
 from mediasync_home.application.runs import EndpointLeaseRequest
 
 
@@ -122,6 +130,69 @@ def test_lab_final_commit_rejects_lost_lease_before_touching_final_tree(tmp_path
     assert not (fixture.target_root / "Photos" / "image.jpg").exists()
 
 
+def test_local_versioned_replace_preserves_old_target_then_replaces_with_verified_payload(
+    tmp_path: Path,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    final = fixture.target_root / "Photos" / "image.jpg"
+    final.write_bytes(b"old-image")
+    artifact = fixture.stage(object_id="operation-a", relative_path="Photos/image.jpg", payload=b"new-image")
+    operation = _replace_operation(fixture, expected_target_payload=b"old-image")
+    adapter = LocalVersionedReplaceFinalCommitAdapter(
+        target_root=fixture.target_root,
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+
+    preservation = adapter.preserve_old_target(permit, operation)
+    receipt = adapter.commit_verified_artifact(permit, artifact)
+
+    version_payload = fixture.target_root / ".mediasync" / "objects" / "versions" / "operation-a.payload"
+    version_manifest = (
+        fixture.target_root / ".mediasync" / "objects" / "versions" / "operation-a.manifest.json"
+    )
+    assert preservation.version_object_id == "operation-a"
+    assert preservation.final_relative_path == RelativePath("Photos/image.jpg")
+    assert receipt.final_relative_path == artifact.relative_path
+    assert final.read_bytes() == b"new-image"
+    assert version_payload.read_bytes() == b"old-image"
+    manifest = json.loads(version_manifest.read_text(encoding="utf-8"))
+    assert manifest["object_role"] == "OLD_TARGET_VERSION"
+    assert manifest["operation_id"] == "operation-a"
+    assert manifest["fingerprint"] == {
+        "byte_count": len(b"old-image"),
+        "content_hash": _sha256(b"old-image"),
+    }
+
+
+def test_local_versioned_replace_rejects_target_drift_after_old_target_preserved(
+    tmp_path: Path,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    final = fixture.target_root / "Photos" / "image.jpg"
+    final.write_bytes(b"old-image")
+    artifact = fixture.stage(object_id="operation-a", relative_path="Photos/image.jpg", payload=b"new-image")
+    operation = _replace_operation(fixture, expected_target_payload=b"old-image")
+    adapter = LocalVersionedReplaceFinalCommitAdapter(
+        target_root=fixture.target_root,
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    adapter.preserve_old_target(permit, operation)
+    final.write_bytes(b"edited-after-preserve")
+
+    with pytest.raises(FinalCommitAdapterError) as exc_info:
+        adapter.commit_verified_artifact(permit, artifact)
+
+    assert exc_info.value.validation_code == "LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE"
+    assert final.read_bytes() == b"edited-after-preserve"
+    assert (
+        fixture.target_root / ".mediasync" / "objects" / "versions" / "operation-a.payload"
+    ).read_bytes() == b"old-image"
+
+
 class _CommitFixture:
     def __init__(
         self,
@@ -207,6 +278,42 @@ def _request() -> EndpointLeaseRequest:
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _replace_operation(
+    fixture: _CommitFixture,
+    *,
+    expected_target_payload: bytes,
+) -> RecoveryOperation:
+    return replace(
+        planned_recovery_operation(
+            run_id=fixture.lease.run_id,
+            run_target_id=fixture.lease.run_target_id,
+            operation_id="operation-a",
+            target_endpoint_id=fixture.lease.endpoint_id,
+            target_endpoint_revision_id=fixture.lease.endpoint_revision_id,
+            endpoint_generation=1,
+            owner_installation_id=fixture.lease.owner_installation_id,
+            ownership_epoch=fixture.lease.ownership_epoch,
+            lease_id=fixture.lease.lease_id,
+            lease_resource_key=fixture.lease.resource_key,
+            fencing_token=fixture.lease.fencing_token,
+            final_relative_path="Photos/image.jpg",
+            target_precondition_kind=RecoveryTargetPreconditionKind.MATCH_FINGERPRINT,
+        ),
+        phase=RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
+        intent_segment_id="segment-a",
+        intent_ordinal=0,
+        staging_object_id="operation-a",
+        expected_target_fingerprint_json=json.dumps(
+            {
+                "byte_count": len(expected_target_payload),
+                "content_hash": _sha256(expected_target_payload),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
 
 
 class _FakeHandle:

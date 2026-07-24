@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from mediasync_home.domain.capabilities import MutationPermit
+
+if TYPE_CHECKING:
+    from mediasync_home.application.recovery_operations import RecoveryOperation
 
 
 @dataclass(frozen=True)
@@ -25,6 +28,15 @@ class CommitReceipt:
 
 
 @dataclass(frozen=True)
+class OldTargetPreservationReceipt:
+    operation_id: str
+    final_relative_path: RelativePath
+    version_object_id: str | None = None
+    quarantine_object_id: str | None = None
+    fingerprint_json: str | None = None
+
+
+@dataclass(frozen=True)
 class FinalArtifactVerificationEvidence:
     fingerprint_json: str
 
@@ -43,3 +55,11 @@ class FinalCommitPort(Protocol):
         permit: MutationPermit,
         artifact: VerifiedStagingArtifact,
     ) -> CommitReceipt: ...
+
+
+class OldTargetPreservationPort(Protocol):
+    def preserve_old_target(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> OldTargetPreservationReceipt: ...
