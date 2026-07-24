@@ -12,6 +12,12 @@ from mediasync_home.adapters.sqlite.connection_policy import SqliteStore
 from mediasync_home.adapters.sqlite.migrations import current_schema_version
 from mediasync_home.application.external_resources import ExternalResourceState, ExternalResourceType
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
+from mediasync_home.application.run_executor import RunExecutorPumpStopReason
+from mediasync_home.application.run_executor_cycle import (
+    RunExecutorCycleAction,
+    RunExecutorCycleOutcome,
+    RunExecutorCyclePumpOutcome,
+)
 from mediasync_home.application.runtime_status import startup_status
 from mediasync_home.application.schedules import ScheduleDefinition
 from mediasync_home.application.task_scheduler import (
@@ -65,17 +71,48 @@ def test_bounded_pipe_loop_reports_sanitized_failure() -> None:
     assert server.calls == 2
 
 
+def test_bounded_pipe_loop_runs_after_request_callback() -> None:
+    server = _FakePipeServer()
+    callbacks: list[int] = []
+
+    result = serve_bounded_pipe_requests(
+        server,
+        request_limit=3,
+        after_request=lambda: callbacks.append(server.calls),
+    )
+
+    assert result.completed is True
+    assert result.served_requests == 3
+    assert callbacks == [1, 2, 3]
+
+
 def test_engine_host_parser_requires_positive_serve_request_limit() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--serve-requests", "0"])
 
 
+def test_engine_host_parser_requires_bounded_executor_cycle_step_limit() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--run-executor-cycle-max-steps", "101"])
+
+
 def test_engine_host_parser_accepts_explicit_long_running_pipe_mode() -> None:
-    args = build_parser().parse_args(["--pipe-name", "pipe-a", "--serve-forever"])
+    args = build_parser().parse_args(
+        [
+            "--pipe-name",
+            "pipe-a",
+            "--serve-forever",
+            "--run-executor-cycle-after-request",
+            "--run-executor-cycle-max-steps",
+            "7",
+        ]
+    )
 
     assert args.pipe_name == "pipe-a"
     assert args.serve_forever is True
     assert args.serve_requests == 1
+    assert args.run_executor_cycle_after_request is True
+    assert args.run_executor_cycle_max_steps == 7
 
 
 def test_long_running_pipe_loop_stops_cleanly_when_interrupted() -> None:
@@ -88,6 +125,21 @@ def test_long_running_pipe_loop_stops_cleanly_when_interrupted() -> None:
     assert result.stop_reason == "INTERRUPTED"
     assert result.served_requests == 3
     assert server.calls == 4
+
+
+def test_long_running_pipe_loop_runs_after_request_until_interrupted() -> None:
+    server = _FakePipeServer(interrupt_on_call=3)
+    callbacks: list[int] = []
+
+    result = serve_pipe_requests_until_interrupted(
+        server,
+        after_request=lambda: callbacks.append(server.calls),
+    )
+
+    assert result.completed is True
+    assert result.stop_reason == "INTERRUPTED"
+    assert result.served_requests == 2
+    assert callbacks == [1, 2]
 
 
 def test_long_running_pipe_loop_reports_sanitized_failure() -> None:
@@ -133,6 +185,67 @@ def test_engine_host_run_uses_long_running_pipe_mode(monkeypatch: pytest.MonkeyP
         "pipe_name": "pipe-a",
         "served_requests": 2,
         "stop_reason": "INTERRUPTED",
+    }
+
+
+def test_engine_host_run_emits_executor_cycle_after_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_win32_pipe = types.ModuleType("mediasync_home.ipc.win32_named_pipe")
+    runtime = _FakeRuntime()
+    lines: list[str] = []
+
+    class FakeWin32NamedPipeServer(_FakePipeServer):
+        def __init__(self, *, pipe_name: str, service: object) -> None:
+            super().__init__()
+            self.pipe_name = pipe_name
+            self.service = service
+
+    fake_win32_pipe.Win32NamedPipeServer = FakeWin32NamedPipeServer
+    fake_win32_pipe.current_user_policy = _authorization
+    monkeypatch.setitem(sys.modules, "mediasync_home.ipc.win32_named_pipe", fake_win32_pipe)
+    monkeypatch.setattr(engine_host_module.os, "name", "nt")
+    monkeypatch.setattr(engine_host_module, "current_process_runtime_policy", lambda root: None)
+    monkeypatch.setattr(engine_host_module, "build_engine_host_runtime", lambda **kwargs: runtime)
+
+    code = run_engine_host(
+        [
+            "--pipe-name",
+            "pipe-a",
+            "--state-root",
+            str(tmp_path),
+            "--run-executor-cycle-after-request",
+            "--run-executor-cycle-max-steps",
+            "7",
+        ],
+        emit=lines.append,
+    )
+
+    events = [json.loads(line) for line in lines]
+    assert code == 0
+    assert runtime.cycle_max_steps == [7]
+    assert [event["event"] for event in events] == [
+        "ENGINE_HOST_PIPE_STARTING",
+        "ENGINE_HOST_RUN_EXECUTOR_CYCLE",
+        "ENGINE_HOST_PIPE_STOPPED",
+    ]
+    assert events[0]["run_executor_cycle_after_request"] is True
+    assert events[0]["run_executor_cycle_max_steps"] == 7
+    assert events[1]["run_executor_cycle"] == {
+        "last_step": {
+            "action": "IDLE",
+            "advanced": False,
+            "idle": True,
+            "next_action": "No runnable work.",
+            "run_id": None,
+            "run_target_id": None,
+            "validation_codes": [],
+        },
+        "next_action": "No runnable work.",
+        "steps_attempted": 1,
+        "stopped_reason": "IDLE",
+        "validation_codes": [],
     }
 
 
@@ -507,9 +620,29 @@ class _FakeRuntime:
 
     def __init__(self) -> None:
         self.closed = False
+        self.cycle_max_steps: list[int] = []
 
     def close(self) -> None:
         self.closed = True
+
+    def run_executor_cycle(self, *, max_steps: int) -> RunExecutorCyclePumpOutcome:
+        self.cycle_max_steps.append(max_steps)
+        step = RunExecutorCycleOutcome(
+            action=RunExecutorCycleAction.IDLE,
+            advanced=False,
+            idle=True,
+            run_id=None,
+            run_target_id=None,
+            validation_codes=(),
+            next_action="No runnable work.",
+        )
+        return RunExecutorCyclePumpOutcome(
+            steps_attempted=1,
+            stopped_reason=RunExecutorPumpStopReason.IDLE,
+            last_step=step,
+            validation_codes=(),
+            next_action="No runnable work.",
+        )
 
 
 class _TaskSchedulerRegistry:

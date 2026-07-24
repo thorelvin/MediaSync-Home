@@ -193,8 +193,11 @@ def test_launcher_local_preview_host_publishes_persistent_engine_host(tmp_path: 
     assert gui_response["payload"]["host_status"]["role"] == "engine-host"
     assert host_events[0]["event"] == "ENGINE_HOST_PIPE_STARTING"
     assert host_events[0]["serve_forever"] is True
+    assert host_events[0]["run_executor_cycle_after_request"] is True
     assert host_events[0]["host_locator"]["installation_id"] == installation_id
     assert host_events[0]["state_root"] == str(state_root)
+    assert host_events[1]["event"] == "ENGINE_HOST_RUN_EXECUTOR_CYCLE"
+    assert host_events[1]["run_executor_cycle"]["stopped_reason"] == "IDLE"
 
 
 def test_launcher_local_preview_status_starts_host_and_queries_gui() -> None:

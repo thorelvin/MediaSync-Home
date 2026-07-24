@@ -191,6 +191,7 @@ def build_local_preview_host_run(
         )
     if state_root is not None:
         engine_args.extend(("--state-root", str(state_root.resolve())))
+        engine_args.append("--run-executor-cycle-after-request")
     if reconcile_task_scheduler_resources:
         if state_root is None:
             raise ValueError("TASK_SCHEDULER_RECONCILIATION_REQUIRES_STATE_ROOT")

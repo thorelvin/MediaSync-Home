@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -47,6 +47,7 @@ from mediasync_home.adapters.sqlite.snapshots import SqliteSnapshotEntryStore
 from mediasync_home.adapters.sqlite.trigger_occurrences import SqliteTriggerOccurrenceStore
 from mediasync_home.application.run_executor import (
     HeldRunTargetLeaseRegistry,
+    MAX_RUN_EXECUTOR_PUMP_STEPS,
     RunExecutorExecutionStartStepOutcome,
     RunExecutorPumpOutcome,
     RunExecutorQueueStore,
@@ -407,6 +408,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="serve local IPC until the Engine Host process is interrupted",
     )
+    parser.add_argument(
+        "--run-executor-cycle-after-request",
+        action="store_true",
+        help="run one bounded executor cycle after each served IPC request",
+    )
+    parser.add_argument(
+        "--run-executor-cycle-max-steps",
+        type=_run_executor_step_limit,
+        default=10,
+        help="maximum executor steps for each after-request cycle",
+    )
     parser.add_argument("--state-root", type=Path, help="optional local preview state root")
     parser.add_argument("--host-mutex-name", help="optional local Engine Host singleton mutex")
     parser.add_argument(
@@ -469,6 +481,10 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
     args = build_parser().parse_args(argv)
     if args.reconcile_task_scheduler_resources and not args.pipe_name:
         raise RuntimeError("TASK_SCHEDULER_RECONCILIATION_REQUIRES_PIPE_MODE")
+    if args.run_executor_cycle_after_request and not args.pipe_name:
+        raise RuntimeError("RUN_EXECUTOR_CYCLE_REQUIRES_PIPE_MODE")
+    if args.run_executor_cycle_after_request and args.state_root is None:
+        raise RuntimeError("RUN_EXECUTOR_CYCLE_REQUIRES_STATE_ROOT")
     if not args.pipe_name:
         return run_role(ProcessRole.ENGINE_HOST, argv, emit=emit)
     if os.name != "nt":
@@ -532,6 +548,8 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                 {
                     "event": "ENGINE_HOST_PIPE_STARTING",
                     "pipe_name": args.pipe_name,
+                    "run_executor_cycle_after_request": args.run_executor_cycle_after_request,
+                    "run_executor_cycle_max_steps": args.run_executor_cycle_max_steps,
                     "serve_forever": args.serve_forever,
                     "serve_requests": args.serve_requests,
                     "startup_reconciliation": _startup_reconciliation_payload(
@@ -560,10 +578,22 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
             pipe_name=args.pipe_name,
             service=runtime.service,
         )
+        after_request = None
+        if args.run_executor_cycle_after_request:
+            after_request = _build_after_request_executor_cycle(
+                runtime=runtime,
+                max_steps=args.run_executor_cycle_max_steps,
+                output=output,
+                pipe_name=args.pipe_name,
+            )
         if args.serve_forever:
-            result = serve_pipe_requests_until_interrupted(server)
+            result = serve_pipe_requests_until_interrupted(server, after_request=after_request)
         else:
-            result = serve_bounded_pipe_requests(server, request_limit=args.serve_requests)
+            result = serve_bounded_pipe_requests(
+                server,
+                request_limit=args.serve_requests,
+                after_request=after_request,
+            )
         if result.completed:
             output(
                 json.dumps(
@@ -744,12 +774,19 @@ def reconcile_task_scheduler_resources_for_engine_host_startup(
     )
 
 
-def serve_bounded_pipe_requests(server: PipeServer, *, request_limit: int) -> PipeLoopResult:
+def serve_bounded_pipe_requests(
+    server: PipeServer,
+    *,
+    request_limit: int,
+    after_request: Callable[[], None] | None = None,
+) -> PipeLoopResult:
     served_requests = 0
     try:
         for _ in range(request_limit):
             server.serve_once()
             served_requests += 1
+            if after_request is not None:
+                after_request()
     except Exception as exc:
         return PipeLoopResult(
             served_requests=served_requests,
@@ -763,12 +800,18 @@ def serve_bounded_pipe_requests(server: PipeServer, *, request_limit: int) -> Pi
     )
 
 
-def serve_pipe_requests_until_interrupted(server: PipeServer) -> PipeLoopResult:
+def serve_pipe_requests_until_interrupted(
+    server: PipeServer,
+    *,
+    after_request: Callable[[], None] | None = None,
+) -> PipeLoopResult:
     served_requests = 0
     try:
         while True:
             server.serve_once()
             served_requests += 1
+            if after_request is not None:
+                after_request()
     except KeyboardInterrupt:
         return PipeLoopResult(
             served_requests=served_requests,
@@ -782,6 +825,53 @@ def serve_pipe_requests_until_interrupted(server: PipeServer) -> PipeLoopResult:
             error_type=type(exc).__name__,
             stop_reason="SERVER_ERROR",
         )
+
+
+def _build_after_request_executor_cycle(
+    *,
+    runtime: EngineHostRuntime,
+    max_steps: int,
+    output: Emit,
+    pipe_name: str,
+) -> Callable[[], None]:
+    def run_cycle() -> None:
+        outcome = runtime.run_executor_cycle(max_steps=max_steps)
+        output(
+            json.dumps(
+                {
+                    "event": "ENGINE_HOST_RUN_EXECUTOR_CYCLE",
+                    "pipe_name": pipe_name,
+                    "run_executor_cycle": _run_executor_cycle_pump_payload(outcome),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+
+    return run_cycle
+
+
+def _run_executor_cycle_pump_payload(
+    outcome: RunExecutorCyclePumpOutcome,
+) -> dict[str, object]:
+    last_step = None
+    if outcome.last_step is not None:
+        last_step = {
+            "action": outcome.last_step.action.value,
+            "advanced": outcome.last_step.advanced,
+            "idle": outcome.last_step.idle,
+            "next_action": outcome.last_step.next_action,
+            "run_id": outcome.last_step.run_id,
+            "run_target_id": outcome.last_step.run_target_id,
+            "validation_codes": list(outcome.last_step.validation_codes),
+        }
+    return {
+        "last_step": last_step,
+        "next_action": outcome.next_action,
+        "steps_attempted": outcome.steps_attempted,
+        "stopped_reason": outcome.stopped_reason.value,
+        "validation_codes": list(outcome.validation_codes),
+    }
 
 
 def _startup_reconciliation_payload(
@@ -984,4 +1074,13 @@ def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
         raise argparse.ArgumentTypeError("value must be at least 1")
+    return parsed
+
+
+def _run_executor_step_limit(value: str) -> int:
+    parsed = _positive_int(value)
+    if parsed > MAX_RUN_EXECUTOR_PUMP_STEPS:
+        raise argparse.ArgumentTypeError(
+            f"value must be at most {MAX_RUN_EXECUTOR_PUMP_STEPS}"
+        )
     return parsed
