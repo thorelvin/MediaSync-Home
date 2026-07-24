@@ -24,6 +24,7 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     recovery_writer_policy,
 )
 from mediasync_home.adapters.sqlite.endpoint_roots import SqliteEndpointRootResolver
+from mediasync_home.adapters.sqlite.external_resources import SqliteExternalResourceStateStore
 from mediasync_home.adapters.sqlite.job_catalog import SqliteStandardBackupJobCatalog
 from mediasync_home.adapters.sqlite.job_draft_store import SqliteJobDraftStore
 from mediasync_home.adapters.sqlite.lease_tokens import SqliteResourceLeaseStore
@@ -441,6 +442,7 @@ def build_engine_host_runtime(
         runs = SqliteRunStore(catalog_connection)
         schedules = SqliteScheduleStore(catalog_connection)
         trigger_occurrences = SqliteTriggerOccurrenceStore(catalog_connection)
+        external_resource_state = SqliteExternalResourceStateStore(catalog_connection)
         catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
         resource_leases = SqliteResourceLeaseStore(recovery_connection)
         recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
@@ -489,6 +491,7 @@ def build_engine_host_runtime(
             run_activity_read_store=runs,
             schedule_store=schedules,
             trigger_occurrence_store=trigger_occurrences,
+            external_resource_state_store=external_resource_state,
             cataloged_file_read_store=catalog_handoffs,
             command_receipt_store=command_receipts,
             outbox_store=outbox,

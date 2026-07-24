@@ -23,6 +23,7 @@ from mediasync_home.application.command_receipts import (
     CommandReceiptStore,
     transition_command_receipt,
 )
+from mediasync_home.application.external_resources import ExternalResourceStateStore
 from mediasync_home.application.job_creation import (
     CreateStandardBackupJobCommand,
     JobCreationOutcome,
@@ -129,6 +130,7 @@ class EngineHostIpcService:
     run_id_factory: RunIdFactory | None = None
     schedule_store: ScheduleStore | None = None
     trigger_occurrence_store: TriggerOccurrenceStore | None = None
+    external_resource_state_store: ExternalResourceStateStore | None = None
     command_receipt_store: CommandReceiptStore | None = None
     command_effect_transaction: CommandEffectTransaction | None = None
     outbox_store: OutboxStore | None = None

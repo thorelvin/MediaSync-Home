@@ -118,6 +118,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.service.run_activity_read_store is not None
         assert runtime.service.schedule_store is not None
         assert runtime.service.trigger_occurrence_store is not None
+        assert runtime.service.external_resource_state_store is not None
         assert runtime.run_executor_lease_authority is not None
         assert runtime.run_executor_catalog_handoff_store is not None
         assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 21
