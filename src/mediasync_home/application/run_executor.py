@@ -60,6 +60,8 @@ class RunTargetLeaseRegistry(Protocol):
         run_target_id: str,
     ) -> None: ...
 
+    def retained_run_target_keys(self) -> tuple[tuple[str, str], ...]: ...
+
 
 @dataclass
 class HeldRunTargetLeaseRegistry(RunTargetLeaseRegistry):
@@ -101,6 +103,9 @@ class HeldRunTargetLeaseRegistry(RunTargetLeaseRegistry):
         lease = self._leases.pop((run_id, run_target_id), None)
         if lease is not None:
             lease.release()
+
+    def retained_run_target_keys(self) -> tuple[tuple[str, str], ...]:
+        return tuple(sorted(self._leases))
 
     def release_all(self) -> None:
         leases = tuple(self._leases.values())

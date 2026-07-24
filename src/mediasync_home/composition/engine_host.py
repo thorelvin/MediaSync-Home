@@ -46,6 +46,10 @@ from mediasync_home.application.run_executor import (
     execute_bounded_run_executor_preflight_pump,
     execute_one_run_target_execution_start_step,
 )
+from mediasync_home.application.run_executor_cycle import (
+    RunExecutorCyclePumpOutcome,
+    execute_bounded_run_executor_cycle,
+)
 from mediasync_home.application.run_operation_planning import (
     RunTargetOperationPlanningOutcome,
     plan_run_target_recovery_operations,
@@ -62,6 +66,7 @@ from mediasync_home.application.run_catalog_handoffs import (
 from mediasync_home.application.run_completion import complete_run_target_after_catalog_handoffs
 from mediasync_home.application.catalog_handoff import FinalFileCatalogHandoffStore
 from mediasync_home.application.plans import PlanStore
+from mediasync_home.application.ports import FinalCommitPort
 from mediasync_home.application.recovery_intents import RecoveryIntentSegmentStore
 from mediasync_home.application.runs import EndpointLeaseAuthority, RunIds, RunTargetCompletionOutcome
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
@@ -216,6 +221,36 @@ class EngineHostRuntime:
             permit=permit,
             runs=self.run_executor_queue_store,
             recovery_operations=self.run_executor_recovery_operation_store,
+        )
+
+    def run_executor_cycle(
+        self,
+        *,
+        max_steps: int,
+        final_commit_port: FinalCommitPort | None = None,
+    ) -> RunExecutorCyclePumpOutcome:
+        if (
+            self.run_executor_queue_store is None
+            or self.run_executor_lease_authority is None
+            or self.run_executor_lease_registry is None
+            or self.run_executor_plan_store is None
+            or self.run_executor_recovery_operation_store is None
+            or self.run_executor_recovery_intent_segment_store is None
+            or self.run_executor_catalog_handoff_store is None
+            or self.run_executor_process_instance_id is None
+        ):
+            raise RuntimeError("RUN_EXECUTOR_RUNTIME_NOT_CONFIGURED")
+        return execute_bounded_run_executor_cycle(
+            runs=self.run_executor_queue_store,
+            leases=self.run_executor_lease_authority,
+            lease_registry=self.run_executor_lease_registry,
+            plans=self.run_executor_plan_store,
+            recovery_operations=self.run_executor_recovery_operation_store,
+            intent_segments=self.run_executor_recovery_intent_segment_store,
+            catalog_handoffs=self.run_executor_catalog_handoff_store,
+            process_instance_id=self.run_executor_process_instance_id,
+            max_steps=max_steps,
+            final_commit_port=final_commit_port,
         )
 
     def close(self) -> None:
