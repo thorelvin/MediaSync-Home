@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import time
 import types
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -30,6 +32,7 @@ from mediasync_home.application.task_scheduler import (
 from mediasync_home.application.trigger_occurrences import TriggerKind
 from mediasync_home.composition import engine_host as engine_host_module
 from mediasync_home.composition.engine_host import (
+    ExecutorMaintenanceLoop,
     TaskSchedulerStartupReconciliationOptions,
     build_engine_host_runtime,
     build_parser,
@@ -105,6 +108,8 @@ def test_engine_host_parser_accepts_explicit_long_running_pipe_mode() -> None:
             "--run-executor-cycle-after-request",
             "--run-executor-cycle-max-steps",
             "7",
+            "--run-executor-cycle-interval-ms",
+            "50",
         ]
     )
 
@@ -113,6 +118,56 @@ def test_engine_host_parser_accepts_explicit_long_running_pipe_mode() -> None:
     assert args.serve_requests == 1
     assert args.run_executor_cycle_after_request is True
     assert args.run_executor_cycle_max_steps == 7
+    assert args.run_executor_cycle_interval_ms == 50
+
+
+def test_executor_maintenance_loop_runs_interval_cycle_and_closes_runtime() -> None:
+    runtime = _FakeRuntime()
+    lines: list[str] = []
+
+    loop = ExecutorMaintenanceLoop(
+        runtime_factory=lambda: runtime,
+        interval_ms=1,
+        max_steps=4,
+        output=lines.append,
+        pipe_name="pipe-a",
+    )
+
+    loop.start()
+    _wait_until(lambda: runtime.cycle_max_steps != [])
+    loop.stop()
+
+    events = [json.loads(line) for line in lines]
+    assert runtime.cycle_max_steps[0] == 4
+    assert runtime.closed is True
+    assert events[0]["event"] == "ENGINE_HOST_RUN_EXECUTOR_CYCLE"
+    assert events[0]["cycle_trigger"] == "INTERVAL"
+    assert events[0]["run_executor_cycle"]["stopped_reason"] == "IDLE"
+
+
+def test_executor_maintenance_loop_reports_sanitized_runtime_failure() -> None:
+    lines: list[str] = []
+
+    loop = ExecutorMaintenanceLoop(
+        runtime_factory=lambda: (_ for _ in ()).throw(RuntimeError("detail")),
+        interval_ms=1,
+        max_steps=4,
+        output=lines.append,
+        pipe_name="pipe-a",
+    )
+
+    loop.start()
+    loop.stop()
+
+    events = [json.loads(line) for line in lines]
+    assert events == [
+        {
+            "cycle_trigger": "INTERVAL",
+            "error_type": "RuntimeError",
+            "event": "ENGINE_HOST_RUN_EXECUTOR_CYCLE_FAILED",
+            "pipe_name": "pipe-a",
+        }
+    ]
 
 
 def test_long_running_pipe_loop_stops_cleanly_when_interrupted() -> None:
@@ -247,6 +302,7 @@ def test_engine_host_run_emits_executor_cycle_after_request(
         "stopped_reason": "IDLE",
         "validation_codes": [],
     }
+    assert events[1]["cycle_trigger"] == "AFTER_REQUEST"
 
 
 def test_engine_host_parser_accepts_optional_state_root_and_inactive_outbox_owner(
@@ -655,6 +711,15 @@ class _TaskSchedulerRegistry:
 
     def apply_task_definition(self, definition: object) -> None:
         self.applied.append(definition)
+
+
+def _wait_until(predicate: Callable[[], bool], *, timeout_seconds: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError("timed out waiting for predicate")
 
 
 def _task_scheduler_schedule() -> ScheduleDefinition:

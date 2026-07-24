@@ -63,6 +63,7 @@ def test_local_preview_host_run_can_enable_task_scheduler_startup_pump(
         state_root=state_root,
         reconcile_task_scheduler_resources=True,
         task_scheduler_executable_path=task_executable,
+        run_executor_cycle_interval_ms=250,
     )
 
     assert host_run.engine_host_args == (
@@ -72,6 +73,8 @@ def test_local_preview_host_run_can_enable_task_scheduler_startup_pump(
         "--state-root",
         str(state_root.resolve()),
         "--run-executor-cycle-after-request",
+        "--run-executor-cycle-interval-ms",
+        "250",
         "--reconcile-task-scheduler-resources",
         "--task-scheduler-executable-path",
         str(task_executable.resolve()),

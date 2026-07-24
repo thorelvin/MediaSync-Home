@@ -145,6 +145,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="absolute local unsigned app executable registered in Task Scheduler actions",
     )
+    parser.add_argument(
+        "--run-executor-cycle-interval-ms",
+        type=_positive_int,
+        default=5000,
+        help="persistent host executor maintenance interval",
+    )
     parser.add_argument("--timeout-seconds", type=_positive_float, default=10.0)
     return parser
 
@@ -168,6 +174,7 @@ def build_local_preview_host_run(
     host_descriptor: LocalEngineHostDescriptor | None = None,
     reconcile_task_scheduler_resources: bool = False,
     task_scheduler_executable_path: Path | None = None,
+    run_executor_cycle_interval_ms: int | None = None,
 ) -> LocalPreviewHostRun:
     if host_descriptor is not None:
         if pipe_name is not None and pipe_name != host_descriptor.pipe_name:
@@ -192,6 +199,13 @@ def build_local_preview_host_run(
     if state_root is not None:
         engine_args.extend(("--state-root", str(state_root.resolve())))
         engine_args.append("--run-executor-cycle-after-request")
+        if run_executor_cycle_interval_ms is not None:
+            engine_args.extend(
+                (
+                    "--run-executor-cycle-interval-ms",
+                    str(run_executor_cycle_interval_ms),
+                )
+            )
     if reconcile_task_scheduler_resources:
         if state_root is None:
             raise ValueError("TASK_SCHEDULER_RECONCILIATION_REQUIRES_STATE_ROOT")
@@ -470,6 +484,7 @@ def _run_local_preview_host_from_args(
         host_descriptor=host_descriptor,
         reconcile_task_scheduler_resources=args.reconcile_task_scheduler_resources,
         task_scheduler_executable_path=args.task_scheduler_executable_path,
+        run_executor_cycle_interval_ms=args.run_executor_cycle_interval_ms,
     )
     from mediasync_home.composition.engine_host import run_engine_host
 
@@ -512,6 +527,13 @@ def _parse_json_object(value: str) -> dict[str, object] | None:
     if not isinstance(payload, dict):
         return None
     return {str(key): item for key, item in payload.items()}
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be at least 1")
+    return parsed
 
 
 def _positive_float(value: str) -> float:

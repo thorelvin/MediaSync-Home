@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sqlite3
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -398,6 +399,72 @@ class EngineHostRuntime:
             self.recovery_connection.close()
 
 
+class ExecutorMaintenanceLoop:
+    def __init__(
+        self,
+        *,
+        runtime_factory: Callable[[], EngineHostRuntime],
+        interval_ms: int,
+        max_steps: int,
+        output: Emit,
+        pipe_name: str,
+    ) -> None:
+        self._runtime_factory = runtime_factory
+        self._interval_seconds = interval_ms / 1000
+        self._max_steps = max_steps
+        self._output = output
+        self._pipe_name = pipe_name
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("EXECUTOR_MAINTENANCE_LOOP_ALREADY_STARTED")
+        self._thread = threading.Thread(
+            target=self._run,
+            name="MediaSyncHomeExecutorMaintenance",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self, *, timeout_seconds: float = 5.0) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout_seconds)
+
+    def _run(self) -> None:
+        runtime: EngineHostRuntime | None = None
+        try:
+            runtime = self._runtime_factory()
+            while not self._stop_event.wait(self._interval_seconds):
+                try:
+                    outcome = runtime.run_executor_cycle(max_steps=self._max_steps)
+                except Exception as exc:
+                    _emit_run_executor_cycle_failed_event(
+                        output=self._output,
+                        pipe_name=self._pipe_name,
+                        cycle_trigger="INTERVAL",
+                        error_type=type(exc).__name__,
+                    )
+                    continue
+                _emit_run_executor_cycle_event(
+                    output=self._output,
+                    pipe_name=self._pipe_name,
+                    cycle_trigger="INTERVAL",
+                    outcome=outcome,
+                )
+        except Exception as exc:
+            _emit_run_executor_cycle_failed_event(
+                output=self._output,
+                pipe_name=self._pipe_name,
+                cycle_trigger="INTERVAL",
+                error_type=type(exc).__name__,
+            )
+        finally:
+            if runtime is not None:
+                runtime.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MediaSync Home Engine Host")
     parser.add_argument("--pipe-name", help="serve non-mutating IPC over this local named pipe")
@@ -418,6 +485,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=_run_executor_step_limit,
         default=10,
         help="maximum executor steps for each after-request cycle",
+    )
+    parser.add_argument(
+        "--run-executor-cycle-interval-ms",
+        type=_positive_int,
+        help="run one bounded executor cycle on this interval while the host is alive",
     )
     parser.add_argument("--state-root", type=Path, help="optional local preview state root")
     parser.add_argument("--host-mutex-name", help="optional local Engine Host singleton mutex")
@@ -485,6 +557,10 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
         raise RuntimeError("RUN_EXECUTOR_CYCLE_REQUIRES_PIPE_MODE")
     if args.run_executor_cycle_after_request and args.state_root is None:
         raise RuntimeError("RUN_EXECUTOR_CYCLE_REQUIRES_STATE_ROOT")
+    if args.run_executor_cycle_interval_ms is not None and not args.pipe_name:
+        raise RuntimeError("RUN_EXECUTOR_MAINTENANCE_REQUIRES_PIPE_MODE")
+    if args.run_executor_cycle_interval_ms is not None and args.state_root is None:
+        raise RuntimeError("RUN_EXECUTOR_MAINTENANCE_REQUIRES_STATE_ROOT")
     if not args.pipe_name:
         return run_role(ProcessRole.ENGINE_HOST, argv, emit=emit)
     if os.name != "nt":
@@ -493,17 +569,19 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
     from mediasync_home.ipc.win32_named_pipe import Win32NamedPipeServer
     from mediasync_home.ipc.win32_named_pipe import current_user_policy
 
-    output = emit or print
+    output = _thread_safe_emit(emit or print)
     service_status = startup_status(
         ProcessRole.ENGINE_HOST,
         runtime_policy=current_process_runtime_policy(ROOT),
     )
+    authorization = current_user_policy()
     host_mutex = _acquire_host_mutex(args.host_mutex_name, output=output, pipe_name=args.pipe_name)
     if args.host_mutex_name and host_mutex is None:
         return 3
     host_locator_payload: dict[str, object] | None = None
     host_locator_path: Path | None = None
     runtime: EngineHostRuntime | None = None
+    executor_maintenance_loop: ExecutorMaintenanceLoop | None = None
     task_scheduler_reconciliation: TaskSchedulerResourcePumpReport | None = None
     try:
         if args.publish_host_locator:
@@ -515,7 +593,7 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                 process_id=os.getpid(),
             )
         runtime = build_engine_host_runtime(
-            authorization=current_user_policy(),
+            authorization=authorization,
             service_status=service_status,
             installation_id=args.installation_id,
             state_root=args.state_root,
@@ -549,6 +627,7 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                     "event": "ENGINE_HOST_PIPE_STARTING",
                     "pipe_name": args.pipe_name,
                     "run_executor_cycle_after_request": args.run_executor_cycle_after_request,
+                    "run_executor_cycle_interval_ms": args.run_executor_cycle_interval_ms,
                     "run_executor_cycle_max_steps": args.run_executor_cycle_max_steps,
                     "serve_forever": args.serve_forever,
                     "serve_requests": args.serve_requests,
@@ -574,6 +653,14 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                 separators=(",", ":"),
             )
         )
+        if args.run_executor_cycle_interval_ms is not None:
+            executor_maintenance_loop = _build_executor_maintenance_loop(
+                args=args,
+                authorization=authorization,
+                service_status=service_status,
+                output=output,
+            )
+            executor_maintenance_loop.start()
         server = Win32NamedPipeServer(
             pipe_name=args.pipe_name,
             service=runtime.service,
@@ -624,6 +711,8 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
         )
         return 2
     finally:
+        if executor_maintenance_loop is not None:
+            executor_maintenance_loop.stop()
         if runtime is not None:
             runtime.close()
         if host_mutex is not None:
@@ -836,19 +925,84 @@ def _build_after_request_executor_cycle(
 ) -> Callable[[], None]:
     def run_cycle() -> None:
         outcome = runtime.run_executor_cycle(max_steps=max_steps)
-        output(
-            json.dumps(
-                {
-                    "event": "ENGINE_HOST_RUN_EXECUTOR_CYCLE",
-                    "pipe_name": pipe_name,
-                    "run_executor_cycle": _run_executor_cycle_pump_payload(outcome),
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            )
+        _emit_run_executor_cycle_event(
+            output=output,
+            pipe_name=pipe_name,
+            cycle_trigger="AFTER_REQUEST",
+            outcome=outcome,
         )
 
     return run_cycle
+
+
+def _build_executor_maintenance_loop(
+    *,
+    args: argparse.Namespace,
+    authorization: ClientAuthorizationPolicy,
+    service_status: RuntimeStatus,
+    output: Emit,
+) -> ExecutorMaintenanceLoop:
+    if args.state_root is None:
+        raise RuntimeError("RUN_EXECUTOR_MAINTENANCE_REQUIRES_STATE_ROOT")
+
+    def runtime_factory() -> EngineHostRuntime:
+        return build_engine_host_runtime(
+            authorization=authorization,
+            service_status=service_status,
+            installation_id=args.installation_id,
+            state_root=args.state_root,
+            reconciler_instance_id=f"{args.installation_id}-executor-maintenance",
+        )
+
+    return ExecutorMaintenanceLoop(
+        runtime_factory=runtime_factory,
+        interval_ms=args.run_executor_cycle_interval_ms,
+        max_steps=args.run_executor_cycle_max_steps,
+        output=output,
+        pipe_name=args.pipe_name,
+    )
+
+
+def _emit_run_executor_cycle_event(
+    *,
+    output: Emit,
+    pipe_name: str,
+    cycle_trigger: str,
+    outcome: RunExecutorCyclePumpOutcome,
+) -> None:
+    output(
+        json.dumps(
+            {
+                "cycle_trigger": cycle_trigger,
+                "event": "ENGINE_HOST_RUN_EXECUTOR_CYCLE",
+                "pipe_name": pipe_name,
+                "run_executor_cycle": _run_executor_cycle_pump_payload(outcome),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+
+
+def _emit_run_executor_cycle_failed_event(
+    *,
+    output: Emit,
+    pipe_name: str,
+    cycle_trigger: str,
+    error_type: str,
+) -> None:
+    output(
+        json.dumps(
+            {
+                "cycle_trigger": cycle_trigger,
+                "error_type": error_type,
+                "event": "ENGINE_HOST_RUN_EXECUTOR_CYCLE_FAILED",
+                "pipe_name": pipe_name,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
 
 
 def _run_executor_cycle_pump_payload(
@@ -1068,6 +1222,16 @@ def _publish_local_host_locator(
     )
     path = publish_local_engine_host_publication(publication)
     return publication.to_payload(), path
+
+
+def _thread_safe_emit(output: Emit) -> Emit:
+    lock = threading.Lock()
+
+    def emit_line(line: str) -> None:
+        with lock:
+            output(line)
+
+    return emit_line
 
 
 def _positive_int(value: str) -> int:

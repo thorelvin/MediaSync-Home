@@ -149,6 +149,8 @@ def test_launcher_local_preview_host_publishes_persistent_engine_host(tmp_path: 
             installation_id,
             "--state-root",
             str(state_root),
+            "--run-executor-cycle-interval-ms",
+            "50",
         ],
         cwd=Path(__file__).resolve().parents[3],
         stdout=subprocess.PIPE,
@@ -179,6 +181,7 @@ def test_launcher_local_preview_host_publishes_persistent_engine_host(tmp_path: 
             check=True,
         )
         assert host.poll() is None
+        time.sleep(0.2)
     finally:
         if host.poll() is None:
             host.kill()
@@ -198,6 +201,11 @@ def test_launcher_local_preview_host_publishes_persistent_engine_host(tmp_path: 
     assert host_events[0]["state_root"] == str(state_root)
     assert host_events[1]["event"] == "ENGINE_HOST_RUN_EXECUTOR_CYCLE"
     assert host_events[1]["run_executor_cycle"]["stopped_reason"] == "IDLE"
+    assert any(
+        event.get("event") == "ENGINE_HOST_RUN_EXECUTOR_CYCLE"
+        and event.get("cycle_trigger") == "INTERVAL"
+        for event in host_events
+    )
 
 
 def test_launcher_local_preview_status_starts_host_and_queries_gui() -> None:
