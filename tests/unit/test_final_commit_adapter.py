@@ -17,6 +17,7 @@ from mediasync_home.adapters.endpoint_leases import (
 from mediasync_home.adapters.final_commit import (
     FinalCommitAdapterError,
     LabNoOverwriteFinalCommitAdapter,
+    LocalResolvingFinalCommitAdapter,
     LocalVersionedReplaceFinalCommitAdapter,
 )
 from mediasync_home.application.ports import RelativePath, VerifiedStagingArtifact
@@ -193,6 +194,48 @@ def test_local_versioned_replace_rejects_target_drift_after_old_target_preserved
     ).read_bytes() == b"old-image"
 
 
+def test_local_resolving_final_commit_inserts_without_lab_marker(tmp_path: Path) -> None:
+    fixture = _commit_fixture(tmp_path)
+    (fixture.target_root / ".mediasync_test_root").unlink()
+    adapter = LocalResolvingFinalCommitAdapter(
+        root_resolver=_RootResolver(target_root=fixture.target_root),
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    artifact = fixture.stage(object_id="operation-a", relative_path="Photos/image.jpg", payload=b"image")
+
+    receipt = adapter.commit_verified_artifact(permit, artifact)
+
+    assert receipt.operation_id == "operation-a"
+    assert receipt.final_relative_path == artifact.relative_path
+    assert (fixture.target_root / "Photos" / "image.jpg").read_bytes() == b"image"
+
+
+def test_local_resolving_final_commit_preserves_then_replaces(tmp_path: Path) -> None:
+    fixture = _commit_fixture(tmp_path)
+    final = fixture.target_root / "Photos" / "image.jpg"
+    final.write_bytes(b"old-image")
+    adapter = LocalResolvingFinalCommitAdapter(
+        root_resolver=_RootResolver(target_root=fixture.target_root),
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    artifact = fixture.stage(object_id="operation-a", relative_path="Photos/image.jpg", payload=b"new-image")
+    operation = _replace_operation(fixture, expected_target_payload=b"old-image")
+
+    preservation = adapter.preserve_old_target(permit, operation)
+    receipt = adapter.commit_verified_artifact(permit, artifact)
+
+    assert preservation.version_object_id == "operation-a"
+    assert receipt.final_relative_path == artifact.relative_path
+    assert final.read_bytes() == b"new-image"
+    assert (
+        fixture.target_root / ".mediasync" / "objects" / "versions" / "operation-a.payload"
+    ).read_bytes() == b"old-image"
+
+
 class _CommitFixture:
     def __init__(
         self,
@@ -351,3 +394,23 @@ class _FakeTokenStore:
 
     def allocate_next_fencing_token(self, *, resource_key: str, ownership_epoch: int) -> int:
         return self._token
+
+
+class _RootResolver:
+    def __init__(self, *, target_root: Path) -> None:
+        self._target_root = target_root
+
+    def resolve_endpoint_root(
+        self,
+        *,
+        resource_key: str,
+        endpoint_id: str,
+        endpoint_revision_id: str,
+    ) -> Path | None:
+        if (
+            resource_key == "endpoint:target-a"
+            and endpoint_id == "target-a"
+            and endpoint_revision_id == "target-rev-a"
+        ):
+            return self._target_root
+        return None

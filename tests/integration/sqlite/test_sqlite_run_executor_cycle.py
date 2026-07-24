@@ -5,7 +5,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from mediasync_home.adapters.final_commit import LocalVersionedReplaceFinalCommitAdapter
+from mediasync_home.adapters.final_commit import LocalResolvingFinalCommitAdapter
 from mediasync_home.adapters.staging import LocalFileStagingTransferAdapter
 from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
 from mediasync_home.adapters.sqlite.connection_policy import (
@@ -35,12 +35,6 @@ from mediasync_home.application.plans import (
     TargetPreconditionKind,
     seal_plan,
 )
-from mediasync_home.application.ports import (
-    CommitReceipt,
-    FinalCommitPort,
-    RelativePath,
-    VerifiedStagingArtifact,
-)
 from mediasync_home.application.recovery_operations import (
     RecoveryOperationPhase,
     RecoveryTargetPreconditionKind,
@@ -61,7 +55,12 @@ from mediasync_home.application.runs import (
     parse_start_run_command,
     start_run_from_sealed_plan,
 )
+from mediasync_home.application.runtime_status import startup_status
+from mediasync_home.composition.engine_host import EngineHostRuntime
 from mediasync_home.domain.capabilities import MutationPermit, _issue_mutation_permit
+from mediasync_home.domain.process_roles import ProcessRole
+from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy
+from mediasync_home.ipc.server import EngineHostIpcService
 
 
 class FixedRunIdFactory(RunIdFactory):
@@ -131,6 +130,7 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
     (source_root / "Pictures").mkdir(parents=True)
     (target_root / "Pictures").mkdir(parents=True)
     (source_root / "Pictures" / "A.jpg").write_bytes(payload)
+    _write_endpoint_marker(target_root)
 
     catalog_connection = _prepared_catalog_connection(tmp_path)
     recovery_connection = _prepared_recovery_connection(tmp_path)
@@ -148,7 +148,11 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
         catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
         lease = FixedLiveLease()
         registry = HeldRunTargetLeaseRegistry()
-        final_commit = _FakeFinalCommitPort()
+        final_commit = LocalResolvingFinalCommitAdapter(
+            root_resolver=SqliteEndpointRootResolver(catalog_connection),
+            staging_root=staging_root,
+            permit_validator=lease,
+        )
         staging = LocalFileStagingTransferAdapter(
             root_resolver=SqliteEndpointRootResolver(catalog_connection),
             staging_root=staging_root,
@@ -167,19 +171,21 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
         )
         _register_resource_lease(recovery_connection)
 
-        outcome = execute_bounded_run_executor_cycle(
-            runs=runs,
-            leases=FixedLeaseAuthority(lease),
-            lease_registry=registry,
-            plans=plans,
-            recovery_operations=recovery_operations,
-            intent_segments=intent_segments,
-            catalog_handoffs=catalog_handoffs,
-            final_commit_port=final_commit,
-            staging_transfer_port=staging,
-            process_instance_id="host-a",
-            max_steps=15,
+        runtime = EngineHostRuntime(
+            service=_service(),
+            run_executor_queue_store=runs,
+            run_executor_lease_authority=FixedLeaseAuthority(lease),
+            run_executor_lease_registry=registry,
+            run_executor_plan_store=plans,
+            run_executor_recovery_operation_store=recovery_operations,
+            run_executor_recovery_intent_segment_store=intent_segments,
+            run_executor_catalog_handoff_store=catalog_handoffs,
+            run_executor_staging_transfer_port=staging,
+            run_executor_final_commit_port=final_commit,
+            run_executor_old_target_preservation_port=final_commit,
+            run_executor_process_instance_id="host-a",
         )
+        outcome = runtime.run_executor_cycle(max_steps=15)
 
         loaded_run = runs.load_started_run("run-a")
         operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
@@ -202,16 +208,10 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
         assert operation.catalog_handoff_id == "final-file:run-a:op-a"
         assert operation.expected_source_fingerprint_json is not None
         assert operation.expected_staging_fingerprint_json is not None
+        assert (target_root / "Pictures" / "A.jpg").read_bytes() == payload
         assert (staging_root / "op-a.payload").read_bytes() == payload
         assert handoff is not None
         assert handoff.content_hash == content_hash
-        assert final_commit.calls == (
-            VerifiedStagingArtifact(
-                object_id="op-a",
-                relative_path=RelativePath("Pictures/A.jpg"),
-                content_hash=content_hash,
-            ),
-        )
     finally:
         catalog_connection.close()
         recovery_connection.close()
@@ -248,8 +248,8 @@ def test_sqlite_run_executor_cycle_replaces_existing_target_from_match_fingerpri
         catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
         lease = FixedLiveLease()
         registry = HeldRunTargetLeaseRegistry()
-        final_commit = LocalVersionedReplaceFinalCommitAdapter(
-            target_root=target_root,
+        final_commit = LocalResolvingFinalCommitAdapter(
+            root_resolver=SqliteEndpointRootResolver(catalog_connection),
             staging_root=staging_root,
             permit_validator=lease,
         )
@@ -334,6 +334,17 @@ def _prepared_catalog_connection(tmp_path: Path) -> sqlite3.Connection:
     apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
     apply_sqlite_migrations(connection, catalog_migration_plan())
     return connection
+
+
+def _service() -> EngineHostIpcService:
+    return EngineHostIpcService(
+        ClientAuthorizationPolicy(
+            expected_user_sid_hash="same-user",
+            expected_session_id=42,
+        ),
+        status=startup_status(ProcessRole.ENGINE_HOST),
+        installation_id="install-a",
+    )
 
 
 def _prepared_recovery_connection(tmp_path: Path) -> sqlite3.Connection:
@@ -588,19 +599,3 @@ def _write_endpoint_marker(target_root: Path) -> None:
         ),
         encoding="utf-8",
     )
-
-
-class _FakeFinalCommitPort(FinalCommitPort):
-    def __init__(self) -> None:
-        self.calls: tuple[VerifiedStagingArtifact, ...] = ()
-
-    def commit_verified_artifact(
-        self,
-        permit: MutationPermit,
-        artifact: VerifiedStagingArtifact,
-    ) -> CommitReceipt:
-        self.calls = (*self.calls, artifact)
-        return CommitReceipt(
-            operation_id=artifact.object_id,
-            final_relative_path=artifact.relative_path,
-        )

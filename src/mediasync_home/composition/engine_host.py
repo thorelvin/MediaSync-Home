@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
-from mediasync_home.adapters.endpoint_leases import LocalResolvingEndpointLeaseAuthority
+from mediasync_home.adapters.endpoint_leases import (
+    LocalResolvingEndpointLeaseAuthority,
+    MutationPermitIssueError,
+)
+from mediasync_home.adapters.final_commit import LocalResolvingFinalCommitAdapter
 from mediasync_home.adapters.final_verification import LocalFinalArtifactVerificationAdapter
 from mediasync_home.adapters.runtime_policy import current_process_runtime_policy
 from mediasync_home.adapters.staging import LocalFileStagingTransferAdapter
@@ -53,6 +57,7 @@ from mediasync_home.application.run_executor import (
     RunExecutorPumpOutcome,
     RunExecutorPumpStopReason,
     RunExecutorQueueStore,
+    RunTargetLeaseRegistry,
     execute_bounded_run_executor_preflight_pump,
     execute_one_run_target_execution_start_step,
 )
@@ -129,6 +134,32 @@ class UuidRunIdFactory:
         return RunIds(run_id=f"run-{token}", logical_run_group_id=f"run-group-{token}")
 
 
+class RetainedRunTargetPermitValidator:
+    def __init__(self, lease_registry: RunTargetLeaseRegistry) -> None:
+        self._lease_registry = lease_registry
+
+    def assert_mutation_permit_current(self, permit: MutationPermit) -> None:
+        lease = self._lease_registry.load_retained_run_target_lease(
+            run_id=permit.run_id,
+            run_target_id=permit.run_target_id,
+        )
+        if lease is None:
+            raise MutationPermitIssueError(
+                "MUTATION_PERMIT_LEASE_NOT_RETAINED",
+                "Reacquire and retain the endpoint lease before applying final filesystem changes.",
+            )
+        lease_validator = getattr(lease, "assert_mutation_permit_current", None)
+        if callable(lease_validator):
+            lease_validator(permit)
+            return
+        current = lease.issue_mutation_permit()
+        if current != permit:
+            raise MutationPermitIssueError(
+                "MUTATION_PERMIT_LEASE_MISMATCH",
+                "Reject the stale permit and reacquire the endpoint lease for this target.",
+            )
+
+
 @dataclass(frozen=True)
 class PipeLoopResult:
     served_requests: int
@@ -164,6 +195,8 @@ class EngineHostRuntime:
     run_executor_recovery_intent_segment_store: RecoveryIntentSegmentStore | None = None
     run_executor_catalog_handoff_store: FinalFileCatalogHandoffStore | None = None
     run_executor_staging_transfer_port: RunTargetStagingPort | None = None
+    run_executor_final_commit_port: FinalCommitPort | None = None
+    run_executor_old_target_preservation_port: OldTargetPreservationPort | None = None
     run_executor_process_instance_id: str | None = None
     catalog_connection: sqlite3.Connection | None = None
     recovery_connection: sqlite3.Connection | None = None
@@ -388,8 +421,10 @@ class EngineHostRuntime:
             catalog_handoffs=self.run_executor_catalog_handoff_store,
             process_instance_id=self.run_executor_process_instance_id,
             max_steps=max_steps,
-            final_commit_port=final_commit_port,
-            old_target_preservation_port=old_target_preservation_port,
+            final_commit_port=final_commit_port or self.run_executor_final_commit_port,
+            old_target_preservation_port=(
+                old_target_preservation_port or self.run_executor_old_target_preservation_port
+            ),
             staging_transfer_port=staging_transfer_port or self.run_executor_staging_transfer_port,
         )
 
@@ -969,10 +1004,17 @@ def build_engine_host_runtime(
         run_executor_staging_transfer_port = LocalFileStagingTransferAdapter(
             root_resolver=endpoint_root_resolver,
         )
+        run_executor_lease_registry = HeldRunTargetLeaseRegistry()
+        run_executor_permit_validator = RetainedRunTargetPermitValidator(
+            run_executor_lease_registry
+        )
+        run_executor_final_commit_port = LocalResolvingFinalCommitAdapter(
+            root_resolver=endpoint_root_resolver,
+            permit_validator=run_executor_permit_validator,
+        )
         final_artifact_verifier = LocalFinalArtifactVerificationAdapter(
             root_resolver=endpoint_root_resolver,
         )
-        run_executor_lease_registry = HeldRunTargetLeaseRegistry()
         startup_reconciliation = reconcile_engine_host_after_startup(
             EngineHostStartupReconciliationRequest(
                 reconciler_instance_id=reconciler_instance_id,
@@ -1031,6 +1073,8 @@ def build_engine_host_runtime(
         run_executor_recovery_intent_segment_store=recovery_intent_segments,
         run_executor_catalog_handoff_store=catalog_handoffs,
         run_executor_staging_transfer_port=run_executor_staging_transfer_port,
+        run_executor_final_commit_port=run_executor_final_commit_port,
+        run_executor_old_target_preservation_port=run_executor_final_commit_port,
         run_executor_process_instance_id=reconciler_instance_id,
         catalog_connection=catalog_connection,
         recovery_connection=recovery_connection,

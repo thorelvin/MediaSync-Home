@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
+from mediasync_home.adapters.endpoint_leases import EndpointLeaseUnavailable, EndpointRootResolver
 from mediasync_home.application.ports import (
     CommitReceipt,
     FinalCommitPort,
@@ -227,6 +228,127 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
         )
 
 
+class LocalResolvingFinalCommitAdapter(FinalCommitPort):
+    def __init__(
+        self,
+        *,
+        root_resolver: EndpointRootResolver,
+        permit_validator: MutationPermitValidator,
+        staging_root: Path | None = None,
+    ) -> None:
+        self._root_resolver = root_resolver
+        self._permit_validator = permit_validator
+        self._staging_root = None if staging_root is None else Path(staging_root)
+
+    def preserve_old_target(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> OldTargetPreservationReceipt:
+        target_root = self._target_root(
+            permit=permit,
+            endpoint_id=operation.target_endpoint_id,
+            endpoint_revision_id=operation.target_endpoint_revision_id,
+        )
+        return self._replace_adapter(target_root).preserve_old_target(permit, operation)
+
+    def commit_verified_artifact(
+        self,
+        permit: MutationPermit,
+        artifact: VerifiedStagingArtifact,
+    ) -> CommitReceipt:
+        self._permit_validator.assert_mutation_permit_current(permit)
+        target_root = self._target_root(
+            permit=permit,
+            endpoint_id=permit.endpoint_id,
+            endpoint_revision_id=permit.endpoint_revision_id,
+        )
+        if _version_manifest_exists(target_root=target_root, object_id=artifact.object_id):
+            return self._replace_adapter(target_root).commit_verified_artifact(permit, artifact)
+        return self._commit_new_file(
+            permit=permit,
+            artifact=artifact,
+            target_root=target_root,
+            staging_root=self._staging_root_for(target_root),
+        )
+
+    def _commit_new_file(
+        self,
+        *,
+        permit: MutationPermit,
+        artifact: VerifiedStagingArtifact,
+        target_root: Path,
+        staging_root: Path,
+    ) -> CommitReceipt:
+        _require_endpoint_marker(
+            target_root,
+            permit,
+            validation_code="LOCAL_FINAL_COMMIT_ENDPOINT_MARKER_MISMATCH",
+            missing_code="LOCAL_FINAL_COMMIT_ENDPOINT_MARKER_MISSING",
+        )
+        staging_payload = _local_staging_payload_path(staging_root, artifact)
+        final_path = _local_final_path(target_root, artifact.relative_path.value)
+        if final_path.exists() or final_path.is_symlink():
+            raise FinalCommitAdapterError(
+                "LOCAL_FINAL_COMMIT_TARGET_EXISTS",
+                "Use the replace/version commit flow for existing targets.",
+            )
+        if _hash_file(staging_payload) != artifact.content_hash:
+            raise FinalCommitAdapterError(
+                "LOCAL_FINAL_COMMIT_STAGING_HASH_MISMATCH",
+                "Restage and verify the artifact before final commit.",
+            )
+        _link_local_payload_without_overwrite(
+            staging_payload=staging_payload,
+            final_path=final_path,
+            content_hash=artifact.content_hash,
+        )
+        return CommitReceipt(
+            operation_id=artifact.object_id,
+            final_relative_path=artifact.relative_path,
+        )
+
+    def _replace_adapter(self, target_root: Path) -> LocalVersionedReplaceFinalCommitAdapter:
+        return LocalVersionedReplaceFinalCommitAdapter(
+            target_root=target_root,
+            staging_root=self._staging_root_for(target_root),
+            permit_validator=self._permit_validator,
+        )
+
+    def _staging_root_for(self, target_root: Path) -> Path:
+        if self._staging_root is not None:
+            return self._staging_root
+        return target_root / ".mediasync" / "objects" / "staging"
+
+    def _target_root(
+        self,
+        *,
+        permit: MutationPermit,
+        endpoint_id: str,
+        endpoint_revision_id: str,
+    ) -> Path:
+        try:
+            root = self._root_resolver.resolve_endpoint_root(
+                resource_key=permit.resource_key,
+                endpoint_id=endpoint_id,
+                endpoint_revision_id=endpoint_revision_id,
+            )
+        except EndpointLeaseUnavailable:
+            raise
+        if root is None:
+            raise FinalCommitAdapterError(
+                "LOCAL_FINAL_COMMIT_ENDPOINT_ROOT_UNKNOWN",
+                "Register endpoint roots before applying final filesystem changes.",
+            )
+        try:
+            return root.resolve(strict=True)
+        except OSError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_FINAL_COMMIT_TARGET_ROOT_MISSING",
+                "Ensure the target endpoint root is reachable before final commit.",
+            ) from exc
+
+
 def _require_lab_marker(target_root: Path, run_id: str) -> None:
     marker_path = target_root / LAB_MARKER_NAME
     try:
@@ -331,6 +453,33 @@ def _replace_staging_payload_path(
     return payload
 
 
+def _local_staging_payload_path(staging_root: Path, artifact: VerifiedStagingArtifact) -> Path:
+    if OBJECT_ID_PATTERN.fullmatch(artifact.object_id) is None:
+        raise FinalCommitAdapterError(
+            "LOCAL_FINAL_COMMIT_REQUIRES_SAFE_OBJECT_ID",
+            "Restage the artifact with an opaque object id before final commit.",
+        )
+    if HASH_PATTERN.fullmatch(artifact.content_hash) is None:
+        raise FinalCommitAdapterError(
+            "LOCAL_FINAL_COMMIT_REQUIRES_CONTENT_HASH",
+            "Verify the staging artifact and provide a lowercase SHA-256 content hash.",
+        )
+    try:
+        root = staging_root.resolve(strict=True)
+    except OSError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_FINAL_COMMIT_STAGING_ROOT_MISSING",
+            "Create the staging root before final commit.",
+        ) from exc
+    payload = root / f"{artifact.object_id}.payload"
+    if not payload.is_file() or payload.is_symlink():
+        raise FinalCommitAdapterError(
+            "LOCAL_FINAL_COMMIT_STAGING_PAYLOAD_MISSING",
+            "Restage and verify the artifact before final commit.",
+        )
+    return payload
+
+
 def _final_path(target_root: Path, artifact: VerifiedStagingArtifact) -> Path:
     parts = _relative_path_parts(artifact.relative_path.value)
     try:
@@ -360,6 +509,42 @@ def _final_path(target_root: Path, artifact: VerifiedStagingArtifact) -> Path:
             "LAB_FINAL_COMMIT_TARGET_EXISTS",
             "Use the replace/version commit flow for existing targets; this adapter only inserts new files.",
         )
+    return final_path
+
+
+def _local_final_path(target_root: Path, relative_path: str) -> Path:
+    parts = _relative_path_parts_for_adapter(
+        relative_path,
+        validation_code="LOCAL_FINAL_COMMIT_REQUIRES_RELATIVE_PATH",
+        next_action="Provide an endpoint-relative final path before commit.",
+    )
+    try:
+        root = target_root.resolve(strict=True)
+    except OSError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_FINAL_COMMIT_TARGET_ROOT_MISSING",
+            "Create the target endpoint root before final commit.",
+        ) from exc
+    final_path = root.joinpath(*parts)
+    parent = final_path.parent
+    if not parent.is_dir():
+        raise FinalCommitAdapterError(
+            "LOCAL_FINAL_COMMIT_TARGET_PARENT_MISSING",
+            "Create and verify the final parent directory before commit.",
+        )
+    _reject_symlink_in_path(
+        root=root,
+        relative_parts=parts[:-1],
+        validation_code="LOCAL_FINAL_COMMIT_REPARSE_UNSUPPORTED",
+        next_action="Revalidate the final path chain before committing through reparse points.",
+    )
+    try:
+        parent.resolve(strict=True).relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_FINAL_COMMIT_TARGET_ESCAPES_ROOT",
+            "Resolve the final path through a validated endpoint root before commit.",
+        ) from exc
     return final_path
 
 
@@ -417,14 +602,20 @@ def _relative_path_parts_for_adapter(
         ) from exc
 
 
-def _reject_symlink_in_path(*, root: Path, relative_parts: tuple[str, ...]) -> None:
+def _reject_symlink_in_path(
+    *,
+    root: Path,
+    relative_parts: tuple[str, ...],
+    validation_code: str = "LAB_FINAL_COMMIT_REPARSE_UNSUPPORTED",
+    next_action: str = "Revalidate the final path chain before committing through reparse points.",
+) -> None:
     current = root
     for part in relative_parts:
         current = current / part
         if current.is_symlink():
             raise FinalCommitAdapterError(
-                "LAB_FINAL_COMMIT_REPARSE_UNSUPPORTED",
-                "Revalidate the final path chain before committing through reparse points.",
+                validation_code,
+                next_action,
             )
 
 
@@ -452,6 +643,36 @@ def _link_verified_payload_without_overwrite(
         except OSError as exc:
             raise FinalCommitAdapterError(
                 "LAB_FINAL_COMMIT_NO_OVERWRITE_UNSUPPORTED",
+                "Use an endpoint profile with proven same-volume no-overwrite insert support.",
+            ) from exc
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _link_local_payload_without_overwrite(
+    *,
+    staging_payload: Path,
+    final_path: Path,
+    content_hash: str,
+) -> None:
+    temp_path = final_path.parent / f".{final_path.name}.{uuid4().hex}.mediasync-commit.tmp"
+    try:
+        _copy_file_durable(source=staging_payload, destination=temp_path)
+        if _hash_file(temp_path) != content_hash:
+            raise FinalCommitAdapterError(
+                "LOCAL_FINAL_COMMIT_TEMP_HASH_MISMATCH",
+                "Restage and verify the artifact before attempting final commit.",
+            )
+        try:
+            os.link(temp_path, final_path)
+        except FileExistsError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_FINAL_COMMIT_TARGET_EXISTS",
+                "Use the replace/version commit flow for existing targets.",
+            ) from exc
+        except OSError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_FINAL_COMMIT_NO_OVERWRITE_UNSUPPORTED",
                 "Use an endpoint profile with proven same-volume no-overwrite insert support.",
             ) from exc
     finally:
@@ -539,6 +760,15 @@ def _version_object_paths(
         version_root / f"{version_object_id}.payload",
         version_root / f"{version_object_id}.manifest.json",
     )
+
+
+def _version_manifest_exists(*, target_root: Path, object_id: str) -> bool:
+    _, manifest_path = _version_object_paths(
+        target_root=target_root,
+        version_object_id=object_id,
+        create=False,
+    )
+    return manifest_path.is_file() and not manifest_path.is_symlink()
 
 
 def _preserve_version_payload(
