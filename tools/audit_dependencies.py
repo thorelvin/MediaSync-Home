@@ -30,10 +30,15 @@ NOTICE_REQUIRED_LICENSES = {
     "MPL-2.0",
     "PSF-2.0",
 }
+LICENSE_ALIASES = {
+    "PSF": "PSF-2.0",
+    "Python Software Foundation License": "PSF-2.0",
+}
 CLASSIFIER_LICENSES = {
     "License :: OSI Approved :: BSD License": "BSD-3-Clause",
     "License :: OSI Approved :: MIT License": "MIT",
     "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)": "MPL-2.0",
+    "License :: OSI Approved :: Python Software Foundation License": "PSF-2.0",
 }
 
 
@@ -195,12 +200,16 @@ def _distribution_license(distribution: metadata.Distribution) -> str:
         metadata_payload.get("License-Expression") or metadata_payload.get("License"),
     )
     if license_name:
-        return license_name.strip()
+        return _normalize_license_name(license_name.strip())
     classifiers = cast(list[str], distribution.metadata.get_all("Classifier") or [])
     for classifier in classifiers:
         if classifier in CLASSIFIER_LICENSES:
             return CLASSIFIER_LICENSES[classifier]
     return "UNKNOWN"
+
+
+def _normalize_license_name(license_name: str) -> str:
+    return LICENSE_ALIASES.get(license_name, license_name)
 
 
 if __name__ == "__main__":

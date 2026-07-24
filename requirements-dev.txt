@@ -4,5 +4,6 @@ import-linter==2.13
 mypy==2.3.0
 packaging==26.2
 PySide6==6.11.1
+pywin32==312
 pytest==9.1.1
 ruff==0.14.6

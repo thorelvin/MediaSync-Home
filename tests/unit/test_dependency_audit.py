@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from tools.audit_dependencies import read_pinned_requirements
+from tools.audit_dependencies import _normalize_license_name, read_pinned_requirements
 
 
 def test_read_pinned_requirements_follows_includes(tmp_path) -> None:
@@ -25,3 +25,9 @@ def test_read_pinned_requirements_rejects_unpinned_dependency(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="must be pinned"):
         read_pinned_requirements(requirements_file)
+
+
+def test_dependency_audit_normalizes_python_software_foundation_license_alias() -> None:
+    assert _normalize_license_name("PSF") == "PSF-2.0"
+    assert _normalize_license_name("Python Software Foundation License") == "PSF-2.0"
+    assert _normalize_license_name("MIT") == "MIT"

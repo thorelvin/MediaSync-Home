@@ -185,6 +185,14 @@
       "version": "9.1.1"
     },
     {
+      "canonical_name": "pywin32",
+      "license": "PSF-2.0",
+      "name": "pywin32",
+      "notice_required": true,
+      "root_requirement": true,
+      "version": "312"
+    },
+    {
       "canonical_name": "pyyaml",
       "license": "MIT",
       "name": "PyYAML",
@@ -256,6 +264,7 @@
     "pyside6",
     "pyside6-addons",
     "pyside6-essentials",
+    "pywin32",
     "shiboken6",
     "typing-extensions"
   ],
@@ -290,6 +299,11 @@
       "name": "PySide6",
       "source": "requirements-dev.txt",
       "version": "6.11.1"
+    },
+    {
+      "name": "pywin32",
+      "source": "requirements-dev.txt",
+      "version": "312"
     },
     {
       "name": "pytest",
