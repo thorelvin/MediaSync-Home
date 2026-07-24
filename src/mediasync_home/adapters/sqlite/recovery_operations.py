@@ -208,6 +208,31 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         ).fetchall()
         return tuple(_operation_from_row(row) for row in rows)
 
+    def list_operations_for_run_target_in_phase(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        phase: RecoveryOperationPhase,
+        limit: int,
+    ) -> tuple[RecoveryOperation, ...]:
+        if limit < 1:
+            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_REQUIRES_POSITIVE_LIMIT")
+        rows = self._connection.execute(
+            f"""
+            SELECT
+                {RECOVERY_OPERATION_COLUMNS}
+            FROM recovery_operations
+            WHERE run_id = ?
+                AND run_target_id = ?
+                AND phase = ?
+            ORDER BY operation_id
+            LIMIT ?
+            """,
+            (run_id, run_target_id, phase.value, limit),
+        ).fetchall()
+        return tuple(_operation_from_row(row) for row in rows)
+
     def _operation_after_transition(
         self,
         operation: RecoveryOperation,
