@@ -49,6 +49,93 @@ class SqliteResourceLeaseStore(ResourceLeaseStore):
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
+    def reconcile_stale_active_resource_lease_after_lock_acquired(
+        self,
+        *,
+        resource_key: str,
+        endpoint_id: str,
+    ) -> tuple[str, ...]:
+        if not resource_key.strip() or not endpoint_id.strip():
+            raise ResourceLeaseRegistrationError(
+                "ENDPOINT_RESOURCE_LEASE_INVALID_REQUEST",
+                "Reconcile resource leases with a non-empty resource key and endpoint id.",
+            )
+
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            rows = self._connection.execute(
+                """
+                SELECT lease_id, endpoint_id, os_lock_kind
+                FROM resource_leases
+                WHERE resource_key = ?
+                    AND lease_mode = 'EXCLUSIVE'
+                    AND state = 'ACQUIRED'
+                ORDER BY acquired_utc, lease_id
+                """,
+                (resource_key,),
+            ).fetchall()
+            if not rows:
+                if not outer_transaction:
+                    self._connection.execute("COMMIT")
+                return ()
+
+            mismatched = next(
+                (
+                    row
+                    for row in rows
+                    if str(row[1]) != endpoint_id or str(row[2]) != "LOCAL_OS_HANDLE"
+                ),
+                None,
+            )
+            if mismatched is not None:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise ResourceLeaseRegistrationError(
+                    "ENDPOINT_RESOURCE_LEASE_ACTIVE_CONFLICT",
+                    "Review the active endpoint lease before reconciling stale local lock state.",
+                )
+
+            lease_ids = tuple(str(row[0]) for row in rows)
+            placeholders = ", ".join("?" for _ in lease_ids)
+            cursor = self._connection.execute(
+                f"""
+                UPDATE resource_leases
+                SET
+                    state = 'RELEASED',
+                    heartbeat_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    released_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE lease_id IN ({placeholders})
+                    AND resource_key = ?
+                    AND state = 'ACQUIRED'
+                    AND lease_mode = 'EXCLUSIVE'
+                    AND os_lock_kind = 'LOCAL_OS_HANDLE'
+                """,
+                (*lease_ids, resource_key),
+            )
+            if cursor.rowcount != len(lease_ids):
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise ResourceLeaseRegistrationError(
+                    "ENDPOINT_RESOURCE_LEASE_RECONCILIATION_CONFLICT",
+                    "Reload recovery lease state before retrying local lease reconciliation.",
+                )
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return lease_ids
+        except ResourceLeaseRegistrationError:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        except sqlite3.Error as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise ResourceLeaseRegistrationError(
+                "ENDPOINT_RESOURCE_LEASE_PERSISTENCE_FAILED",
+                "Retry after recovery storage is writable and migrated.",
+            ) from exc
+
     def register_acquired_resource_lease(
         self,
         *,

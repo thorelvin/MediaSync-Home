@@ -142,6 +142,47 @@ def test_local_endpoint_lease_authority_registers_durable_resource_lease(tmp_pat
     assert resource_store.releases == [attempt.lease.lease_id]
 
 
+def test_local_endpoint_lease_authority_reconciles_stale_durable_lease_after_lock_acquired(
+    tmp_path: Path,
+) -> None:
+    root = _endpoint_root(tmp_path)
+    handle = _FakeHandle(root / ".mediasync" / "locks" / "mutation.lock")
+    resource_store = _FakeResourceLeaseStore(42, stale_active_lease_ids=("lease-old",))
+    authority = LocalEndpointLeaseAuthority(
+        target_roots={"endpoint:target-a": root},
+        resource_lease_store=resource_store,
+        lock_opener=_FakeOpener(handle),
+    )
+
+    attempt = authority.acquire_endpoint_lease(_request())
+
+    assert attempt.acquired is True
+    assert attempt.lease is not None
+    assert resource_store.reconciliations == [("endpoint:target-a", "target-a")]
+    assert resource_store.reconciled_lease_ids == ["lease-old"]
+    assert resource_store.events[0] == "reconcile:endpoint:target-a:target-a"
+    assert resource_store.events[1].startswith("register:")
+    assert handle.closed is False
+
+
+def test_local_endpoint_lease_authority_closes_lock_when_stale_lease_reconciliation_fails(
+    tmp_path: Path,
+) -> None:
+    root = _endpoint_root(tmp_path)
+    handle = _FakeHandle(root / ".mediasync" / "locks" / "mutation.lock")
+    authority = LocalEndpointLeaseAuthority(
+        target_roots={"endpoint:target-a": root},
+        resource_lease_store=_ReconcileFailingResourceLeaseStore(),
+        lock_opener=_FakeOpener(handle),
+    )
+
+    attempt = authority.acquire_endpoint_lease(_request())
+
+    assert attempt.acquired is False
+    assert attempt.validation_codes == ("ENDPOINT_RESOURCE_LEASE_ACTIVE_CONFLICT",)
+    assert handle.closed is True
+
+
 def test_local_endpoint_lease_issues_current_mutation_permit(tmp_path: Path) -> None:
     root = _endpoint_root(tmp_path)
     handle = _FakeHandle(root / ".mediasync" / "locks" / "mutation.lock")
@@ -485,10 +526,27 @@ class _FailingTokenStore:
 
 
 class _FakeResourceLeaseStore:
-    def __init__(self, token: int) -> None:
+    def __init__(self, token: int, stale_active_lease_ids: tuple[str, ...] = ()) -> None:
         self._token = token
+        self._stale_active_lease_ids = list(stale_active_lease_ids)
         self.registrations: list[dict[str, object]] = []
+        self.reconciliations: list[tuple[str, str]] = []
+        self.reconciled_lease_ids: list[str] = []
         self.releases: list[str] = []
+        self.events: list[str] = []
+
+    def reconcile_stale_active_resource_lease_after_lock_acquired(
+        self,
+        *,
+        resource_key: str,
+        endpoint_id: str,
+    ) -> tuple[str, ...]:
+        self.reconciliations.append((resource_key, endpoint_id))
+        self.events.append(f"reconcile:{resource_key}:{endpoint_id}")
+        lease_ids = tuple(self._stale_active_lease_ids)
+        self.reconciled_lease_ids.extend(lease_ids)
+        self._stale_active_lease_ids.clear()
+        return lease_ids
 
     def register_acquired_resource_lease(
         self,
@@ -504,6 +562,7 @@ class _FakeResourceLeaseStore:
         lease_mode: str,
         os_lock_kind: str,
     ) -> int:
+        self.events.append(f"register:{lease_id}")
         self.registrations.append(
             {
                 "lease_id": lease_id,
@@ -525,6 +584,14 @@ class _FakeResourceLeaseStore:
 
 
 class _FailingResourceLeaseStore:
+    def reconcile_stale_active_resource_lease_after_lock_acquired(
+        self,
+        *,
+        resource_key: str,
+        endpoint_id: str,
+    ) -> tuple[str, ...]:
+        return ()
+
     def register_acquired_resource_lease(
         self,
         *,
@@ -546,6 +613,38 @@ class _FailingResourceLeaseStore:
 
     def release_resource_lease(self, *, lease_id: str) -> None:
         raise AssertionError("release must not be called when registration fails")
+
+
+class _ReconcileFailingResourceLeaseStore:
+    def reconcile_stale_active_resource_lease_after_lock_acquired(
+        self,
+        *,
+        resource_key: str,
+        endpoint_id: str,
+    ) -> tuple[str, ...]:
+        raise ResourceLeaseRegistrationError(
+            "ENDPOINT_RESOURCE_LEASE_ACTIVE_CONFLICT",
+            "Review the active endpoint lease before reconciling stale local lock state.",
+        )
+
+    def register_acquired_resource_lease(
+        self,
+        *,
+        lease_id: str,
+        resource_key: str,
+        owner_instance_id: str,
+        ownership_epoch: int,
+        run_id: str,
+        run_target_id: str,
+        endpoint_id: str,
+        endpoint_generation: int | None,
+        lease_mode: str,
+        os_lock_kind: str,
+    ) -> int:
+        raise AssertionError("registration must not run when reconciliation fails")
+
+    def release_resource_lease(self, *, lease_id: str) -> None:
+        raise AssertionError("release must not be called when reconciliation fails")
 
 
 def _request(

@@ -55,6 +55,13 @@ class FencingTokenStore(Protocol):
 
 
 class ResourceLeaseStore(Protocol):
+    def reconcile_stale_active_resource_lease_after_lock_acquired(
+        self,
+        *,
+        resource_key: str,
+        endpoint_id: str,
+    ) -> tuple[str, ...]: ...
+
     def register_acquired_resource_lease(
         self,
         *,
@@ -224,6 +231,11 @@ class LocalEndpointLeaseAuthority(EndpointLeaseAuthority):
         try:
             marker = _read_endpoint_marker(marker_path)
             owner_installation_id, ownership_epoch = _validate_marker(marker, request)
+            if self._resource_lease_store is not None:
+                self._resource_lease_store.reconcile_stale_active_resource_lease_after_lock_acquired(
+                    resource_key=request.resource_key,
+                    endpoint_id=request.endpoint_id,
+                )
             lease_id = str(uuid4())
             fencing_token = self._acquire_fencing_token(
                 lease_id=lease_id,

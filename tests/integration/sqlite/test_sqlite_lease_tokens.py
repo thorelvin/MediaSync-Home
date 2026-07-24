@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -7,8 +8,10 @@ import pytest
 
 from mediasync_home.adapters.endpoint_leases import (
     FencingTokenAllocationError,
+    LocalEndpointLeaseAuthority,
     ResourceLeaseRegistrationError,
 )
+from mediasync_home.application.runs import EndpointLeaseRequest
 from mediasync_home.adapters.sqlite.connection_policy import (
     apply_sqlite_connection_policy,
     recovery_writer_policy,
@@ -226,6 +229,98 @@ def test_sqlite_resource_lease_store_blocks_second_active_exclusive_lease(tmp_pa
         connection.close()
 
 
+def test_sqlite_resource_lease_store_reconciles_stale_active_lease_after_lock_acquired(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_recovery_connection(tmp_path)
+    try:
+        store = SqliteResourceLeaseStore(connection)
+        assert _register_resource_lease(store, lease_id="lease-a") == 1
+
+        released = store.reconcile_stale_active_resource_lease_after_lock_acquired(
+            resource_key="endpoint:target-a",
+            endpoint_id="target-a",
+        )
+
+        assert released == ("lease-a",)
+        assert _register_resource_lease(store, lease_id="lease-b") == 2
+        rows = connection.execute(
+            """
+            SELECT lease_id, state, released_utc
+            FROM resource_leases
+            ORDER BY lease_id
+            """
+        ).fetchall()
+        assert rows[0][:2] == ("lease-a", "RELEASED")
+        assert rows[0][2] is not None
+        assert rows[1] == ("lease-b", "ACQUIRED", None)
+    finally:
+        connection.close()
+
+
+def test_local_endpoint_lease_authority_with_sqlite_store_reacquires_after_stale_active_row(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_recovery_connection(tmp_path)
+    try:
+        root = _endpoint_root(tmp_path)
+        store = SqliteResourceLeaseStore(connection)
+        assert _register_resource_lease(store, lease_id="lease-a") == 1
+        handle = _FakeHandle(root / ".mediasync" / "locks" / "mutation.lock")
+        authority = LocalEndpointLeaseAuthority(
+            target_roots={"endpoint:target-a": root},
+            resource_lease_store=store,
+            lock_opener=_FakeOpener(handle),
+        )
+
+        attempt = authority.acquire_endpoint_lease(_lease_request())
+
+        assert attempt.acquired is True
+        assert attempt.lease is not None
+        assert attempt.lease.fencing_token == 2
+        rows = connection.execute(
+            """
+            SELECT lease_id, state
+            FROM resource_leases
+            ORDER BY acquired_utc, lease_id
+            """
+        ).fetchall()
+        assert rows == [
+            ("lease-a", "RELEASED"),
+            (attempt.lease.lease_id, "ACQUIRED"),
+        ]
+        assert handle.closed is False
+    finally:
+        connection.close()
+
+
+def test_sqlite_resource_lease_store_rejects_stale_reconciliation_for_endpoint_mismatch(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_recovery_connection(tmp_path)
+    try:
+        store = SqliteResourceLeaseStore(connection)
+        assert _register_resource_lease(store, lease_id="lease-a") == 1
+
+        with pytest.raises(ResourceLeaseRegistrationError) as exc_info:
+            store.reconcile_stale_active_resource_lease_after_lock_acquired(
+                resource_key="endpoint:target-a",
+                endpoint_id="target-b",
+            )
+
+        assert exc_info.value.validation_code == "ENDPOINT_RESOURCE_LEASE_ACTIVE_CONFLICT"
+        row = connection.execute(
+            """
+            SELECT state, released_utc
+            FROM resource_leases
+            WHERE lease_id = 'lease-a'
+            """
+        ).fetchone()
+        assert row == ("ACQUIRED", None)
+    finally:
+        connection.close()
+
+
 def test_sqlite_resource_lease_store_releases_and_allows_next_token(tmp_path: Path) -> None:
     connection = _prepared_recovery_connection(tmp_path)
     try:
@@ -324,3 +419,52 @@ def _prepared_recovery_connection(tmp_path: Path) -> sqlite3.Connection:
     apply_sqlite_connection_policy(connection, recovery_writer_policy(database))
     apply_sqlite_migrations(connection, recovery_migration_plan())
     return connection
+
+
+def _lease_request() -> EndpointLeaseRequest:
+    return EndpointLeaseRequest(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+        endpoint_id="target-a",
+        endpoint_revision_id="target-rev-a",
+        resource_key="endpoint:target-a",
+        required_owner_installation_id="owner-a",
+        required_ownership_epoch=1,
+    )
+
+
+def _endpoint_root(tmp_path: Path) -> Path:
+    root = tmp_path / "target"
+    lock_dir = root / ".mediasync" / "locks"
+    lock_dir.mkdir(parents=True)
+    marker = {
+        "endpoint_id": "target-a",
+        "owner_installation_id": "owner-a",
+        "ownership_epoch": 1,
+    }
+    (root / ".mediasync" / "endpoint.json").write_text(
+        json.dumps(marker, sort_keys=True),
+        encoding="utf-8",
+    )
+    return root
+
+
+class _FakeHandle:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    def is_alive(self) -> bool:
+        return not self.closed
+
+
+class _FakeOpener:
+    def __init__(self, handle: _FakeHandle) -> None:
+        self._handle = handle
+
+    def acquire_exclusive_lock(self, lock_path: Path) -> _FakeHandle:
+        assert lock_path == self._handle.path
+        return self._handle
