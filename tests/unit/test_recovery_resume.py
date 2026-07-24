@@ -155,6 +155,36 @@ def test_recovery_resume_reverifies_filesystem_applied_then_completes_target() -
     assert operation.expected_final_fingerprint_json == _fingerprint_json()
 
 
+def test_recovery_resume_reverifies_commit_preconditions_then_completes_target() -> None:
+    runs = _RunStore(_run())
+    recovery_operations = _RecoveryOperationStore((_commit_preconditions_operation(),))
+    catalog_handoffs = _CatalogHandoffStore()
+    final_verifier = _FinalVerifier()
+
+    report = resume_recovery_operations_after_startup(
+        RecoveryResumeStartupRequest(reconciler_instance_id="host-b"),
+        runs=runs,
+        recovery_operations=recovery_operations,
+        catalog_handoffs=catalog_handoffs,
+        final_verifier=final_verifier,
+    )
+
+    loaded = runs.load_started_run("run-a")
+    operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    assert report.scanned == 3
+    assert tuple(finding.action for finding in report.findings) == (
+        RecoveryResumeAction.FINAL_REVERIFIED,
+        RecoveryResumeAction.CATALOG_HANDOFF_RECORDED,
+        RecoveryResumeAction.TARGET_COMPLETED,
+    )
+    assert final_verifier.verified_operation_ids == ("op-a",)
+    assert loaded is not None
+    assert loaded.state is RunState.COMPLETED
+    assert operation is not None
+    assert operation.phase is RecoveryOperationPhase.CATALOG_RECORDED
+    assert operation.expected_final_fingerprint_json == _fingerprint_json()
+
+
 def test_recovery_resume_blocks_when_final_reverification_fails() -> None:
     runs = _RunStore(_run())
     recovery_operations = _RecoveryOperationStore((_filesystem_applied_operation(),))
@@ -517,6 +547,14 @@ def _filesystem_applied_operation() -> RecoveryOperation:
     return replace(
         _catalog_recorded_operation(),
         phase=RecoveryOperationPhase.FILESYSTEM_APPLIED,
+        catalog_handoff_id=None,
+    )
+
+
+def _commit_preconditions_operation() -> RecoveryOperation:
+    return replace(
+        _catalog_recorded_operation(),
+        phase=RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
         catalog_handoff_id=None,
     )
 

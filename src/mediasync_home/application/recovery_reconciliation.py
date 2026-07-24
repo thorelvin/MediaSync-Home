@@ -146,9 +146,6 @@ def _classification_for_phase(
         return RecoveryOperationStartupClassification.REFRESH_COMMIT_INTENT
     if phase in {
         RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
-    }:
-        return RecoveryOperationStartupClassification.CONTINUE_FROM_VERIFIED_OBJECT
-    if phase in {
         RecoveryOperationPhase.FILESYSTEM_APPLIED,
         RecoveryOperationPhase.FINAL_DURABLE,
     }:

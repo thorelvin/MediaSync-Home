@@ -126,6 +126,7 @@ def resume_recovery_operations_after_startup(
     remaining = request.limit
     if final_verifier is not None:
         for phase in (
+            RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
             RecoveryOperationPhase.FILESYSTEM_APPLIED,
             RecoveryOperationPhase.FINAL_DURABLE,
         ):
@@ -376,6 +377,7 @@ def _resume_final_filesystem_verification(
             next_action="Review run state before re-verifying final filesystem evidence.",
         )
     if operation.phase not in {
+        RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
         RecoveryOperationPhase.FILESYSTEM_APPLIED,
         RecoveryOperationPhase.FINAL_DURABLE,
     }:
@@ -440,6 +442,22 @@ def _transition_to_final_verified(
     evidence: FinalArtifactVerificationEvidence,
 ) -> RecoveryOperation | None:
     current = operation
+    if current.phase is RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED:
+        applied = recovery_operations.record_operation_phase_transition(
+            run_id=current.run_id,
+            operation_id=current.operation_id,
+            expected_phase=current.phase,
+            next_phase=RecoveryOperationPhase.FILESYSTEM_APPLIED,
+            process_instance_id=process_instance_id,
+            payload={
+                "final_relative_path": current.final_relative_path,
+                "resume_reason": "STARTUP_FINAL_ARTIFACT_REVERIFIED_AFTER_PRECONDITION",
+            },
+        )
+        if applied is None:
+            return None
+        current = applied
+
     if current.phase is RecoveryOperationPhase.FILESYSTEM_APPLIED:
         durable = recovery_operations.record_operation_phase_transition(
             run_id=current.run_id,
