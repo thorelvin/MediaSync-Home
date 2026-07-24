@@ -14,6 +14,8 @@ from mediasync_home.application.schedules import (
     validate_schedule_reconciliation_page_request,
 )
 from mediasync_home.application.external_resources import (
+    ExternalResourceRecord,
+    ExternalResourceState,
     ExternalResourceStateStore,
     ExternalResourceType,
 )
@@ -131,6 +133,16 @@ class TaskSchedulerDesiredResourceReport:
     blocked: int
     next_cursor: str | None
     findings: tuple[TaskSchedulerDesiredResourceFinding, ...]
+
+
+@dataclass(frozen=True)
+class TaskSchedulerClaimedResourceReconciliation:
+    resource_id: str
+    action: TaskSchedulerReconciliationAction
+    applied: bool
+    completed: bool
+    blocked: bool
+    reason: str | None = None
 
 
 class TaskSchedulerRegistryPort(Protocol):
@@ -398,6 +410,108 @@ def stage_task_scheduler_desired_resource_page(
         blocked=blocked,
         next_cursor=page[-1].schedule_id if len(page) == request.limit else None,
         findings=tuple(findings),
+    )
+
+
+def reconcile_claimed_task_scheduler_resource(
+    claimed: ExternalResourceRecord,
+    *,
+    installation_id: str,
+    executable_path: str,
+    schedules: ScheduleStore,
+    registry: TaskSchedulerRegistryPort,
+    external_resources: ExternalResourceStateStore,
+) -> TaskSchedulerClaimedResourceReconciliation:
+    if claimed.resource_type is not ExternalResourceType.TASK_SCHEDULER:
+        raise TaskSchedulerDefinitionViolation("TASK_SCHEDULER_CLAIM_RESOURCE_TYPE_MISMATCH")
+    if claimed.state is not ExternalResourceState.CLAIMED or claimed.claim_token is None:
+        raise TaskSchedulerDefinitionViolation("TASK_SCHEDULER_RESOURCE_MUST_BE_CLAIMED")
+    schedule = schedules.load_schedule(claimed.resource_id)
+    if schedule is None:
+        external_resources.mark_external_resource_blocked(
+            resource_type=claimed.resource_type,
+            resource_id=claimed.resource_id,
+            claim_token=claimed.claim_token,
+            error_code="TASK_SCHEDULER_SCHEDULE_NOT_FOUND",
+        )
+        return TaskSchedulerClaimedResourceReconciliation(
+            resource_id=claimed.resource_id,
+            action=TaskSchedulerReconciliationAction.BLOCK_INVALID_DESIRED_STATE,
+            applied=False,
+            completed=False,
+            blocked=True,
+            reason="TASK_SCHEDULER_SCHEDULE_NOT_FOUND",
+        )
+    try:
+        desired = build_same_user_task_scheduler_definition(
+            schedule,
+            installation_id=installation_id,
+            executable_path=executable_path,
+        )
+        if (
+            schedule.definition_generation != claimed.desired_generation
+            or desired.definition_hash != claimed.desired_hash
+        ):
+            raise TaskSchedulerDefinitionViolation("TASK_SCHEDULER_CLAIM_DESIRED_DRIFT")
+    except TaskSchedulerDefinitionViolation as exc:
+        external_resources.mark_external_resource_blocked(
+            resource_type=claimed.resource_type,
+            resource_id=claimed.resource_id,
+            claim_token=claimed.claim_token,
+            error_code=str(exc),
+        )
+        return TaskSchedulerClaimedResourceReconciliation(
+            resource_id=claimed.resource_id,
+            action=TaskSchedulerReconciliationAction.BLOCK_INVALID_DESIRED_STATE,
+            applied=False,
+            completed=False,
+            blocked=True,
+            reason=str(exc),
+        )
+
+    plan = classify_task_scheduler_reconciliation(
+        schedule,
+        installation_id=installation_id,
+        executable_path=executable_path,
+        observed=registry.load_task(desired.task_path),
+    )
+    if plan.action.value.startswith("BLOCK_"):
+        external_resources.mark_external_resource_blocked(
+            resource_type=claimed.resource_type,
+            resource_id=claimed.resource_id,
+            claim_token=claimed.claim_token,
+            error_code=plan.reason or plan.action.value,
+        )
+        return TaskSchedulerClaimedResourceReconciliation(
+            resource_id=claimed.resource_id,
+            action=plan.action,
+            applied=False,
+            completed=False,
+            blocked=True,
+            reason=plan.reason,
+        )
+
+    applied = False
+    if plan.action in {
+        TaskSchedulerReconciliationAction.CREATE,
+        TaskSchedulerReconciliationAction.UPDATE_DRIFTED,
+    }:
+        registry.apply_task_definition(plan.desired)
+        applied = True
+    external_resources.mark_external_resource_in_sync(
+        resource_type=claimed.resource_type,
+        resource_id=claimed.resource_id,
+        desired_generation=claimed.desired_generation,
+        claim_token=claimed.claim_token,
+        observed_hash=desired.definition_hash,
+    )
+    return TaskSchedulerClaimedResourceReconciliation(
+        resource_id=claimed.resource_id,
+        action=plan.action,
+        applied=applied,
+        completed=True,
+        blocked=False,
+        reason=plan.reason,
     )
 
 

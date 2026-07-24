@@ -14,11 +14,13 @@ from mediasync_home.application.task_scheduler import (
     build_same_user_task_scheduler_definition,
     classify_task_scheduler_reconciliation,
     parse_trigger_task_arguments,
+    reconcile_claimed_task_scheduler_resource,
     reconcile_task_scheduler_page,
     stage_task_scheduler_desired_resource_page,
 )
 from mediasync_home.application.external_resources import (
     ExternalResourceRecord,
+    ExternalResourceState,
     ExternalResourceStateStore,
     ExternalResourceType,
 )
@@ -346,6 +348,129 @@ def test_stage_task_scheduler_desired_resource_page_reports_invalid_desired_stat
     assert resources.desired == ()
 
 
+def test_reconcile_claimed_task_scheduler_resource_applies_and_completes_claim() -> None:
+    schedule = _bound_schedule()
+    definition = build_same_user_task_scheduler_definition(
+        schedule,
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    registry = _Registry(_observed(definition, enabled=False))
+    resources = _ExternalResourceStore()
+
+    result = reconcile_claimed_task_scheduler_resource(
+        _claimed_resource(schedule),
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+        schedules=_ScheduleStore(schedule),
+        registry=registry,
+        external_resources=resources,
+    )
+
+    assert result.action is TaskSchedulerReconciliationAction.UPDATE_DRIFTED
+    assert result.applied is True
+    assert result.completed is True
+    assert result.blocked is False
+    assert tuple(definition.task_path for definition in registry.applied) == (
+        r"\MediaSync Home\install-a\schedule-a",
+    )
+    assert resources.completed == (
+        (
+            ExternalResourceType.TASK_SCHEDULER,
+            "schedule-a",
+            schedule.definition_generation,
+            "claim-a",
+            schedule.desired_definition_hash,
+        ),
+    )
+    assert resources.blocked == ()
+
+
+def test_reconcile_claimed_task_scheduler_resource_completes_in_sync_without_apply() -> None:
+    schedule = _bound_schedule()
+    definition = build_same_user_task_scheduler_definition(
+        schedule,
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    registry = _Registry(_observed(definition))
+    resources = _ExternalResourceStore()
+
+    result = reconcile_claimed_task_scheduler_resource(
+        _claimed_resource(schedule),
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+        schedules=_ScheduleStore(schedule),
+        registry=registry,
+        external_resources=resources,
+    )
+
+    assert result.action is TaskSchedulerReconciliationAction.IN_SYNC
+    assert result.applied is False
+    assert result.completed is True
+    assert registry.applied == []
+    assert resources.completed[0][4] == schedule.desired_definition_hash
+
+
+def test_reconcile_claimed_task_scheduler_resource_blocks_unsafe_drift() -> None:
+    schedule = _bound_schedule()
+    definition = build_same_user_task_scheduler_definition(
+        schedule,
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    registry = _Registry(_observed(definition, executable_path=r"C:\Other\App.exe"))
+    resources = _ExternalResourceStore()
+
+    result = reconcile_claimed_task_scheduler_resource(
+        _claimed_resource(schedule),
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+        schedules=_ScheduleStore(schedule),
+        registry=registry,
+        external_resources=resources,
+    )
+
+    assert result.action is TaskSchedulerReconciliationAction.BLOCK_BINARY_DRIFT
+    assert result.completed is False
+    assert result.blocked is True
+    assert registry.applied == []
+    assert resources.completed == ()
+    assert resources.blocked == (
+        (
+            ExternalResourceType.TASK_SCHEDULER,
+            "schedule-a",
+            "claim-a",
+            "TASK_SCHEDULER_EXECUTABLE_DRIFT",
+        ),
+    )
+
+
+def test_reconcile_claimed_task_scheduler_resource_blocks_stale_claim_desired_state() -> None:
+    schedule = _bound_schedule()
+    resources = _ExternalResourceStore()
+
+    result = reconcile_claimed_task_scheduler_resource(
+        _claimed_resource(schedule, desired_hash="b" * 64),
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+        schedules=_ScheduleStore(schedule),
+        registry=_Registry(),
+        external_resources=resources,
+    )
+
+    assert result.action is TaskSchedulerReconciliationAction.BLOCK_INVALID_DESIRED_STATE
+    assert result.reason == "TASK_SCHEDULER_CLAIM_DESIRED_DRIFT"
+    assert resources.blocked == (
+        (
+            ExternalResourceType.TASK_SCHEDULER,
+            "schedule-a",
+            "claim-a",
+            "TASK_SCHEDULER_CLAIM_DESIRED_DRIFT",
+        ),
+    )
+
+
 class _ScheduleStore:
     def __init__(self, *schedules: ScheduleDefinition) -> None:
         self.schedules = sorted(schedules, key=lambda item: item.schedule_id)
@@ -394,6 +519,8 @@ class _Registry:
 class _ExternalResourceStore(ExternalResourceStateStore):
     def __init__(self) -> None:
         self.desired: tuple[tuple[ExternalResourceType, str, int, str], ...] = ()
+        self.completed: tuple[tuple[ExternalResourceType, str, int, str, str], ...] = ()
+        self.blocked: tuple[tuple[ExternalResourceType, str, str, str], ...] = ()
 
     def upsert_desired_resource_state(
         self,
@@ -441,7 +568,19 @@ class _ExternalResourceStore(ExternalResourceStateStore):
         claim_token: str,
         observed_hash: str,
     ) -> ExternalResourceRecord:
-        raise AssertionError("not used by scheduler desired-resource staging")
+        self.completed = (
+            *self.completed,
+            (resource_type, resource_id, desired_generation, claim_token, observed_hash),
+        )
+        return ExternalResourceRecord(
+            resource_type=resource_type,
+            resource_id=resource_id,
+            desired_generation=desired_generation,
+            desired_hash=observed_hash,
+            observed_generation=desired_generation,
+            observed_hash=observed_hash,
+            state=ExternalResourceState.IN_SYNC,
+        )
 
     def mark_external_resource_blocked(
         self,
@@ -451,7 +590,18 @@ class _ExternalResourceStore(ExternalResourceStateStore):
         claim_token: str,
         error_code: str,
     ) -> ExternalResourceRecord:
-        raise AssertionError("not used by scheduler desired-resource staging")
+        self.blocked = (
+            *self.blocked,
+            (resource_type, resource_id, claim_token, error_code),
+        )
+        return ExternalResourceRecord(
+            resource_type=resource_type,
+            resource_id=resource_id,
+            desired_generation=1,
+            desired_hash="0" * 64,
+            state=ExternalResourceState.BLOCKED,
+            last_error_code=error_code,
+        )
 
 
 def _bound_schedule(
@@ -513,4 +663,19 @@ def _observed(
         multiple_instances_policy=definition.multiple_instances_policy,
         execution_time_limit_seconds=definition.execution_time_limit_seconds,
         stop_on_execution_time_limit=definition.stop_on_execution_time_limit,
+    )
+
+
+def _claimed_resource(
+    schedule: ScheduleDefinition,
+    *,
+    desired_hash: str | None = None,
+) -> ExternalResourceRecord:
+    return ExternalResourceRecord(
+        resource_type=ExternalResourceType.TASK_SCHEDULER,
+        resource_id=schedule.schedule_id,
+        desired_generation=schedule.definition_generation,
+        desired_hash=schedule.desired_definition_hash if desired_hash is None else desired_hash,
+        state=ExternalResourceState.CLAIMED,
+        claim_token="claim-a",
     )
