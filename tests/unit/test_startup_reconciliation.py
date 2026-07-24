@@ -84,6 +84,7 @@ def test_engine_host_startup_reconciliation_runs_command_receipts_and_outbox() -
     assert report.recovery_operations.findings[0].classification is (
         RecoveryOperationStartupClassification.CONTINUE_FROM_VERIFIED_OBJECT
     )
+    assert report.recovery_resume is None
     assert report.skipped_outbox_requeue_reason is None
 
 
@@ -98,6 +99,8 @@ def test_engine_host_startup_reconciliation_skips_outbox_without_inactive_owner_
     assert outbox.requests == ()
     assert report.command_receipts is None
     assert report.outbox is None
+    assert report.recovery_operations is None
+    assert report.recovery_resume is None
     assert report.skipped_outbox_requeue_reason == (
         "OUTBOX_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF"
     )
@@ -111,6 +114,8 @@ def test_engine_host_startup_reconciliation_allows_no_optional_stores() -> None:
     assert report.reconciler_instance_id == "host-b"
     assert report.command_receipts is None
     assert report.outbox is None
+    assert report.recovery_operations is None
+    assert report.recovery_resume is None
     assert report.skipped_outbox_requeue_reason is None
 
 
@@ -141,6 +146,13 @@ def test_engine_host_startup_reconciliation_allows_no_optional_stores() -> None:
                 recovery_operation_limit=0,
             ),
             "ENGINE_HOST_RECONCILIATION_RECOVERY_OPERATION_LIMIT_MUST_BE_POSITIVE",
+        ),
+        (
+            EngineHostStartupReconciliationRequest(
+                reconciler_instance_id="host-b",
+                recovery_resume_limit=0,
+            ),
+            "ENGINE_HOST_RECONCILIATION_RECOVERY_RESUME_LIMIT_MUST_BE_POSITIVE",
         ),
         (
             EngineHostStartupReconciliationRequest(

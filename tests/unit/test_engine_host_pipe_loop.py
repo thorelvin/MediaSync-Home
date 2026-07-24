@@ -126,6 +126,8 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.startup_reconciliation.reconciler_instance_id == "host-new"
         assert runtime.startup_reconciliation.recovery_operations is not None
         assert runtime.startup_reconciliation.recovery_operations.scanned == 0
+        assert runtime.startup_reconciliation.recovery_resume is not None
+        assert runtime.startup_reconciliation.recovery_resume.scanned == 0
         assert runtime.startup_reconciliation.skipped_outbox_requeue_reason == (
             "OUTBOX_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF"
         )

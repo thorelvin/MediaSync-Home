@@ -73,6 +73,7 @@ from mediasync_home.application.recovery_intents import RecoveryIntentSegmentSto
 from mediasync_home.application.recovery_reconciliation import (
     RecoveryOperationStartupReconciliationReport,
 )
+from mediasync_home.application.recovery_resume import RecoveryResumeStartupReport
 from mediasync_home.application.runs import EndpointLeaseAuthority, RunIds, RunTargetCompletionOutcome
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
 from mediasync_home.application.startup_reconciliation import (
@@ -455,6 +456,8 @@ def build_engine_host_runtime(
             command_receipts=command_receipts,
             outbox=outbox,
             recovery_operations=recovery_operations,
+            recovery_resume_operations=recovery_operations,
+            runs=runs,
         )
         service = EngineHostIpcService(
             authorization,
@@ -543,6 +546,7 @@ def _startup_reconciliation_payload(
         "recovery_operations": _recovery_operations_reconciliation_payload(
             report.recovery_operations
         ),
+        "recovery_resume": _recovery_resume_payload(report.recovery_resume),
         "skipped_outbox_requeue_reason": report.skipped_outbox_requeue_reason,
     }
 
@@ -564,6 +568,29 @@ def _recovery_operations_reconciliation_payload(
                 "phase": finding.phase.value,
                 "classification": finding.classification.value,
                 "requires_manual_decision": finding.requires_manual_decision,
+                "next_action": finding.next_action,
+            }
+            for finding in report.findings
+        ],
+    }
+
+
+def _recovery_resume_payload(
+    report: RecoveryResumeStartupReport | None,
+) -> dict[str, object] | None:
+    if report is None:
+        return None
+    return {
+        "scanned": report.scanned,
+        "completed_run_target_ids": report.completed_run_target_ids,
+        "blocked_run_target_ids": report.blocked_run_target_ids,
+        "findings": [
+            {
+                "action": finding.action.value,
+                "run_id": finding.run_id,
+                "run_target_id": finding.run_target_id,
+                "operation_ids": finding.operation_ids,
+                "validation_codes": finding.validation_codes,
                 "next_action": finding.next_action,
             }
             for finding in report.findings
