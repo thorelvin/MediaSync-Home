@@ -7,7 +7,10 @@ from dataclasses import replace
 from pathlib import Path
 
 from mediasync_home.adapters.endpoint_leases import LocalEndpointLease
-from mediasync_home.adapters.final_commit import LabNoOverwriteFinalCommitAdapter
+from mediasync_home.adapters.final_commit import (
+    LabNoOverwriteFinalCommitAdapter,
+    LocalVersionedReplaceFinalCommitAdapter,
+)
 from mediasync_home.adapters.sqlite.connection_policy import (
     apply_sqlite_connection_policy,
     recovery_writer_policy,
@@ -18,6 +21,7 @@ from mediasync_home.adapters.sqlite.recovery_intents import SqliteRecoveryIntent
 from mediasync_home.adapters.sqlite.recovery_operations import SqliteRecoveryOperationStore
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationMetadata,
     RecoveryOperationPhase,
     RecoveryTargetPreconditionKind,
     planned_recovery_operation,
@@ -82,6 +86,87 @@ def test_sqlite_run_final_commit_bridge_applies_lab_commit(
         connection.close()
 
 
+def test_sqlite_run_final_commit_bridge_resumes_preserved_replacement(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _register_resource_lease(connection)
+        recovery_operations = SqliteRecoveryOperationStore(connection)
+        intent_segments = SqliteRecoveryIntentSegmentStore(connection)
+        old_payload = b"old-image"
+        new_payload = b"new-image"
+        operation = _record_staging_verified_operation(
+            recovery_operations,
+            content_hash=_sha256(new_payload),
+            content_byte_count=len(new_payload),
+            target_precondition_kind=RecoveryTargetPreconditionKind.MATCH_FINGERPRINT,
+            expected_target_payload=old_payload,
+        )
+        target_root = tmp_path / "target"
+        staging_root = tmp_path / "staging"
+        _prepare_lab_target(target_root=target_root, staging_root=staging_root)
+        (target_root / "Pictures" / "A.jpg").write_bytes(old_payload)
+        (staging_root / "op-a.payload").write_bytes(new_payload)
+        lease = _lease(target_root / ".mediasync" / "locks" / "mutation.lock")
+        adapter = LocalVersionedReplaceFinalCommitAdapter(
+            target_root=target_root,
+            staging_root=staging_root,
+            permit_validator=lease,
+        )
+        intent = publish_run_target_recovery_intent_segment(
+            permit=lease.issue_mutation_permit(),
+            recovery_operations=recovery_operations,
+            intent_segments=intent_segments,
+            process_instance_id="host-a",
+        )
+        assert intent.published is True
+        preconditions = recovery_operations.record_operation_phase_transition(
+            run_id=operation.run_id,
+            operation_id=operation.operation_id,
+            expected_phase=RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
+            next_phase=RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
+            process_instance_id="host-a",
+        )
+        assert preconditions is not None
+        preservation = adapter.preserve_old_target(lease.issue_mutation_permit(), preconditions)
+        preserved = recovery_operations.record_operation_phase_transition(
+            run_id=preconditions.run_id,
+            operation_id=preconditions.operation_id,
+            expected_phase=RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
+            next_phase=RecoveryOperationPhase.OLD_TARGET_PRESERVED,
+            process_instance_id="host-a",
+            operation_metadata=RecoveryOperationMetadata(
+                version_object_id=preservation.version_object_id,
+            ),
+        )
+        assert preserved is not None
+
+        outcome = commit_next_run_target_verified_artifact(
+            permit=lease.issue_mutation_permit(),
+            recovery_operations=recovery_operations,
+            final_commit_port=adapter,
+            process_instance_id="host-a",
+        )
+
+        loaded = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+        assert outcome.committed is True
+        assert outcome.validation_codes == ()
+        assert loaded is not None
+        assert loaded.phase is RecoveryOperationPhase.FINAL_VERIFIED
+        assert loaded.version_object_id == "op-a"
+        assert loaded.final_durability_state == "FINAL_COMMIT_ADAPTER_COMPLETED"
+        assert (target_root / "Pictures" / "A.jpg").read_bytes() == new_payload
+        assert (target_root / ".mediasync" / "objects" / "versions" / "op-a.payload").read_bytes() == old_payload
+        assert _event_phases(connection)[-3:] == [
+            "FILESYSTEM_APPLIED",
+            "FINAL_DURABLE",
+            "FINAL_VERIFIED",
+        ]
+    finally:
+        connection.close()
+
+
 def _prepared_recovery_connection(tmp_path: Path) -> sqlite3.Connection:
     database = tmp_path / "recovery.sqlite"
     connection = sqlite3.connect(database)
@@ -109,9 +194,17 @@ def _record_staging_verified_operation(
     store: SqliteRecoveryOperationStore,
     *,
     content_hash: str,
+    content_byte_count: int = 5,
+    target_precondition_kind: RecoveryTargetPreconditionKind = RecoveryTargetPreconditionKind.ABSENT,
+    expected_target_payload: bytes | None = None,
 ) -> RecoveryOperation:
     operation = store.record_planned_operation(
-        _operation(content_hash=content_hash),
+        _operation(
+            content_hash=content_hash,
+            content_byte_count=content_byte_count,
+            target_precondition_kind=target_precondition_kind,
+            expected_target_payload=expected_target_payload,
+        ),
         process_instance_id="host-a",
     )
     for next_phase in (
@@ -135,7 +228,13 @@ def _record_staging_verified_operation(
     return operation
 
 
-def _operation(*, content_hash: str) -> RecoveryOperation:
+def _operation(
+    *,
+    content_hash: str,
+    content_byte_count: int = 5,
+    target_precondition_kind: RecoveryTargetPreconditionKind = RecoveryTargetPreconditionKind.ABSENT,
+    expected_target_payload: bytes | None = None,
+) -> RecoveryOperation:
     return replace(
         planned_recovery_operation(
             run_id="run-a",
@@ -150,11 +249,21 @@ def _operation(*, content_hash: str) -> RecoveryOperation:
             lease_resource_key="endpoint:target-a",
             fencing_token=1,
             final_relative_path="Pictures/A.jpg",
-            target_precondition_kind=RecoveryTargetPreconditionKind.ABSENT,
+            target_precondition_kind=target_precondition_kind,
         ),
         staging_object_id="op-a",
+        expected_target_fingerprint_json=None
+        if expected_target_payload is None
+        else json.dumps(
+            {
+                "byte_count": len(expected_target_payload),
+                "content_hash": _sha256(expected_target_payload),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
         expected_staging_fingerprint_json=json.dumps(
-            {"byte_count": 5, "content_hash": content_hash},
+            {"byte_count": content_byte_count, "content_hash": content_hash},
             sort_keys=True,
             separators=(",", ":"),
         ),
@@ -164,6 +273,17 @@ def _operation(*, content_hash: str) -> RecoveryOperation:
 def _prepare_lab_target(*, target_root: Path, staging_root: Path) -> None:
     (target_root / "Pictures").mkdir(parents=True)
     (target_root / ".mediasync" / "locks").mkdir(parents=True)
+    (target_root / ".mediasync" / "endpoint.json").write_text(
+        json.dumps(
+            {
+                "endpoint_id": "target-a",
+                "owner_installation_id": "owner-a",
+                "ownership_epoch": 1,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
     (target_root / ".mediasync_test_root").write_text(
         json.dumps({"run_id": "run-a"}),
         encoding="utf-8",

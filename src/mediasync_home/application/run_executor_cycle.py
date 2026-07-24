@@ -34,6 +34,9 @@ from mediasync_home.application.run_operation_lease_rebind import (
     rebind_next_run_target_recovery_operation_lease,
 )
 from mediasync_home.application.run_operation_planning import plan_run_target_recovery_operations
+from mediasync_home.application.run_preserved_commit_refresh import (
+    refresh_next_run_target_preserved_commit_intent_for_fresh_lease,
+)
 from mediasync_home.application.run_staging import (
     RunTargetStagingPort,
     execute_next_run_target_staging_step,
@@ -331,29 +334,84 @@ def _advance_retained_target(
     if _has_phase(
         recovery_operations=recovery_operations,
         permit=permit,
-        phase=RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
+        phase=RecoveryOperationPhase.OLD_TARGET_PRESERVED,
         limit=target.planned_operations + 1,
     ):
-        refresh_outcome = refresh_next_run_target_commit_intent_for_fresh_lease(
+        preserved_refresh_outcome = refresh_next_run_target_preserved_commit_intent_for_fresh_lease(
             permit=permit,
             recovery_operations=recovery_operations,
             intent_segments=intent_segments,
             process_instance_id=process_instance_id,
             max_operations=target.planned_operations + 1,
         )
-        if not refresh_outcome.idle:
-            if refresh_outcome.refreshed:
+        if not preserved_refresh_outcome.idle:
+            if preserved_refresh_outcome.refreshed:
                 return _advanced(
                     action=RunExecutorCycleAction.COMMIT_INTENT_REFRESHED,
-                    run_id=refresh_outcome.run_id,
-                    run_target_id=refresh_outcome.run_target_id,
-                    next_action=refresh_outcome.next_action,
+                    run_id=preserved_refresh_outcome.run_id,
+                    run_target_id=preserved_refresh_outcome.run_target_id,
+                    next_action=preserved_refresh_outcome.next_action,
                 )
             return _blocked(
-                run_id=refresh_outcome.run_id,
-                run_target_id=refresh_outcome.run_target_id,
-                validation_codes=refresh_outcome.validation_codes,
-                next_action=refresh_outcome.next_action,
+                run_id=preserved_refresh_outcome.run_id,
+                run_target_id=preserved_refresh_outcome.run_target_id,
+                validation_codes=preserved_refresh_outcome.validation_codes,
+                next_action=preserved_refresh_outcome.next_action,
+            )
+        if final_commit_port is None:
+            return _blocked(
+                run_id=permit.run_id,
+                run_target_id=permit.run_target_id,
+                validation_codes=("RUN_EXECUTOR_FINAL_COMMIT_PORT_NOT_CONFIGURED",),
+                next_action="Configure a final commit port before applying verified artifacts.",
+            )
+        final_commit_outcome = commit_next_run_target_verified_artifact(
+            permit=permit,
+            recovery_operations=recovery_operations,
+            final_commit_port=final_commit_port,
+            old_target_preservation_port=old_target_preservation_port,
+            process_instance_id=process_instance_id,
+        )
+        if final_commit_outcome.committed:
+            return _advanced(
+                action=RunExecutorCycleAction.FINAL_COMMITTED,
+                run_id=final_commit_outcome.run_id,
+                run_target_id=final_commit_outcome.run_target_id,
+                next_action=final_commit_outcome.next_action,
+            )
+        return _blocked(
+            run_id=final_commit_outcome.run_id,
+            run_target_id=final_commit_outcome.run_target_id,
+            validation_codes=final_commit_outcome.validation_codes,
+            next_action=final_commit_outcome.next_action,
+        )
+
+    if _has_phase(
+        recovery_operations=recovery_operations,
+        permit=permit,
+        phase=RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
+        limit=target.planned_operations + 1,
+    ):
+        commit_refresh_outcome = refresh_next_run_target_commit_intent_for_fresh_lease(
+            permit=permit,
+            recovery_operations=recovery_operations,
+            intent_segments=intent_segments,
+            process_instance_id=process_instance_id,
+            max_operations=target.planned_operations + 1,
+        )
+        if not commit_refresh_outcome.idle:
+            if commit_refresh_outcome.refreshed:
+                return _advanced(
+                    action=RunExecutorCycleAction.COMMIT_INTENT_REFRESHED,
+                    run_id=commit_refresh_outcome.run_id,
+                    run_target_id=commit_refresh_outcome.run_target_id,
+                    next_action=commit_refresh_outcome.next_action,
+                )
+            return _blocked(
+                run_id=commit_refresh_outcome.run_id,
+                run_target_id=commit_refresh_outcome.run_target_id,
+                validation_codes=commit_refresh_outcome.validation_codes,
+                next_action=commit_refresh_outcome.next_action,
             )
         if final_commit_port is None:
             return _blocked(

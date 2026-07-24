@@ -96,6 +96,57 @@ def test_commit_next_run_target_verified_artifact_preserves_matching_target_befo
     assert stored.final_durability_state == "FINAL_COMMIT_ADAPTER_COMPLETED"
 
 
+def test_commit_next_run_target_verified_artifact_resumes_preserved_replacement() -> None:
+    operation = _old_target_preserved_operation()
+    recovery_operations = _FakeRecoveryOperationStore((operation,))
+    final_commit = _FakeFinalCommitPort()
+
+    outcome = commit_next_run_target_verified_artifact(
+        permit=_permit(),
+        recovery_operations=recovery_operations,
+        final_commit_port=final_commit,
+        process_instance_id="host-a",
+    )
+
+    stored = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    assert outcome.committed is True
+    assert outcome.validation_codes == ()
+    assert stored.phase is RecoveryOperationPhase.FINAL_VERIFIED
+    assert stored.version_object_id == "op-a"
+    assert stored.final_durability_state == "FINAL_COMMIT_ADAPTER_COMPLETED"
+    assert final_commit.calls == (
+        (
+            "lease-a",
+            VerifiedStagingArtifact(
+                object_id="op-a",
+                relative_path=RelativePath("Pictures/A.jpg"),
+                content_hash="a" * 64,
+            ),
+        ),
+    )
+    assert [transition[2] for transition in recovery_operations.transitions] == [
+        RecoveryOperationPhase.FILESYSTEM_APPLIED,
+        RecoveryOperationPhase.FINAL_DURABLE,
+        RecoveryOperationPhase.FINAL_VERIFIED,
+    ]
+
+
+def test_commit_next_run_target_verified_artifact_requires_preserved_old_target() -> None:
+    operation = _old_target_preserved_operation(version_object_id=None)
+    final_commit = _FakeFinalCommitPort()
+
+    outcome = commit_next_run_target_verified_artifact(
+        permit=_permit(),
+        recovery_operations=_FakeRecoveryOperationStore((operation,)),
+        final_commit_port=final_commit,
+        process_instance_id="host-a",
+    )
+
+    assert outcome.committed is False
+    assert outcome.validation_codes == ("RUN_TARGET_FINAL_COMMIT_REQUIRES_PRESERVED_OLD_TARGET",)
+    assert final_commit.calls == ()
+
+
 def test_commit_next_run_target_verified_artifact_reports_idle_without_commit_intent() -> None:
     outcome = commit_next_run_target_verified_artifact(
         permit=_permit(),
@@ -307,6 +358,20 @@ def _operation(*, lease_id: str = "lease-a") -> RecoveryOperation:
         intent_segment_id="segment-a",
         intent_ordinal=0,
         expected_staging_fingerprint_json='{"content_hash":"' + ("a" * 64) + '"}',
+    )
+
+
+def _old_target_preserved_operation(
+    *,
+    lease_id: str = "lease-a",
+    version_object_id: str | None = "op-a",
+) -> RecoveryOperation:
+    return replace(
+        _operation(lease_id=lease_id),
+        phase=RecoveryOperationPhase.OLD_TARGET_PRESERVED,
+        target_precondition_kind=RecoveryTargetPreconditionKind.MATCH_FINGERPRINT,
+        expected_target_fingerprint_json='{"content_hash":"' + ("b" * 64) + '"}',
+        version_object_id=version_object_id,
     )
 
 

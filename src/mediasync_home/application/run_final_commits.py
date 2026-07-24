@@ -3,15 +3,22 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Mapping, Protocol
 
 from mediasync_home.application.journaled_commit import JournaledFinalCommitPort
-from mediasync_home.application.ports import CommitReceipt, FinalCommitPort, RelativePath, VerifiedStagingArtifact
-from mediasync_home.application.ports import OldTargetPreservationPort
+from mediasync_home.application.ports import (
+    CommitReceipt,
+    FinalCommitPort,
+    OldTargetPreservationPort,
+    RelativePath,
+    VerifiedStagingArtifact,
+)
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationMetadata,
     RecoveryOperationPhase,
     RecoveryOperationStore,
+    RecoveryTargetPreconditionKind,
 )
 from mediasync_home.domain.capabilities import MutationPermit
 
@@ -42,6 +49,13 @@ class RunTargetFinalCommitOutcome:
     next_action: str
 
 
+class RunTargetFinalCommitError(RuntimeError):
+    def __init__(self, validation_code: str, next_action: str) -> None:
+        super().__init__(validation_code)
+        self.validation_code = validation_code
+        self.next_action = next_action
+
+
 def commit_next_run_target_verified_artifact(
     *,
     permit: MutationPermit,
@@ -58,7 +72,7 @@ def commit_next_run_target_verified_artifact(
             next_action="Bind final commit execution to the Engine Host process instance.",
         )
 
-    operation = _next_commit_intent_operation(
+    operation = _next_commit_ready_operation(
         permit=permit,
         recovery_operations=recovery_operations,
     )
@@ -90,14 +104,24 @@ def commit_next_run_target_verified_artifact(
             next_action="Stage and verify the operation before applying final filesystem changes.",
         )
 
-    journaled_commit = JournaledFinalCommitPort(
-        recovery_operations=recovery_operations,
-        final_commit_port=final_commit_port,
-        old_target_preservation_port=old_target_preservation_port,
-        process_instance_id=process_instance_id,
-    )
     try:
-        receipt = journaled_commit.commit_verified_artifact(permit, artifact)
+        if operation.phase is RecoveryOperationPhase.OLD_TARGET_PRESERVED:
+            receipt = _commit_preserved_target_replacement(
+                permit=permit,
+                recovery_operations=recovery_operations,
+                final_commit_port=final_commit_port,
+                operation=operation,
+                artifact=artifact,
+                process_instance_id=process_instance_id,
+            )
+        else:
+            journaled_commit = JournaledFinalCommitPort(
+                recovery_operations=recovery_operations,
+                final_commit_port=final_commit_port,
+                old_target_preservation_port=old_target_preservation_port,
+                process_instance_id=process_instance_id,
+            )
+            receipt = journaled_commit.commit_verified_artifact(permit, artifact)
     except RuntimeError as exc:
         return _failed(
             permit=permit,
@@ -121,25 +145,33 @@ def commit_next_run_target_verified_artifact(
     )
 
 
-def _next_commit_intent_operation(
+def _next_commit_ready_operation(
     *,
     permit: MutationPermit,
     recovery_operations: RunTargetFinalCommitOperationStore,
 ) -> RecoveryOperation | None:
-    operations = recovery_operations.list_operations_for_run_target_in_phase(
-        run_id=permit.run_id,
-        run_target_id=permit.run_target_id,
-        phase=RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
-        limit=1,
-    )
-    if not operations:
-        return None
-    return operations[0]
+    for phase in (
+        RecoveryOperationPhase.OLD_TARGET_PRESERVED,
+        RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
+    ):
+        operations = recovery_operations.list_operations_for_run_target_in_phase(
+            run_id=permit.run_id,
+            run_target_id=permit.run_target_id,
+            phase=phase,
+            limit=1,
+        )
+        if operations:
+            return operations[0]
+    return None
 
 
 def _operation_matches_permit(*, operation: RecoveryOperation, permit: MutationPermit) -> bool:
     return (
-        operation.phase is RecoveryOperationPhase.COMMIT_INTENT_RECORDED
+        operation.phase
+        in {
+            RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
+            RecoveryOperationPhase.OLD_TARGET_PRESERVED,
+        }
         and operation.run_id == permit.run_id
         and operation.run_target_id == permit.run_target_id
         and operation.target_endpoint_id == permit.endpoint_id
@@ -150,6 +182,154 @@ def _operation_matches_permit(*, operation: RecoveryOperation, permit: MutationP
         and operation.lease_resource_key == permit.resource_key
         and operation.fencing_token == permit.fencing_token
     )
+
+
+def _commit_preserved_target_replacement(
+    *,
+    permit: MutationPermit,
+    recovery_operations: RunTargetFinalCommitOperationStore,
+    final_commit_port: FinalCommitPort,
+    operation: RecoveryOperation,
+    artifact: VerifiedStagingArtifact,
+    process_instance_id: str,
+) -> CommitReceipt:
+    _validate_preserved_target_replacement(operation)
+    try:
+        receipt = final_commit_port.commit_verified_artifact(permit, artifact)
+    except Exception as exc:
+        _record_failure(
+            recovery_operations=recovery_operations,
+            operation=operation,
+            process_instance_id=process_instance_id,
+            exc=exc,
+        )
+        raise
+
+    applied = _transition(
+        recovery_operations=recovery_operations,
+        operation=operation,
+        next_phase=RecoveryOperationPhase.FILESYSTEM_APPLIED,
+        process_instance_id=process_instance_id,
+        payload={
+            "receipt_final_relative_path": receipt.final_relative_path.value,
+            "receipt_operation_id": receipt.operation_id,
+            "resume_from_phase": RecoveryOperationPhase.OLD_TARGET_PRESERVED.value,
+        },
+    )
+    try:
+        _validate_receipt(operation=operation, artifact=artifact, receipt=receipt)
+    except RunTargetFinalCommitError as exc:
+        _record_failure(
+            recovery_operations=recovery_operations,
+            operation=applied,
+            process_instance_id=process_instance_id,
+            exc=exc,
+        )
+        raise
+
+    durable = _transition(
+        recovery_operations=recovery_operations,
+        operation=applied,
+        next_phase=RecoveryOperationPhase.FINAL_DURABLE,
+        process_instance_id=process_instance_id,
+        payload={"durability_state": "FINAL_COMMIT_ADAPTER_COMPLETED"},
+        operation_metadata=RecoveryOperationMetadata(
+            final_durability_state="FINAL_COMMIT_ADAPTER_COMPLETED",
+        ),
+    )
+    _transition(
+        recovery_operations=recovery_operations,
+        operation=durable,
+        next_phase=RecoveryOperationPhase.FINAL_VERIFIED,
+        process_instance_id=process_instance_id,
+        payload={
+            "content_hash": artifact.content_hash,
+            "final_relative_path": artifact.relative_path.value,
+        },
+    )
+    return receipt
+
+
+def _validate_preserved_target_replacement(operation: RecoveryOperation) -> None:
+    if operation.target_precondition_kind is not RecoveryTargetPreconditionKind.MATCH_FINGERPRINT:
+        raise RunTargetFinalCommitError(
+            "RUN_TARGET_FINAL_COMMIT_REQUIRES_PRESERVED_REPLACE_PRECONDITION",
+            "Reload recovery state before resuming a preserved replacement.",
+        )
+    if operation.version_object_id is None and operation.quarantine_object_id is None:
+        raise RunTargetFinalCommitError(
+            "RUN_TARGET_FINAL_COMMIT_REQUIRES_PRESERVED_OLD_TARGET",
+            "Recover or reconcile the preserved old target before applying replacement bytes.",
+        )
+
+
+def _transition(
+    *,
+    recovery_operations: RunTargetFinalCommitOperationStore,
+    operation: RecoveryOperation,
+    next_phase: RecoveryOperationPhase,
+    process_instance_id: str,
+    payload: Mapping[str, object],
+    operation_metadata: RecoveryOperationMetadata | None = None,
+) -> RecoveryOperation:
+    updated = recovery_operations.record_operation_phase_transition(
+        run_id=operation.run_id,
+        operation_id=operation.operation_id,
+        expected_phase=operation.phase,
+        next_phase=next_phase,
+        process_instance_id=process_instance_id,
+        payload=payload,
+        operation_metadata=operation_metadata,
+    )
+    if updated is None:
+        raise RunTargetFinalCommitError(
+            "RUN_TARGET_FINAL_COMMIT_PHASE_CONFLICT",
+            "Reload recovery state or run startup final reverify before retrying final commit.",
+        )
+    return updated
+
+
+def _validate_receipt(
+    *,
+    operation: RecoveryOperation,
+    artifact: VerifiedStagingArtifact,
+    receipt: CommitReceipt,
+) -> None:
+    if receipt.operation_id != operation.operation_id:
+        raise RunTargetFinalCommitError(
+            "RUN_TARGET_FINAL_COMMIT_RECEIPT_OPERATION_MISMATCH",
+            "Enter recovery before catalog handoff because the final commit receipt is inconsistent.",
+        )
+    if _relative_path(receipt.final_relative_path.value) != _relative_path(artifact.relative_path.value):
+        raise RunTargetFinalCommitError(
+            "RUN_TARGET_FINAL_COMMIT_RECEIPT_PATH_MISMATCH",
+            "Enter recovery before catalog handoff because the final commit receipt path is inconsistent.",
+        )
+
+
+def _record_failure(
+    *,
+    recovery_operations: RunTargetFinalCommitOperationStore,
+    operation: RecoveryOperation,
+    process_instance_id: str,
+    exc: Exception,
+) -> None:
+    updated = recovery_operations.record_operation_phase_transition(
+        run_id=operation.run_id,
+        operation_id=operation.operation_id,
+        expected_phase=operation.phase,
+        next_phase=RecoveryOperationPhase.FAILED_RETRYABLE,
+        process_instance_id=process_instance_id,
+        payload={
+            "error_code": _error_code(exc),
+            "error_type": type(exc).__name__,
+        },
+    )
+    if updated is None:
+        raise RunTargetFinalCommitError(
+            "RUN_TARGET_FINAL_COMMIT_FAILURE_JOURNAL_CONFLICT",
+            "Reload recovery state before retrying or resuming the final commit.",
+        ) from exc
 
 
 def _verified_artifact(operation: RecoveryOperation) -> VerifiedStagingArtifact | None:
@@ -184,6 +364,10 @@ def _content_hash(operation: RecoveryOperation) -> str | None:
     return None
 
 
+def _relative_path(value: str) -> str:
+    return value.replace("\\", "/")
+
+
 def _failed(
     *,
     permit: MutationPermit,
@@ -203,7 +387,7 @@ def _failed(
     )
 
 
-def _error_code(exc: RuntimeError) -> str:
+def _error_code(exc: Exception) -> str:
     code = getattr(exc, "validation_code", None)
     if isinstance(code, str) and code.strip():
         return code
