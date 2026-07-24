@@ -59,10 +59,11 @@ from mediasync_home.application.run_catalog_handoffs import (
     RunTargetCatalogHandoffStepOutcome,
     record_next_run_target_catalog_handoff,
 )
+from mediasync_home.application.run_completion import complete_run_target_after_catalog_handoffs
 from mediasync_home.application.catalog_handoff import FinalFileCatalogHandoffStore
 from mediasync_home.application.plans import PlanStore
 from mediasync_home.application.recovery_intents import RecoveryIntentSegmentStore
-from mediasync_home.application.runs import EndpointLeaseAuthority, RunIds
+from mediasync_home.application.runs import EndpointLeaseAuthority, RunIds, RunTargetCompletionOutcome
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
 from mediasync_home.application.startup_reconciliation import (
     EngineHostStartupReconciliationReport,
@@ -199,6 +200,22 @@ class EngineHostRuntime:
             recovery_operations=self.run_executor_recovery_operation_store,
             catalog_handoffs=self.run_executor_catalog_handoff_store,
             process_instance_id=self.run_executor_process_instance_id,
+        )
+
+    def run_executor_complete_catalog_recorded_target(
+        self,
+        *,
+        permit: MutationPermit,
+    ) -> RunTargetCompletionOutcome:
+        if (
+            self.run_executor_queue_store is None
+            or self.run_executor_recovery_operation_store is None
+        ):
+            raise RuntimeError("RUN_EXECUTOR_RUNTIME_NOT_CONFIGURED")
+        return complete_run_target_after_catalog_handoffs(
+            permit=permit,
+            runs=self.run_executor_queue_store,
+            recovery_operations=self.run_executor_recovery_operation_store,
         )
 
     def close(self) -> None:
