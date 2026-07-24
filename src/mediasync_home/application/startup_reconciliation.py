@@ -8,6 +8,7 @@ from mediasync_home.application.command_receipts import (
     CommandReceiptStartupReconciliationRequest,
     CommandReceiptStartupReconciliationStore,
 )
+from mediasync_home.application.catalog_handoff import FinalFileCatalogHandoffStore
 from mediasync_home.application.outbox import (
     MAX_OUTBOX_STARTUP_RECONCILIATION_LIMIT,
     OutboxStartupReconciliationReport,
@@ -23,9 +24,10 @@ from mediasync_home.application.recovery_reconciliation import (
 )
 from mediasync_home.application.recovery_resume import (
     MAX_RECOVERY_RESUME_STARTUP_LIMIT,
-    RecoveryResumeOperationStore,
+    RecoveryResumeCatalogHandoffOperationStore,
     RecoveryResumeStartupReport,
     RecoveryResumeStartupRequest,
+    resume_recovery_operations_after_startup,
     resume_catalog_recorded_run_targets_after_startup,
 )
 from mediasync_home.application.runs import RunStore
@@ -61,7 +63,8 @@ def reconcile_engine_host_after_startup(
     command_receipts: CommandReceiptStartupReconciliationStore | None = None,
     outbox: OutboxStartupReconciliationStore | None = None,
     recovery_operations: RecoveryOperationStartupReconciliationStore | None = None,
-    recovery_resume_operations: RecoveryResumeOperationStore | None = None,
+    recovery_resume_operations: RecoveryResumeCatalogHandoffOperationStore | None = None,
+    recovery_resume_catalog_handoffs: FinalFileCatalogHandoffStore | None = None,
     runs: RunStore | None = None,
 ) -> EngineHostStartupReconciliationReport:
     validate_engine_host_startup_reconciliation_request(request)
@@ -101,14 +104,23 @@ def reconcile_engine_host_after_startup(
 
     recovery_resume_report = None
     if recovery_resume_operations is not None and runs is not None:
-        recovery_resume_report = resume_catalog_recorded_run_targets_after_startup(
-            RecoveryResumeStartupRequest(
-                reconciler_instance_id=request.reconciler_instance_id,
-                limit=request.recovery_resume_limit,
-            ),
-            runs=runs,
-            recovery_operations=recovery_resume_operations,
+        resume_request = RecoveryResumeStartupRequest(
+            reconciler_instance_id=request.reconciler_instance_id,
+            limit=request.recovery_resume_limit,
         )
+        if recovery_resume_catalog_handoffs is None:
+            recovery_resume_report = resume_catalog_recorded_run_targets_after_startup(
+                resume_request,
+                runs=runs,
+                recovery_operations=recovery_resume_operations,
+            )
+        else:
+            recovery_resume_report = resume_recovery_operations_after_startup(
+                resume_request,
+                runs=runs,
+                recovery_operations=recovery_resume_operations,
+                catalog_handoffs=recovery_resume_catalog_handoffs,
+            )
 
     return EngineHostStartupReconciliationReport(
         reconciler_instance_id=request.reconciler_instance_id,

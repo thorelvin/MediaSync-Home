@@ -457,6 +457,7 @@ def build_engine_host_runtime(
             outbox=outbox,
             recovery_operations=recovery_operations,
             recovery_resume_operations=recovery_operations,
+            recovery_resume_catalog_handoffs=catalog_handoffs,
             runs=runs,
         )
         service = EngineHostIpcService(

@@ -5,6 +5,7 @@ import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
+from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
 from mediasync_home.adapters.sqlite.command_receipts import SqliteCommandReceiptStore
 from mediasync_home.adapters.sqlite.connection_policy import (
     apply_sqlite_connection_policy,
@@ -204,6 +205,88 @@ def test_sqlite_engine_host_startup_reconciliation_resumes_catalog_recorded_targ
             recovery_connection.close()
 
 
+def test_sqlite_engine_host_startup_reconciliation_records_final_verified_handoff(
+    tmp_path: Path,
+) -> None:
+    catalog_database = tmp_path / "catalog.sqlite"
+    recovery_database = tmp_path / "recovery.sqlite"
+    with sqlite3.connect(catalog_database) as catalog_connection:
+        recovery_connection = sqlite3.connect(recovery_database)
+        try:
+            _prepare_catalog(catalog_connection, catalog_database)
+            _prepare_recovery(recovery_connection, recovery_database)
+            _insert_plan_parent_rows(catalog_connection)
+            receipts = SqliteCommandReceiptStore(catalog_connection)
+            plans = SqlitePlanStore(catalog_connection)
+            runs = SqliteRunStore(catalog_connection)
+            catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
+            recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
+            _register_resource_lease(recovery_connection)
+            SqliteRecoveryIntentSegmentStore(recovery_connection).publish_intent_segment(
+                _segment()
+            )
+            receipts.record_received(_receipt("idempotency-a"))
+            plan = _sealed_plan()
+            plans.save_sealed_plan(plan)
+            start_run_from_sealed_plan(
+                command=parse_start_run_command(
+                    request_id="request-a",
+                    idempotency_key="idempotency-a",
+                    payload={
+                        "plan_id": plan.plan_id,
+                        "plan_checksum": plan.plan_checksum,
+                    },
+                ),
+                plans=plans,
+                runs=runs,
+                id_factory=_FixedRunIdFactory(),
+            )
+            _mark_run_target_executing(runs)
+            _record_final_verified_operation(recovery_operations)
+
+            report = reconcile_engine_host_after_startup(
+                EngineHostStartupReconciliationRequest(
+                    reconciler_instance_id="host-new",
+                    recovery_operation_limit=10,
+                    recovery_resume_limit=10,
+                ),
+                recovery_operations=recovery_operations,
+                recovery_resume_operations=recovery_operations,
+                recovery_resume_catalog_handoffs=catalog_handoffs,
+                runs=runs,
+            )
+
+            loaded = runs.load_started_run("run-a")
+            operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+            handoff = catalog_handoffs.load_final_file_handoff("final-file:run-a:op-a")
+            assert report.recovery_operations is not None
+            assert report.recovery_operations.scanned == 1
+            assert report.recovery_operations.findings[0].classification is (
+                RecoveryOperationStartupClassification.FILESYSTEM_APPLIED_NEEDS_CATALOG
+            )
+            assert report.recovery_resume is not None
+            assert report.recovery_resume.scanned == 2
+            assert tuple(finding.action for finding in report.recovery_resume.findings) == (
+                RecoveryResumeAction.CATALOG_HANDOFF_RECORDED,
+                RecoveryResumeAction.TARGET_COMPLETED,
+            )
+            assert report.recovery_resume.completed_run_target_ids == (
+                "run-a-target-0000",
+            )
+            assert handoff is not None
+            assert handoff.content_hash == "a" * 64
+            assert operation is not None
+            assert operation.phase is RecoveryOperationPhase.CATALOG_RECORDED
+            assert operation.catalog_handoff_id == "final-file:run-a:op-a"
+            assert loaded is not None
+            assert loaded.state is RunState.COMPLETED
+            assert loaded.targets[0].state is RunTargetState.SUCCEEDED
+            assert loaded.targets[0].completed_operations == 1
+            assert loaded.targets[0].completed_bytes == 128
+        finally:
+            recovery_connection.close()
+
+
 def _prepare_catalog(connection: sqlite3.Connection, database: Path) -> None:
     apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
     apply_sqlite_migrations(connection, catalog_migration_plan())
@@ -355,6 +438,20 @@ def _mark_run_target_executing(runs: SqliteRunStore) -> None:
 
 
 def _record_catalog_recorded_operation(store: SqliteRecoveryOperationStore) -> RecoveryOperation:
+    operation = _record_final_verified_operation(store)
+    updated = store.record_operation_phase_transition(
+        run_id=operation.run_id,
+        operation_id=operation.operation_id,
+        expected_phase=operation.phase,
+        next_phase=RecoveryOperationPhase.CATALOG_RECORDED,
+        process_instance_id="host-a",
+        catalog_handoff_id="final-file:run-a:op-a",
+    )
+    assert updated is not None
+    return updated
+
+
+def _record_final_verified_operation(store: SqliteRecoveryOperationStore) -> RecoveryOperation:
     operation = store.record_planned_operation(_catalog_resume_operation(), process_instance_id="host-a")
     for next_phase in (
         RecoveryOperationPhase.SOURCE_VALIDATED,
@@ -400,16 +497,7 @@ def _record_catalog_recorded_operation(store: SqliteRecoveryOperationStore) -> R
         )
         assert updated is not None
         operation = updated
-    updated = store.record_operation_phase_transition(
-        run_id=operation.run_id,
-        operation_id=operation.operation_id,
-        expected_phase=operation.phase,
-        next_phase=RecoveryOperationPhase.CATALOG_RECORDED,
-        process_instance_id="host-a",
-        catalog_handoff_id="final-file:run-a:op-a",
-    )
-    assert updated is not None
-    return updated
+    return operation
 
 
 def _catalog_resume_operation() -> RecoveryOperation:

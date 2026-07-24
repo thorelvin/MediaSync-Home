@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Mapping
 
 import pytest
 
+from mediasync_home.application.catalog_handoff import FinalFileCatalogHandoff
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationMetadata,
     RecoveryOperationPhase,
     RecoveryTargetPreconditionKind,
     planned_recovery_operation,
@@ -15,6 +18,7 @@ from mediasync_home.application.recovery_resume import (
     RecoveryResumeStartupRequest,
     RecoveryResumeViolation,
     resume_catalog_recorded_run_targets_after_startup,
+    resume_recovery_operations_after_startup,
     validate_recovery_resume_startup_request,
 )
 from mediasync_home.application.runs import (
@@ -88,6 +92,68 @@ def test_recovery_resume_blocks_on_binding_mismatch() -> None:
     )
 
 
+def test_recovery_resume_records_final_verified_catalog_handoff_then_completes_target() -> None:
+    runs = _RunStore(_run())
+    recovery_operations = _RecoveryOperationStore((_final_verified_operation(),))
+    catalog_handoffs = _CatalogHandoffStore()
+
+    report = resume_recovery_operations_after_startup(
+        RecoveryResumeStartupRequest(reconciler_instance_id="host-b"),
+        runs=runs,
+        recovery_operations=recovery_operations,
+        catalog_handoffs=catalog_handoffs,
+    )
+
+    loaded = runs.load_started_run("run-a")
+    operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    handoff = catalog_handoffs.load_final_file_handoff("final-file:run-a:op-a")
+    assert report.scanned == 2
+    assert tuple(finding.action for finding in report.findings) == (
+        RecoveryResumeAction.CATALOG_HANDOFF_RECORDED,
+        RecoveryResumeAction.TARGET_COMPLETED,
+    )
+    assert report.completed_run_target_ids == ("run-a-target-0000",)
+    assert report.blocked_run_target_ids == ()
+    assert loaded is not None
+    assert loaded.state is RunState.COMPLETED
+    assert loaded.targets[0].state is RunTargetState.SUCCEEDED
+    assert operation is not None
+    assert operation.phase is RecoveryOperationPhase.CATALOG_RECORDED
+    assert operation.catalog_handoff_id == "final-file:run-a:op-a"
+    assert handoff is not None
+    assert handoff.content_hash == "a" * 64
+
+
+def test_recovery_resume_blocks_final_verified_without_content_hash() -> None:
+    runs = _RunStore(_run())
+    recovery_operations = _RecoveryOperationStore(
+        (replace(_final_verified_operation(), expected_final_fingerprint_json=None),)
+    )
+    catalog_handoffs = _CatalogHandoffStore()
+
+    report = resume_recovery_operations_after_startup(
+        RecoveryResumeStartupRequest(reconciler_instance_id="host-b"),
+        runs=runs,
+        recovery_operations=recovery_operations,
+        catalog_handoffs=catalog_handoffs,
+    )
+
+    loaded = runs.load_started_run("run-a")
+    operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    assert report.scanned == 1
+    assert report.completed_run_target_ids == ()
+    assert report.blocked_run_target_ids == ("run-a-target-0000",)
+    assert report.findings[0].action is RecoveryResumeAction.BLOCKED
+    assert report.findings[0].validation_codes == (
+        "RECOVERY_RESUME_FINAL_VERIFIED_REQUIRES_CONTENT_HASH",
+    )
+    assert catalog_handoffs.load_final_file_handoff("final-file:run-a:op-a") is None
+    assert loaded is not None
+    assert loaded.state is RunState.EXECUTING
+    assert operation is not None
+    assert operation.phase is RecoveryOperationPhase.FINAL_VERIFIED
+
+
 @pytest.mark.parametrize(
     ("startup_request", "error_code"),
     [
@@ -111,7 +177,62 @@ def test_recovery_resume_validates_request(
 
 class _RecoveryOperationStore:
     def __init__(self, operations: tuple[RecoveryOperation, ...]) -> None:
-        self._operations = operations
+        self._operations = list(operations)
+
+    def record_planned_operation(
+        self,
+        operation: RecoveryOperation,
+        *,
+        process_instance_id: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> RecoveryOperation:
+        self._operations.append(operation)
+        return operation
+
+    def record_operation_phase_transition(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        expected_phase: RecoveryOperationPhase,
+        next_phase: RecoveryOperationPhase,
+        process_instance_id: str,
+        payload: Mapping[str, object] | None = None,
+        intent_segment_id: str | None = None,
+        intent_ordinal: int | None = None,
+        catalog_handoff_id: str | None = None,
+        operation_metadata: RecoveryOperationMetadata | None = None,
+    ) -> RecoveryOperation | None:
+        if (
+            not process_instance_id.strip()
+            or next_phase is not RecoveryOperationPhase.CATALOG_RECORDED
+            or catalog_handoff_id is None
+        ):
+            return None
+        for index, operation in enumerate(self._operations):
+            if (
+                operation.run_id == run_id
+                and operation.operation_id == operation_id
+                and operation.phase is expected_phase
+            ):
+                updated = replace(
+                    operation,
+                    phase=next_phase,
+                    catalog_handoff_id=catalog_handoff_id,
+                )
+                self._operations[index] = updated
+                return updated
+        return None
+
+    def load_operation(self, *, run_id: str, operation_id: str) -> RecoveryOperation | None:
+        return next(
+            (
+                operation
+                for operation in self._operations
+                if operation.run_id == run_id and operation.operation_id == operation_id
+            ),
+            None,
+        )
 
     def list_operations_in_phase(
         self,
@@ -140,6 +261,26 @@ class _RecoveryOperationStore:
             and operation.run_target_id == run_target_id
             and operation.phase is phase
         )[:limit]
+
+
+class _CatalogHandoffStore:
+    def __init__(self) -> None:
+        self._handoffs: dict[str, FinalFileCatalogHandoff] = {}
+
+    def record_final_file_handoff(
+        self,
+        handoff: FinalFileCatalogHandoff,
+    ) -> FinalFileCatalogHandoff:
+        existing = self._handoffs.get(handoff.handoff_id)
+        if existing is not None:
+            if existing != handoff:
+                raise ValueError("CATALOG_HANDOFF_IDEMPOTENCY_CONFLICT")
+            return existing
+        self._handoffs[handoff.handoff_id] = handoff
+        return handoff
+
+    def load_final_file_handoff(self, handoff_id: str) -> FinalFileCatalogHandoff | None:
+        return self._handoffs.get(handoff_id)
 
 
 class _RunStore(RunStore):
@@ -283,4 +424,12 @@ def _catalog_recorded_operation() -> RecoveryOperation:
         intent_ordinal=0,
         catalog_handoff_id="final-file:run-a:op-a",
         expected_final_fingerprint_json='{"byte_count":128,"content_hash":"' + ("a" * 64) + '"}',
+    )
+
+
+def _final_verified_operation() -> RecoveryOperation:
+    return replace(
+        _catalog_recorded_operation(),
+        phase=RecoveryOperationPhase.FINAL_VERIFIED,
+        catalog_handoff_id=None,
     )

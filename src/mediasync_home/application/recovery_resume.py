@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol
+from typing import Mapping, Protocol
 
+from mediasync_home.application.catalog_handoff import (
+    CatalogHandoffError,
+    FinalFileCatalogHandoffStore,
+    record_catalog_handoff_after_final_verification,
+)
 from mediasync_home.application.recovery_operations import RecoveryOperation, RecoveryOperationPhase
+from mediasync_home.application.recovery_operations import RecoveryOperationStore
 from mediasync_home.application.runs import (
     RunState,
     RunStore,
@@ -16,6 +23,7 @@ from mediasync_home.application.runs import (
 
 
 MAX_RECOVERY_RESUME_STARTUP_LIMIT = 1000
+HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class RecoveryResumeViolation(ValueError):
@@ -23,6 +31,7 @@ class RecoveryResumeViolation(ValueError):
 
 
 class RecoveryResumeAction(str, Enum):
+    CATALOG_HANDOFF_RECORDED = "CATALOG_HANDOFF_RECORDED"
     TARGET_COMPLETED = "TARGET_COMPLETED"
     ALREADY_TERMINAL = "ALREADY_TERMINAL"
     BLOCKED = "BLOCKED"
@@ -83,6 +92,60 @@ class RecoveryResumeOperationStore(Protocol):
         phase: RecoveryOperationPhase,
         limit: int,
     ) -> tuple[RecoveryOperation, ...]: ...
+
+
+class RecoveryResumeCatalogHandoffOperationStore(
+    RecoveryResumeOperationStore,
+    RecoveryOperationStore,
+    Protocol,
+):
+    pass
+
+
+def resume_recovery_operations_after_startup(
+    request: RecoveryResumeStartupRequest,
+    *,
+    runs: RunStore,
+    recovery_operations: RecoveryResumeCatalogHandoffOperationStore,
+    catalog_handoffs: FinalFileCatalogHandoffStore,
+) -> RecoveryResumeStartupReport:
+    validate_recovery_resume_startup_request(request)
+
+    findings: list[RecoveryResumeFinding] = []
+    final_verified_operations = recovery_operations.list_operations_in_phase(
+        phase=RecoveryOperationPhase.FINAL_VERIFIED,
+        limit=request.limit,
+    )
+    for operation in final_verified_operations:
+        findings.append(
+            _resume_final_verified_catalog_handoff(
+                operation=operation,
+                runs=runs,
+                recovery_operations=recovery_operations,
+                catalog_handoffs=catalog_handoffs,
+                process_instance_id=request.reconciler_instance_id,
+            )
+        )
+
+    scanned = len(final_verified_operations)
+    remaining = request.limit - scanned
+    if remaining > 0:
+        catalog_recorded_report = resume_catalog_recorded_run_targets_after_startup(
+            RecoveryResumeStartupRequest(
+                reconciler_instance_id=request.reconciler_instance_id,
+                limit=remaining,
+            ),
+            runs=runs,
+            recovery_operations=recovery_operations,
+        )
+        scanned += catalog_recorded_report.scanned
+        findings.extend(catalog_recorded_report.findings)
+
+    return RecoveryResumeStartupReport(
+        reconciler_instance_id=request.reconciler_instance_id,
+        scanned=scanned,
+        findings=tuple(findings),
+    )
 
 
 def resume_catalog_recorded_run_targets_after_startup(
@@ -193,7 +256,11 @@ def _resume_catalog_recorded_target(
         (
             item
             for item in cataloged_operations
-            if _operation_target_binding_mismatch(operation=item, target=target)
+            if _operation_target_binding_mismatch(
+                operation=item,
+                target=target,
+                expected_phase=RecoveryOperationPhase.CATALOG_RECORDED,
+            )
         ),
         None,
     )
@@ -234,13 +301,96 @@ def _resume_catalog_recorded_target(
     )
 
 
+def _resume_final_verified_catalog_handoff(
+    *,
+    operation: RecoveryOperation,
+    runs: RunStore,
+    recovery_operations: RecoveryResumeCatalogHandoffOperationStore,
+    catalog_handoffs: FinalFileCatalogHandoffStore,
+    process_instance_id: str,
+) -> RecoveryResumeFinding:
+    run = runs.load_started_run(operation.run_id)
+    if run is None:
+        return _blocked(
+            operation=operation,
+            validation_code="RECOVERY_RESUME_RUN_NOT_FOUND",
+            next_action="Keep recovery mode active until the catalog run row is restored.",
+        )
+    target = next(
+        (item for item in run.targets if item.run_target_id == operation.run_target_id),
+        None,
+    )
+    if target is None:
+        return _blocked(
+            operation=operation,
+            validation_code="RECOVERY_RESUME_RUN_TARGET_NOT_FOUND",
+            next_action="Keep recovery mode active until the catalog run target row is restored.",
+        )
+    if run.state is not RunState.EXECUTING or target.state is not RunTargetState.EXECUTING:
+        return _blocked(
+            operation=operation,
+            validation_code="RECOVERY_RESUME_TARGET_NOT_EXECUTING",
+            next_action="Review run state before recording a final-verified catalog handoff.",
+        )
+    if _operation_target_binding_mismatch(
+        operation=operation,
+        target=target,
+        expected_phase=RecoveryOperationPhase.FINAL_VERIFIED,
+    ):
+        return _blocked(
+            operation=operation,
+            validation_code="RECOVERY_RESUME_OPERATION_TARGET_BINDING_MISMATCH",
+            next_action="Reconcile lease and ownership evidence before recording catalog handoff.",
+        )
+
+    content_hash = _operation_content_hash(operation)
+    if content_hash is None:
+        return _blocked(
+            operation=operation,
+            validation_code="RECOVERY_RESUME_FINAL_VERIFIED_REQUIRES_CONTENT_HASH",
+            next_action="Reverify final filesystem state before recording catalog handoff.",
+        )
+
+    try:
+        outcome = record_catalog_handoff_after_final_verification(
+            run_id=operation.run_id,
+            operation_id=operation.operation_id,
+            content_hash=content_hash,
+            recovery_operations=recovery_operations,
+            catalog_handoffs=catalog_handoffs,
+            process_instance_id=process_instance_id,
+        )
+    except (CatalogHandoffError, ValueError, RuntimeError) as exc:
+        return RecoveryResumeFinding(
+            action=RecoveryResumeAction.BLOCKED,
+            run_id=operation.run_id,
+            run_target_id=operation.run_target_id,
+            operation_ids=(operation.operation_id,),
+            validation_codes=(_exception_validation_code(exc),),
+            next_action=_exception_next_action(
+                exc,
+                "Reconcile catalog handoff state before retrying startup recovery resume.",
+            ),
+        )
+
+    return RecoveryResumeFinding(
+        action=RecoveryResumeAction.CATALOG_HANDOFF_RECORDED,
+        run_id=operation.run_id,
+        run_target_id=operation.run_target_id,
+        operation_ids=(outcome.recovery_operation.operation_id,),
+        validation_codes=(),
+        next_action="Catalog handoff is recorded; complete catalog-recorded recovery work.",
+    )
+
+
 def _operation_target_binding_mismatch(
     *,
     operation: RecoveryOperation,
     target: StartedRunTarget,
+    expected_phase: RecoveryOperationPhase,
 ) -> bool:
     return (
-        operation.phase is not RecoveryOperationPhase.CATALOG_RECORDED
+        operation.phase is not expected_phase
         or operation.target_endpoint_id != target.endpoint_id
         or operation.target_endpoint_revision_id != target.endpoint_revision_id
         or operation.lease_resource_key != target.lease_resource_key
@@ -253,7 +403,26 @@ def _operation_target_binding_mismatch(
     )
 
 
+def _operation_content_hash(operation: RecoveryOperation) -> str | None:
+    for payload in _operation_fingerprint_payloads(operation):
+        content_hash = payload.get("content_hash")
+        if isinstance(content_hash, str) and HASH_PATTERN.fullmatch(content_hash) is not None:
+            return content_hash
+    return None
+
+
 def _operation_byte_count(operation: RecoveryOperation) -> int:
+    for payload in _operation_fingerprint_payloads(operation):
+        byte_count = payload.get("byte_count")
+        if isinstance(byte_count, int) and byte_count >= 0:
+            return byte_count
+    return 0
+
+
+def _operation_fingerprint_payloads(
+    operation: RecoveryOperation,
+) -> tuple[Mapping[str, object], ...]:
+    payloads: list[Mapping[str, object]] = []
     for raw_payload in (
         operation.expected_final_fingerprint_json,
         operation.expected_staging_fingerprint_json,
@@ -264,12 +433,26 @@ def _operation_byte_count(operation: RecoveryOperation) -> int:
             payload = json.loads(raw_payload)
         except json.JSONDecodeError:
             continue
-        if not isinstance(payload, dict):
-            continue
-        byte_count = payload.get("byte_count")
-        if isinstance(byte_count, int) and byte_count >= 0:
-            return byte_count
-    return 0
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return tuple(payloads)
+
+
+def _exception_validation_code(exc: Exception) -> str:
+    validation_code = getattr(exc, "validation_code", None)
+    if isinstance(validation_code, str) and validation_code.strip():
+        return validation_code
+    message = str(exc)
+    if message.strip():
+        return message
+    return type(exc).__name__
+
+
+def _exception_next_action(exc: Exception, fallback: str) -> str:
+    next_action = getattr(exc, "next_action", None)
+    if isinstance(next_action, str) and next_action.strip():
+        return next_action
+    return fallback
 
 
 def _blocked(
