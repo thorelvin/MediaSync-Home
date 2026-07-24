@@ -81,6 +81,31 @@ def test_bootstrap_protocol_trigger_invocation_routes_to_trigger_client(
     }
 
 
+def test_bootstrap_local_preview_host_invocation_routes_to_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_launcher_main(argv: object, *, emit: object | None = None) -> int:
+        captured["argv"] = argv
+        captured["emit"] = emit
+        return 29
+
+    monkeypatch.setitem(bootstrap.ROLE_ENTRYPOINTS, ProcessRole.LAUNCHER, fake_launcher_main)
+    output: list[str] = []
+
+    exit_code = bootstrap.main(
+        ["--local-preview-host", "--pipe-name", "pipe-a"],
+        emit=output.append,
+    )
+
+    assert exit_code == 29
+    assert captured == {
+        "argv": ["--local-preview-host", "--pipe-name", "pipe-a"],
+        "emit": output.append,
+    }
+
+
 def test_bootstrap_explicit_role_wins_over_protocol_trigger_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

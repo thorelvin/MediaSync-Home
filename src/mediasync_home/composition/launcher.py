@@ -47,6 +47,13 @@ class LocalPreviewStatusLaunch:
 
 
 @dataclass(frozen=True)
+class LocalPreviewHostRun:
+    pipe_name: str
+    engine_host_args: tuple[str, ...]
+    host_descriptor: LocalEngineHostDescriptor | None = None
+
+
+@dataclass(frozen=True)
 class LocalPreviewStatusResult:
     pipe_name: str
     engine_host_returncode: int | None
@@ -114,10 +121,16 @@ class LocalPreviewStatusResult:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MediaSync Home launcher role")
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--local-preview-status",
         action="store_true",
         help="start a bounded Engine Host and verify readiness through a GUI status query",
+    )
+    mode.add_argument(
+        "--local-preview-host",
+        action="store_true",
+        help="run the persistent same-user local-preview Engine Host",
     )
     parser.add_argument("--installation-id", default="local-dev")
     parser.add_argument("--pipe-name")
@@ -138,12 +151,63 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run_launcher(argv: Sequence[str] | None = None, *, emit: Emit | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.local_preview_host:
+        return _run_local_preview_host_from_args(args, emit=emit)
     if args.local_preview_status:
         result = _run_local_preview_status_from_args(args)
         output = emit or print
         output(json.dumps(result.to_dict(), sort_keys=True, separators=(",", ":")))
         return 0 if result.accepted else 2
     return run_role(ProcessRole.LAUNCHER, argv, emit=emit)
+
+
+def build_local_preview_host_run(
+    *,
+    pipe_name: str | None = None,
+    state_root: Path | None = None,
+    host_descriptor: LocalEngineHostDescriptor | None = None,
+    reconcile_task_scheduler_resources: bool = False,
+    task_scheduler_executable_path: Path | None = None,
+) -> LocalPreviewHostRun:
+    if host_descriptor is not None:
+        if pipe_name is not None and pipe_name != host_descriptor.pipe_name:
+            raise ValueError("HOST_LOCATOR_PIPE_NAME_MISMATCH")
+        pipe_name = host_descriptor.pipe_name
+        if state_root is None:
+            state_root = host_descriptor.state_root
+    if pipe_name is None:
+        raise ValueError("PIPE_NAME_REQUIRED")
+
+    engine_args = ["--pipe-name", pipe_name, "--serve-forever"]
+    if host_descriptor is not None:
+        engine_args.extend(
+            (
+                "--installation-id",
+                host_descriptor.installation_id,
+                "--host-mutex-name",
+                host_descriptor.mutex_name,
+                "--publish-host-locator",
+            )
+        )
+    if state_root is not None:
+        engine_args.extend(("--state-root", str(state_root.resolve())))
+    if reconcile_task_scheduler_resources:
+        if state_root is None:
+            raise ValueError("TASK_SCHEDULER_RECONCILIATION_REQUIRES_STATE_ROOT")
+        if task_scheduler_executable_path is None:
+            raise ValueError("TASK_SCHEDULER_EXECUTABLE_PATH_REQUIRED")
+        engine_args.extend(
+            (
+                "--reconcile-task-scheduler-resources",
+                "--task-scheduler-executable-path",
+                str(task_scheduler_executable_path.resolve()),
+            )
+        )
+    return LocalPreviewHostRun(
+        pipe_name=pipe_name,
+        engine_host_args=tuple(engine_args),
+        host_descriptor=host_descriptor,
+    )
 
 
 def build_local_preview_status_launch(
@@ -369,6 +433,46 @@ def _run_local_preview_status_from_args(args: argparse.Namespace) -> LocalPrevie
         timeout_seconds=args.timeout_seconds,
         existing_publication=existing_publication,
     )
+
+
+def _run_local_preview_host_from_args(
+    args: argparse.Namespace,
+    *,
+    emit: Emit | None = None,
+) -> int:
+    if os.name != "nt":
+        raise RuntimeError("local preview host IPC mode is Windows-only")
+
+    host_descriptor = None
+    if args.pipe_name is None:
+        from mediasync_home.adapters.local_host_locator import (
+            build_local_engine_host_descriptor_for_user,
+        )
+        from mediasync_home.ipc.win32_named_pipe import current_process_identity
+
+        identity = current_process_identity()
+        host_descriptor = build_local_engine_host_descriptor_for_user(
+            installation_id=args.installation_id,
+            user_scope_hash=identity.user_sid_hash,
+            state_root=args.state_root,
+            environ=os.environ,
+        )
+        pipe_name = host_descriptor.pipe_name
+        state_root = host_descriptor.state_root
+    else:
+        pipe_name = args.pipe_name
+        state_root = args.state_root
+
+    host_run = build_local_preview_host_run(
+        pipe_name=pipe_name,
+        state_root=state_root,
+        host_descriptor=host_descriptor,
+        reconcile_task_scheduler_resources=args.reconcile_task_scheduler_resources,
+        task_scheduler_executable_path=args.task_scheduler_executable_path,
+    )
+    from mediasync_home.composition.engine_host import run_engine_host
+
+    return run_engine_host(host_run.engine_host_args, emit=emit)
 
 
 def _load_matching_host_publication(

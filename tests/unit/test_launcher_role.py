@@ -14,11 +14,100 @@ from mediasync_home.application.host_locator import (
     build_local_engine_host_descriptor,
     build_local_engine_host_publication,
 )
+from mediasync_home.composition import engine_host as engine_host_module
+from mediasync_home.composition import launcher as launcher_module
 from mediasync_home.composition.launcher import (
+    build_local_preview_host_run,
     build_local_preview_status_launch,
+    run_launcher,
     run_local_preview_status,
 )
 from mediasync_home.domain.process_roles import ProcessRole
+
+
+def test_local_preview_host_run_uses_long_running_published_descriptor(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    descriptor = build_local_engine_host_descriptor(
+        installation_id="preview-a",
+        user_scope_hash="b" * 64,
+        state_root=state_root,
+    )
+
+    host_run = build_local_preview_host_run(host_descriptor=descriptor)
+
+    assert host_run.pipe_name == descriptor.pipe_name
+    assert host_run.host_descriptor is descriptor
+    assert host_run.engine_host_args == (
+        "--pipe-name",
+        descriptor.pipe_name,
+        "--serve-forever",
+        "--installation-id",
+        "preview-a",
+        "--host-mutex-name",
+        descriptor.mutex_name,
+        "--publish-host-locator",
+        "--state-root",
+        str(state_root.resolve()),
+    )
+
+
+def test_local_preview_host_run_can_enable_task_scheduler_startup_pump(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    task_executable = tmp_path / "MediaSyncHome.exe"
+
+    host_run = build_local_preview_host_run(
+        pipe_name="pipe-a",
+        state_root=state_root,
+        reconcile_task_scheduler_resources=True,
+        task_scheduler_executable_path=task_executable,
+    )
+
+    assert host_run.engine_host_args == (
+        "--pipe-name",
+        "pipe-a",
+        "--serve-forever",
+        "--state-root",
+        str(state_root.resolve()),
+        "--reconcile-task-scheduler-resources",
+        "--task-scheduler-executable-path",
+        str(task_executable.resolve()),
+    )
+
+
+def test_local_preview_host_run_rejects_scheduler_reconcile_without_state_root(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="TASK_SCHEDULER_RECONCILIATION_REQUIRES_STATE_ROOT"):
+        build_local_preview_host_run(
+            pipe_name="pipe-a",
+            reconcile_task_scheduler_resources=True,
+            task_scheduler_executable_path=tmp_path / "MediaSyncHome.exe",
+        )
+
+
+def test_run_launcher_local_preview_host_delegates_to_engine_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    output: list[str] = []
+
+    def fake_run_engine_host(argv: object, *, emit: object | None = None) -> int:
+        captured["argv"] = argv
+        captured["emit"] = emit
+        return 23
+
+    monkeypatch.setattr(launcher_module.os, "name", "nt")
+    monkeypatch.setattr(engine_host_module, "run_engine_host", fake_run_engine_host)
+
+    code = run_launcher(["--local-preview-host", "--pipe-name", "pipe-a"], emit=output.append)
+
+    assert code == 23
+    assert captured == {
+        "argv": ("--pipe-name", "pipe-a", "--serve-forever"),
+        "emit": output.append,
+    }
 
 
 def test_local_preview_status_launch_builds_safe_engine_and_gui_plans(tmp_path: Path) -> None:

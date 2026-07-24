@@ -134,6 +134,69 @@ def test_gui_can_disconnect_and_reconnect_without_stopping_engine_host() -> None
     assert host_events[-1]["served_requests"] == 4
 
 
+def test_launcher_local_preview_host_publishes_persistent_engine_host(tmp_path: Path) -> None:
+    installation_id = f"launcher-host-{uuid4().hex}"
+    state_root = tmp_path / "state"
+    host = subprocess.Popen(
+        [
+            sys.executable,
+            "-u",
+            "scripts/run_role.py",
+            "--role",
+            "launcher",
+            "--local-preview-host",
+            "--installation-id",
+            installation_id,
+            "--state-root",
+            str(state_root),
+        ],
+        cwd=Path(__file__).resolve().parents[3],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    stdout = ""
+    stderr = ""
+    gui: subprocess.CompletedProcess[str] | None = None
+    try:
+        _wait_for_file(state_root / LOCAL_ENGINE_HOST_PUBLICATION_FILENAME)
+        gui = subprocess.run(
+            [
+                sys.executable,
+                "scripts/run_role.py",
+                "--role",
+                "gui",
+                "--installation-id",
+                installation_id,
+                "--state-root",
+                str(state_root),
+                "--query-status",
+            ],
+            cwd=Path(__file__).resolve().parents[3],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        assert host.poll() is None
+    finally:
+        if host.poll() is None:
+            host.kill()
+        stdout, stderr = host.communicate(timeout=5)
+
+    assert gui is not None
+    gui_response = json.loads(gui.stdout)
+    host_events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+
+    assert stderr == ""
+    assert gui_response["status"] == "ACCEPTED"
+    assert gui_response["payload"]["host_status"]["role"] == "engine-host"
+    assert host_events[0]["event"] == "ENGINE_HOST_PIPE_STARTING"
+    assert host_events[0]["serve_forever"] is True
+    assert host_events[0]["host_locator"]["installation_id"] == installation_id
+    assert host_events[0]["state_root"] == str(state_root)
+
+
 def test_launcher_local_preview_status_starts_host_and_queries_gui() -> None:
     pipe_name = win32_named_pipe.make_pipe_name(
         installation_id="launcher-preview-status-test",
