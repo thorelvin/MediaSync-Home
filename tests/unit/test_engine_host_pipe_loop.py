@@ -207,6 +207,33 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         runtime.close()
 
 
+def test_engine_host_runtime_releases_executor_leases_on_close(tmp_path: Path) -> None:
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=startup_status(ProcessRole.ENGINE_HOST),
+        state_root=tmp_path / "state",
+        reconciler_instance_id="host-new",
+    )
+    closed = False
+    try:
+        assert runtime.run_executor_lease_registry is not None
+        lease = _FakeLiveLease()
+        runtime.run_executor_lease_registry.retain_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            lease=lease,
+        )
+
+        runtime.close()
+        closed = True
+
+        assert lease.released is True
+        assert runtime.run_executor_lease_registry.retained_count == 0
+    finally:
+        if not closed:
+            runtime.close()
+
+
 class _FakePipeServer:
     def __init__(self, *, fail_on_call: int | None = None) -> None:
         self.calls = 0
@@ -216,6 +243,22 @@ class _FakePipeServer:
         self.calls += 1
         if self.calls == self._fail_on_call:
             raise RuntimeError("internal detail must not leak")
+
+
+class _FakeLiveLease:
+    lease_id = "lease-a"
+    owner_installation_id = "owner-a"
+    ownership_epoch = 1
+    fencing_token = 42
+
+    def __init__(self) -> None:
+        self.released = False
+
+    def issue_mutation_permit(self) -> object:
+        raise AssertionError("permit issuance is not used by this test")
+
+    def release(self) -> None:
+        self.released = True
 
 
 def _authorization() -> ClientAuthorizationPolicy:

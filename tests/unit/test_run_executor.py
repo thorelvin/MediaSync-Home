@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from mediasync_home.application.run_executor import (
+    MAX_RUN_EXECUTOR_PUMP_STEPS,
+    HeldRunTargetLeaseRegistry,
     RunExecutorQueueStore,
+    RunExecutorPumpStopReason,
+    RunExecutorViolation,
+    execute_bounded_run_executor_preflight_pump,
     execute_one_run_target_preflight_step,
 )
 from mediasync_home.application.runs import (
@@ -122,6 +129,139 @@ def test_execute_one_run_target_preflight_step_reports_lease_unavailable_after_c
     assert loaded.targets[0].state is RunTargetState.ACQUIRING_LEASE
 
 
+def test_bounded_run_executor_pump_retains_acquired_leases_until_idle() -> None:
+    first_lease = _FakeLiveLease("lease-a")
+    second_lease = _FakeLiveLease("lease-b")
+    leases = _SequencedLeaseAuthority(
+        (
+            EndpointLeaseAttempt(True, first_lease, (), "first acquired"),
+            EndpointLeaseAttempt(True, second_lease, (), "second acquired"),
+        )
+    )
+    runs = _InMemoryRunStore(
+        _queued_run(
+            targets=(
+                _target(run_target_id="run-a-target-0000", endpoint_id="target-a"),
+                _target(run_target_id="run-a-target-0001", endpoint_id="target-b"),
+            )
+        )
+    )
+    registry = HeldRunTargetLeaseRegistry()
+
+    outcome = execute_bounded_run_executor_preflight_pump(
+        runs=runs,
+        leases=leases,
+        lease_registry=registry,
+        max_steps=3,
+    )
+
+    assert outcome.steps_attempted == 3
+    assert outcome.leases_retained == 2
+    assert outcome.stopped_reason is RunExecutorPumpStopReason.IDLE
+    assert registry.retained_count == 2
+    assert registry.load_retained_run_target_lease(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+    ) is first_lease
+    assert registry.load_retained_run_target_lease(
+        run_id="run-a",
+        run_target_id="run-a-target-0001",
+    ) is second_lease
+    assert first_lease.released is False
+    assert second_lease.released is False
+    loaded = runs.load_started_run("run-a")
+    assert loaded is not None
+    assert [target.state for target in loaded.targets] == [
+        RunTargetState.REVALIDATING,
+        RunTargetState.REVALIDATING,
+    ]
+
+
+def test_bounded_run_executor_pump_stops_on_blocked_step() -> None:
+    leases = _FakeLeaseAuthority(
+        EndpointLeaseAttempt(
+            acquired=False,
+            lease=None,
+            validation_codes=("ENDPOINT_LEASE_UNAVAILABLE",),
+            next_action="Wait for the current endpoint writer to release the lock.",
+        )
+    )
+    registry = HeldRunTargetLeaseRegistry()
+
+    outcome = execute_bounded_run_executor_preflight_pump(
+        runs=_InMemoryRunStore(_queued_run()),
+        leases=leases,
+        lease_registry=registry,
+        max_steps=5,
+    )
+
+    assert outcome.steps_attempted == 1
+    assert outcome.leases_retained == 0
+    assert outcome.stopped_reason is RunExecutorPumpStopReason.BLOCKED
+    assert outcome.validation_codes == ("ENDPOINT_LEASE_UNAVAILABLE",)
+    assert registry.retained_count == 0
+
+
+def test_bounded_run_executor_pump_stops_at_step_limit_with_retained_lease() -> None:
+    lease = _FakeLiveLease("lease-a")
+    registry = HeldRunTargetLeaseRegistry()
+
+    outcome = execute_bounded_run_executor_preflight_pump(
+        runs=_InMemoryRunStore(
+            _queued_run(
+                targets=(
+                    _target(run_target_id="run-a-target-0000", endpoint_id="target-a"),
+                    _target(run_target_id="run-a-target-0001", endpoint_id="target-b"),
+                )
+            )
+        ),
+        leases=_SequencedLeaseAuthority((EndpointLeaseAttempt(True, lease, (), "acquired"),)),
+        lease_registry=registry,
+        max_steps=1,
+    )
+
+    assert outcome.steps_attempted == 1
+    assert outcome.leases_retained == 1
+    assert outcome.stopped_reason is RunExecutorPumpStopReason.STEP_LIMIT_REACHED
+    assert registry.retained_count == 1
+    assert lease.released is False
+
+
+def test_bounded_run_executor_pump_requires_bounded_step_limit() -> None:
+    with pytest.raises(RunExecutorViolation, match="RUN_EXECUTOR_PUMP_REQUIRES_POSITIVE_STEP_LIMIT"):
+        execute_bounded_run_executor_preflight_pump(
+            runs=_InMemoryRunStore(None),
+            leases=_FakeLeaseAuthority(EndpointLeaseAttempt(False, None, (), "unused")),
+            lease_registry=HeldRunTargetLeaseRegistry(),
+            max_steps=0,
+        )
+    with pytest.raises(RunExecutorViolation, match="RUN_EXECUTOR_PUMP_STEP_LIMIT_TOO_LARGE"):
+        execute_bounded_run_executor_preflight_pump(
+            runs=_InMemoryRunStore(None),
+            leases=_FakeLeaseAuthority(EndpointLeaseAttempt(False, None, (), "unused")),
+            lease_registry=HeldRunTargetLeaseRegistry(),
+            max_steps=MAX_RUN_EXECUTOR_PUMP_STEPS + 1,
+        )
+
+
+def test_lease_registry_releases_replaced_and_shutdown_leases() -> None:
+    first = _FakeLiveLease("lease-a")
+    second = _FakeLiveLease("lease-b")
+    registry = HeldRunTargetLeaseRegistry()
+
+    registry.retain_run_target_lease(run_id="run-a", run_target_id="target-a", lease=first)
+    registry.retain_run_target_lease(run_id="run-a", run_target_id="target-a", lease=second)
+
+    assert first.released is True
+    assert second.released is False
+    assert registry.retained_count == 1
+
+    registry.release_all()
+
+    assert second.released is True
+    assert registry.retained_count == 0
+
+
 class _InMemoryRunStore(RunExecutorQueueStore):
     def __init__(self, run: StartedRun | None, *, preflight_conflict: bool = False) -> None:
         self.run = run
@@ -220,20 +360,35 @@ class _FakeLeaseAuthority(EndpointLeaseAuthority):
         return self._attempt
 
 
+class _SequencedLeaseAuthority(EndpointLeaseAuthority):
+    def __init__(self, attempts: tuple[EndpointLeaseAttempt, ...]) -> None:
+        self._attempts = list(attempts)
+        self.requests: tuple[EndpointLeaseRequest, ...] = ()
+
+    def acquire_endpoint_lease(self, request: EndpointLeaseRequest) -> EndpointLeaseAttempt:
+        self.requests = (*self.requests, request)
+        if not self._attempts:
+            raise AssertionError("unexpected lease request")
+        return self._attempts.pop(0)
+
+
 class _FakeLiveLease:
-    lease_id = "lease-a"
     owner_installation_id = "owner-a"
     ownership_epoch = 1
     fencing_token = 42
 
-    def __init__(self) -> None:
+    def __init__(self, lease_id: str = "lease-a") -> None:
+        self.lease_id = lease_id
         self.released = False
 
     def release(self) -> None:
         self.released = True
 
 
-def _queued_run() -> StartedRun:
+def _queued_run(
+    *,
+    targets: tuple[StartedRunTarget, ...] | None = None,
+) -> StartedRun:
     return StartedRun(
         run_id="run-a",
         job_id="job-a",
@@ -249,19 +404,23 @@ def _queued_run() -> StartedRun:
         plan_checksum="a" * 64,
         planned_operations=1,
         planned_bytes=128,
-        targets=(_target(),),
+        targets=targets or (_target(),),
     )
 
 
-def _target() -> StartedRunTarget:
+def _target(
+    *,
+    run_target_id: str = "run-a-target-0000",
+    endpoint_id: str = "target-a",
+) -> StartedRunTarget:
     return StartedRunTarget(
-        run_target_id="run-a-target-0000",
-        endpoint_id="target-a",
-        endpoint_revision_id="target-rev-a",
+        run_target_id=run_target_id,
+        endpoint_id=endpoint_id,
+        endpoint_revision_id="target-rev-a" if endpoint_id == "target-a" else f"{endpoint_id}-rev-a",
         state=RunTargetState.PENDING,
         required_owner_installation_id="owner-a",
         required_ownership_epoch=1,
-        lease_resource_key="endpoint:target-a",
+        lease_resource_key=f"endpoint:{endpoint_id}",
         planned_operations=1,
         planned_bytes=128,
     )

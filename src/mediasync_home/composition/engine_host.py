@@ -36,6 +36,12 @@ from mediasync_home.adapters.sqlite.runs import SqliteRunStore
 from mediasync_home.adapters.sqlite.schedules import SqliteScheduleStore
 from mediasync_home.adapters.sqlite.snapshots import SqliteSnapshotEntryStore
 from mediasync_home.adapters.sqlite.trigger_occurrences import SqliteTriggerOccurrenceStore
+from mediasync_home.application.run_executor import (
+    HeldRunTargetLeaseRegistry,
+    RunExecutorPumpOutcome,
+    RunExecutorQueueStore,
+    execute_bounded_run_executor_preflight_pump,
+)
 from mediasync_home.application.runs import EndpointLeaseAuthority, RunIds
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
 from mediasync_home.application.startup_reconciliation import (
@@ -81,11 +87,29 @@ class EngineHostRuntime:
     service: EngineHostIpcService
     state_layout: StateStoreLayout | None = None
     startup_reconciliation: EngineHostStartupReconciliationReport | None = None
+    run_executor_queue_store: RunExecutorQueueStore | None = None
     run_executor_lease_authority: EndpointLeaseAuthority | None = None
+    run_executor_lease_registry: HeldRunTargetLeaseRegistry | None = None
     catalog_connection: sqlite3.Connection | None = None
     recovery_connection: sqlite3.Connection | None = None
 
+    def run_executor_preflight_pump(self, *, max_steps: int) -> RunExecutorPumpOutcome:
+        if (
+            self.run_executor_queue_store is None
+            or self.run_executor_lease_authority is None
+            or self.run_executor_lease_registry is None
+        ):
+            raise RuntimeError("RUN_EXECUTOR_RUNTIME_NOT_CONFIGURED")
+        return execute_bounded_run_executor_preflight_pump(
+            runs=self.run_executor_queue_store,
+            leases=self.run_executor_lease_authority,
+            lease_registry=self.run_executor_lease_registry,
+            max_steps=max_steps,
+        )
+
     def close(self) -> None:
+        if self.run_executor_lease_registry is not None:
+            self.run_executor_lease_registry.release_all()
         if self.catalog_connection is not None:
             self.catalog_connection.close()
         if self.recovery_connection is not None:
@@ -262,6 +286,7 @@ def build_engine_host_runtime(
             root_resolver=SqliteEndpointRootResolver(catalog_connection),
             resource_lease_store=resource_leases,
         )
+        run_executor_lease_registry = HeldRunTargetLeaseRegistry()
         startup_reconciliation = reconcile_engine_host_after_startup(
             EngineHostStartupReconciliationRequest(
                 reconciler_instance_id=reconciler_instance_id,
@@ -301,7 +326,9 @@ def build_engine_host_runtime(
         service=service,
         state_layout=layout,
         startup_reconciliation=startup_reconciliation,
+        run_executor_queue_store=runs,
         run_executor_lease_authority=run_executor_lease_authority,
+        run_executor_lease_registry=run_executor_lease_registry,
         catalog_connection=catalog_connection,
         recovery_connection=recovery_connection,
     )
