@@ -132,6 +132,13 @@ class TriggerOccurrenceStore(Protocol):
         deduplication_key: str,
     ) -> TriggerOccurrence | None: ...
 
+    def mark_run_enqueued(
+        self,
+        *,
+        deduplication_key: str,
+        run_id: str,
+    ) -> TriggerOccurrence: ...
+
 
 def build_enqueue_trigger_occurrence_payload(
     *,

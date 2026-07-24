@@ -49,6 +49,40 @@ def test_sqlite_trigger_occurrence_records_and_deduplicates_scheduled_retry(
         assert _row_count(connection, "trigger_occurrences") == 1
 
 
+def test_sqlite_trigger_occurrence_marks_run_enqueued_idempotently(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_job(connection)
+        _insert_run_parent_rows(connection)
+        store = SqliteTriggerOccurrenceStore(connection)
+        occurrence = _occurrence(delivery_id=DELIVERY_ID)
+        store.record_received(occurrence)
+
+        updated = store.mark_run_enqueued(
+            deduplication_key=occurrence.deduplication_key,
+            run_id="run-a",
+        )
+        replay = store.mark_run_enqueued(
+            deduplication_key=occurrence.deduplication_key,
+            run_id="run-a",
+        )
+
+        assert updated.state is TriggerOccurrenceState.RUN_ENQUEUED
+        assert updated.run_id == "run-a"
+        assert replay == updated
+        with pytest.raises(
+            SqliteTriggerOccurrenceStoreError,
+            match="TRIGGER_OCCURRENCE_RUN_ENQUEUE_CONFLICT",
+        ):
+            store.mark_run_enqueued(
+                deduplication_key=occurrence.deduplication_key,
+                run_id="run-b",
+            )
+
+
 def test_sqlite_trigger_occurrence_rejects_same_key_payload_conflict(
     tmp_path: Path,
 ) -> None:
@@ -138,6 +172,97 @@ def _prepare_catalog(connection: sqlite3.Connection, database: Path) -> None:
 
 def _insert_job(connection: sqlite3.Connection) -> None:
     connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')")
+
+
+def _insert_run_parent_rows(connection: sqlite3.Connection) -> None:
+    connection.execute("INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')")
+    connection.execute(
+        """
+        INSERT INTO job_revisions (job_id, id, filter_set_id)
+            VALUES ('job-a', 'job-rev-a', 'filter-a')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO analyses (id, job_id, job_revision_id)
+            VALUES ('analysis-a', 'job-a', 'job-rev-a')
+        """
+    )
+    connection.execute("INSERT INTO plans (id, analysis_id) VALUES ('plan-a', 'analysis-a')")
+    connection.execute(
+        """
+        INSERT INTO plan_seal_details (
+            plan_id,
+            analysis_id,
+            job_id,
+            job_revision_id,
+            planner_version,
+            plan_schema_version,
+            operation_schema_version,
+            execution_policy,
+            checksum_algorithm,
+            serializer_version,
+            plan_checksum,
+            risk_summary_json,
+            operation_count,
+            planned_bytes
+        )
+        VALUES (
+            'plan-a',
+            'analysis-a',
+            'job-a',
+            'job-rev-a',
+            'planner',
+            1,
+            1,
+            'dry-run',
+            'SHA-256',
+            'canonical-json',
+            ?,
+            '{}',
+            1,
+            0
+        )
+        """,
+        ("a" * 64,),
+    )
+    connection.execute(
+        """
+        INSERT INTO runs (
+            id,
+            job_id,
+            job_revision_id,
+            plan_id,
+            command_request_id,
+            logical_run_group_id,
+            trigger_type,
+            state,
+            summary_json,
+            app_version,
+            plan_checksum,
+            idempotency_key,
+            planned_operations,
+            planned_bytes
+        )
+        VALUES (
+            'run-a',
+            'job-a',
+            'job-rev-a',
+            'plan-a',
+            'request-a',
+            'run-group-a',
+            'MANUAL_LOCAL_PREVIEW',
+            'QUEUED',
+            '{}',
+            '0B-dev',
+            ?,
+            'trigger:occurrence-a',
+            1,
+            0
+        )
+        """,
+        ("a" * 64,),
+    )
 
 
 def _row_count(connection: sqlite3.Connection, table_name: str) -> int:

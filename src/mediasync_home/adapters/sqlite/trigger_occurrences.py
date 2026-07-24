@@ -98,6 +98,45 @@ class SqliteTriggerOccurrenceStore(TriggerOccurrenceStore):
     ) -> TriggerOccurrence | None:
         return self._load_one("WHERE deduplication_key = ?", (deduplication_key,))
 
+    def mark_run_enqueued(
+        self,
+        *,
+        deduplication_key: str,
+        run_id: str,
+    ) -> TriggerOccurrence:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            cursor = self._connection.execute(
+                """
+                UPDATE trigger_occurrences
+                SET
+                    state = 'RUN_ENQUEUED',
+                    run_id = ?
+                WHERE deduplication_key = ?
+                    AND state IN ('RECEIVED', 'RUN_ENQUEUED')
+                    AND (run_id IS NULL OR run_id = ?)
+                """,
+                (run_id, deduplication_key, run_id),
+            )
+            if cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise SqliteTriggerOccurrenceStoreError("TRIGGER_OCCURRENCE_RUN_ENQUEUE_CONFLICT")
+            updated = self.load_trigger_occurrence_by_deduplication_key(deduplication_key)
+            if updated is None:
+                raise SqliteTriggerOccurrenceStoreError("TRIGGER_OCCURRENCE_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return updated
+        except (sqlite3.Error, SqliteTriggerOccurrenceStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteTriggerOccurrenceStoreError):
+                raise
+            raise SqliteTriggerOccurrenceStoreError("TRIGGER_OCCURRENCE_RUN_ENQUEUE_FAILED") from exc
+
     def mark_terminal(
         self,
         *,

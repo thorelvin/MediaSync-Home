@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
 from mediasync_home.adapters.runtime_policy import current_process_runtime_policy
 from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
@@ -32,6 +33,7 @@ from mediasync_home.adapters.sqlite.runs import SqliteRunStore
 from mediasync_home.adapters.sqlite.schedules import SqliteScheduleStore
 from mediasync_home.adapters.sqlite.snapshots import SqliteSnapshotEntryStore
 from mediasync_home.adapters.sqlite.trigger_occurrences import SqliteTriggerOccurrenceStore
+from mediasync_home.application.runs import RunIds
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
 from mediasync_home.application.startup_reconciliation import (
     EngineHostStartupReconciliationReport,
@@ -56,6 +58,12 @@ class EngineHostMutexGuard(Protocol):
     name: str
 
     def close(self) -> None: ...
+
+
+class UuidRunIdFactory:
+    def new_run_ids(self) -> RunIds:
+        token = uuid4().hex
+        return RunIds(run_id=f"run-{token}", logical_run_group_id=f"run-group-{token}")
 
 
 @dataclass(frozen=True)
@@ -133,6 +141,7 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
         runtime = build_engine_host_runtime(
             authorization=current_user_policy(),
             service_status=service_status,
+            installation_id=args.installation_id,
             state_root=args.state_root,
             reconciler_instance_id=args.installation_id,
             inactive_outbox_owner_instance_ids=tuple(args.inactive_outbox_owner_instance_id or ()),
@@ -205,6 +214,7 @@ def build_engine_host_runtime(
     *,
     authorization: ClientAuthorizationPolicy,
     service_status: RuntimeStatus,
+    installation_id: str = "local-dev",
     state_root: Path | None = None,
     reconciler_instance_id: str = "local-dev",
     inactive_outbox_owner_instance_ids: tuple[str, ...] = (),
@@ -214,6 +224,7 @@ def build_engine_host_runtime(
             service=EngineHostIpcService(
                 authorization,
                 status=service_status,
+                installation_id=installation_id,
             )
         )
 
@@ -253,6 +264,7 @@ def build_engine_host_runtime(
         service = EngineHostIpcService(
             authorization,
             status=service_status,
+            installation_id=installation_id,
             job_draft_store=job_drafts,
             standard_backup_job_catalog=standard_backup_jobs,
             standard_backup_job_read_store=standard_backup_jobs,
@@ -264,6 +276,7 @@ def build_engine_host_runtime(
             plan_operation_read_store=plans,
             plan_endpoint_read_store=plans,
             run_store=runs,
+            run_id_factory=UuidRunIdFactory(),
             run_activity_read_store=runs,
             schedule_store=schedules,
             trigger_occurrence_store=trigger_occurrences,

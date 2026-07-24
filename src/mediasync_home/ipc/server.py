@@ -84,10 +84,15 @@ from mediasync_home.application.snapshots import (
     SnapshotIssueReadModelStore,
 )
 from mediasync_home.application.trigger_occurrences import (
+    EnqueueTriggerOccurrenceCommand,
     TriggerCommandName,
     TriggerOccurrenceStore,
     TriggerOccurrencePayloadError,
     parse_enqueue_trigger_occurrence_command,
+)
+from mediasync_home.application.trigger_runs import (
+    TriggerRunEnqueueOutcome,
+    enqueue_trigger_occurrence_run,
 )
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
@@ -106,6 +111,7 @@ from mediasync_home.ipc.protocol import (
 class EngineHostIpcService:
     authorization: ClientAuthorizationPolicy
     status: RuntimeStatus = field(default_factory=lambda: startup_status(ProcessRole.ENGINE_HOST))
+    installation_id: str = "local-dev"
     job_draft_store: JobDraftStore | None = None
     standard_backup_job_catalog: StandardBackupJobCatalog | None = None
     standard_backup_job_read_store: StandardBackupJobReadModelStore | None = None
@@ -404,19 +410,7 @@ class EngineHostIpcService:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
 
         if self.status.mutations_enabled:
-            receipt_response = self._record_terminal_rejected_receipt(
-                envelope,
-                identity,
-                rejection_reason=IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED.value,
-            )
-            if receipt_response is not None:
-                return receipt_response
-            response_payload = command.response_payload(mutations_enabled=True)
-            self._add_receipt_payload(response_payload, envelope.idempotency_key)
-            return IpcResponse.rejected(
-                IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED,
-                response_payload,
-            )
+            return self._dispatch_enqueue_trigger_occurrence(envelope, identity, command)
 
         receipt_response = self._record_terminal_rejected_receipt(
             envelope,
@@ -428,6 +422,150 @@ class EngineHostIpcService:
         response_payload = command.response_payload(mutations_enabled=False)
         self._add_receipt_payload(response_payload, envelope.idempotency_key)
         return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, response_payload)
+
+    def _dispatch_enqueue_trigger_occurrence(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: EnqueueTriggerOccurrenceCommand,
+    ) -> IpcResponse:
+        return self._run_command_effect_transaction(
+            lambda: self._dispatch_enqueue_trigger_occurrence_in_transaction(
+                envelope,
+                identity,
+                command,
+            )
+        )
+
+    def _dispatch_enqueue_trigger_occurrence_in_transaction(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: EnqueueTriggerOccurrenceCommand,
+    ) -> IpcResponse:
+        if (
+            self.command_receipt_store is None
+            or self.schedule_store is None
+            or self.trigger_occurrence_store is None
+            or self.plan_store is None
+            or self.run_store is None
+            or self.run_id_factory is None
+        ):
+            return self._reject_config_missing_trigger_occurrence(envelope, identity, command)
+
+        receipt, conflict_response = self._record_received_receipt(envelope, identity)
+        if conflict_response is not None:
+            return conflict_response
+        if receipt is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+
+        replay = self._trigger_occurrence_replay_response(envelope, command, receipt)
+        if replay is not None:
+            return replay
+
+        receipt = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        outcome = enqueue_trigger_occurrence_run(
+            command=command,
+            installation_id=self.installation_id,
+            schedules=self.schedule_store,
+            occurrences=self.trigger_occurrence_store,
+            plans=self.plan_store,
+            runs=self.run_store,
+            id_factory=self.run_id_factory,
+        )
+        if not outcome.enqueued or outcome.run_start is None or outcome.run_start.run is None:
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.REJECTED,
+                rejection_reason=IpcReason.COMMAND_PRECONDITION_FAILED.value,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+            payload = _trigger_occurrence_response_payload(
+                envelope=envelope,
+                command=command,
+                mutations_enabled=True,
+                recognized=True,
+                outcome=outcome,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(IpcReason.COMMAND_PRECONDITION_FAILED, payload)
+
+        receipt = transition_command_receipt(
+            receipt,
+            CommandReceiptState.EFFECT_PREPARED,
+            result_entity_type="run",
+            result_entity_id=outcome.run_start.run.run_id,
+        )
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.ACCEPTED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.SUCCEEDED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        if outcome.run_start.created:
+            self._enqueue_command_effect_outbox(receipt)
+
+        payload = _trigger_occurrence_response_payload(
+            envelope=envelope,
+            command=command,
+            mutations_enabled=True,
+            recognized=True,
+            outcome=outcome,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.accepted(payload)
+
+    def _reject_config_missing_trigger_occurrence(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: EnqueueTriggerOccurrenceCommand,
+    ) -> IpcResponse:
+        receipt_response = self._record_terminal_rejected_receipt(
+            envelope,
+            identity,
+            rejection_reason=IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED.value,
+        )
+        if receipt_response is not None:
+            return receipt_response
+        payload = _trigger_occurrence_response_payload(
+            envelope=envelope,
+            command=command,
+            mutations_enabled=True,
+            recognized=True,
+            outcome=None,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload)
+
+    def _trigger_occurrence_replay_response(
+        self,
+        envelope: IpcCommandEnvelope,
+        command: EnqueueTriggerOccurrenceCommand,
+        receipt: CommandReceipt,
+    ) -> IpcResponse | None:
+        if receipt.state is CommandReceiptState.RECEIVED:
+            return None
+        run = None
+        if receipt.result_entity_id is not None and self.run_store is not None:
+            run = self.run_store.load_started_run(receipt.result_entity_id)
+        payload = _trigger_occurrence_response_payload(
+            envelope=envelope,
+            command=command,
+            mutations_enabled=True,
+            recognized=True,
+            outcome=None,
+            run=run,
+        )
+        payload["enqueued"] = receipt.state is CommandReceiptState.SUCCEEDED
+        payload["created"] = False
+        payload["idempotent_replay"] = True
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        if receipt.state is CommandReceiptState.SUCCEEDED:
+            return IpcResponse.accepted(payload)
+        if receipt.state is CommandReceiptState.REJECTED:
+            return IpcResponse.rejected(_receipt_rejection_reason(receipt), payload)
+        return IpcResponse.accepted(payload)
 
     def _handle_create_standard_backup_job(
         self,
@@ -932,6 +1070,58 @@ def _start_run_response_payload(
             "plan_checksum": run.plan_checksum,
             "planned_operations": run.planned_operations,
             "planned_bytes": run.planned_bytes,
+        }
+    return result
+
+
+def _trigger_occurrence_response_payload(
+    *,
+    envelope: IpcCommandEnvelope,
+    command: EnqueueTriggerOccurrenceCommand | None,
+    mutations_enabled: bool,
+    recognized: bool,
+    outcome: TriggerRunEnqueueOutcome | None,
+    run: StartedRun | None = None,
+) -> dict[str, Any]:
+    result = {
+        "command_name": envelope.command_name,
+        "delivery_id": envelope.idempotency_key,
+        "recognized": recognized,
+        "mutations_enabled": mutations_enabled,
+    }
+    if command is not None:
+        result["delivery_id"] = command.delivery.delivery_id
+        result["schedule_id"] = command.schedule_id
+        result["schedule_revision_hash"] = command.schedule_revision_hash
+    if outcome is not None:
+        result["enqueued"] = outcome.enqueued
+        result["deduplicated"] = outcome.deduplicated
+        result["compacted"] = outcome.compacted
+        result["schedule_resolution"] = outcome.schedule_resolution_kind.value
+        result["validation_codes"] = list(outcome.validation_codes)
+        result["next_action"] = outcome.next_action
+        if outcome.occurrence is not None:
+            result["occurrence"] = {
+                "occurrence_id": outcome.occurrence.occurrence_id,
+                "state": outcome.occurrence.state.value,
+                "run_id": outcome.occurrence.run_id,
+            }
+        if outcome.run_start is not None:
+            result["created"] = outcome.run_start.created
+            result["idempotent_replay"] = outcome.run_start.idempotent_replay
+            result["readiness"] = outcome.run_start.readiness.to_dict()
+            run = outcome.run_start.run
+    if run is not None:
+        result["run"] = {
+            "run_id": run.run_id,
+            "job_id": run.job_id,
+            "job_revision_id": run.job_revision_id,
+            "plan_id": run.plan_id,
+            "state": run.state.value,
+            "plan_checksum": run.plan_checksum,
+            "planned_operations": run.planned_operations,
+            "planned_bytes": run.planned_bytes,
+            "trigger_occurrence_id": run.trigger_occurrence_id,
         }
     return result
 

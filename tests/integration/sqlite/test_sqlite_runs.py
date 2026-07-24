@@ -15,7 +15,9 @@ from mediasync_home.adapters.sqlite.migrations import apply_sqlite_migrations, c
 from mediasync_home.adapters.sqlite.outbox import SqliteOutboxStore
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
 from mediasync_home.adapters.sqlite.runs import SqliteRunStore, SqliteRunStoreError
+from mediasync_home.adapters.sqlite.schedules import SqliteScheduleStore
 from mediasync_home.adapters.sqlite.transactions import SqliteImmediateTransactionRunner
+from mediasync_home.adapters.sqlite.trigger_occurrences import SqliteTriggerOccurrenceStore
 from mediasync_home.application.command_receipts import CommandReceipt
 from mediasync_home.application.plans import (
     PlanEndpoint,
@@ -43,6 +45,15 @@ from mediasync_home.application.runs import (
     start_run_from_sealed_plan,
 )
 from mediasync_home.application.runtime_status import startup_status
+from mediasync_home.application.schedules import ScheduleDefinition
+from mediasync_home.application.trigger_occurrences import (
+    TriggerCommandName,
+    TriggerDeliveryContext,
+    TriggerKind,
+    TriggerOccurrenceState,
+    build_enqueue_trigger_occurrence_payload,
+    payload_hash,
+)
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
@@ -461,6 +472,105 @@ def test_sqlite_enabled_start_run_ipc_persists_run_and_success_receipt(tmp_path:
         assert id_factory.calls == 1
 
 
+def test_sqlite_enabled_trigger_occurrence_ipc_records_occurrence_and_queues_run(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        plan_store = SqlitePlanStore(connection)
+        run_store = SqliteRunStore(connection)
+        receipt_store = SqliteCommandReceiptStore(connection)
+        outbox_store = SqliteOutboxStore(connection)
+        schedule_store = SqliteScheduleStore(connection)
+        occurrence_store = SqliteTriggerOccurrenceStore(connection)
+        id_factory = FixedRunIdFactory()
+        plan = _sealed_plan()
+        plan_store.save_sealed_plan(plan)
+        schedule_store.save_schedule(_schedule(plan))
+        service = EngineHostIpcService(
+            ClientAuthorizationPolicy(
+                expected_user_sid_hash="same-user",
+                expected_session_id=42,
+            ),
+            status=replace(
+                startup_status(ProcessRole.ENGINE_HOST),
+                mutations_enabled=True,
+                scope="0B_LOCAL_MUTATION_PREVIEW",
+            ),
+            installation_id="preview-a",
+            plan_store=plan_store,
+            run_store=run_store,
+            run_id_factory=id_factory,
+            schedule_store=schedule_store,
+            trigger_occurrence_store=occurrence_store,
+            command_receipt_store=receipt_store,
+            command_effect_transaction=SqliteImmediateTransactionRunner(connection),
+            outbox_store=outbox_store,
+        )
+        ipc_client = InProcessIpcClient(
+            service=service,
+            identity=VerifiedClientIdentity(
+                user_sid_hash="same-user",
+                session_id=42,
+                is_remote=False,
+                transport="sqlite-trigger-run-ipc-test",
+            ),
+            role=ProcessRole.TRIGGER_CLIENT,
+            client_instance_id="55555555-5555-4555-8555-555555555555",
+        )
+        ipc_client.connect()
+        delivery_id = "11111111-1111-4111-8111-111111111111"
+        trigger_payload = build_enqueue_trigger_occurrence_payload(
+            schedule_id="schedule-a",
+            schedule_revision_hash="b" * 64,
+            delivery=TriggerDeliveryContext(
+                delivery_id=delivery_id,
+                observed_start_utc="2026-07-20T12:00:02.000Z",
+                trigger_kind=TriggerKind.SCHEDULED_TIME,
+                task_definition_hash="b" * 64,
+                scheduled_slot_utc="2026-07-20T12:00:00.000Z",
+            ),
+        )
+
+        response = ipc_client.submit_command(
+            TriggerCommandName.ENQUEUE_TRIGGER_OCCURRENCE.value,
+            request_id=delivery_id,
+            idempotency_key=delivery_id,
+            payload=trigger_payload,
+            payload_hash=payload_hash(trigger_payload),
+        )
+
+        loaded_receipt = receipt_store.load_command_receipt(delivery_id)
+        loaded_run = run_store.load_started_run("run-a")
+        assert response.status is IpcStatus.ACCEPTED
+        assert response.reason is None
+        assert response.payload["enqueued"] is True
+        assert response.payload["run"]["run_id"] == "run-a"
+        assert response.payload["receipt"]["state"] == "SUCCEEDED"
+        assert loaded_receipt is not None
+        assert loaded_receipt.result_entity_type == "run"
+        assert loaded_receipt.result_entity_id == "run-a"
+        assert loaded_run is not None
+        assert loaded_run.trigger_occurrence_id == response.payload["occurrence"]["occurrence_id"]
+        loaded_occurrence = occurrence_store.load_trigger_occurrence(
+            loaded_run.trigger_occurrence_id
+        )
+        loaded_outbox = outbox_store.load_outbox_message(f"command-effect:{delivery_id}")
+        assert loaded_occurrence is not None
+        assert loaded_occurrence.state is TriggerOccurrenceState.RUN_ENQUEUED
+        assert loaded_occurrence.run_id == "run-a"
+        assert loaded_outbox is not None
+        assert loaded_outbox.aggregate_type == "run"
+        assert loaded_outbox.aggregate_id == "run-a"
+        assert _row_count(connection, "trigger_occurrences") == 1
+        assert _row_count(connection, "runs") == 1
+        assert _row_count(connection, "command_receipts") == 1
+        assert _row_count(connection, "outbox_messages") == 1
+        assert id_factory.calls == 1
+
+
 def _prepare_catalog(connection: sqlite3.Connection, database: Path) -> None:
     apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
     apply_sqlite_migrations(connection, catalog_migration_plan())
@@ -593,6 +703,19 @@ def _sealed_plan() -> SealedPlan:
                 risk_level=PlanRiskLevel.LOW,
             ),
         ),
+    )
+
+
+def _schedule(plan: SealedPlan) -> ScheduleDefinition:
+    return ScheduleDefinition(
+        schedule_id="schedule-a",
+        job_id=plan.job_id,
+        plan_id=plan.plan_id,
+        plan_checksum=plan.plan_checksum,
+        trigger_type=TriggerKind.SCHEDULED_TIME,
+        configuration_json='{"kind":"daily"}',
+        definition_generation=1,
+        desired_definition_hash="b" * 64,
     )
 
 

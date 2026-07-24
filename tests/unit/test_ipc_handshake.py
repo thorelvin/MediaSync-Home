@@ -67,6 +67,7 @@ from mediasync_home.application.runs import (
     StartedRun,
     StartedRunTarget,
 )
+from mediasync_home.application.schedules import ScheduleDefinition, ScheduleStore
 from mediasync_home.application.snapshots import (
     SnapshotCoverageCursor,
     SnapshotCoveragePage,
@@ -85,7 +86,16 @@ from mediasync_home.application.snapshots import (
     validate_snapshot_entry_page_query,
     validate_snapshot_issue_page_query,
 )
-from mediasync_home.application.trigger_occurrences import TriggerCommandName, payload_hash
+from mediasync_home.application.trigger_occurrences import (
+    TriggerCommandName,
+    TriggerKind,
+    TriggerOccurrence,
+    TriggerOccurrenceRegistration,
+    TriggerOccurrenceState,
+    TriggerOccurrenceStore,
+    ensure_trigger_occurrence_compatible,
+    payload_hash,
+)
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
@@ -114,14 +124,22 @@ PAYLOAD_HASH_B = "a" * 64
 TRIGGER_DELIVERY_ID = "11111111-1111-4111-8111-111111111111"
 
 
-def _trigger_payload() -> dict[str, object]:
+def _trigger_payload(
+    *,
+    delivery_id: str = TRIGGER_DELIVERY_ID,
+    observed_start_utc: str = "2026-07-20T12:00:00.000Z",
+    scheduled_slot_utc: str | None = None,
+) -> dict[str, object]:
+    delivery: dict[str, object] = {
+        "delivery_id": delivery_id,
+        "observed_start_utc": observed_start_utc,
+        "task_definition_hash": "b" * 64,
+        "trigger_kind": "SCHEDULED_TIME",
+    }
+    if scheduled_slot_utc is not None:
+        delivery["scheduled_slot_utc"] = scheduled_slot_utc
     return {
-        "delivery": {
-            "delivery_id": TRIGGER_DELIVERY_ID,
-            "observed_start_utc": "2026-07-20T12:00:00.000Z",
-            "task_definition_hash": "b" * 64,
-            "trigger_kind": "SCHEDULED_TIME",
-        },
+        "delivery": delivery,
         "schedule_id": "schedule-a",
         "schedule_revision_hash": "a" * 64,
     }
@@ -346,6 +364,17 @@ class _InMemoryPlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointRea
         )
 
 
+class _InMemoryScheduleStore(ScheduleStore):
+    def __init__(self, *schedules: ScheduleDefinition) -> None:
+        self.schedules = {schedule.schedule_id: schedule for schedule in schedules}
+
+    def save_schedule(self, schedule: ScheduleDefinition) -> None:
+        self.schedules[schedule.schedule_id] = schedule
+
+    def load_schedule(self, schedule_id: str) -> ScheduleDefinition | None:
+        return self.schedules.get(schedule_id)
+
+
 class _InMemorySnapshotEntryStore(SnapshotEntryReadModelStore):
     def __init__(
         self,
@@ -527,6 +556,53 @@ class _InMemoryRunStore(RunStore, RunActivityReadModelStore):
             return None
         self.runs[run_id] = replace(run, targets=tuple(updated_targets))
         return recorded
+
+
+class _InMemoryTriggerOccurrenceStore(TriggerOccurrenceStore):
+    def __init__(self) -> None:
+        self.occurrences: dict[str, TriggerOccurrence] = {}
+        self.deduplication_keys: dict[str, str] = {}
+
+    def record_received(self, occurrence: TriggerOccurrence) -> TriggerOccurrenceRegistration:
+        existing_id = self.deduplication_keys.get(occurrence.deduplication_key)
+        if existing_id is not None:
+            existing = ensure_trigger_occurrence_compatible(
+                self.occurrences[existing_id],
+                occurrence,
+            )
+            return TriggerOccurrenceRegistration(occurrence=existing, deduplicated=True)
+        self.occurrences[occurrence.occurrence_id] = occurrence
+        self.deduplication_keys[occurrence.deduplication_key] = occurrence.occurrence_id
+        return TriggerOccurrenceRegistration(occurrence=occurrence, deduplicated=False)
+
+    def load_trigger_occurrence(self, occurrence_id: str) -> TriggerOccurrence | None:
+        return self.occurrences.get(occurrence_id)
+
+    def load_trigger_occurrence_by_deduplication_key(
+        self,
+        deduplication_key: str,
+    ) -> TriggerOccurrence | None:
+        occurrence_id = self.deduplication_keys.get(deduplication_key)
+        if occurrence_id is None:
+            return None
+        return self.occurrences[occurrence_id]
+
+    def mark_run_enqueued(
+        self,
+        *,
+        deduplication_key: str,
+        run_id: str,
+    ) -> TriggerOccurrence:
+        occurrence = self.load_trigger_occurrence_by_deduplication_key(deduplication_key)
+        if occurrence is None:
+            raise AssertionError("occurrence must exist before run enqueue")
+        if occurrence.state is TriggerOccurrenceState.RUN_ENQUEUED and occurrence.run_id == run_id:
+            return occurrence
+        if occurrence.state is not TriggerOccurrenceState.RECEIVED or occurrence.run_id is not None:
+            raise AssertionError("occurrence cannot be rebound to a different run")
+        updated = replace(occurrence, state=TriggerOccurrenceState.RUN_ENQUEUED, run_id=run_id)
+        self.occurrences[updated.occurrence_id] = updated
+        return updated
 
 
 class _InMemoryCatalogedFileStore(CatalogedFileReadModelStore):
@@ -1410,6 +1486,157 @@ def test_enabled_enqueue_trigger_occurrence_requires_dispatcher_dependencies() -
     )
 
 
+def test_enabled_enqueue_trigger_occurrence_records_occurrence_and_queues_run() -> None:
+    plan = _sealed_plan()
+    receipts = _InMemoryCommandReceiptStore()
+    runs = _InMemoryRunStore()
+    occurrences = _InMemoryTriggerOccurrenceStore()
+    id_factory = _FixedRunIdFactory()
+    service = _service(mutations_enabled=True)
+    service.installation_id = "preview-a"
+    service.schedule_store = _InMemoryScheduleStore(_schedule(plan))
+    service.trigger_occurrence_store = occurrences
+    service.plan_store = _InMemoryPlanStore(plan)
+    service.run_store = runs
+    service.run_id_factory = id_factory
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service, role=ProcessRole.TRIGGER_CLIENT)
+    ipc_client.connect()
+    trigger_payload = _trigger_payload(scheduled_slot_utc="2026-07-20T12:00:00.000Z")
+
+    response = ipc_client.submit_command(
+        TriggerCommandName.ENQUEUE_TRIGGER_OCCURRENCE.value,
+        request_id=TRIGGER_DELIVERY_ID,
+        idempotency_key=TRIGGER_DELIVERY_ID,
+        payload=trigger_payload,
+        payload_hash=payload_hash(trigger_payload),
+    )
+
+    receipt = receipts.load_command_receipt(TRIGGER_DELIVERY_ID)
+    run = runs.load_started_run("run-a")
+    occurrence = next(iter(occurrences.occurrences.values()))
+    assert response.status is IpcStatus.ACCEPTED
+    assert response.reason is None
+    assert response.payload["enqueued"] is True
+    assert response.payload["created"] is True
+    assert response.payload["idempotent_replay"] is False
+    assert response.payload["schedule_resolution"] == "READY"
+    assert response.payload["occurrence"] == {
+        "occurrence_id": occurrence.occurrence_id,
+        "state": TriggerOccurrenceState.RUN_ENQUEUED.value,
+        "run_id": "run-a",
+    }
+    assert response.payload["run"]["run_id"] == "run-a"
+    assert response.payload["run"]["trigger_occurrence_id"] == occurrence.occurrence_id
+    assert response.payload["receipt"]["state"] == CommandReceiptState.SUCCEEDED.value
+    assert response.payload["receipt"]["result_entity_type"] == "run"
+    assert response.payload["receipt"]["result_entity_id"] == "run-a"
+    assert receipt is not None
+    assert receipt.state is CommandReceiptState.SUCCEEDED
+    assert run is not None
+    assert run.trigger_occurrence_id == occurrence.occurrence_id
+    assert run.command_receipt_id == TRIGGER_DELIVERY_ID
+    assert run.idempotency_key == occurrence.occurrence_id
+    assert occurrence.state is TriggerOccurrenceState.RUN_ENQUEUED
+    assert occurrence.run_id == "run-a"
+    assert id_factory.calls == 1
+
+
+def test_enabled_enqueue_trigger_occurrence_deduplicates_retry_to_existing_run() -> None:
+    plan = _sealed_plan()
+    receipts = _InMemoryCommandReceiptStore()
+    runs = _InMemoryRunStore()
+    occurrences = _InMemoryTriggerOccurrenceStore()
+    id_factory = _FixedRunIdFactory()
+    service = _service(mutations_enabled=True)
+    service.installation_id = "preview-a"
+    service.schedule_store = _InMemoryScheduleStore(_schedule(plan))
+    service.trigger_occurrence_store = occurrences
+    service.plan_store = _InMemoryPlanStore(plan)
+    service.run_store = runs
+    service.run_id_factory = id_factory
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service, role=ProcessRole.TRIGGER_CLIENT)
+    ipc_client.connect()
+    first_payload = _trigger_payload(
+        delivery_id=TRIGGER_DELIVERY_ID,
+        observed_start_utc="2026-07-20T12:00:02.000Z",
+        scheduled_slot_utc="2026-07-20T12:00:00.000Z",
+    )
+    retry_delivery_id = "22222222-2222-4222-8222-222222222222"
+    retry_payload = _trigger_payload(
+        delivery_id=retry_delivery_id,
+        observed_start_utc="2026-07-20T12:00:08.000Z",
+        scheduled_slot_utc="2026-07-20T12:00:00.000Z",
+    )
+
+    first = ipc_client.submit_command(
+        TriggerCommandName.ENQUEUE_TRIGGER_OCCURRENCE.value,
+        request_id=TRIGGER_DELIVERY_ID,
+        idempotency_key=TRIGGER_DELIVERY_ID,
+        payload=first_payload,
+        payload_hash=payload_hash(first_payload),
+    )
+    retry = ipc_client.submit_command(
+        TriggerCommandName.ENQUEUE_TRIGGER_OCCURRENCE.value,
+        request_id=retry_delivery_id,
+        idempotency_key=retry_delivery_id,
+        payload=retry_payload,
+        payload_hash=payload_hash(retry_payload),
+    )
+
+    assert first.status is IpcStatus.ACCEPTED
+    assert retry.status is IpcStatus.ACCEPTED
+    assert first.payload["run"]["run_id"] == "run-a"
+    assert retry.payload["run"]["run_id"] == "run-a"
+    assert retry.payload["deduplicated"] is True
+    assert retry.payload["created"] is False
+    assert retry.payload["idempotent_replay"] is True
+    assert retry.payload["occurrence"]["run_id"] == "run-a"
+    assert receipts.load_command_receipt(retry_delivery_id) is not None
+    assert len(receipts.receipts) == 2
+    assert len(runs.runs) == 1
+    assert id_factory.calls == 1
+
+
+def test_enabled_enqueue_trigger_occurrence_rejects_schedule_revision_mismatch() -> None:
+    plan = _sealed_plan()
+    receipts = _InMemoryCommandReceiptStore()
+    runs = _InMemoryRunStore()
+    occurrences = _InMemoryTriggerOccurrenceStore()
+    service = _service(mutations_enabled=True)
+    service.installation_id = "preview-a"
+    service.schedule_store = _InMemoryScheduleStore(_schedule(plan, desired_definition_hash="c" * 64))
+    service.trigger_occurrence_store = occurrences
+    service.plan_store = _InMemoryPlanStore(plan)
+    service.run_store = runs
+    service.run_id_factory = _FixedRunIdFactory()
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service, role=ProcessRole.TRIGGER_CLIENT)
+    ipc_client.connect()
+    trigger_payload = _trigger_payload()
+
+    response = ipc_client.submit_command(
+        TriggerCommandName.ENQUEUE_TRIGGER_OCCURRENCE.value,
+        request_id=TRIGGER_DELIVERY_ID,
+        idempotency_key=TRIGGER_DELIVERY_ID,
+        payload=trigger_payload,
+        payload_hash=payload_hash(trigger_payload),
+    )
+
+    receipt = receipts.load_command_receipt(TRIGGER_DELIVERY_ID)
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.COMMAND_PRECONDITION_FAILED
+    assert response.payload["enqueued"] is False
+    assert response.payload["schedule_resolution"] == "REVISION_MISMATCH"
+    assert response.payload["validation_codes"] == ["TRIGGER_SCHEDULE_REVISION_MISMATCH"]
+    assert response.payload["receipt"]["state"] == CommandReceiptState.REJECTED.value
+    assert receipt is not None
+    assert receipt.rejection_reason == IpcReason.COMMAND_PRECONDITION_FAILED.value
+    assert occurrences.occurrences == {}
+    assert runs.runs == {}
+
+
 def test_enabled_create_standard_backup_job_persists_job_and_succeeds_receipt() -> None:
     drafts = _InMemoryJobDraftStore()
     catalog = _InMemoryStandardBackupJobCatalog()
@@ -1860,6 +2087,23 @@ def _sealed_plan() -> SealedPlan:
                 risk_level=PlanRiskLevel.LOW,
             ),
         ),
+    )
+
+
+def _schedule(
+    plan: SealedPlan,
+    *,
+    desired_definition_hash: str = "a" * 64,
+) -> ScheduleDefinition:
+    return ScheduleDefinition(
+        schedule_id="schedule-a",
+        job_id=plan.job_id,
+        plan_id=plan.plan_id,
+        plan_checksum=plan.plan_checksum,
+        trigger_type=TriggerKind.SCHEDULED_TIME,
+        configuration_json='{"kind":"daily"}',
+        definition_generation=1,
+        desired_definition_hash=desired_definition_hash,
     )
 
 

@@ -63,6 +63,8 @@ class StartRunCommand:
     idempotency_key: str
     plan_id: str
     plan_checksum: str
+    run_idempotency_key: str | None = None
+    trigger_occurrence_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -273,7 +275,7 @@ def start_run_from_sealed_plan(
     runs: RunStore,
     id_factory: RunIdFactory,
 ) -> RunStartOutcome:
-    existing = runs.load_started_run_by_idempotency_key(command.idempotency_key)
+    existing = runs.load_started_run_by_idempotency_key(_effective_run_idempotency_key(command))
     if existing is not None:
         return RunStartOutcome(
             created=False,
@@ -546,7 +548,7 @@ def _started_run_from_plan(
         job_revision_id=plan.job_revision_id,
         plan_id=plan.plan_id,
         command_request_id=command.request_id,
-        idempotency_key=command.idempotency_key,
+        idempotency_key=_effective_run_idempotency_key(command),
         command_receipt_id=command.idempotency_key,
         logical_run_group_id=ids.logical_run_group_id,
         trigger_type=RunTriggerType.MANUAL_LOCAL_PREVIEW,
@@ -555,10 +557,16 @@ def _started_run_from_plan(
         plan_checksum=plan.plan_checksum,
         planned_operations=plan.operation_count,
         planned_bytes=plan.planned_bytes,
+        trigger_occurrence_id=command.trigger_occurrence_id,
         targets=tuple(_started_run_target(ids.run_id, endpoint) for endpoint in _target_endpoints(plan)),
         summary={
             "executor_pending": True,
             "scope": "0B_RUN_START_SKELETON",
+            **(
+                {"trigger_occurrence_id": command.trigger_occurrence_id}
+                if command.trigger_occurrence_id is not None
+                else {}
+            ),
         },
     )
 
@@ -620,3 +628,7 @@ def _ready_to_queue(plan_id: str) -> RunStartReadiness:
         validation_codes=(),
         next_action="Run is queued for the 0B local executor skeleton.",
     )
+
+
+def _effective_run_idempotency_key(command: StartRunCommand) -> str:
+    return command.run_idempotency_key or command.idempotency_key

@@ -207,6 +207,52 @@ def test_start_run_replays_existing_idempotency_key() -> None:
     assert ids.calls == 1
 
 
+def test_start_run_can_use_trigger_occurrence_idempotency_key() -> None:
+    plan = _sealed_plan()
+    runs = InMemoryRunStore()
+    ids = FixedRunIdFactory()
+    first_command = StartRunCommand(
+        request_id="trigger-delivery-a",
+        idempotency_key="delivery-a",
+        plan_id=plan.plan_id,
+        plan_checksum=plan.plan_checksum,
+        run_idempotency_key="trigger:occurrence-a",
+        trigger_occurrence_id="trigger:occurrence-a",
+    )
+    retry_command = StartRunCommand(
+        request_id="trigger-delivery-b",
+        idempotency_key="delivery-b",
+        plan_id=plan.plan_id,
+        plan_checksum=plan.plan_checksum,
+        run_idempotency_key="trigger:occurrence-a",
+        trigger_occurrence_id="trigger:occurrence-a",
+    )
+
+    first = start_run_from_sealed_plan(
+        command=first_command,
+        plans=InMemoryPlanStore(plan),
+        runs=runs,
+        id_factory=ids,
+    )
+    retry = start_run_from_sealed_plan(
+        command=retry_command,
+        plans=InMemoryPlanStore(plan),
+        runs=runs,
+        id_factory=ids,
+    )
+
+    assert first.created is True
+    assert retry.created is False
+    assert retry.idempotent_replay is True
+    assert first.run is not None
+    assert first.run.idempotency_key == "trigger:occurrence-a"
+    assert first.run.command_receipt_id == "delivery-a"
+    assert first.run.trigger_occurrence_id == "trigger:occurrence-a"
+    assert first.run.summary["trigger_occurrence_id"] == "trigger:occurrence-a"
+    assert retry.run == first.run
+    assert ids.calls == 1
+
+
 def test_start_run_requires_existing_plan() -> None:
     runs = InMemoryRunStore()
     ids = FixedRunIdFactory()
