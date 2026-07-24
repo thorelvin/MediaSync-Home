@@ -127,6 +127,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_schedule_desired_state",
                 statements=CATALOG_SCHEDULE_DESIRED_STATE,
             ),
+            SqliteMigration(
+                version=21,
+                name="catalog_external_resource_state",
+                statements=CATALOG_EXTERNAL_RESOURCE_STATE,
+            ),
         ),
     )
 
@@ -1063,6 +1068,55 @@ CATALOG_SCHEDULE_DESIRED_STATE = (
     """
     CREATE INDEX idx_schedules_job_enabled
         ON schedules (job_id, enabled)
+    """,
+)
+
+CATALOG_EXTERNAL_RESOURCE_STATE = (
+    """
+    CREATE TABLE external_resource_state (
+        resource_type TEXT NOT NULL CHECK (
+            resource_type IN ('task_scheduler', 'notification_channel', 'control_marker')
+        ),
+        resource_id TEXT NOT NULL,
+        desired_generation INTEGER NOT NULL CHECK (desired_generation >= 1),
+        desired_hash TEXT NOT NULL CHECK (length(desired_hash) = 64),
+        observed_generation INTEGER CHECK (
+            observed_generation IS NULL OR observed_generation >= 1
+        ),
+        observed_hash TEXT CHECK (observed_hash IS NULL OR length(observed_hash) = 64),
+        state TEXT NOT NULL CHECK (state IN ('PENDING', 'CLAIMED', 'IN_SYNC', 'BLOCKED')),
+        claim_owner_instance_id TEXT,
+        claim_generation INTEGER NOT NULL DEFAULT 0 CHECK (claim_generation >= 0),
+        claim_token TEXT,
+        claim_started_utc TEXT,
+        claim_ttl_ms INTEGER CHECK (claim_ttl_ms IS NULL OR claim_ttl_ms > 0),
+        last_attempt_utc TEXT,
+        last_success_utc TEXT,
+        last_error_code TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+        PRIMARY KEY (resource_type, resource_id),
+        CHECK (
+            state <> 'CLAIMED'
+            OR (
+                claim_owner_instance_id IS NOT NULL
+                AND claim_token IS NOT NULL
+                AND claim_started_utc IS NOT NULL
+            )
+        ),
+        CHECK (
+            state <> 'IN_SYNC'
+            OR (
+                observed_generation = desired_generation
+                AND observed_hash = desired_hash
+                AND last_success_utc IS NOT NULL
+            )
+        )
+    )
+    """,
+    """
+    CREATE INDEX idx_external_resource_state_type_state_id
+        ON external_resource_state (resource_type, state, resource_id)
     """,
 )
 
