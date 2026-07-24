@@ -85,6 +85,16 @@ class EndpointLockOpener(Protocol):
     def acquire_exclusive_lock(self, lock_path: Path) -> EndpointLockHandle: ...
 
 
+class EndpointRootResolver(Protocol):
+    def resolve_endpoint_root(
+        self,
+        *,
+        resource_key: str,
+        endpoint_id: str,
+        endpoint_revision_id: str,
+    ) -> Path | None: ...
+
+
 @dataclass
 class LocalEndpointLease:
     lease_id: str
@@ -284,6 +294,46 @@ class LocalEndpointLeaseAuthority(EndpointLeaseAuthority):
             resource_key=request.resource_key,
             ownership_epoch=ownership_epoch,
         )
+
+
+class LocalResolvingEndpointLeaseAuthority(EndpointLeaseAuthority):
+    def __init__(
+        self,
+        *,
+        root_resolver: EndpointRootResolver,
+        token_store: FencingTokenStore | None = None,
+        resource_lease_store: ResourceLeaseStore | None = None,
+        lock_opener: EndpointLockOpener | None = None,
+    ) -> None:
+        if token_store is None and resource_lease_store is None:
+            raise ValueError(
+                "LocalResolvingEndpointLeaseAuthority requires a token or resource lease store"
+            )
+        self._root_resolver = root_resolver
+        self._token_store = token_store
+        self._resource_lease_store = resource_lease_store
+        self._lock_opener = lock_opener
+
+    def acquire_endpoint_lease(self, request: EndpointLeaseRequest) -> EndpointLeaseAttempt:
+        try:
+            root = self._root_resolver.resolve_endpoint_root(
+                resource_key=request.resource_key,
+                endpoint_id=request.endpoint_id,
+                endpoint_revision_id=request.endpoint_revision_id,
+            )
+        except EndpointLeaseUnavailable as exc:
+            return _failed(exc.validation_code, exc.next_action)
+        if root is None:
+            return _failed(
+                "ENDPOINT_LEASE_RESOURCE_UNKNOWN",
+                "Register the target endpoint root before acquiring its mutation lock.",
+            )
+        return LocalEndpointLeaseAuthority(
+            target_roots={request.resource_key: root},
+            token_store=self._token_store,
+            resource_lease_store=self._resource_lease_store,
+            lock_opener=self._lock_opener,
+        ).acquire_endpoint_lease(request)
 
 
 class Win32EndpointLockOpener(EndpointLockOpener):

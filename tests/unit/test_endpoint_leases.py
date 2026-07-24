@@ -10,6 +10,7 @@ from mediasync_home.adapters.endpoint_leases import (
     EndpointLeaseUnavailable,
     FencingTokenAllocationError,
     LocalEndpointLeaseAuthority,
+    LocalResolvingEndpointLeaseAuthority,
     MutationPermitIssueError,
     ResourceLeaseRegistrationError,
     Win32EndpointLockHandle,
@@ -45,6 +46,64 @@ def test_local_endpoint_lease_authority_opens_lock_and_allocates_fencing_token(t
     attempt.lease.release()
 
     assert handle.closed is True
+
+
+def test_local_resolving_endpoint_lease_authority_resolves_root_before_acquiring(
+    tmp_path: Path,
+) -> None:
+    root = _endpoint_root(tmp_path)
+    handle = _FakeHandle(root / ".mediasync" / "locks" / "mutation.lock")
+    opener = _FakeOpener(handle)
+    token_store = _FakeTokenStore(42)
+    resolver = _FakeRootResolver({"endpoint:target-a": root})
+    authority = LocalResolvingEndpointLeaseAuthority(
+        root_resolver=resolver,
+        token_store=token_store,
+        lock_opener=opener,
+    )
+
+    attempt = authority.acquire_endpoint_lease(_request())
+
+    assert attempt.acquired is True
+    assert attempt.lease is not None
+    assert attempt.lease.lock_path == root / ".mediasync" / "locks" / "mutation.lock"
+    assert resolver.requests == [("endpoint:target-a", "target-a", "target-rev-a")]
+    assert opener.paths == [root / ".mediasync" / "locks" / "mutation.lock"]
+    assert token_store.requests == [("endpoint:target-a", 1)]
+
+
+def test_local_resolving_endpoint_lease_authority_reports_unknown_resolved_root(
+    tmp_path: Path,
+) -> None:
+    opener = _FakeOpener(_FakeHandle(tmp_path / "unused.lock"))
+    authority = LocalResolvingEndpointLeaseAuthority(
+        root_resolver=_FakeRootResolver({}),
+        token_store=_FakeTokenStore(42),
+        lock_opener=opener,
+    )
+
+    attempt = authority.acquire_endpoint_lease(_request())
+
+    assert attempt.acquired is False
+    assert attempt.validation_codes == ("ENDPOINT_LEASE_RESOURCE_UNKNOWN",)
+    assert opener.paths == []
+
+
+def test_local_resolving_endpoint_lease_authority_returns_resolver_rejection(
+    tmp_path: Path,
+) -> None:
+    opener = _FakeOpener(_FakeHandle(tmp_path / "unused.lock"))
+    authority = LocalResolvingEndpointLeaseAuthority(
+        root_resolver=_RejectingRootResolver(),
+        token_store=_FakeTokenStore(42),
+        lock_opener=opener,
+    )
+
+    attempt = authority.acquire_endpoint_lease(_request())
+
+    assert attempt.acquired is False
+    assert attempt.validation_codes == ("ENDPOINT_ROOT_URI_UNSUPPORTED",)
+    assert opener.paths == []
 
 
 def test_local_endpoint_lease_authority_registers_durable_resource_lease(tmp_path: Path) -> None:
@@ -374,6 +433,36 @@ class _UnavailableOpener:
         raise EndpointLeaseUnavailable(
             "ENDPOINT_LEASE_UNAVAILABLE",
             "Wait for the current endpoint writer to release the mutation lock.",
+        )
+
+
+class _FakeRootResolver:
+    def __init__(self, roots: dict[str, Path]) -> None:
+        self._roots = roots
+        self.requests: list[tuple[str, str, str]] = []
+
+    def resolve_endpoint_root(
+        self,
+        *,
+        resource_key: str,
+        endpoint_id: str,
+        endpoint_revision_id: str,
+    ) -> Path | None:
+        self.requests.append((resource_key, endpoint_id, endpoint_revision_id))
+        return self._roots.get(resource_key)
+
+
+class _RejectingRootResolver:
+    def resolve_endpoint_root(
+        self,
+        *,
+        resource_key: str,
+        endpoint_id: str,
+        endpoint_revision_id: str,
+    ) -> Path | None:
+        raise EndpointLeaseUnavailable(
+            "ENDPOINT_ROOT_URI_UNSUPPORTED",
+            "Use a local file endpoint root before acquiring a local mutation lease.",
         )
 
 

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
+from mediasync_home.adapters.endpoint_leases import LocalResolvingEndpointLeaseAuthority
 from mediasync_home.adapters.runtime_policy import current_process_runtime_policy
 from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
 from mediasync_home.adapters.sqlite.command_receipts import SqliteCommandReceiptStore
@@ -20,8 +21,10 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     catalog_critical_writer_policy,
     recovery_writer_policy,
 )
+from mediasync_home.adapters.sqlite.endpoint_roots import SqliteEndpointRootResolver
 from mediasync_home.adapters.sqlite.job_catalog import SqliteStandardBackupJobCatalog
 from mediasync_home.adapters.sqlite.job_draft_store import SqliteJobDraftStore
+from mediasync_home.adapters.sqlite.lease_tokens import SqliteResourceLeaseStore
 from mediasync_home.adapters.sqlite.migrations import (
     apply_sqlite_migrations,
     catalog_migration_plan,
@@ -33,7 +36,7 @@ from mediasync_home.adapters.sqlite.runs import SqliteRunStore
 from mediasync_home.adapters.sqlite.schedules import SqliteScheduleStore
 from mediasync_home.adapters.sqlite.snapshots import SqliteSnapshotEntryStore
 from mediasync_home.adapters.sqlite.trigger_occurrences import SqliteTriggerOccurrenceStore
-from mediasync_home.application.runs import RunIds
+from mediasync_home.application.runs import EndpointLeaseAuthority, RunIds
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
 from mediasync_home.application.startup_reconciliation import (
     EngineHostStartupReconciliationReport,
@@ -78,6 +81,7 @@ class EngineHostRuntime:
     service: EngineHostIpcService
     state_layout: StateStoreLayout | None = None
     startup_reconciliation: EngineHostStartupReconciliationReport | None = None
+    run_executor_lease_authority: EndpointLeaseAuthority | None = None
     catalog_connection: sqlite3.Connection | None = None
     recovery_connection: sqlite3.Connection | None = None
 
@@ -253,6 +257,11 @@ def build_engine_host_runtime(
         schedules = SqliteScheduleStore(catalog_connection)
         trigger_occurrences = SqliteTriggerOccurrenceStore(catalog_connection)
         catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
+        resource_leases = SqliteResourceLeaseStore(recovery_connection)
+        run_executor_lease_authority = LocalResolvingEndpointLeaseAuthority(
+            root_resolver=SqliteEndpointRootResolver(catalog_connection),
+            resource_lease_store=resource_leases,
+        )
         startup_reconciliation = reconcile_engine_host_after_startup(
             EngineHostStartupReconciliationRequest(
                 reconciler_instance_id=reconciler_instance_id,
@@ -292,6 +301,7 @@ def build_engine_host_runtime(
         service=service,
         state_layout=layout,
         startup_reconciliation=startup_reconciliation,
+        run_executor_lease_authority=run_executor_lease_authority,
         catalog_connection=catalog_connection,
         recovery_connection=recovery_connection,
     )
