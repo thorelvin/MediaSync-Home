@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import sqlite3
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -19,12 +22,15 @@ from mediasync_home.application.task_scheduler import (
     build_same_user_task_scheduler_definition,
 )
 from mediasync_home.application.trigger_occurrences import TriggerKind
+from mediasync_home.composition import engine_host as engine_host_module
 from mediasync_home.composition.engine_host import (
     TaskSchedulerStartupReconciliationOptions,
     build_engine_host_runtime,
     build_parser,
     reconcile_task_scheduler_resources_for_engine_host_startup,
+    run_engine_host,
     serve_bounded_pipe_requests,
+    serve_pipe_requests_until_interrupted,
 )
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
@@ -62,6 +68,72 @@ def test_bounded_pipe_loop_reports_sanitized_failure() -> None:
 def test_engine_host_parser_requires_positive_serve_request_limit() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--serve-requests", "0"])
+
+
+def test_engine_host_parser_accepts_explicit_long_running_pipe_mode() -> None:
+    args = build_parser().parse_args(["--pipe-name", "pipe-a", "--serve-forever"])
+
+    assert args.pipe_name == "pipe-a"
+    assert args.serve_forever is True
+    assert args.serve_requests == 1
+
+
+def test_long_running_pipe_loop_stops_cleanly_when_interrupted() -> None:
+    server = _FakePipeServer(interrupt_on_call=4)
+
+    result = serve_pipe_requests_until_interrupted(server)
+
+    assert result.completed is True
+    assert result.error_type is None
+    assert result.stop_reason == "INTERRUPTED"
+    assert result.served_requests == 3
+    assert server.calls == 4
+
+
+def test_long_running_pipe_loop_reports_sanitized_failure() -> None:
+    server = _FakePipeServer(fail_on_call=3)
+
+    result = serve_pipe_requests_until_interrupted(server)
+
+    assert result.completed is False
+    assert result.error_type == "RuntimeError"
+    assert result.stop_reason == "SERVER_ERROR"
+    assert result.served_requests == 2
+    assert server.calls == 3
+
+
+def test_engine_host_run_uses_long_running_pipe_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_win32_pipe = types.ModuleType("mediasync_home.ipc.win32_named_pipe")
+    runtime = _FakeRuntime()
+    lines: list[str] = []
+
+    class FakeWin32NamedPipeServer(_FakePipeServer):
+        def __init__(self, *, pipe_name: str, service: object) -> None:
+            super().__init__(interrupt_on_call=3)
+            self.pipe_name = pipe_name
+            self.service = service
+
+    fake_win32_pipe.Win32NamedPipeServer = FakeWin32NamedPipeServer
+    fake_win32_pipe.current_user_policy = _authorization
+    monkeypatch.setitem(sys.modules, "mediasync_home.ipc.win32_named_pipe", fake_win32_pipe)
+    monkeypatch.setattr(engine_host_module.os, "name", "nt")
+    monkeypatch.setattr(engine_host_module, "current_process_runtime_policy", lambda root: None)
+    monkeypatch.setattr(engine_host_module, "build_engine_host_runtime", lambda **kwargs: runtime)
+
+    code = run_engine_host(["--pipe-name", "pipe-a", "--serve-forever"], emit=lines.append)
+
+    events = [json.loads(line) for line in lines]
+    assert code == 0
+    assert runtime.closed is True
+    assert events[0]["event"] == "ENGINE_HOST_PIPE_STARTING"
+    assert events[0]["serve_forever"] is True
+    assert events[0]["serve_requests"] == 1
+    assert events[-1] == {
+        "event": "ENGINE_HOST_PIPE_STOPPED",
+        "pipe_name": "pipe-a",
+        "served_requests": 2,
+        "stop_reason": "INTERRUPTED",
+    }
 
 
 def test_engine_host_parser_accepts_optional_state_root_and_inactive_outbox_owner(
@@ -394,12 +466,20 @@ def test_engine_host_runtime_releases_executor_leases_on_close(tmp_path: Path) -
 
 
 class _FakePipeServer:
-    def __init__(self, *, fail_on_call: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_on_call: int | None = None,
+        interrupt_on_call: int | None = None,
+    ) -> None:
         self.calls = 0
         self._fail_on_call = fail_on_call
+        self._interrupt_on_call = interrupt_on_call
 
     def serve_once(self) -> None:
         self.calls += 1
+        if self.calls == self._interrupt_on_call:
+            raise KeyboardInterrupt
         if self.calls == self._fail_on_call:
             raise RuntimeError("internal detail must not leak")
 
@@ -418,6 +498,18 @@ class _FakeLiveLease:
 
     def release(self) -> None:
         self.released = True
+
+
+class _FakeRuntime:
+    service = object()
+    state_layout = None
+    startup_reconciliation = None
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _TaskSchedulerRegistry:

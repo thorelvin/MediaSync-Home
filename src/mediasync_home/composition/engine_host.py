@@ -131,6 +131,7 @@ class PipeLoopResult:
     served_requests: int
     completed: bool
     error_type: str | None = None
+    stop_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -401,6 +402,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pipe-name", help="serve non-mutating IPC over this local named pipe")
     parser.add_argument("--installation-id", default="local-dev")
     parser.add_argument("--serve-requests", type=_positive_int, default=1)
+    parser.add_argument(
+        "--serve-forever",
+        action="store_true",
+        help="serve local IPC until the Engine Host process is interrupted",
+    )
     parser.add_argument("--state-root", type=Path, help="optional local preview state root")
     parser.add_argument("--host-mutex-name", help="optional local Engine Host singleton mutex")
     parser.add_argument(
@@ -526,6 +532,7 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                 {
                     "event": "ENGINE_HOST_PIPE_STARTING",
                     "pipe_name": args.pipe_name,
+                    "serve_forever": args.serve_forever,
                     "serve_requests": args.serve_requests,
                     "startup_reconciliation": _startup_reconciliation_payload(
                         runtime.startup_reconciliation
@@ -553,7 +560,10 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
             pipe_name=args.pipe_name,
             service=runtime.service,
         )
-        result = serve_bounded_pipe_requests(server, request_limit=args.serve_requests)
+        if args.serve_forever:
+            result = serve_pipe_requests_until_interrupted(server)
+        else:
+            result = serve_bounded_pipe_requests(server, request_limit=args.serve_requests)
         if result.completed:
             output(
                 json.dumps(
@@ -561,6 +571,7 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                         "event": "ENGINE_HOST_PIPE_STOPPED",
                         "pipe_name": args.pipe_name,
                         "served_requests": result.served_requests,
+                        "stop_reason": result.stop_reason,
                     },
                     sort_keys=True,
                     separators=(",", ":"),
@@ -575,6 +586,7 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                     "event": "ENGINE_HOST_PIPE_FAILED",
                     "pipe_name": args.pipe_name,
                     "served_requests": result.served_requests,
+                    "stop_reason": result.stop_reason,
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -744,7 +756,32 @@ def serve_bounded_pipe_requests(server: PipeServer, *, request_limit: int) -> Pi
             completed=False,
             error_type=type(exc).__name__,
         )
-    return PipeLoopResult(served_requests=served_requests, completed=True)
+    return PipeLoopResult(
+        served_requests=served_requests,
+        completed=True,
+        stop_reason="REQUEST_LIMIT_REACHED",
+    )
+
+
+def serve_pipe_requests_until_interrupted(server: PipeServer) -> PipeLoopResult:
+    served_requests = 0
+    try:
+        while True:
+            server.serve_once()
+            served_requests += 1
+    except KeyboardInterrupt:
+        return PipeLoopResult(
+            served_requests=served_requests,
+            completed=True,
+            stop_reason="INTERRUPTED",
+        )
+    except Exception as exc:
+        return PipeLoopResult(
+            served_requests=served_requests,
+            completed=False,
+            error_type=type(exc).__name__,
+            stop_reason="SERVER_ERROR",
+        )
 
 
 def _startup_reconciliation_payload(
