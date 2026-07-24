@@ -519,6 +519,99 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore):
                 raise
             raise SqliteRunStoreError("RUN_TARGET_EXECUTION_START_FAILED") from exc
 
+    def record_run_target_succeeded(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        completed_operations: int,
+        completed_bytes: int,
+    ) -> StartedRun | None:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            target_cursor = self._connection.execute(
+                """
+                UPDATE run_targets
+                SET
+                    state = 'SUCCEEDED',
+                    completed_operations = ?,
+                    completed_bytes = ?,
+                    finished_utc = COALESCE(finished_utc, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    row_version = row_version + 1
+                WHERE run_id = ?
+                    AND id = ?
+                    AND state = 'EXECUTING'
+                    AND planned_operations = ?
+                    AND planned_bytes = ?
+                    AND EXISTS (
+                        SELECT 1
+                        FROM runs
+                        WHERE runs.id = run_targets.run_id
+                            AND runs.state = 'EXECUTING'
+                    )
+                """,
+                (
+                    completed_operations,
+                    completed_bytes,
+                    run_id,
+                    run_target_id,
+                    completed_operations,
+                    completed_bytes,
+                ),
+            )
+            if target_cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            run_cursor = self._connection.execute(
+                """
+                UPDATE runs
+                SET
+                    state = CASE
+                        WHEN NOT EXISTS (
+                            SELECT 1
+                            FROM run_targets
+                            WHERE run_targets.run_id = runs.id
+                                AND run_targets.state != 'SUCCEEDED'
+                        )
+                        THEN 'COMPLETED'
+                        ELSE state
+                    END,
+                    finished_utc = CASE
+                        WHEN NOT EXISTS (
+                            SELECT 1
+                            FROM run_targets
+                            WHERE run_targets.run_id = runs.id
+                                AND run_targets.state != 'SUCCEEDED'
+                        )
+                        THEN COALESCE(finished_utc, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                        ELSE finished_utc
+                    END,
+                    row_version = row_version + 1
+                WHERE id = ?
+                    AND state = 'EXECUTING'
+                """,
+                (run_id,),
+            )
+            if run_cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            run = self.load_started_run(run_id)
+            if run is None:
+                raise SqliteRunStoreError("RUN_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return run
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_TARGET_COMPLETION_FAILED") from exc
+
     def _load_one(
         self,
         query: str,
@@ -566,7 +659,9 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore):
                 last_ownership_epoch,
                 last_fencing_token,
                 planned_operations,
-                planned_bytes
+                planned_bytes,
+                completed_operations,
+                completed_bytes
             FROM run_targets
             WHERE run_id = ?
                 AND id = ?
@@ -592,7 +687,9 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore):
                 last_ownership_epoch,
                 last_fencing_token,
                 planned_operations,
-                planned_bytes
+                planned_bytes,
+                completed_operations,
+                completed_bytes
             FROM run_targets
             WHERE run_id = ?
             ORDER BY id
@@ -620,6 +717,8 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore):
                 last_fencing_token=None if row[9] is None else int(row[9]),
                 planned_operations=int(row[10]),
                 planned_bytes=int(row[11]),
+                completed_operations=int(row[12]),
+                completed_bytes=int(row[13]),
             )
             for row in rows
         )

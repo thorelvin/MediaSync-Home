@@ -46,6 +46,7 @@ from mediasync_home.application.runs import (
     StartedRun,
     acquire_run_target_lease,
     begin_next_run_target_preflight,
+    complete_run_target_success,
     parse_start_run_command,
     start_run_from_sealed_plan,
 )
@@ -459,6 +460,61 @@ def test_sqlite_run_store_rejects_execution_start_with_stale_lease_metadata(
         assert loaded is not None
         assert loaded.state is RunState.PREFLIGHT
         assert loaded.targets[0].state is RunTargetState.REVALIDATING
+
+
+def test_sqlite_run_store_records_successful_run_target_completion(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        plans = SqlitePlanStore(connection)
+        runs = SqliteRunStore(connection)
+        plan = _sealed_plan()
+        lease = FixedLiveLease()
+        leases = FixedLeaseAuthority(lease)
+        registry = HeldRunTargetLeaseRegistry()
+        plans.save_sealed_plan(plan)
+        start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        preflight = execute_one_run_target_preflight_step(runs=runs, leases=leases)
+        assert preflight.lease is lease
+        registry.retain_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            lease=lease,
+        )
+        execute_one_run_target_execution_start_step(runs=runs, lease_registry=registry)
+
+        outcome = complete_run_target_success(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            runs=runs,
+            completed_operations=1,
+            completed_bytes=128,
+        )
+
+        loaded = runs.load_started_run("run-a")
+        assert outcome.completed is True
+        assert outcome.run_completed is True
+        assert outcome.target is not None
+        assert outcome.target.state is RunTargetState.SUCCEEDED
+        assert outcome.target.completed_operations == 1
+        assert outcome.target.completed_bytes == 128
+        assert loaded is not None
+        assert loaded.state is RunState.COMPLETED
+        assert loaded.targets[0] == outcome.target
+        assert _run_target_finished_utc(connection, "run-a-target-0000") is not None
 
 
 def test_sqlite_run_store_lists_recent_run_activity_summaries(tmp_path: Path) -> None:
@@ -953,6 +1009,15 @@ def _row_count(connection: sqlite3.Connection, table: str) -> int:
 def _run_target_started_utc(connection: sqlite3.Connection, run_target_id: str) -> str | None:
     row = connection.execute(
         "SELECT started_utc FROM run_targets WHERE id = ?",
+        (run_target_id,),
+    ).fetchone()
+    assert row is not None
+    return None if row[0] is None else str(row[0])
+
+
+def _run_target_finished_utc(connection: sqlite3.Connection, run_target_id: str) -> str | None:
+    row = connection.execute(
+        "SELECT finished_utc FROM run_targets WHERE id = ?",
         (run_target_id,),
     ).fetchone()
     assert row is not None

@@ -87,6 +87,8 @@ class StartedRunTarget:
     last_fencing_token: int | None = None
     planned_operations: int = 0
     planned_bytes: int = 0
+    completed_operations: int = 0
+    completed_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -216,6 +218,18 @@ class RunTargetExecutionStartOutcome:
     next_action: str
 
 
+@dataclass(frozen=True)
+class RunTargetCompletionOutcome:
+    completed: bool
+    run_completed: bool
+    run_id: str
+    run_target_id: str
+    run: StartedRun | None
+    target: StartedRunTarget | None
+    validation_codes: tuple[str, ...]
+    next_action: str
+
+
 class RunStore(Protocol):
     def save_started_run(self, run: StartedRun) -> None: ...
 
@@ -253,6 +267,15 @@ class RunStore(Protocol):
         ownership_epoch: int,
         fencing_token: int,
     ) -> StartedRunTarget | None: ...
+
+    def record_run_target_succeeded(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        completed_operations: int,
+        completed_bytes: int,
+    ) -> StartedRun | None: ...
 
 
 class RunIdFactory(Protocol):
@@ -660,6 +683,120 @@ def start_run_target_execution(
         mutation_permit=permit,
         validation_codes=(),
         next_action="Target is executing with a live mutation permit.",
+    )
+
+
+def complete_run_target_success(
+    *,
+    run_id: str,
+    run_target_id: str,
+    runs: RunStore,
+    completed_operations: int,
+    completed_bytes: int,
+) -> RunTargetCompletionOutcome:
+    if completed_operations < 0 or completed_bytes < 0:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=None,
+            target=None,
+            validation_codes=("RUN_TARGET_COMPLETION_REQUIRES_NON_NEGATIVE_COUNTS",),
+            next_action="Retry completion with non-negative operation and byte counts.",
+        )
+
+    run = runs.load_started_run(run_id)
+    if run is None:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=None,
+            target=None,
+            validation_codes=("RUN_NOT_FOUND",),
+            next_action="Create and execute a run before completing target work.",
+        )
+    if run.state is not RunState.EXECUTING:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=run,
+            target=None,
+            validation_codes=("RUN_NOT_EXECUTING",),
+            next_action="Only executing runs can complete target work.",
+        )
+
+    target = _target_by_id(run, run_target_id)
+    if target is None:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=run,
+            target=None,
+            validation_codes=("RUN_TARGET_NOT_FOUND",),
+            next_action="Reload run targets before completing target work.",
+        )
+    if target.state is not RunTargetState.EXECUTING:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=run,
+            target=target,
+            validation_codes=("RUN_TARGET_NOT_EXECUTING",),
+            next_action="Only executing targets can be marked succeeded.",
+        )
+    if (
+        completed_operations != target.planned_operations
+        or completed_bytes != target.planned_bytes
+    ):
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=run,
+            target=target,
+            validation_codes=("RUN_TARGET_COMPLETION_COUNTS_MISMATCH",),
+            next_action="Complete all planned target work before marking the target succeeded.",
+        )
+
+    updated_run = runs.record_run_target_succeeded(
+        run_id=run_id,
+        run_target_id=run_target_id,
+        completed_operations=completed_operations,
+        completed_bytes=completed_bytes,
+    )
+    if updated_run is None:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=None,
+            target=None,
+            validation_codes=("RUN_TARGET_COMPLETION_CONFLICT",),
+            next_action="Reload run state before retrying target completion.",
+        )
+    updated_target = _target_by_id(updated_run, run_target_id)
+    if updated_target is None:
+        raise RunStartViolation("RUN_TARGET_COMPLETION_LOAD_FAILED")
+    return RunTargetCompletionOutcome(
+        completed=True,
+        run_completed=updated_run.state is RunState.COMPLETED,
+        run_id=run_id,
+        run_target_id=run_target_id,
+        run=updated_run,
+        target=updated_target,
+        validation_codes=(),
+        next_action="Target succeeded; run is complete." if updated_run.state is RunState.COMPLETED else "Target succeeded; remaining targets continue.",
     )
 
 
