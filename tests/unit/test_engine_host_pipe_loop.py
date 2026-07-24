@@ -20,8 +20,10 @@ from mediasync_home.application.task_scheduler import (
 )
 from mediasync_home.application.trigger_occurrences import TriggerKind
 from mediasync_home.composition.engine_host import (
+    TaskSchedulerStartupReconciliationOptions,
     build_engine_host_runtime,
     build_parser,
+    reconcile_task_scheduler_resources_for_engine_host_startup,
     serve_bounded_pipe_requests,
 )
 from mediasync_home.domain.process_roles import ProcessRole
@@ -83,6 +85,41 @@ def test_engine_host_parser_accepts_optional_state_root_and_inactive_outbox_owne
     assert args.host_mutex_name == "Local\\MediaSyncHome-0B-1234567890abcdef12345678"
     assert args.publish_host_locator is True
     assert args.inactive_outbox_owner_instance_id == ["host-old"]
+
+
+def test_engine_host_parser_accepts_bounded_task_scheduler_startup_pump(
+    tmp_path: Path,
+) -> None:
+    args = build_parser().parse_args(
+        [
+            "--pipe-name",
+            "pipe-a",
+            "--state-root",
+            str(tmp_path),
+            "--reconcile-task-scheduler-resources",
+            "--task-scheduler-executable-path",
+            TASK_SCHEDULER_EXECUTABLE,
+            "--task-scheduler-schedule-page-limit",
+            "5",
+            "--task-scheduler-max-schedule-pages",
+            "2",
+            "--task-scheduler-max-claims",
+            "7",
+            "--task-scheduler-claim-ttl-ms",
+            "12000",
+            "--task-scheduler-claim-token-prefix",
+            "startup-a",
+        ]
+    )
+
+    assert args.reconcile_task_scheduler_resources is True
+    assert args.task_scheduler_backend == "com"
+    assert args.task_scheduler_executable_path == TASK_SCHEDULER_EXECUTABLE
+    assert args.task_scheduler_schedule_page_limit == 5
+    assert args.task_scheduler_max_schedule_pages == 2
+    assert args.task_scheduler_max_claims == 7
+    assert args.task_scheduler_claim_ttl_ms == 12000
+    assert args.task_scheduler_claim_token_prefix == "startup-a"
 
 
 def test_engine_host_runtime_without_state_root_preserves_non_persistent_service() -> None:
@@ -276,6 +313,55 @@ def test_engine_host_runtime_stages_and_reconciles_task_scheduler_resources(
         assert stored_resource.observed_generation == schedule.definition_generation
         assert stored_resource.observed_hash == schedule.desired_definition_hash
         assert stored_resource.claim_token is None
+    finally:
+        runtime.close()
+
+
+def test_engine_host_startup_task_scheduler_reconciliation_uses_injected_registry(
+    tmp_path: Path,
+) -> None:
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=startup_status(ProcessRole.ENGINE_HOST),
+        state_root=tmp_path / "state",
+        installation_id="install-a",
+        reconciler_instance_id="host-new",
+    )
+
+    try:
+        schedule = _task_scheduler_schedule()
+        assert runtime.service.schedule_store is not None
+        assert runtime.service.external_resource_state_store is not None
+        assert runtime.catalog_connection is not None
+        _insert_task_scheduler_plan_parent_rows(runtime.catalog_connection)
+        runtime.service.schedule_store.save_schedule(schedule)
+
+        definition = build_same_user_task_scheduler_definition(
+            schedule,
+            installation_id="install-a",
+            executable_path=TASK_SCHEDULER_EXECUTABLE,
+        )
+        registry = _TaskSchedulerRegistry(_observed_task_scheduler_definition(definition))
+
+        report = reconcile_task_scheduler_resources_for_engine_host_startup(
+            runtime,
+            options=TaskSchedulerStartupReconciliationOptions(
+                installation_id="install-a",
+                executable_path=TASK_SCHEDULER_EXECUTABLE,
+                schedule_page_limit=10,
+                max_schedule_pages=1,
+                max_claims=2,
+                claim_token_prefix="startup-a",
+            ),
+            registry=registry,
+        )
+
+        assert report.schedules_scanned == 1
+        assert report.resources_staged == 1
+        assert report.resources_reconciled == 1
+        assert report.claims_attempted == 2
+        assert report.claim_idle is True
+        assert report.claim_findings[0].action is TaskSchedulerReconciliationAction.IN_SYNC
     finally:
         runtime.close()
 

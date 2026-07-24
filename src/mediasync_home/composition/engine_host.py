@@ -14,6 +14,10 @@ from mediasync_home.adapters.endpoint_leases import LocalResolvingEndpointLeaseA
 from mediasync_home.adapters.final_verification import LocalFinalArtifactVerificationAdapter
 from mediasync_home.adapters.runtime_policy import current_process_runtime_policy
 from mediasync_home.adapters.staging import LocalFileStagingTransferAdapter
+from mediasync_home.adapters.task_scheduler import (
+    Pywin32TaskSchedulerGateway,
+    WindowsTaskSchedulerRegistry,
+)
 from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
 from mediasync_home.adapters.sqlite.command_receipts import SqliteCommandReceiptStore
 from mediasync_home.adapters.sqlite.connection_policy import (
@@ -127,6 +131,19 @@ class PipeLoopResult:
     served_requests: int
     completed: bool
     error_type: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskSchedulerStartupReconciliationOptions:
+    installation_id: str
+    executable_path: str
+    backend: str = "com"
+    schedule_page_limit: int = 100
+    max_schedule_pages: int = 10
+    max_claims: int = 100
+    claim_ttl_ms: int = 30_000
+    claim_token_prefix: str | None = None
+    after_schedule_id: str | None = None
 
 
 @dataclass
@@ -396,11 +413,56 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help="owner instance proven inactive before startup outbox requeue",
     )
+    parser.add_argument(
+        "--reconcile-task-scheduler-resources",
+        action="store_true",
+        help="run one bounded Task Scheduler desired-state pump before serving the pipe",
+    )
+    parser.add_argument(
+        "--task-scheduler-backend",
+        choices=("com",),
+        default="com",
+        help="Task Scheduler registry backend used by the bounded startup pump",
+    )
+    parser.add_argument(
+        "--task-scheduler-executable-path",
+        help="absolute executable path registered in Task Scheduler actions",
+    )
+    parser.add_argument(
+        "--task-scheduler-schedule-page-limit",
+        type=_positive_int,
+        default=100,
+        help="schedule page size for the bounded Task Scheduler startup pump",
+    )
+    parser.add_argument(
+        "--task-scheduler-max-schedule-pages",
+        type=_positive_int,
+        default=10,
+        help="maximum schedule pages staged by the bounded Task Scheduler startup pump",
+    )
+    parser.add_argument(
+        "--task-scheduler-max-claims",
+        type=_positive_int,
+        default=100,
+        help="maximum pending Task Scheduler resources reconciled by the startup pump",
+    )
+    parser.add_argument(
+        "--task-scheduler-claim-ttl-ms",
+        type=_positive_int,
+        default=30_000,
+        help="claim TTL used by the bounded Task Scheduler startup pump",
+    )
+    parser.add_argument(
+        "--task-scheduler-claim-token-prefix",
+        help="optional deterministic claim-token prefix for the bounded startup pump",
+    )
     return parser
 
 
 def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.reconcile_task_scheduler_resources and not args.pipe_name:
+        raise RuntimeError("TASK_SCHEDULER_RECONCILIATION_REQUIRES_PIPE_MODE")
     if not args.pipe_name:
         return run_role(ProcessRole.ENGINE_HOST, argv, emit=emit)
     if os.name != "nt":
@@ -420,6 +482,7 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
     host_locator_payload: dict[str, object] | None = None
     host_locator_path: Path | None = None
     runtime: EngineHostRuntime | None = None
+    task_scheduler_reconciliation: TaskSchedulerResourcePumpReport | None = None
     try:
         if args.publish_host_locator:
             host_locator_payload, host_locator_path = _publish_local_host_locator(
@@ -437,6 +500,27 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
             reconciler_instance_id=args.installation_id,
             inactive_outbox_owner_instance_ids=tuple(args.inactive_outbox_owner_instance_id or ()),
         )
+        if args.reconcile_task_scheduler_resources:
+            try:
+                task_scheduler_reconciliation = (
+                    reconcile_task_scheduler_resources_for_engine_host_startup(
+                        runtime,
+                        options=_task_scheduler_startup_options(args),
+                    )
+                )
+            except Exception as exc:
+                output(
+                    json.dumps(
+                        {
+                            "error_type": type(exc).__name__,
+                            "event": "ENGINE_HOST_TASK_SCHEDULER_RECONCILIATION_FAILED",
+                            "pipe_name": args.pipe_name,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+                return 4
         output(
             json.dumps(
                 {
@@ -457,6 +541,9 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                     "host_locator_path": None
                     if host_locator_path is None
                     else str(host_locator_path),
+                    "task_scheduler_reconciliation": _task_scheduler_resource_pump_payload(
+                        task_scheduler_reconciliation
+                    ),
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -620,6 +707,31 @@ def build_engine_host_runtime(
     )
 
 
+def build_task_scheduler_registry(backend: str) -> TaskSchedulerRegistryPort:
+    if backend == "com":
+        return WindowsTaskSchedulerRegistry(Pywin32TaskSchedulerGateway())
+    raise RuntimeError("TASK_SCHEDULER_BACKEND_UNSUPPORTED")
+
+
+def reconcile_task_scheduler_resources_for_engine_host_startup(
+    runtime: EngineHostRuntime,
+    *,
+    options: TaskSchedulerStartupReconciliationOptions,
+    registry: TaskSchedulerRegistryPort | None = None,
+) -> TaskSchedulerResourcePumpReport:
+    return runtime.task_scheduler_reconcile_resources_bounded(
+        installation_id=options.installation_id,
+        executable_path=options.executable_path,
+        registry=registry or build_task_scheduler_registry(options.backend),
+        schedule_page_limit=options.schedule_page_limit,
+        max_schedule_pages=options.max_schedule_pages,
+        max_claims=options.max_claims,
+        claim_token_prefix=options.claim_token_prefix,
+        claim_ttl_ms=options.claim_ttl_ms,
+        after_schedule_id=options.after_schedule_id,
+    )
+
+
 def serve_bounded_pipe_requests(server: PipeServer, *, request_limit: int) -> PipeLoopResult:
     served_requests = 0
     try:
@@ -664,6 +776,66 @@ def _startup_reconciliation_payload(
         ),
         "recovery_resume": _recovery_resume_payload(report.recovery_resume),
         "skipped_outbox_requeue_reason": report.skipped_outbox_requeue_reason,
+    }
+
+
+def _task_scheduler_startup_options(
+    args: argparse.Namespace,
+) -> TaskSchedulerStartupReconciliationOptions:
+    if args.state_root is None:
+        raise RuntimeError("TASK_SCHEDULER_RECONCILIATION_REQUIRES_STATE_ROOT")
+    if args.task_scheduler_executable_path is None:
+        raise RuntimeError("TASK_SCHEDULER_EXECUTABLE_PATH_REQUIRED")
+    return TaskSchedulerStartupReconciliationOptions(
+        installation_id=str(args.installation_id),
+        executable_path=str(args.task_scheduler_executable_path),
+        backend=str(args.task_scheduler_backend),
+        schedule_page_limit=int(args.task_scheduler_schedule_page_limit),
+        max_schedule_pages=int(args.task_scheduler_max_schedule_pages),
+        max_claims=int(args.task_scheduler_max_claims),
+        claim_ttl_ms=int(args.task_scheduler_claim_ttl_ms),
+        claim_token_prefix=args.task_scheduler_claim_token_prefix,
+    )
+
+
+def _task_scheduler_resource_pump_payload(
+    report: TaskSchedulerResourcePumpReport | None,
+) -> dict[str, object] | None:
+    if report is None:
+        return None
+    return {
+        "claim_idle": report.claim_idle,
+        "claims_attempted": report.claims_attempted,
+        "resources_applied": report.resources_applied,
+        "resources_blocked": report.resources_blocked,
+        "resources_completed": report.resources_completed,
+        "resources_reconciled": report.resources_reconciled,
+        "resources_staged": report.resources_staged,
+        "schedule_pages_attempted": report.schedule_pages_attempted,
+        "schedules_scanned": report.schedules_scanned,
+        "stage_blocked": report.stage_blocked,
+        "stage_completed": report.stage_completed,
+        "stage_next_cursor": report.stage_next_cursor,
+        "claim_findings": [
+            {
+                "action": finding.action.value,
+                "applied": finding.applied,
+                "blocked": finding.blocked,
+                "completed": finding.completed,
+                "reason": finding.reason,
+                "resource_id": finding.resource_id,
+            }
+            for finding in report.claim_findings
+        ],
+        "stage_findings": [
+            {
+                "reason": finding.reason,
+                "schedule_id": finding.schedule_id,
+                "staged": finding.staged,
+                "task_path": finding.task_path,
+            }
+            for finding in report.stage_findings
+        ],
     }
 
 
