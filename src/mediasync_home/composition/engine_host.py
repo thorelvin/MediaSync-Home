@@ -55,6 +55,11 @@ from mediasync_home.application.run_intent_segments import (
     RunTargetIntentSegmentOutcome,
     publish_run_target_recovery_intent_segment,
 )
+from mediasync_home.application.run_catalog_handoffs import (
+    RunTargetCatalogHandoffStepOutcome,
+    record_next_run_target_catalog_handoff,
+)
+from mediasync_home.application.catalog_handoff import FinalFileCatalogHandoffStore
 from mediasync_home.application.plans import PlanStore
 from mediasync_home.application.recovery_intents import RecoveryIntentSegmentStore
 from mediasync_home.application.runs import EndpointLeaseAuthority, RunIds
@@ -109,6 +114,7 @@ class EngineHostRuntime:
     run_executor_plan_store: PlanStore | None = None
     run_executor_recovery_operation_store: RunTargetIntentOperationStore | None = None
     run_executor_recovery_intent_segment_store: RecoveryIntentSegmentStore | None = None
+    run_executor_catalog_handoff_store: FinalFileCatalogHandoffStore | None = None
     run_executor_process_instance_id: str | None = None
     catalog_connection: sqlite3.Connection | None = None
     recovery_connection: sqlite3.Connection | None = None
@@ -175,6 +181,24 @@ class EngineHostRuntime:
             process_instance_id=self.run_executor_process_instance_id,
             segment_sequence=segment_sequence,
             previous_segment_hash=previous_segment_hash,
+        )
+
+    def run_executor_record_catalog_handoff(
+        self,
+        *,
+        permit: MutationPermit,
+    ) -> RunTargetCatalogHandoffStepOutcome:
+        if (
+            self.run_executor_recovery_operation_store is None
+            or self.run_executor_catalog_handoff_store is None
+            or self.run_executor_process_instance_id is None
+        ):
+            raise RuntimeError("RUN_EXECUTOR_RUNTIME_NOT_CONFIGURED")
+        return record_next_run_target_catalog_handoff(
+            permit=permit,
+            recovery_operations=self.run_executor_recovery_operation_store,
+            catalog_handoffs=self.run_executor_catalog_handoff_store,
+            process_instance_id=self.run_executor_process_instance_id,
         )
 
     def close(self) -> None:
@@ -404,6 +428,7 @@ def build_engine_host_runtime(
         run_executor_plan_store=plans,
         run_executor_recovery_operation_store=recovery_operations,
         run_executor_recovery_intent_segment_store=recovery_intent_segments,
+        run_executor_catalog_handoff_store=catalog_handoffs,
         run_executor_process_instance_id=reconciler_instance_id,
         catalog_connection=catalog_connection,
         recovery_connection=recovery_connection,
