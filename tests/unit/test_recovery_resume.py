@@ -6,6 +6,7 @@ from typing import Mapping
 import pytest
 
 from mediasync_home.application.catalog_handoff import FinalFileCatalogHandoff
+from mediasync_home.application.ports import FinalArtifactVerificationEvidence
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
     RecoveryOperationMetadata,
@@ -124,6 +125,64 @@ def test_recovery_resume_records_final_verified_catalog_handoff_then_completes_t
     assert handoff.content_hash == "a" * 64
 
 
+def test_recovery_resume_reverifies_filesystem_applied_then_completes_target() -> None:
+    runs = _RunStore(_run())
+    recovery_operations = _RecoveryOperationStore((_filesystem_applied_operation(),))
+    catalog_handoffs = _CatalogHandoffStore()
+    final_verifier = _FinalVerifier()
+
+    report = resume_recovery_operations_after_startup(
+        RecoveryResumeStartupRequest(reconciler_instance_id="host-b"),
+        runs=runs,
+        recovery_operations=recovery_operations,
+        catalog_handoffs=catalog_handoffs,
+        final_verifier=final_verifier,
+    )
+
+    loaded = runs.load_started_run("run-a")
+    operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    assert report.scanned == 3
+    assert tuple(finding.action for finding in report.findings) == (
+        RecoveryResumeAction.FINAL_REVERIFIED,
+        RecoveryResumeAction.CATALOG_HANDOFF_RECORDED,
+        RecoveryResumeAction.TARGET_COMPLETED,
+    )
+    assert final_verifier.verified_operation_ids == ("op-a",)
+    assert loaded is not None
+    assert loaded.state is RunState.COMPLETED
+    assert operation is not None
+    assert operation.phase is RecoveryOperationPhase.CATALOG_RECORDED
+    assert operation.expected_final_fingerprint_json == _fingerprint_json()
+
+
+def test_recovery_resume_blocks_when_final_reverification_fails() -> None:
+    runs = _RunStore(_run())
+    recovery_operations = _RecoveryOperationStore((_filesystem_applied_operation(),))
+    catalog_handoffs = _CatalogHandoffStore()
+
+    report = resume_recovery_operations_after_startup(
+        RecoveryResumeStartupRequest(reconciler_instance_id="host-b"),
+        runs=runs,
+        recovery_operations=recovery_operations,
+        catalog_handoffs=catalog_handoffs,
+        final_verifier=_FinalVerifier(failure_code="FINAL_ARTIFACT_VERIFY_FINGERPRINT_MISMATCH"),
+    )
+
+    loaded = runs.load_started_run("run-a")
+    operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    assert report.scanned == 1
+    assert report.completed_run_target_ids == ()
+    assert report.blocked_run_target_ids == ("run-a-target-0000",)
+    assert report.findings[0].action is RecoveryResumeAction.BLOCKED
+    assert report.findings[0].validation_codes == (
+        "FINAL_ARTIFACT_VERIFY_FINGERPRINT_MISMATCH",
+    )
+    assert loaded is not None
+    assert loaded.state is RunState.EXECUTING
+    assert operation is not None
+    assert operation.phase is RecoveryOperationPhase.FILESYSTEM_APPLIED
+
+
 def test_recovery_resume_blocks_final_verified_without_content_hash() -> None:
     runs = _RunStore(_run())
     recovery_operations = _RecoveryOperationStore(
@@ -203,11 +262,7 @@ class _RecoveryOperationStore:
         catalog_handoff_id: str | None = None,
         operation_metadata: RecoveryOperationMetadata | None = None,
     ) -> RecoveryOperation | None:
-        if (
-            not process_instance_id.strip()
-            or next_phase is not RecoveryOperationPhase.CATALOG_RECORDED
-            or catalog_handoff_id is None
-        ):
+        if not process_instance_id.strip():
             return None
         for index, operation in enumerate(self._operations):
             if (
@@ -215,10 +270,18 @@ class _RecoveryOperationStore:
                 and operation.operation_id == operation_id
                 and operation.phase is expected_phase
             ):
+                if next_phase is RecoveryOperationPhase.CATALOG_RECORDED and catalog_handoff_id is None:
+                    return None
                 updated = replace(
                     operation,
                     phase=next_phase,
-                    catalog_handoff_id=catalog_handoff_id,
+                    catalog_handoff_id=catalog_handoff_id
+                    if catalog_handoff_id is not None
+                    else operation.catalog_handoff_id,
+                    expected_final_fingerprint_json=operation_metadata.expected_final_fingerprint_json
+                    if operation_metadata is not None
+                    and operation_metadata.expected_final_fingerprint_json is not None
+                    else operation.expected_final_fingerprint_json,
                 )
                 self._operations[index] = updated
                 return updated
@@ -281,6 +344,21 @@ class _CatalogHandoffStore:
 
     def load_final_file_handoff(self, handoff_id: str) -> FinalFileCatalogHandoff | None:
         return self._handoffs.get(handoff_id)
+
+
+class _FinalVerifier:
+    def __init__(self, *, failure_code: str | None = None) -> None:
+        self._failure_code = failure_code
+        self.verified_operation_ids: tuple[str, ...] = ()
+
+    def verify_final_artifact(
+        self,
+        operation: RecoveryOperation,
+    ) -> FinalArtifactVerificationEvidence:
+        self.verified_operation_ids = (*self.verified_operation_ids, operation.operation_id)
+        if self._failure_code is not None:
+            raise RuntimeError(self._failure_code)
+        return FinalArtifactVerificationEvidence(fingerprint_json=_fingerprint_json())
 
 
 class _RunStore(RunStore):
@@ -433,3 +511,15 @@ def _final_verified_operation() -> RecoveryOperation:
         phase=RecoveryOperationPhase.FINAL_VERIFIED,
         catalog_handoff_id=None,
     )
+
+
+def _filesystem_applied_operation() -> RecoveryOperation:
+    return replace(
+        _catalog_recorded_operation(),
+        phase=RecoveryOperationPhase.FILESYSTEM_APPLIED,
+        catalog_handoff_id=None,
+    )
+
+
+def _fingerprint_json() -> str:
+    return '{"byte_count":128,"content_hash":"' + ("a" * 64) + '"}'

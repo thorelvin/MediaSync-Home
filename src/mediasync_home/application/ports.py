@@ -24,6 +24,11 @@ class CommitReceipt:
     final_relative_path: RelativePath
 
 
+@dataclass(frozen=True)
+class FinalArtifactVerificationEvidence:
+    fingerprint_json: str
+
+
 class ReadOnlySourcePort(Protocol):
     def exists(self, relative_path: RelativePath) -> bool: ...
 
@@ -38,4 +43,3 @@ class FinalCommitPort(Protocol):
         permit: MutationPermit,
         artifact: VerifiedStagingArtifact,
     ) -> CommitReceipt: ...
-

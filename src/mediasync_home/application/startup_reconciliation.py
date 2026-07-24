@@ -23,6 +23,7 @@ from mediasync_home.application.recovery_reconciliation import (
     reconcile_recovery_operations_after_startup,
 )
 from mediasync_home.application.recovery_resume import (
+    FinalArtifactVerificationPort,
     MAX_RECOVERY_RESUME_STARTUP_LIMIT,
     RecoveryResumeCatalogHandoffOperationStore,
     RecoveryResumeStartupReport,
@@ -65,6 +66,7 @@ def reconcile_engine_host_after_startup(
     recovery_operations: RecoveryOperationStartupReconciliationStore | None = None,
     recovery_resume_operations: RecoveryResumeCatalogHandoffOperationStore | None = None,
     recovery_resume_catalog_handoffs: FinalFileCatalogHandoffStore | None = None,
+    recovery_resume_final_verifier: FinalArtifactVerificationPort | None = None,
     runs: RunStore | None = None,
 ) -> EngineHostStartupReconciliationReport:
     validate_engine_host_startup_reconciliation_request(request)
@@ -120,6 +122,7 @@ def reconcile_engine_host_after_startup(
                 runs=runs,
                 recovery_operations=recovery_resume_operations,
                 catalog_handoffs=recovery_resume_catalog_handoffs,
+                final_verifier=recovery_resume_final_verifier,
             )
 
     return EngineHostStartupReconciliationReport(

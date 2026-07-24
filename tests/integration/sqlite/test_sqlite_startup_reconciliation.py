@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
+from mediasync_home.adapters.final_verification import LocalFinalArtifactVerificationAdapter
 from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
 from mediasync_home.adapters.sqlite.command_receipts import SqliteCommandReceiptStore
 from mediasync_home.adapters.sqlite.connection_policy import (
@@ -15,6 +17,7 @@ from mediasync_home.adapters.sqlite.connection_policy import (
 from mediasync_home.adapters.sqlite.lease_tokens import SqliteResourceLeaseStore
 from mediasync_home.adapters.sqlite.migrations import apply_sqlite_migrations, catalog_migration_plan
 from mediasync_home.adapters.sqlite.migrations import recovery_migration_plan
+from mediasync_home.adapters.sqlite.endpoint_roots import SqliteEndpointRootResolver
 from mediasync_home.adapters.sqlite.outbox import SqliteOutboxStore
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
 from mediasync_home.adapters.sqlite.recovery_intents import SqliteRecoveryIntentSegmentStore
@@ -287,6 +290,98 @@ def test_sqlite_engine_host_startup_reconciliation_records_final_verified_handof
             recovery_connection.close()
 
 
+def test_sqlite_engine_host_startup_reconciliation_reverifies_filesystem_applied(
+    tmp_path: Path,
+) -> None:
+    catalog_database = tmp_path / "catalog.sqlite"
+    recovery_database = tmp_path / "recovery.sqlite"
+    target_root = tmp_path / "target"
+    payload = b"x" * 128
+    content_hash = hashlib.sha256(payload).hexdigest()
+    (target_root / "Pictures").mkdir(parents=True)
+    (target_root / "Pictures" / "A.jpg").write_bytes(payload)
+    with sqlite3.connect(catalog_database) as catalog_connection:
+        recovery_connection = sqlite3.connect(recovery_database)
+        try:
+            _prepare_catalog(catalog_connection, catalog_database)
+            _prepare_recovery(recovery_connection, recovery_database)
+            _insert_plan_parent_rows(catalog_connection, target_root=target_root)
+            receipts = SqliteCommandReceiptStore(catalog_connection)
+            plans = SqlitePlanStore(catalog_connection)
+            runs = SqliteRunStore(catalog_connection)
+            catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
+            recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
+            final_verifier = LocalFinalArtifactVerificationAdapter(
+                root_resolver=SqliteEndpointRootResolver(catalog_connection),
+            )
+            _register_resource_lease(recovery_connection)
+            SqliteRecoveryIntentSegmentStore(recovery_connection).publish_intent_segment(
+                _segment()
+            )
+            receipts.record_received(_receipt("idempotency-a"))
+            plan = _sealed_plan()
+            plans.save_sealed_plan(plan)
+            start_run_from_sealed_plan(
+                command=parse_start_run_command(
+                    request_id="request-a",
+                    idempotency_key="idempotency-a",
+                    payload={
+                        "plan_id": plan.plan_id,
+                        "plan_checksum": plan.plan_checksum,
+                    },
+                ),
+                plans=plans,
+                runs=runs,
+                id_factory=_FixedRunIdFactory(),
+            )
+            _mark_run_target_executing(runs)
+            _record_filesystem_applied_operation(
+                recovery_operations,
+                content_hash=content_hash,
+            )
+
+            report = reconcile_engine_host_after_startup(
+                EngineHostStartupReconciliationRequest(
+                    reconciler_instance_id="host-new",
+                    recovery_operation_limit=10,
+                    recovery_resume_limit=10,
+                ),
+                recovery_operations=recovery_operations,
+                recovery_resume_operations=recovery_operations,
+                recovery_resume_catalog_handoffs=catalog_handoffs,
+                recovery_resume_final_verifier=final_verifier,
+                runs=runs,
+            )
+
+            loaded = runs.load_started_run("run-a")
+            operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+            handoff = catalog_handoffs.load_final_file_handoff("final-file:run-a:op-a")
+            assert report.recovery_operations is not None
+            assert report.recovery_operations.scanned == 1
+            assert report.recovery_operations.findings[0].classification is (
+                RecoveryOperationStartupClassification.REVERIFY_FINAL
+            )
+            assert report.recovery_resume is not None
+            assert report.recovery_resume.scanned == 3
+            assert tuple(finding.action for finding in report.recovery_resume.findings) == (
+                RecoveryResumeAction.FINAL_REVERIFIED,
+                RecoveryResumeAction.CATALOG_HANDOFF_RECORDED,
+                RecoveryResumeAction.TARGET_COMPLETED,
+            )
+            assert handoff is not None
+            assert handoff.content_hash == content_hash
+            assert operation is not None
+            assert operation.phase is RecoveryOperationPhase.CATALOG_RECORDED
+            assert operation.catalog_handoff_id == "final-file:run-a:op-a"
+            assert loaded is not None
+            assert loaded.state is RunState.COMPLETED
+            assert loaded.targets[0].state is RunTargetState.SUCCEEDED
+            assert loaded.targets[0].completed_operations == 1
+            assert loaded.targets[0].completed_bytes == 128
+        finally:
+            recovery_connection.close()
+
+
 def _prepare_catalog(connection: sqlite3.Connection, database: Path) -> None:
     apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
     apply_sqlite_migrations(connection, catalog_migration_plan())
@@ -335,7 +430,8 @@ class _FixedRunIdFactory(RunIdFactory):
         return RunIds(run_id="run-a", logical_run_group_id="run-group-a")
 
 
-def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
+def _insert_plan_parent_rows(connection: sqlite3.Connection, *, target_root: Path | None = None) -> None:
+    root_uri = "file:///E:/Backup" if target_root is None else target_root.as_uri()
     connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')")
     connection.execute("INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')")
     connection.execute(
@@ -355,8 +451,9 @@ def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
         INSERT INTO endpoint_revisions (endpoint_id, id, display_name, root_uri)
-            VALUES ('target-a', 'target-rev-a', 'USB', 'file:///E:/Backup')
-        """
+            VALUES ('target-a', 'target-rev-a', 'USB', ?)
+        """,
+        (root_uri,),
     )
     connection.execute(
         """
@@ -452,7 +549,32 @@ def _record_catalog_recorded_operation(store: SqliteRecoveryOperationStore) -> R
 
 
 def _record_final_verified_operation(store: SqliteRecoveryOperationStore) -> RecoveryOperation:
-    operation = store.record_planned_operation(_catalog_resume_operation(), process_instance_id="host-a")
+    operation = _record_filesystem_applied_operation(store)
+    for next_phase in (
+        RecoveryOperationPhase.FINAL_DURABLE,
+        RecoveryOperationPhase.FINAL_VERIFIED,
+    ):
+        updated = store.record_operation_phase_transition(
+            run_id=operation.run_id,
+            operation_id=operation.operation_id,
+            expected_phase=operation.phase,
+            next_phase=next_phase,
+            process_instance_id="host-a",
+        )
+        assert updated is not None
+        operation = updated
+    return operation
+
+
+def _record_filesystem_applied_operation(
+    store: SqliteRecoveryOperationStore,
+    *,
+    content_hash: str = "a" * 64,
+) -> RecoveryOperation:
+    operation = store.record_planned_operation(
+        _catalog_resume_operation(content_hash=content_hash),
+        process_instance_id="host-a",
+    )
     for next_phase in (
         RecoveryOperationPhase.SOURCE_VALIDATED,
         RecoveryOperationPhase.SOURCE_STABILITY_BOUND,
@@ -485,8 +607,6 @@ def _record_final_verified_operation(store: SqliteRecoveryOperationStore) -> Rec
     for next_phase in (
         RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
         RecoveryOperationPhase.FILESYSTEM_APPLIED,
-        RecoveryOperationPhase.FINAL_DURABLE,
-        RecoveryOperationPhase.FINAL_VERIFIED,
     ):
         updated = store.record_operation_phase_transition(
             run_id=operation.run_id,
@@ -500,12 +620,12 @@ def _record_final_verified_operation(store: SqliteRecoveryOperationStore) -> Rec
     return operation
 
 
-def _catalog_resume_operation() -> RecoveryOperation:
+def _catalog_resume_operation(*, content_hash: str = "a" * 64) -> RecoveryOperation:
     return replace(
         _planned_operation(),
         staging_object_id="op-a",
         expected_final_fingerprint_json=json.dumps(
-            {"byte_count": 128, "content_hash": "a" * 64},
+            {"byte_count": 128, "content_hash": content_hash},
             sort_keys=True,
             separators=(",", ":"),
         ),

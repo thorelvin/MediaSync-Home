@@ -11,6 +11,7 @@ from typing import Protocol
 from uuid import uuid4
 
 from mediasync_home.adapters.endpoint_leases import LocalResolvingEndpointLeaseAuthority
+from mediasync_home.adapters.final_verification import LocalFinalArtifactVerificationAdapter
 from mediasync_home.adapters.runtime_policy import current_process_runtime_policy
 from mediasync_home.adapters.staging import LocalFileStagingTransferAdapter
 from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
@@ -447,6 +448,9 @@ def build_engine_host_runtime(
         run_executor_staging_transfer_port = LocalFileStagingTransferAdapter(
             root_resolver=endpoint_root_resolver,
         )
+        final_artifact_verifier = LocalFinalArtifactVerificationAdapter(
+            root_resolver=endpoint_root_resolver,
+        )
         run_executor_lease_registry = HeldRunTargetLeaseRegistry()
         startup_reconciliation = reconcile_engine_host_after_startup(
             EngineHostStartupReconciliationRequest(
@@ -458,6 +462,7 @@ def build_engine_host_runtime(
             recovery_operations=recovery_operations,
             recovery_resume_operations=recovery_operations,
             recovery_resume_catalog_handoffs=catalog_handoffs,
+            recovery_resume_final_verifier=final_artifact_verifier,
             runs=runs,
         )
         service = EngineHostIpcService(

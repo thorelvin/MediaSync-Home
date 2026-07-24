@@ -11,8 +11,9 @@ from mediasync_home.application.catalog_handoff import (
     FinalFileCatalogHandoffStore,
     record_catalog_handoff_after_final_verification,
 )
+from mediasync_home.application.ports import FinalArtifactVerificationEvidence
 from mediasync_home.application.recovery_operations import RecoveryOperation, RecoveryOperationPhase
-from mediasync_home.application.recovery_operations import RecoveryOperationStore
+from mediasync_home.application.recovery_operations import RecoveryOperationMetadata, RecoveryOperationStore
 from mediasync_home.application.runs import (
     RunState,
     RunStore,
@@ -31,6 +32,7 @@ class RecoveryResumeViolation(ValueError):
 
 
 class RecoveryResumeAction(str, Enum):
+    FINAL_REVERIFIED = "FINAL_REVERIFIED"
     CATALOG_HANDOFF_RECORDED = "CATALOG_HANDOFF_RECORDED"
     TARGET_COMPLETED = "TARGET_COMPLETED"
     ALREADY_TERMINAL = "ALREADY_TERMINAL"
@@ -102,20 +104,63 @@ class RecoveryResumeCatalogHandoffOperationStore(
     pass
 
 
+class FinalArtifactVerificationPort(Protocol):
+    def verify_final_artifact(
+        self,
+        operation: RecoveryOperation,
+    ) -> FinalArtifactVerificationEvidence: ...
+
+
 def resume_recovery_operations_after_startup(
     request: RecoveryResumeStartupRequest,
     *,
     runs: RunStore,
     recovery_operations: RecoveryResumeCatalogHandoffOperationStore,
     catalog_handoffs: FinalFileCatalogHandoffStore,
+    final_verifier: FinalArtifactVerificationPort | None = None,
 ) -> RecoveryResumeStartupReport:
     validate_recovery_resume_startup_request(request)
 
     findings: list[RecoveryResumeFinding] = []
+    scanned = 0
+    remaining = request.limit
+    if final_verifier is not None:
+        for phase in (
+            RecoveryOperationPhase.FILESYSTEM_APPLIED,
+            RecoveryOperationPhase.FINAL_DURABLE,
+        ):
+            if remaining < 1:
+                break
+            operations = recovery_operations.list_operations_in_phase(
+                phase=phase,
+                limit=remaining,
+            )
+            scanned += len(operations)
+            remaining -= len(operations)
+            for operation in operations:
+                findings.append(
+                    _resume_final_filesystem_verification(
+                        operation=operation,
+                        runs=runs,
+                        recovery_operations=recovery_operations,
+                        final_verifier=final_verifier,
+                        process_instance_id=request.reconciler_instance_id,
+                    )
+                )
+
+    if remaining < 1:
+        return RecoveryResumeStartupReport(
+            reconciler_instance_id=request.reconciler_instance_id,
+            scanned=scanned,
+            findings=tuple(findings),
+        )
+
     final_verified_operations = recovery_operations.list_operations_in_phase(
         phase=RecoveryOperationPhase.FINAL_VERIFIED,
-        limit=request.limit,
+        limit=remaining,
     )
+    scanned += len(final_verified_operations)
+    remaining -= len(final_verified_operations)
     for operation in final_verified_operations:
         findings.append(
             _resume_final_verified_catalog_handoff(
@@ -127,8 +172,6 @@ def resume_recovery_operations_after_startup(
             )
         )
 
-    scanned = len(final_verified_operations)
-    remaining = request.limit - scanned
     if remaining > 0:
         catalog_recorded_report = resume_catalog_recorded_run_targets_after_startup(
             RecoveryResumeStartupRequest(
@@ -298,6 +341,128 @@ def _resume_catalog_recorded_target(
         operation_ids=operation_ids,
         validation_codes=(),
         next_action=outcome.next_action,
+    )
+
+
+def _resume_final_filesystem_verification(
+    *,
+    operation: RecoveryOperation,
+    runs: RunStore,
+    recovery_operations: RecoveryResumeCatalogHandoffOperationStore,
+    final_verifier: FinalArtifactVerificationPort,
+    process_instance_id: str,
+) -> RecoveryResumeFinding:
+    run = runs.load_started_run(operation.run_id)
+    if run is None:
+        return _blocked(
+            operation=operation,
+            validation_code="RECOVERY_RESUME_RUN_NOT_FOUND",
+            next_action="Keep recovery mode active until the catalog run row is restored.",
+        )
+    target = next(
+        (item for item in run.targets if item.run_target_id == operation.run_target_id),
+        None,
+    )
+    if target is None:
+        return _blocked(
+            operation=operation,
+            validation_code="RECOVERY_RESUME_RUN_TARGET_NOT_FOUND",
+            next_action="Keep recovery mode active until the catalog run target row is restored.",
+        )
+    if run.state is not RunState.EXECUTING or target.state is not RunTargetState.EXECUTING:
+        return _blocked(
+            operation=operation,
+            validation_code="RECOVERY_RESUME_TARGET_NOT_EXECUTING",
+            next_action="Review run state before re-verifying final filesystem evidence.",
+        )
+    if operation.phase not in {
+        RecoveryOperationPhase.FILESYSTEM_APPLIED,
+        RecoveryOperationPhase.FINAL_DURABLE,
+    }:
+        return _blocked(
+            operation=operation,
+            validation_code="RECOVERY_RESUME_FINAL_REVERIFY_PHASE_UNSUPPORTED",
+            next_action="Use the recovery resume phase handler matching the operation state.",
+        )
+    if _operation_target_binding_mismatch(
+        operation=operation,
+        target=target,
+        expected_phase=operation.phase,
+    ):
+        return _blocked(
+            operation=operation,
+            validation_code="RECOVERY_RESUME_OPERATION_TARGET_BINDING_MISMATCH",
+            next_action="Reconcile lease and ownership evidence before re-verifying final state.",
+        )
+
+    try:
+        evidence = final_verifier.verify_final_artifact(operation)
+        verified = _transition_to_final_verified(
+            operation=operation,
+            recovery_operations=recovery_operations,
+            process_instance_id=process_instance_id,
+            evidence=evidence,
+        )
+    except (ValueError, RuntimeError) as exc:
+        return RecoveryResumeFinding(
+            action=RecoveryResumeAction.BLOCKED,
+            run_id=operation.run_id,
+            run_target_id=operation.run_target_id,
+            operation_ids=(operation.operation_id,),
+            validation_codes=(_exception_validation_code(exc),),
+            next_action=_exception_next_action(
+                exc,
+                "Reverify final filesystem state before retrying startup recovery resume.",
+            ),
+        )
+
+    if verified is None:
+        return _blocked(
+            operation=operation,
+            validation_code="RECOVERY_RESUME_FINAL_REVERIFY_PHASE_CONFLICT",
+            next_action="Reload recovery state before retrying final verification.",
+        )
+    return RecoveryResumeFinding(
+        action=RecoveryResumeAction.FINAL_REVERIFIED,
+        run_id=verified.run_id,
+        run_target_id=verified.run_target_id,
+        operation_ids=(verified.operation_id,),
+        validation_codes=(),
+        next_action="Final filesystem state is reverified; continue catalog handoff recovery.",
+    )
+
+
+def _transition_to_final_verified(
+    *,
+    operation: RecoveryOperation,
+    recovery_operations: RecoveryResumeCatalogHandoffOperationStore,
+    process_instance_id: str,
+    evidence: FinalArtifactVerificationEvidence,
+) -> RecoveryOperation | None:
+    current = operation
+    if current.phase is RecoveryOperationPhase.FILESYSTEM_APPLIED:
+        durable = recovery_operations.record_operation_phase_transition(
+            run_id=current.run_id,
+            operation_id=current.operation_id,
+            expected_phase=current.phase,
+            next_phase=RecoveryOperationPhase.FINAL_DURABLE,
+            process_instance_id=process_instance_id,
+            payload={"durability_state": "STARTUP_FINAL_REVERIFY"},
+        )
+        if durable is None:
+            return None
+        current = durable
+
+    return recovery_operations.record_operation_phase_transition(
+        run_id=current.run_id,
+        operation_id=current.operation_id,
+        expected_phase=current.phase,
+        next_phase=RecoveryOperationPhase.FINAL_VERIFIED,
+        process_instance_id=process_instance_id,
+        payload={"fingerprint_json": evidence.fingerprint_json},
+        operation_metadata=RecoveryOperationMetadata(
+            expected_final_fingerprint_json=evidence.fingerprint_json,
+        ),
     )
 
 
