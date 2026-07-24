@@ -28,6 +28,7 @@ def test_recovery_operation_startup_reconciliation_classifies_non_terminal_opera
             _operation("op-staged", RecoveryOperationPhase.STAGING_VERIFIED),
             _operation("op-intent", RecoveryOperationPhase.COMMIT_INTENT_RECORDED),
             _operation("op-preconditions", RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED),
+            _operation("op-preserved", RecoveryOperationPhase.OLD_TARGET_PRESERVED),
             _operation("op-applied", RecoveryOperationPhase.FILESYSTEM_APPLIED),
             _operation("op-final", RecoveryOperationPhase.FINAL_VERIFIED),
             _operation("op-catalog", RecoveryOperationPhase.CATALOG_RECORDED),
@@ -43,7 +44,7 @@ def test_recovery_operation_startup_reconciliation_classifies_non_terminal_opera
     )
 
     assert report.reconciler_instance_id == "host-b"
-    assert report.scanned == 7
+    assert report.scanned == 8
     assert report.requires_recovery_mode is True
     assert report.manual_decision_operation_ids == ()
     assert [(finding.operation_id, finding.classification) for finding in report.findings] == [
@@ -51,6 +52,7 @@ def test_recovery_operation_startup_reconciliation_classifies_non_terminal_opera
         ("op-staged", RecoveryOperationStartupClassification.REACQUIRE_AND_REBIND_PRE_COMMIT),
         ("op-intent", RecoveryOperationStartupClassification.REFRESH_COMMIT_INTENT),
         ("op-preconditions", RecoveryOperationStartupClassification.REVERIFY_FINAL),
+        ("op-preserved", RecoveryOperationStartupClassification.REVERIFY_FINAL),
         ("op-applied", RecoveryOperationStartupClassification.REVERIFY_FINAL),
         ("op-final", RecoveryOperationStartupClassification.FILESYSTEM_APPLIED_NEEDS_CATALOG),
         ("op-catalog", RecoveryOperationStartupClassification.CATALOG_RECORDED_NEEDS_RUN_COMPLETION),

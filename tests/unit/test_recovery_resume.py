@@ -185,6 +185,37 @@ def test_recovery_resume_reverifies_commit_preconditions_then_completes_target()
     assert operation.expected_final_fingerprint_json == _fingerprint_json()
 
 
+def test_recovery_resume_reverifies_old_target_preserved_then_completes_target() -> None:
+    runs = _RunStore(_run())
+    recovery_operations = _RecoveryOperationStore((_old_target_preserved_operation(),))
+    catalog_handoffs = _CatalogHandoffStore()
+    final_verifier = _FinalVerifier()
+
+    report = resume_recovery_operations_after_startup(
+        RecoveryResumeStartupRequest(reconciler_instance_id="host-b"),
+        runs=runs,
+        recovery_operations=recovery_operations,
+        catalog_handoffs=catalog_handoffs,
+        final_verifier=final_verifier,
+    )
+
+    loaded = runs.load_started_run("run-a")
+    operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    assert report.scanned == 3
+    assert tuple(finding.action for finding in report.findings) == (
+        RecoveryResumeAction.FINAL_REVERIFIED,
+        RecoveryResumeAction.CATALOG_HANDOFF_RECORDED,
+        RecoveryResumeAction.TARGET_COMPLETED,
+    )
+    assert final_verifier.verified_operation_ids == ("op-a",)
+    assert loaded is not None
+    assert loaded.state is RunState.COMPLETED
+    assert operation is not None
+    assert operation.phase is RecoveryOperationPhase.CATALOG_RECORDED
+    assert operation.version_object_id == "version-a"
+    assert operation.expected_final_fingerprint_json == _fingerprint_json()
+
+
 def test_recovery_resume_blocks_when_final_reverification_fails() -> None:
     runs = _RunStore(_run())
     recovery_operations = _RecoveryOperationStore((_filesystem_applied_operation(),))
@@ -211,6 +242,33 @@ def test_recovery_resume_blocks_when_final_reverification_fails() -> None:
     assert loaded.state is RunState.EXECUTING
     assert operation is not None
     assert operation.phase is RecoveryOperationPhase.FILESYSTEM_APPLIED
+
+
+def test_recovery_resume_blocks_old_target_preserved_when_final_reverification_fails() -> None:
+    runs = _RunStore(_run())
+    recovery_operations = _RecoveryOperationStore((_old_target_preserved_operation(),))
+    catalog_handoffs = _CatalogHandoffStore()
+
+    report = resume_recovery_operations_after_startup(
+        RecoveryResumeStartupRequest(reconciler_instance_id="host-b"),
+        runs=runs,
+        recovery_operations=recovery_operations,
+        catalog_handoffs=catalog_handoffs,
+        final_verifier=_FinalVerifier(failure_code="FINAL_ARTIFACT_VERIFY_MISSING"),
+    )
+
+    loaded = runs.load_started_run("run-a")
+    operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    assert report.scanned == 1
+    assert report.completed_run_target_ids == ()
+    assert report.blocked_run_target_ids == ("run-a-target-0000",)
+    assert report.findings[0].action is RecoveryResumeAction.BLOCKED
+    assert report.findings[0].validation_codes == ("FINAL_ARTIFACT_VERIFY_MISSING",)
+    assert loaded is not None
+    assert loaded.state is RunState.EXECUTING
+    assert operation is not None
+    assert operation.phase is RecoveryOperationPhase.OLD_TARGET_PRESERVED
+    assert operation.version_object_id == "version-a"
 
 
 def test_recovery_resume_blocks_final_verified_without_content_hash() -> None:
@@ -556,6 +614,15 @@ def _commit_preconditions_operation() -> RecoveryOperation:
         _catalog_recorded_operation(),
         phase=RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
         catalog_handoff_id=None,
+    )
+
+
+def _old_target_preserved_operation() -> RecoveryOperation:
+    return replace(
+        _catalog_recorded_operation(),
+        phase=RecoveryOperationPhase.OLD_TARGET_PRESERVED,
+        catalog_handoff_id=None,
+        version_object_id="version-a",
     )
 
 

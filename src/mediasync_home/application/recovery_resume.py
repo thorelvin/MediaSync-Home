@@ -127,6 +127,7 @@ def resume_recovery_operations_after_startup(
     if final_verifier is not None:
         for phase in (
             RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
+            RecoveryOperationPhase.OLD_TARGET_PRESERVED,
             RecoveryOperationPhase.FILESYSTEM_APPLIED,
             RecoveryOperationPhase.FINAL_DURABLE,
         ):
@@ -378,6 +379,7 @@ def _resume_final_filesystem_verification(
         )
     if operation.phase not in {
         RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
+        RecoveryOperationPhase.OLD_TARGET_PRESERVED,
         RecoveryOperationPhase.FILESYSTEM_APPLIED,
         RecoveryOperationPhase.FINAL_DURABLE,
     }:
@@ -442,7 +444,10 @@ def _transition_to_final_verified(
     evidence: FinalArtifactVerificationEvidence,
 ) -> RecoveryOperation | None:
     current = operation
-    if current.phase is RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED:
+    if current.phase in {
+        RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
+        RecoveryOperationPhase.OLD_TARGET_PRESERVED,
+    }:
         applied = recovery_operations.record_operation_phase_transition(
             run_id=current.run_id,
             operation_id=current.operation_id,
@@ -451,7 +456,7 @@ def _transition_to_final_verified(
             process_instance_id=process_instance_id,
             payload={
                 "final_relative_path": current.final_relative_path,
-                "resume_reason": "STARTUP_FINAL_ARTIFACT_REVERIFIED_AFTER_PRECONDITION",
+                "resume_reason": _final_reverify_resume_reason(current.phase),
             },
         )
         if applied is None:
@@ -482,6 +487,12 @@ def _transition_to_final_verified(
             expected_final_fingerprint_json=evidence.fingerprint_json,
         ),
     )
+
+
+def _final_reverify_resume_reason(phase: RecoveryOperationPhase) -> str:
+    if phase is RecoveryOperationPhase.OLD_TARGET_PRESERVED:
+        return "STARTUP_FINAL_ARTIFACT_REVERIFIED_AFTER_OLD_TARGET_PRESERVED"
+    return "STARTUP_FINAL_ARTIFACT_REVERIFIED_AFTER_PRECONDITION"
 
 
 def _resume_final_verified_catalog_handoff(
