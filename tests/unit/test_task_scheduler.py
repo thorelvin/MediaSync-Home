@@ -8,6 +8,7 @@ from mediasync_home.application.schedules import ScheduleDefinition
 from mediasync_home.application.task_scheduler import (
     ObservedTaskSchedulerDefinition,
     TaskSchedulerDefinitionViolation,
+    TaskSchedulerPendingResourceReconciliationRequest,
     TaskSchedulerReconciliationAction,
     TaskSchedulerReconciliationRequest,
     bind_same_user_task_scheduler_definition_hash,
@@ -15,6 +16,7 @@ from mediasync_home.application.task_scheduler import (
     classify_task_scheduler_reconciliation,
     parse_trigger_task_arguments,
     reconcile_claimed_task_scheduler_resource,
+    reconcile_next_pending_task_scheduler_resource,
     reconcile_task_scheduler_page,
     stage_task_scheduler_desired_resource_page,
 )
@@ -471,6 +473,74 @@ def test_reconcile_claimed_task_scheduler_resource_blocks_stale_claim_desired_st
     )
 
 
+def test_reconcile_next_pending_task_scheduler_resource_claims_and_completes() -> None:
+    schedule = _bound_schedule()
+    definition = build_same_user_task_scheduler_definition(
+        schedule,
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    resources = _ExternalResourceStore(
+        ExternalResourceRecord(
+            resource_type=ExternalResourceType.TASK_SCHEDULER,
+            resource_id=schedule.schedule_id,
+            desired_generation=schedule.definition_generation,
+            desired_hash=schedule.desired_definition_hash,
+        )
+    )
+
+    result = reconcile_next_pending_task_scheduler_resource(
+        TaskSchedulerPendingResourceReconciliationRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            owner_instance_id="host-a",
+            claim_token="claim-a",
+            claim_ttl_ms=30_000,
+        ),
+        schedules=_ScheduleStore(schedule),
+        registry=_Registry(_observed(definition)),
+        external_resources=resources,
+    )
+
+    assert result is not None
+    assert result.action is TaskSchedulerReconciliationAction.IN_SYNC
+    assert result.completed is True
+    assert resources.claims == (
+        (
+            ExternalResourceType.TASK_SCHEDULER,
+            "host-a",
+            "claim-a",
+            30_000,
+        ),
+    )
+    assert resources.completed == (
+        (
+            ExternalResourceType.TASK_SCHEDULER,
+            "schedule-a",
+            schedule.definition_generation,
+            "claim-a",
+            schedule.desired_definition_hash,
+        ),
+    )
+
+
+def test_reconcile_next_pending_task_scheduler_resource_reports_idle() -> None:
+    result = reconcile_next_pending_task_scheduler_resource(
+        TaskSchedulerPendingResourceReconciliationRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            owner_instance_id="host-a",
+            claim_token="claim-a",
+            claim_ttl_ms=30_000,
+        ),
+        schedules=_ScheduleStore(),
+        registry=_Registry(),
+        external_resources=_ExternalResourceStore(),
+    )
+
+    assert result is None
+
+
 class _ScheduleStore:
     def __init__(self, *schedules: ScheduleDefinition) -> None:
         self.schedules = sorted(schedules, key=lambda item: item.schedule_id)
@@ -517,10 +587,12 @@ class _Registry:
 
 
 class _ExternalResourceStore(ExternalResourceStateStore):
-    def __init__(self) -> None:
+    def __init__(self, *pending: ExternalResourceRecord) -> None:
+        self.pending = list(pending)
         self.desired: tuple[tuple[ExternalResourceType, str, int, str], ...] = ()
         self.completed: tuple[tuple[ExternalResourceType, str, int, str, str], ...] = ()
         self.blocked: tuple[tuple[ExternalResourceType, str, str, str], ...] = ()
+        self.claims: tuple[tuple[ExternalResourceType, str, str, int], ...] = ()
 
     def upsert_desired_resource_state(
         self,
@@ -557,6 +629,20 @@ class _ExternalResourceStore(ExternalResourceStateStore):
         claim_token: str,
         claim_ttl_ms: int,
     ) -> ExternalResourceRecord | None:
+        self.claims = (
+            *self.claims,
+            (resource_type, owner_instance_id, claim_token, claim_ttl_ms),
+        )
+        for index, record in enumerate(self.pending):
+            if record.resource_type is resource_type:
+                self.pending.pop(index)
+                return replace(
+                    record,
+                    state=ExternalResourceState.CLAIMED,
+                    claim_owner_instance_id=owner_instance_id,
+                    claim_token=claim_token,
+                    claim_ttl_ms=claim_ttl_ms,
+                )
         return None
 
     def mark_external_resource_in_sync(

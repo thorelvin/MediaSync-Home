@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from mediasync_home.adapters.sqlite.connection_policy import SqliteStore
 from mediasync_home.adapters.sqlite.migrations import current_schema_version
+from mediasync_home.application.external_resources import ExternalResourceState, ExternalResourceType
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
 from mediasync_home.application.runtime_status import startup_status
+from mediasync_home.application.schedules import ScheduleDefinition
+from mediasync_home.application.task_scheduler import (
+    TaskSchedulerDefinition,
+    ObservedTaskSchedulerDefinition,
+    TaskSchedulerReconciliationAction,
+    bind_same_user_task_scheduler_definition_hash,
+    build_same_user_task_scheduler_definition,
+)
+from mediasync_home.application.trigger_occurrences import TriggerKind
 from mediasync_home.composition.engine_host import (
     build_engine_host_runtime,
     build_parser,
@@ -21,6 +32,7 @@ from mediasync_home.ipc.protocol import IpcReason, IpcStatus
 
 EXPECTED_USER = "same-user"
 EXPECTED_SESSION = 42
+TASK_SCHEDULER_EXECUTABLE = r"C:\Program Files\MediaSync Home\MediaSyncHome.exe"
 
 
 def test_bounded_pipe_loop_serves_exact_request_limit() -> None:
@@ -119,6 +131,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.service.schedule_store is not None
         assert runtime.service.trigger_occurrence_store is not None
         assert runtime.service.external_resource_state_store is not None
+        assert runtime.reconciler_instance_id == "host-new"
         assert runtime.run_executor_lease_authority is not None
         assert runtime.run_executor_catalog_handoff_store is not None
         assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 21
@@ -213,6 +226,60 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         runtime.close()
 
 
+def test_engine_host_runtime_stages_and_reconciles_task_scheduler_resources(
+    tmp_path: Path,
+) -> None:
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=startup_status(ProcessRole.ENGINE_HOST),
+        state_root=tmp_path / "state",
+        installation_id="install-a",
+        reconciler_instance_id="host-new",
+    )
+
+    try:
+        schedule = _task_scheduler_schedule()
+        assert runtime.service.schedule_store is not None
+        assert runtime.service.external_resource_state_store is not None
+        assert runtime.catalog_connection is not None
+        _insert_task_scheduler_plan_parent_rows(runtime.catalog_connection)
+        runtime.service.schedule_store.save_schedule(schedule)
+
+        stage_report = runtime.task_scheduler_stage_desired_resource_page(
+            installation_id="install-a",
+            executable_path=TASK_SCHEDULER_EXECUTABLE,
+            limit=10,
+        )
+        definition = build_same_user_task_scheduler_definition(
+            schedule,
+            installation_id="install-a",
+            executable_path=TASK_SCHEDULER_EXECUTABLE,
+        )
+        result = runtime.task_scheduler_reconcile_next_pending_resource(
+            installation_id="install-a",
+            executable_path=TASK_SCHEDULER_EXECUTABLE,
+            registry=_TaskSchedulerRegistry(_observed_task_scheduler_definition(definition)),
+            claim_token="claim-a",
+        )
+        stored_resource = runtime.service.external_resource_state_store.load_external_resource_state(
+            resource_type=ExternalResourceType.TASK_SCHEDULER,
+            resource_id=schedule.schedule_id,
+        )
+
+        assert stage_report.scanned == 1
+        assert stage_report.staged == 1
+        assert result is not None
+        assert result.action is TaskSchedulerReconciliationAction.IN_SYNC
+        assert result.completed is True
+        assert stored_resource is not None
+        assert stored_resource.state is ExternalResourceState.IN_SYNC
+        assert stored_resource.observed_generation == schedule.definition_generation
+        assert stored_resource.observed_hash == schedule.desired_definition_hash
+        assert stored_resource.claim_token is None
+    finally:
+        runtime.close()
+
+
 def test_engine_host_runtime_releases_executor_leases_on_close(tmp_path: Path) -> None:
     runtime = build_engine_host_runtime(
         authorization=_authorization(),
@@ -265,6 +332,120 @@ class _FakeLiveLease:
 
     def release(self) -> None:
         self.released = True
+
+
+class _TaskSchedulerRegistry:
+    def __init__(self, *observed: ObservedTaskSchedulerDefinition) -> None:
+        self.observed = {definition.task_path: definition for definition in observed}
+        self.applied: list[object] = []
+
+    def load_task(self, task_path: str) -> ObservedTaskSchedulerDefinition | None:
+        return self.observed.get(task_path)
+
+    def apply_task_definition(self, definition: object) -> None:
+        self.applied.append(definition)
+
+
+def _task_scheduler_schedule() -> ScheduleDefinition:
+    return bind_same_user_task_scheduler_definition_hash(
+        ScheduleDefinition(
+            schedule_id="schedule-a",
+            job_id="job-a",
+            plan_id="plan-a",
+            plan_checksum="a" * 64,
+            trigger_type=TriggerKind.SCHEDULED_TIME,
+            configuration_json='{"kind":"daily"}',
+            definition_generation=1,
+            desired_definition_hash="0" * 64,
+            time_zone_id="Europe/Oslo",
+            dst_policy="PRESERVE_WALL_TIME",
+            misfire_policy="QUEUE_ONCE",
+            coalescing_window_seconds=60,
+            task_logon_type="INTERACTIVE_TOKEN",
+            requires_network=False,
+            run_only_when_logged_on=True,
+            enabled=True,
+            row_version=1,
+        ),
+        installation_id="install-a",
+        executable_path=TASK_SCHEDULER_EXECUTABLE,
+    )
+
+
+def _observed_task_scheduler_definition(
+    definition: TaskSchedulerDefinition,
+) -> ObservedTaskSchedulerDefinition:
+    return ObservedTaskSchedulerDefinition(
+        task_path=definition.task_path,
+        executable_path=definition.executable_path,
+        arguments=definition.arguments,
+        enabled=definition.enabled,
+        trigger_type=definition.trigger_type,
+        configuration_json=definition.configuration_json,
+        time_zone_id=definition.time_zone_id,
+        task_logon_type=definition.task_logon_type,
+        run_only_when_logged_on=definition.run_only_when_logged_on,
+        requires_network=definition.requires_network,
+        multiple_instances_policy=definition.multiple_instances_policy,
+        execution_time_limit_seconds=definition.execution_time_limit_seconds,
+        stop_on_execution_time_limit=definition.stop_on_execution_time_limit,
+    )
+
+
+def _insert_task_scheduler_plan_parent_rows(connection: sqlite3.Connection) -> None:
+    connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')")
+    connection.execute("INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')")
+    connection.execute(
+        """
+        INSERT INTO job_revisions (job_id, id, filter_set_id)
+            VALUES ('job-a', 'job-rev-a', 'filter-a')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO analyses (id, job_id, job_revision_id)
+            VALUES ('analysis-a', 'job-a', 'job-rev-a')
+        """
+    )
+    connection.execute("INSERT INTO plans (id, analysis_id) VALUES ('plan-a', 'analysis-a')")
+    connection.execute(
+        """
+        INSERT INTO plan_seal_details (
+            plan_id,
+            analysis_id,
+            job_id,
+            job_revision_id,
+            planner_version,
+            plan_schema_version,
+            operation_schema_version,
+            execution_policy,
+            checksum_algorithm,
+            serializer_version,
+            plan_checksum,
+            risk_summary_json,
+            operation_count,
+            planned_bytes
+        )
+        VALUES (
+            'plan-a',
+            'analysis-a',
+            'job-a',
+            'job-rev-a',
+            'planner',
+            1,
+            1,
+            'dry-run',
+            'SHA-256',
+            'canonical-json',
+            ?,
+            '{}',
+            1,
+            0
+        )
+        """,
+        ("a" * 64,),
+    )
+    connection.commit()
 
 
 def _authorization() -> ClientAuthorizationPolicy:

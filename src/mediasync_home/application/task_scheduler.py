@@ -18,6 +18,7 @@ from mediasync_home.application.external_resources import (
     ExternalResourceState,
     ExternalResourceStateStore,
     ExternalResourceType,
+    validate_external_resource_claim,
 )
 from mediasync_home.application.trigger_occurrences import TriggerKind
 
@@ -98,6 +99,15 @@ class TaskSchedulerReconciliationRequest:
     executable_path: str
     limit: int
     after_schedule_id: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskSchedulerPendingResourceReconciliationRequest:
+    installation_id: str
+    executable_path: str
+    owner_instance_id: str
+    claim_token: str
+    claim_ttl_ms: int
 
 
 @dataclass(frozen=True)
@@ -512,6 +522,39 @@ def reconcile_claimed_task_scheduler_resource(
         completed=True,
         blocked=False,
         reason=plan.reason,
+    )
+
+
+def reconcile_next_pending_task_scheduler_resource(
+    request: TaskSchedulerPendingResourceReconciliationRequest,
+    *,
+    schedules: ScheduleStore,
+    registry: TaskSchedulerRegistryPort,
+    external_resources: ExternalResourceStateStore,
+) -> TaskSchedulerClaimedResourceReconciliation | None:
+    _non_empty_text(request.installation_id, "TASK_SCHEDULER_INSTALLATION_ID_REQUIRED")
+    _normalized_executable_path(request.executable_path)
+    validate_external_resource_claim(
+        resource_type=ExternalResourceType.TASK_SCHEDULER,
+        owner_instance_id=request.owner_instance_id,
+        claim_token=request.claim_token,
+        claim_ttl_ms=request.claim_ttl_ms,
+    )
+    claimed = external_resources.claim_next_pending_external_resource(
+        resource_type=ExternalResourceType.TASK_SCHEDULER,
+        owner_instance_id=request.owner_instance_id,
+        claim_token=request.claim_token,
+        claim_ttl_ms=request.claim_ttl_ms,
+    )
+    if claimed is None:
+        return None
+    return reconcile_claimed_task_scheduler_resource(
+        claimed,
+        installation_id=request.installation_id,
+        executable_path=request.executable_path,
+        schedules=schedules,
+        registry=registry,
+        external_resources=external_resources,
     )
 
 

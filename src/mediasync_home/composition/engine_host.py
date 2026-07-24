@@ -83,6 +83,15 @@ from mediasync_home.application.startup_reconciliation import (
     EngineHostStartupReconciliationRequest,
     reconcile_engine_host_after_startup,
 )
+from mediasync_home.application.task_scheduler import (
+    TaskSchedulerClaimedResourceReconciliation,
+    TaskSchedulerDesiredResourceReport,
+    TaskSchedulerPendingResourceReconciliationRequest,
+    TaskSchedulerReconciliationRequest,
+    TaskSchedulerRegistryPort,
+    reconcile_next_pending_task_scheduler_resource,
+    stage_task_scheduler_desired_resource_page,
+)
 from mediasync_home.composition._role_runner import Emit, run_role
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.domain.capabilities import MutationPermit
@@ -122,6 +131,7 @@ class EngineHostRuntime:
     service: EngineHostIpcService
     state_layout: StateStoreLayout | None = None
     startup_reconciliation: EngineHostStartupReconciliationReport | None = None
+    reconciler_instance_id: str | None = None
     run_executor_queue_store: RunExecutorQueueStore | None = None
     run_executor_lease_authority: EndpointLeaseAuthority | None = None
     run_executor_lease_registry: HeldRunTargetLeaseRegistry | None = None
@@ -133,6 +143,58 @@ class EngineHostRuntime:
     run_executor_process_instance_id: str | None = None
     catalog_connection: sqlite3.Connection | None = None
     recovery_connection: sqlite3.Connection | None = None
+
+    def task_scheduler_stage_desired_resource_page(
+        self,
+        *,
+        installation_id: str,
+        executable_path: str,
+        limit: int,
+        after_schedule_id: str | None = None,
+    ) -> TaskSchedulerDesiredResourceReport:
+        if (
+            self.service.schedule_store is None
+            or self.service.external_resource_state_store is None
+        ):
+            raise RuntimeError("TASK_SCHEDULER_RUNTIME_NOT_CONFIGURED")
+        return stage_task_scheduler_desired_resource_page(
+            TaskSchedulerReconciliationRequest(
+                installation_id=installation_id,
+                executable_path=executable_path,
+                limit=limit,
+                after_schedule_id=after_schedule_id,
+            ),
+            schedules=self.service.schedule_store,
+            external_resources=self.service.external_resource_state_store,
+        )
+
+    def task_scheduler_reconcile_next_pending_resource(
+        self,
+        *,
+        installation_id: str,
+        executable_path: str,
+        registry: TaskSchedulerRegistryPort,
+        claim_token: str | None = None,
+        claim_ttl_ms: int = 30_000,
+    ) -> TaskSchedulerClaimedResourceReconciliation | None:
+        if (
+            self.service.schedule_store is None
+            or self.service.external_resource_state_store is None
+            or self.reconciler_instance_id is None
+        ):
+            raise RuntimeError("TASK_SCHEDULER_RUNTIME_NOT_CONFIGURED")
+        return reconcile_next_pending_task_scheduler_resource(
+            TaskSchedulerPendingResourceReconciliationRequest(
+                installation_id=installation_id,
+                executable_path=executable_path,
+                owner_instance_id=self.reconciler_instance_id,
+                claim_token=claim_token or uuid4().hex,
+                claim_ttl_ms=claim_ttl_ms,
+            ),
+            schedules=self.service.schedule_store,
+            registry=registry,
+            external_resources=self.service.external_resource_state_store,
+        )
 
     def run_executor_preflight_pump(self, *, max_steps: int) -> RunExecutorPumpOutcome:
         if (
@@ -504,6 +566,7 @@ def build_engine_host_runtime(
         service=service,
         state_layout=layout,
         startup_reconciliation=startup_reconciliation,
+        reconciler_instance_id=reconciler_instance_id,
         run_executor_queue_store=runs,
         run_executor_lease_authority=run_executor_lease_authority,
         run_executor_lease_registry=run_executor_lease_registry,
