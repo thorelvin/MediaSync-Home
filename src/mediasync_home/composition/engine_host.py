@@ -51,6 +51,7 @@ from mediasync_home.application.run_executor import (
     MAX_RUN_EXECUTOR_PUMP_STEPS,
     RunExecutorExecutionStartStepOutcome,
     RunExecutorPumpOutcome,
+    RunExecutorPumpStopReason,
     RunExecutorQueueStore,
     execute_bounded_run_executor_preflight_pump,
     execute_one_run_target_execution_start_step,
@@ -405,12 +406,14 @@ class ExecutorMaintenanceLoop:
         *,
         runtime_factory: Callable[[], EngineHostRuntime],
         interval_ms: int,
+        max_interval_ms: int | None = None,
         max_steps: int,
         output: Emit,
         pipe_name: str,
     ) -> None:
         self._runtime_factory = runtime_factory
-        self._interval_seconds = interval_ms / 1000
+        self._base_interval_ms = interval_ms
+        self._max_interval_ms = max_interval_ms or interval_ms
         self._max_steps = max_steps
         self._output = output
         self._pipe_name = pipe_name
@@ -434,24 +437,32 @@ class ExecutorMaintenanceLoop:
 
     def _run(self) -> None:
         runtime: EngineHostRuntime | None = None
+        next_interval_ms = self._base_interval_ms
         try:
             runtime = self._runtime_factory()
-            while not self._stop_event.wait(self._interval_seconds):
+            while not self._stop_event.wait(next_interval_ms / 1000):
                 try:
                     outcome = runtime.run_executor_cycle(max_steps=self._max_steps)
                 except Exception as exc:
+                    next_interval_ms = self._backed_off_interval(next_interval_ms)
                     _emit_run_executor_cycle_failed_event(
                         output=self._output,
                         pipe_name=self._pipe_name,
                         cycle_trigger="INTERVAL",
                         error_type=type(exc).__name__,
+                        next_interval_ms=next_interval_ms,
                     )
                     continue
+                next_interval_ms = self._next_interval_after_outcome(
+                    current_interval_ms=next_interval_ms,
+                    outcome=outcome,
+                )
                 _emit_run_executor_cycle_event(
                     output=self._output,
                     pipe_name=self._pipe_name,
                     cycle_trigger="INTERVAL",
                     outcome=outcome,
+                    next_interval_ms=next_interval_ms,
                 )
         except Exception as exc:
             _emit_run_executor_cycle_failed_event(
@@ -459,10 +470,24 @@ class ExecutorMaintenanceLoop:
                 pipe_name=self._pipe_name,
                 cycle_trigger="INTERVAL",
                 error_type=type(exc).__name__,
+                next_interval_ms=None,
             )
         finally:
             if runtime is not None:
                 runtime.close()
+
+    def _next_interval_after_outcome(
+        self,
+        *,
+        current_interval_ms: int,
+        outcome: RunExecutorCyclePumpOutcome,
+    ) -> int:
+        if outcome.stopped_reason is RunExecutorPumpStopReason.IDLE:
+            return self._backed_off_interval(current_interval_ms)
+        return self._base_interval_ms
+
+    def _backed_off_interval(self, current_interval_ms: int) -> int:
+        return min(self._max_interval_ms, current_interval_ms * 2)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -490,6 +515,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--run-executor-cycle-interval-ms",
         type=_positive_int,
         help="run one bounded executor cycle on this interval while the host is alive",
+    )
+    parser.add_argument(
+        "--run-executor-cycle-max-interval-ms",
+        type=_positive_int,
+        default=60_000,
+        help="maximum backed-off interval for idle executor maintenance",
     )
     parser.add_argument("--state-root", type=Path, help="optional local preview state root")
     parser.add_argument("--host-mutex-name", help="optional local Engine Host singleton mutex")
@@ -561,6 +592,11 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
         raise RuntimeError("RUN_EXECUTOR_MAINTENANCE_REQUIRES_PIPE_MODE")
     if args.run_executor_cycle_interval_ms is not None and args.state_root is None:
         raise RuntimeError("RUN_EXECUTOR_MAINTENANCE_REQUIRES_STATE_ROOT")
+    if (
+        args.run_executor_cycle_interval_ms is not None
+        and args.run_executor_cycle_max_interval_ms < args.run_executor_cycle_interval_ms
+    ):
+        raise RuntimeError("RUN_EXECUTOR_MAINTENANCE_MAX_INTERVAL_TOO_SMALL")
     if not args.pipe_name:
         return run_role(ProcessRole.ENGINE_HOST, argv, emit=emit)
     if os.name != "nt":
@@ -628,6 +664,9 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                     "pipe_name": args.pipe_name,
                     "run_executor_cycle_after_request": args.run_executor_cycle_after_request,
                     "run_executor_cycle_interval_ms": args.run_executor_cycle_interval_ms,
+                    "run_executor_cycle_max_interval_ms": (
+                        args.run_executor_cycle_max_interval_ms
+                    ),
                     "run_executor_cycle_max_steps": args.run_executor_cycle_max_steps,
                     "serve_forever": args.serve_forever,
                     "serve_requests": args.serve_requests,
@@ -957,6 +996,7 @@ def _build_executor_maintenance_loop(
     return ExecutorMaintenanceLoop(
         runtime_factory=runtime_factory,
         interval_ms=args.run_executor_cycle_interval_ms,
+        max_interval_ms=args.run_executor_cycle_max_interval_ms,
         max_steps=args.run_executor_cycle_max_steps,
         output=output,
         pipe_name=args.pipe_name,
@@ -969,12 +1009,14 @@ def _emit_run_executor_cycle_event(
     pipe_name: str,
     cycle_trigger: str,
     outcome: RunExecutorCyclePumpOutcome,
+    next_interval_ms: int | None = None,
 ) -> None:
     output(
         json.dumps(
             {
                 "cycle_trigger": cycle_trigger,
                 "event": "ENGINE_HOST_RUN_EXECUTOR_CYCLE",
+                "next_interval_ms": next_interval_ms,
                 "pipe_name": pipe_name,
                 "run_executor_cycle": _run_executor_cycle_pump_payload(outcome),
             },
@@ -990,6 +1032,7 @@ def _emit_run_executor_cycle_failed_event(
     pipe_name: str,
     cycle_trigger: str,
     error_type: str,
+    next_interval_ms: int | None,
 ) -> None:
     output(
         json.dumps(
@@ -997,6 +1040,7 @@ def _emit_run_executor_cycle_failed_event(
                 "cycle_trigger": cycle_trigger,
                 "error_type": error_type,
                 "event": "ENGINE_HOST_RUN_EXECUTOR_CYCLE_FAILED",
+                "next_interval_ms": next_interval_ms,
                 "pipe_name": pipe_name,
             },
             sort_keys=True,

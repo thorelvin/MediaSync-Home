@@ -110,6 +110,8 @@ def test_engine_host_parser_accepts_explicit_long_running_pipe_mode() -> None:
             "7",
             "--run-executor-cycle-interval-ms",
             "50",
+            "--run-executor-cycle-max-interval-ms",
+            "400",
         ]
     )
 
@@ -119,6 +121,7 @@ def test_engine_host_parser_accepts_explicit_long_running_pipe_mode() -> None:
     assert args.run_executor_cycle_after_request is True
     assert args.run_executor_cycle_max_steps == 7
     assert args.run_executor_cycle_interval_ms == 50
+    assert args.run_executor_cycle_max_interval_ms == 400
 
 
 def test_executor_maintenance_loop_runs_interval_cycle_and_closes_runtime() -> None:
@@ -128,6 +131,7 @@ def test_executor_maintenance_loop_runs_interval_cycle_and_closes_runtime() -> N
     loop = ExecutorMaintenanceLoop(
         runtime_factory=lambda: runtime,
         interval_ms=1,
+        max_interval_ms=4,
         max_steps=4,
         output=lines.append,
         pipe_name="pipe-a",
@@ -142,7 +146,38 @@ def test_executor_maintenance_loop_runs_interval_cycle_and_closes_runtime() -> N
     assert runtime.closed is True
     assert events[0]["event"] == "ENGINE_HOST_RUN_EXECUTOR_CYCLE"
     assert events[0]["cycle_trigger"] == "INTERVAL"
+    assert events[0]["next_interval_ms"] == 2
     assert events[0]["run_executor_cycle"]["stopped_reason"] == "IDLE"
+
+
+def test_executor_maintenance_loop_resets_interval_after_non_idle_work() -> None:
+    runtime = _ScriptedRuntime(
+        (
+            RunExecutorPumpStopReason.IDLE,
+            RunExecutorPumpStopReason.STEP_LIMIT_REACHED,
+        )
+    )
+    lines: list[str] = []
+
+    loop = ExecutorMaintenanceLoop(
+        runtime_factory=lambda: runtime,
+        interval_ms=1,
+        max_interval_ms=4,
+        max_steps=4,
+        output=lines.append,
+        pipe_name="pipe-a",
+    )
+
+    loop.start()
+    _wait_until(lambda: len(runtime.cycle_max_steps) >= 2)
+    loop.stop()
+
+    events = [json.loads(line) for line in lines]
+    assert [event["next_interval_ms"] for event in events[:2]] == [2, 1]
+    assert [event["run_executor_cycle"]["stopped_reason"] for event in events[:2]] == [
+        "IDLE",
+        "STEP_LIMIT_REACHED",
+    ]
 
 
 def test_executor_maintenance_loop_reports_sanitized_runtime_failure() -> None:
@@ -151,6 +186,7 @@ def test_executor_maintenance_loop_reports_sanitized_runtime_failure() -> None:
     loop = ExecutorMaintenanceLoop(
         runtime_factory=lambda: (_ for _ in ()).throw(RuntimeError("detail")),
         interval_ms=1,
+        max_interval_ms=4,
         max_steps=4,
         output=lines.append,
         pipe_name="pipe-a",
@@ -165,6 +201,7 @@ def test_executor_maintenance_loop_reports_sanitized_runtime_failure() -> None:
             "cycle_trigger": "INTERVAL",
             "error_type": "RuntimeError",
             "event": "ENGINE_HOST_RUN_EXECUTOR_CYCLE_FAILED",
+            "next_interval_ms": None,
             "pipe_name": "pipe-a",
         }
     ]
@@ -698,6 +735,40 @@ class _FakeRuntime:
             last_step=step,
             validation_codes=(),
             next_action="No runnable work.",
+        )
+
+
+class _ScriptedRuntime(_FakeRuntime):
+    def __init__(self, stopped_reasons: tuple[RunExecutorPumpStopReason, ...]) -> None:
+        super().__init__()
+        self._stopped_reasons = list(stopped_reasons)
+        self._last_stopped_reason = stopped_reasons[-1]
+
+    def run_executor_cycle(self, *, max_steps: int) -> RunExecutorCyclePumpOutcome:
+        self.cycle_max_steps.append(max_steps)
+        stopped_reason = (
+            self._stopped_reasons.pop(0)
+            if self._stopped_reasons
+            else self._last_stopped_reason
+        )
+        idle = stopped_reason is RunExecutorPumpStopReason.IDLE
+        step = RunExecutorCycleOutcome(
+            action=RunExecutorCycleAction.IDLE
+            if idle
+            else RunExecutorCycleAction.PREFLIGHT_LEASE_ACQUIRED,
+            advanced=not idle,
+            idle=idle,
+            run_id=None if idle else "run-a",
+            run_target_id=None if idle else "run-a-target-0000",
+            validation_codes=(),
+            next_action="No runnable work." if idle else "Continue executor work.",
+        )
+        return RunExecutorCyclePumpOutcome(
+            steps_attempted=1,
+            stopped_reason=stopped_reason,
+            last_step=step,
+            validation_codes=(),
+            next_action=step.next_action,
         )
 
 

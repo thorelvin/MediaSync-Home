@@ -151,6 +151,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=5000,
         help="persistent host executor maintenance interval",
     )
+    parser.add_argument(
+        "--run-executor-cycle-max-interval-ms",
+        type=_positive_int,
+        default=60_000,
+        help="maximum backed-off interval for persistent host executor maintenance",
+    )
     parser.add_argument("--timeout-seconds", type=_positive_float, default=10.0)
     return parser
 
@@ -175,6 +181,7 @@ def build_local_preview_host_run(
     reconcile_task_scheduler_resources: bool = False,
     task_scheduler_executable_path: Path | None = None,
     run_executor_cycle_interval_ms: int | None = None,
+    run_executor_cycle_max_interval_ms: int | None = None,
 ) -> LocalPreviewHostRun:
     if host_descriptor is not None:
         if pipe_name is not None and pipe_name != host_descriptor.pipe_name:
@@ -206,6 +213,13 @@ def build_local_preview_host_run(
                     str(run_executor_cycle_interval_ms),
                 )
             )
+            if run_executor_cycle_max_interval_ms is not None:
+                engine_args.extend(
+                    (
+                        "--run-executor-cycle-max-interval-ms",
+                        str(run_executor_cycle_max_interval_ms),
+                    )
+                )
     if reconcile_task_scheduler_resources:
         if state_root is None:
             raise ValueError("TASK_SCHEDULER_RECONCILIATION_REQUIRES_STATE_ROOT")
@@ -485,6 +499,7 @@ def _run_local_preview_host_from_args(
         reconcile_task_scheduler_resources=args.reconcile_task_scheduler_resources,
         task_scheduler_executable_path=args.task_scheduler_executable_path,
         run_executor_cycle_interval_ms=args.run_executor_cycle_interval_ms,
+        run_executor_cycle_max_interval_ms=args.run_executor_cycle_max_interval_ms,
     )
     from mediasync_home.composition.engine_host import run_engine_host
 
