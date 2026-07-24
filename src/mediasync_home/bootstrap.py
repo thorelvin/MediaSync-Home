@@ -23,7 +23,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--role",
         choices=[role.value for role in ProcessRole],
-        default=ProcessRole.LAUNCHER.value,
         help="process role to start; defaults to launcher",
     )
     return parser
@@ -31,5 +30,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None, *, emit: Emit | None = None) -> int:
     args, role_args = build_parser().parse_known_args(argv)
-    role = ProcessRole(args.role)
+    role = (
+        ProcessRole(args.role)
+        if args.role is not None
+        else _infer_protocol_entrypoint_role(role_args)
+    )
     return ROLE_ENTRYPOINTS[role](role_args, emit=emit)
+
+
+def _infer_protocol_entrypoint_role(role_args: Sequence[str]) -> ProcessRole:
+    if "--enqueue-trigger-occurrence" in role_args:
+        return ProcessRole.TRIGGER_CLIENT
+    return ProcessRole.LAUNCHER

@@ -122,6 +122,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--installation-id", default="local-dev")
     parser.add_argument("--pipe-name")
     parser.add_argument("--state-root", type=Path)
+    parser.add_argument(
+        "--reconcile-task-scheduler-resources",
+        action="store_true",
+        help="ask the bounded Engine Host to reconcile Task Scheduler desired state at startup",
+    )
+    parser.add_argument(
+        "--task-scheduler-executable-path",
+        type=Path,
+        help="absolute local unsigned app executable registered in Task Scheduler actions",
+    )
     parser.add_argument("--timeout-seconds", type=_positive_float, default=10.0)
     return parser
 
@@ -142,6 +152,8 @@ def build_local_preview_status_launch(
     state_root: Path | None = None,
     host_descriptor: LocalEngineHostDescriptor | None = None,
     executable: Path | None = None,
+    reconcile_task_scheduler_resources: bool = False,
+    task_scheduler_executable_path: Path | None = None,
     environment: dict[str, str] | None = None,
 ) -> LocalPreviewStatusLaunch:
     if host_descriptor is not None:
@@ -167,6 +179,18 @@ def build_local_preview_status_launch(
         engine_args.append("--publish-host-locator")
     if state_root is not None:
         engine_args.extend(("--state-root", str(state_root.resolve())))
+    if reconcile_task_scheduler_resources:
+        if state_root is None:
+            raise ValueError("TASK_SCHEDULER_RECONCILIATION_REQUIRES_STATE_ROOT")
+        if task_scheduler_executable_path is None:
+            raise ValueError("TASK_SCHEDULER_EXECUTABLE_PATH_REQUIRED")
+        engine_args.extend(
+            (
+                "--reconcile-task-scheduler-resources",
+                "--task-scheduler-executable-path",
+                str(task_scheduler_executable_path.resolve()),
+            )
+        )
     engine_host = build_internal_role_launch_plan(
         role=ProcessRole.ENGINE_HOST,
         executable=executable or Path(sys.executable).resolve(),
@@ -335,6 +359,8 @@ def _run_local_preview_status_from_args(args: argparse.Namespace) -> LocalPrevie
         pipe_name=pipe_name,
         state_root=state_root,
         host_descriptor=host_descriptor,
+        reconcile_task_scheduler_resources=args.reconcile_task_scheduler_resources,
+        task_scheduler_executable_path=args.task_scheduler_executable_path,
         environment=dict(os.environ),
     )
     return run_local_preview_status(

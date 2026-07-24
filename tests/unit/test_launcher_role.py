@@ -71,6 +71,61 @@ def test_local_preview_status_launch_builds_safe_engine_and_gui_plans(tmp_path: 
     assert launch.gui_status.requires_elevation is False
 
 
+def test_local_preview_status_launch_can_enable_task_scheduler_startup_pump(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    task_executable = tmp_path / "MediaSyncHome.exe"
+
+    launch = build_local_preview_status_launch(
+        pipe_name="pipe-a",
+        state_root=state_root,
+        reconcile_task_scheduler_resources=True,
+        task_scheduler_executable_path=task_executable,
+        environment={"PYTHONUTF8": "1"},
+    )
+
+    assert launch.engine_host.command_line_vector() == (
+        str(Path(sys.executable).resolve()),
+        str(Path(__file__).resolve().parents[2] / "scripts/run_role.py"),
+        "--role",
+        "engine-host",
+        "--pipe-name",
+        "pipe-a",
+        "--serve-requests",
+        "2",
+        "--state-root",
+        str(state_root.resolve()),
+        "--reconcile-task-scheduler-resources",
+        "--task-scheduler-executable-path",
+        str(task_executable.resolve()),
+    )
+
+
+def test_local_preview_status_launch_rejects_scheduler_reconcile_without_state_root(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="TASK_SCHEDULER_RECONCILIATION_REQUIRES_STATE_ROOT"):
+        build_local_preview_status_launch(
+            pipe_name="pipe-a",
+            reconcile_task_scheduler_resources=True,
+            task_scheduler_executable_path=tmp_path / "MediaSyncHome.exe",
+            environment={"PYTHONUTF8": "1"},
+        )
+
+
+def test_local_preview_status_launch_rejects_scheduler_reconcile_without_executable(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="TASK_SCHEDULER_EXECUTABLE_PATH_REQUIRED"):
+        build_local_preview_status_launch(
+            pipe_name="pipe-a",
+            state_root=tmp_path / "state",
+            reconcile_task_scheduler_resources=True,
+            environment={"PYTHONUTF8": "1"},
+        )
+
+
 def test_local_preview_status_launch_uses_host_locator_descriptor(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
     descriptor = build_local_engine_host_descriptor(

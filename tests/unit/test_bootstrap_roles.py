@@ -38,3 +38,69 @@ def test_bootstrap_defaults_to_launcher_role() -> None:
 
     assert exit_code == 0
     assert json.loads(output[0])["role"] == ProcessRole.LAUNCHER.value
+
+
+def test_bootstrap_protocol_trigger_invocation_routes_to_trigger_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_trigger_client_main(argv: object, *, emit: object | None = None) -> int:
+        captured["argv"] = argv
+        captured["emit"] = emit
+        return 17
+
+    monkeypatch.setitem(
+        bootstrap.ROLE_ENTRYPOINTS,
+        ProcessRole.TRIGGER_CLIENT,
+        fake_trigger_client_main,
+    )
+    output: list[str] = []
+
+    exit_code = bootstrap.main(
+        [
+            "--enqueue-trigger-occurrence",
+            "--schedule-id",
+            "schedule-a",
+            "--schedule-revision-hash",
+            "a" * 64,
+        ],
+        emit=output.append,
+    )
+
+    assert exit_code == 17
+    assert captured == {
+        "argv": [
+            "--enqueue-trigger-occurrence",
+            "--schedule-id",
+            "schedule-a",
+            "--schedule-revision-hash",
+            "a" * 64,
+        ],
+        "emit": output.append,
+    }
+
+
+def test_bootstrap_explicit_role_wins_over_protocol_trigger_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_launcher_main(argv: object, *, emit: object | None = None) -> int:
+        captured["argv"] = argv
+        captured["emit"] = emit
+        return 19
+
+    monkeypatch.setitem(bootstrap.ROLE_ENTRYPOINTS, ProcessRole.LAUNCHER, fake_launcher_main)
+    output: list[str] = []
+
+    exit_code = bootstrap.main(
+        ["--role", "launcher", "--enqueue-trigger-occurrence"],
+        emit=output.append,
+    )
+
+    assert exit_code == 19
+    assert captured == {
+        "argv": ["--enqueue-trigger-occurrence"],
+        "emit": output.append,
+    }
