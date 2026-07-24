@@ -27,6 +27,9 @@ from mediasync_home.application.run_executor import (
 )
 from mediasync_home.application.run_final_commits import commit_next_run_target_verified_artifact
 from mediasync_home.application.run_intent_segments import publish_run_target_recovery_intent_segment
+from mediasync_home.application.run_operation_lease_rebind import (
+    rebind_next_run_target_recovery_operation_lease,
+)
 from mediasync_home.application.run_operation_planning import plan_run_target_recovery_operations
 from mediasync_home.application.run_staging import (
     RunTargetStagingPort,
@@ -51,6 +54,7 @@ class RunExecutorCycleAction(str, Enum):
     CATALOG_HANDOFF_RECORDED = "CATALOG_HANDOFF_RECORDED"
     TARGET_COMPLETED = "TARGET_COMPLETED"
     EXECUTING_LEASE_REACQUIRED = "EXECUTING_LEASE_REACQUIRED"
+    OPERATION_LEASE_REBOUND = "OPERATION_LEASE_REBOUND"
     STAGING_ADVANCED = "STAGING_ADVANCED"
     WAITING_FOR_STAGING = "WAITING_FOR_STAGING"
     IDLE = "IDLE"
@@ -346,6 +350,27 @@ def _advance_retained_target(
             run_target_id=final_commit_outcome.run_target_id,
             validation_codes=final_commit_outcome.validation_codes,
             next_action=final_commit_outcome.next_action,
+        )
+
+    rebind_outcome = rebind_next_run_target_recovery_operation_lease(
+        permit=permit,
+        recovery_operations=recovery_operations,
+        process_instance_id=process_instance_id,
+        max_operations=target.planned_operations + 1,
+    )
+    if not rebind_outcome.idle:
+        if rebind_outcome.rebound:
+            return _advanced(
+                action=RunExecutorCycleAction.OPERATION_LEASE_REBOUND,
+                run_id=rebind_outcome.run_id,
+                run_target_id=rebind_outcome.run_target_id,
+                next_action=rebind_outcome.next_action,
+            )
+        return _blocked(
+            run_id=rebind_outcome.run_id,
+            run_target_id=rebind_outcome.run_target_id,
+            validation_codes=rebind_outcome.validation_codes,
+            next_action=rebind_outcome.next_action,
         )
 
     if _has_phase(

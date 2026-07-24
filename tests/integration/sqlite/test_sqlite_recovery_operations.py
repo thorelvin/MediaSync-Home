@@ -140,6 +140,54 @@ def test_sqlite_recovery_operation_store_persists_transition_metadata(
         connection.close()
 
 
+def test_sqlite_recovery_operation_store_rebinds_pre_commit_operation_lease(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_recovery_connection(tmp_path)
+    try:
+        old_token = _register_resource_lease(connection)
+        store = SqliteRecoveryOperationStore(connection)
+        store.record_planned_operation(_operation(), process_instance_id="host-a")
+        SqliteResourceLeaseStore(connection).release_resource_lease(lease_id="lease-a")
+        new_token = _register_resource_lease(connection, lease_id="lease-b")
+
+        updated = store.record_operation_lease_rebound(
+            run_id="run-a",
+            operation_id="operation-a",
+            expected_phase=RecoveryOperationPhase.PLANNED,
+            expected_lease_id="lease-a",
+            expected_ownership_epoch=1,
+            expected_fencing_token=old_token,
+            lease_id="lease-b",
+            owner_installation_id="owner-a",
+            ownership_epoch=1,
+            fencing_token=new_token,
+            process_instance_id="host-b",
+            payload={"reason": "restart"},
+        )
+
+        assert updated is not None
+        assert updated.phase is RecoveryOperationPhase.PLANNED
+        assert updated.lease_id == "lease-b"
+        assert updated.fencing_token == new_token
+        assert store.load_operation(run_id="run-a", operation_id="operation-a") == updated
+        rows = connection.execute(
+            """
+            SELECT run_sequence, from_phase, to_phase, payload_json
+            FROM recovery_events
+            WHERE run_id = ?
+            ORDER BY run_sequence
+            """,
+            ("run-a",),
+        ).fetchall()
+        assert rows == [
+            (0, None, "PLANNED", "{}"),
+            (1, "PLANNED", "PLANNED", '{"reason":"restart"}'),
+        ]
+    finally:
+        connection.close()
+
+
 def test_sqlite_recovery_operation_store_records_commit_intent_with_matching_segment(
     tmp_path: Path,
 ) -> None:
@@ -164,6 +212,44 @@ def test_sqlite_recovery_operation_store_records_commit_intent_with_matching_seg
         assert updated.phase is RecoveryOperationPhase.COMMIT_INTENT_RECORDED
         assert updated.intent_segment_id == "segment-a"
         assert updated.intent_ordinal == 0
+    finally:
+        connection.close()
+
+
+def test_sqlite_recovery_operation_store_rejects_commit_intent_lease_rebind(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _register_resource_lease(connection)
+        SqliteRecoveryIntentSegmentStore(connection).publish_intent_segment(_segment())
+        store = SqliteRecoveryOperationStore(connection)
+        _record_staging_verified_operation(store)
+        operation = store.record_operation_phase_transition(
+            run_id="run-a",
+            operation_id="operation-a",
+            expected_phase=RecoveryOperationPhase.STAGING_VERIFIED,
+            next_phase=RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
+            process_instance_id="host-a",
+            intent_segment_id="segment-a",
+            intent_ordinal=0,
+        )
+        assert operation is not None
+
+        with pytest.raises(SqliteRecoveryOperationStoreError, match="LEASE_REBIND_PHASE_UNSUPPORTED"):
+            store.record_operation_lease_rebound(
+                run_id="run-a",
+                operation_id="operation-a",
+                expected_phase=RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
+                expected_lease_id="lease-a",
+                expected_ownership_epoch=1,
+                expected_fencing_token=1,
+                lease_id="lease-b",
+                owner_installation_id="owner-a",
+                ownership_epoch=1,
+                fencing_token=2,
+                process_instance_id="host-b",
+            )
     finally:
         connection.close()
 
@@ -282,9 +368,9 @@ def _register_resource_lease(
     *,
     lease_id: str = "lease-a",
     resource_key: str = "endpoint:target-a",
-) -> None:
+) -> int:
     endpoint_id = resource_key.removeprefix("endpoint:")
-    assert SqliteResourceLeaseStore(connection).register_acquired_resource_lease(
+    return SqliteResourceLeaseStore(connection).register_acquired_resource_lease(
         lease_id=lease_id,
         resource_key=resource_key,
         owner_instance_id="owner-a",
@@ -295,7 +381,7 @@ def _register_resource_lease(
         endpoint_generation=None,
         lease_mode="EXCLUSIVE",
         os_lock_kind="LOCAL_OS_HANDLE",
-    ) == 1
+    )
 
 
 def _record_staging_verified_operation(

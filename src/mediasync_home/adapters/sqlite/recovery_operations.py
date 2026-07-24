@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import Any, Mapping
 
 from mediasync_home.application.recovery_operations import (
+    PRE_COMMIT_LEASE_REBIND_PHASES,
     RecoveryOperation,
     RecoveryOperationMetadata,
     RecoveryOperationPhase,
@@ -177,6 +178,117 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                 operation_id=operation_id,
                 from_phase=expected_phase,
                 to_phase=next_phase,
+                process_instance_id=process_instance_id,
+                payload=payload,
+            )
+            loaded = self.load_operation(run_id=run_id, operation_id=operation_id)
+            if loaded is None:
+                raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return loaded
+        except SqliteRecoveryOperationStoreError:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        except sqlite3.IntegrityError as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_PERSISTENCE_CONFLICT") from exc
+        except sqlite3.Error as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_PERSISTENCE_FAILED") from exc
+
+    def record_operation_lease_rebound(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        expected_phase: RecoveryOperationPhase,
+        expected_lease_id: str,
+        expected_ownership_epoch: int,
+        expected_fencing_token: int,
+        lease_id: str,
+        owner_installation_id: str,
+        ownership_epoch: int,
+        fencing_token: int,
+        process_instance_id: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> RecoveryOperation | None:
+        _validate_process_instance_id(process_instance_id)
+        if expected_phase not in PRE_COMMIT_LEASE_REBIND_PHASES:
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_LEASE_REBIND_PHASE_UNSUPPORTED"
+            )
+
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            operation = self.load_operation(run_id=run_id, operation_id=operation_id)
+            if operation is None or operation.phase is not expected_phase:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            if (
+                operation.lease_id != expected_lease_id
+                or operation.ownership_epoch != expected_ownership_epoch
+                or operation.fencing_token != expected_fencing_token
+            ):
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+
+            updated = replace(
+                operation,
+                owner_installation_id=owner_installation_id,
+                ownership_epoch=ownership_epoch,
+                lease_id=lease_id,
+                fencing_token=fencing_token,
+            )
+            validate_recovery_operation(updated)
+            self._require_active_matching_lease(updated)
+
+            cursor = self._connection.execute(
+                """
+                UPDATE recovery_operations
+                SET
+                    owner_installation_id = ?,
+                    ownership_epoch = ?,
+                    lease_id = ?,
+                    fencing_token = ?,
+                    updated_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE run_id = ?
+                    AND operation_id = ?
+                    AND phase = ?
+                    AND lease_id = ?
+                    AND ownership_epoch = ?
+                    AND fencing_token = ?
+                """,
+                (
+                    updated.owner_installation_id,
+                    updated.ownership_epoch,
+                    updated.lease_id,
+                    updated.fencing_token,
+                    run_id,
+                    operation_id,
+                    expected_phase.value,
+                    expected_lease_id,
+                    expected_ownership_epoch,
+                    expected_fencing_token,
+                ),
+            )
+            if cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+
+            self._append_event(
+                run_id=run_id,
+                operation_id=operation_id,
+                from_phase=expected_phase,
+                to_phase=expected_phase,
                 process_instance_id=process_instance_id,
                 payload=payload,
             )

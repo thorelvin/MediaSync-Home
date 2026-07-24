@@ -133,6 +133,23 @@ class RecoveryOperationStore(Protocol):
         operation_metadata: RecoveryOperationMetadata | None = None,
     ) -> RecoveryOperation | None: ...
 
+    def record_operation_lease_rebound(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        expected_phase: RecoveryOperationPhase,
+        expected_lease_id: str,
+        expected_ownership_epoch: int,
+        expected_fencing_token: int,
+        lease_id: str,
+        owner_installation_id: str,
+        ownership_epoch: int,
+        fencing_token: int,
+        process_instance_id: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> RecoveryOperation | None: ...
+
     def load_operation(self, *, run_id: str, operation_id: str) -> RecoveryOperation | None: ...
 
 
@@ -185,6 +202,16 @@ PHASES_REQUIRING_CATALOG_HANDOFF = {
     RecoveryOperationPhase.CATALOG_RECORDED,
     RecoveryOperationPhase.CLEANED,
 }
+PRE_COMMIT_LEASE_REBIND_PHASES = (
+    RecoveryOperationPhase.PLANNED,
+    RecoveryOperationPhase.SOURCE_VALIDATED,
+    RecoveryOperationPhase.SOURCE_STABILITY_BOUND,
+    RecoveryOperationPhase.TARGET_PRECONDITION_VALIDATED,
+    RecoveryOperationPhase.STAGING_ALLOCATED,
+    RecoveryOperationPhase.TRANSFERRED,
+    RecoveryOperationPhase.STAGING_DURABLE,
+    RecoveryOperationPhase.STAGING_VERIFIED,
+)
 
 
 def planned_recovery_operation(

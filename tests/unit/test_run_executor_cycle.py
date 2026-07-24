@@ -209,6 +209,43 @@ def test_executor_cycle_reacquires_executing_target_after_registry_loss_before_p
     assert operation.fencing_token == 43
 
 
+def test_executor_cycle_rebinds_pre_commit_operation_after_reacquired_executing_lease() -> None:
+    plan = _sealed_plan()
+    runs = _InMemoryRunStore(
+        _run(
+            state=RunState.EXECUTING,
+            plan=plan,
+            target_state=RunTargetState.EXECUTING,
+        )
+    )
+    lease = _FakeLiveLease("lease-b", fencing_token=43)
+    registry = HeldRunTargetLeaseRegistry()
+    recovery_operations = _FakeRecoveryOperationStore((_planned_operation(),))
+
+    outcome = execute_bounded_run_executor_cycle(
+        runs=runs,
+        leases=_FakeLeaseAuthority(lease),
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=recovery_operations,
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        process_instance_id="host-a",
+        max_steps=2,
+    )
+
+    operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    assert outcome.steps_attempted == 2
+    assert outcome.stopped_reason is RunExecutorPumpStopReason.STEP_LIMIT_REACHED
+    assert outcome.last_step is not None
+    assert outcome.last_step.action is RunExecutorCycleAction.OPERATION_LEASE_REBOUND
+    assert outcome.validation_codes == ()
+    assert operation is not None
+    assert operation.phase is RecoveryOperationPhase.PLANNED
+    assert operation.lease_id == "lease-b"
+    assert operation.fencing_token == 43
+
+
 def test_executor_cycle_completes_catalog_recorded_target_and_releases_lease() -> None:
     plan = _sealed_plan()
     runs = _InMemoryRunStore(_run(state=RunState.EXECUTING, plan=plan, target_state=RunTargetState.EXECUTING))
@@ -518,6 +555,41 @@ class _FakeRecoveryOperationStore(RunExecutorCycleRecoveryOperationStore):
         self.operations[(run_id, operation_id)] = updated
         return updated
 
+    def record_operation_lease_rebound(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        expected_phase: RecoveryOperationPhase,
+        expected_lease_id: str,
+        expected_ownership_epoch: int,
+        expected_fencing_token: int,
+        lease_id: str,
+        owner_installation_id: str,
+        ownership_epoch: int,
+        fencing_token: int,
+        process_instance_id: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> RecoveryOperation | None:
+        operation = self.operations.get((run_id, operation_id))
+        if (
+            operation is None
+            or operation.phase is not expected_phase
+            or operation.lease_id != expected_lease_id
+            or operation.ownership_epoch != expected_ownership_epoch
+            or operation.fencing_token != expected_fencing_token
+        ):
+            return None
+        updated = replace(
+            operation,
+            owner_installation_id=owner_installation_id,
+            ownership_epoch=ownership_epoch,
+            lease_id=lease_id,
+            fencing_token=fencing_token,
+        )
+        self.operations[(run_id, operation_id)] = updated
+        return updated
+
     def load_operation(self, *, run_id: str, operation_id: str) -> RecoveryOperation | None:
         return self.operations.get((run_id, operation_id))
 
@@ -695,21 +767,7 @@ def _target(*, state: RunTargetState) -> StartedRunTarget:
 
 def _operation() -> RecoveryOperation:
     return replace(
-        planned_recovery_operation(
-            run_id="run-a",
-            run_target_id="run-a-target-0000",
-            operation_id="op-a",
-            target_endpoint_id="target-a",
-            target_endpoint_revision_id="target-rev-a",
-            endpoint_generation=1,
-            owner_installation_id="owner-a",
-            ownership_epoch=1,
-            lease_id="lease-a",
-            lease_resource_key="endpoint:target-a",
-            fencing_token=42,
-            final_relative_path="Pictures/A.jpg",
-            target_precondition_kind=RecoveryTargetPreconditionKind.ABSENT,
-        ),
+        _planned_operation(),
         phase=RecoveryOperationPhase.CATALOG_RECORDED,
         staging_object_id="op-a",
         intent_segment_id="segment-a",
@@ -718,6 +776,23 @@ def _operation() -> RecoveryOperation:
         expected_final_fingerprint_json='{"byte_count":128,"content_hash":"' + ("a" * 64) + '"}',
     )
 
+
+def _planned_operation() -> RecoveryOperation:
+    return planned_recovery_operation(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+        operation_id="op-a",
+        target_endpoint_id="target-a",
+        target_endpoint_revision_id="target-rev-a",
+        endpoint_generation=1,
+        owner_installation_id="owner-a",
+        ownership_epoch=1,
+        lease_id="lease-a",
+        lease_resource_key="endpoint:target-a",
+        fencing_token=42,
+        final_relative_path="Pictures/A.jpg",
+        target_precondition_kind=RecoveryTargetPreconditionKind.ABSENT,
+    )
 
 def _sealed_plan() -> SealedPlan:
     return seal_plan(
