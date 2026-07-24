@@ -245,32 +245,32 @@ def test_engine_host_runtime_stages_and_reconciles_task_scheduler_resources(
         _insert_task_scheduler_plan_parent_rows(runtime.catalog_connection)
         runtime.service.schedule_store.save_schedule(schedule)
 
-        stage_report = runtime.task_scheduler_stage_desired_resource_page(
-            installation_id="install-a",
-            executable_path=TASK_SCHEDULER_EXECUTABLE,
-            limit=10,
-        )
         definition = build_same_user_task_scheduler_definition(
             schedule,
             installation_id="install-a",
             executable_path=TASK_SCHEDULER_EXECUTABLE,
         )
-        result = runtime.task_scheduler_reconcile_next_pending_resource(
+        report = runtime.task_scheduler_reconcile_resources_bounded(
             installation_id="install-a",
             executable_path=TASK_SCHEDULER_EXECUTABLE,
             registry=_TaskSchedulerRegistry(_observed_task_scheduler_definition(definition)),
-            claim_token="claim-a",
+            schedule_page_limit=10,
+            max_schedule_pages=1,
+            max_claims=2,
+            claim_token_prefix="pump-a",
         )
         stored_resource = runtime.service.external_resource_state_store.load_external_resource_state(
             resource_type=ExternalResourceType.TASK_SCHEDULER,
             resource_id=schedule.schedule_id,
         )
 
-        assert stage_report.scanned == 1
-        assert stage_report.staged == 1
-        assert result is not None
-        assert result.action is TaskSchedulerReconciliationAction.IN_SYNC
-        assert result.completed is True
+        assert report.schedules_scanned == 1
+        assert report.resources_staged == 1
+        assert report.resources_reconciled == 1
+        assert report.claims_attempted == 2
+        assert report.claim_idle is True
+        assert report.claim_findings[0].action is TaskSchedulerReconciliationAction.IN_SYNC
+        assert report.claim_findings[0].completed is True
         assert stored_resource is not None
         assert stored_resource.state is ExternalResourceState.IN_SYNC
         assert stored_resource.observed_generation == schedule.definition_generation

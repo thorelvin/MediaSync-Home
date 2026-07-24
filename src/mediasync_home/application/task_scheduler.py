@@ -25,6 +25,8 @@ from mediasync_home.application.trigger_occurrences import TriggerKind
 
 TASK_SCHEDULER_HASH_PLACEHOLDER = "<TASK_DEFINITION_HASH>"
 TASK_SCHEDULER_SCHEMA_VERSION = 1
+MAX_TASK_SCHEDULER_RECONCILIATION_PUMP_PAGES = 100
+MAX_TASK_SCHEDULER_RECONCILIATION_PUMP_CLAIMS = 500
 
 
 class TaskSchedulerDefinitionViolation(ValueError):
@@ -111,6 +113,19 @@ class TaskSchedulerPendingResourceReconciliationRequest:
 
 
 @dataclass(frozen=True)
+class TaskSchedulerResourcePumpRequest:
+    installation_id: str
+    executable_path: str
+    owner_instance_id: str
+    claim_token_prefix: str
+    claim_ttl_ms: int
+    schedule_page_limit: int
+    max_schedule_pages: int
+    max_claims: int
+    after_schedule_id: str | None = None
+
+
+@dataclass(frozen=True)
 class TaskSchedulerReconciliationFinding:
     schedule_id: str
     action: TaskSchedulerReconciliationAction
@@ -153,6 +168,24 @@ class TaskSchedulerClaimedResourceReconciliation:
     completed: bool
     blocked: bool
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskSchedulerResourcePumpReport:
+    schedule_pages_attempted: int
+    schedules_scanned: int
+    resources_staged: int
+    stage_blocked: int
+    stage_completed: bool
+    stage_next_cursor: str | None
+    claims_attempted: int
+    resources_reconciled: int
+    resources_applied: int
+    resources_completed: int
+    resources_blocked: int
+    claim_idle: bool
+    stage_findings: tuple[TaskSchedulerDesiredResourceFinding, ...]
+    claim_findings: tuple[TaskSchedulerClaimedResourceReconciliation, ...]
 
 
 class TaskSchedulerRegistryPort(Protocol):
@@ -558,6 +591,82 @@ def reconcile_next_pending_task_scheduler_resource(
     )
 
 
+def reconcile_task_scheduler_resources_bounded(
+    request: TaskSchedulerResourcePumpRequest,
+    *,
+    schedules: ScheduleStore,
+    registry: TaskSchedulerRegistryPort,
+    external_resources: ExternalResourceStateStore,
+) -> TaskSchedulerResourcePumpReport:
+    _validate_task_scheduler_resource_pump_request(request)
+    cursor = request.after_schedule_id
+    stage_findings: list[TaskSchedulerDesiredResourceFinding] = []
+    schedule_pages_attempted = 0
+    schedules_scanned = 0
+    resources_staged = 0
+    stage_blocked = 0
+    stage_completed = False
+    for _ in range(request.max_schedule_pages):
+        page_report = stage_task_scheduler_desired_resource_page(
+            TaskSchedulerReconciliationRequest(
+                installation_id=request.installation_id,
+                executable_path=request.executable_path,
+                limit=request.schedule_page_limit,
+                after_schedule_id=cursor,
+            ),
+            schedules=schedules,
+            external_resources=external_resources,
+        )
+        schedule_pages_attempted += 1
+        schedules_scanned += page_report.scanned
+        resources_staged += page_report.staged
+        stage_blocked += page_report.blocked
+        stage_findings.extend(page_report.findings)
+        cursor = page_report.next_cursor
+        if cursor is None:
+            stage_completed = True
+            break
+
+    claim_findings: list[TaskSchedulerClaimedResourceReconciliation] = []
+    claims_attempted = 0
+    claim_idle = False
+    for claim_index in range(1, request.max_claims + 1):
+        claims_attempted += 1
+        finding = reconcile_next_pending_task_scheduler_resource(
+            TaskSchedulerPendingResourceReconciliationRequest(
+                installation_id=request.installation_id,
+                executable_path=request.executable_path,
+                owner_instance_id=request.owner_instance_id,
+                claim_token=f"{request.claim_token_prefix}:{claim_index:04d}",
+                claim_ttl_ms=request.claim_ttl_ms,
+            ),
+            schedules=schedules,
+            registry=registry,
+            external_resources=external_resources,
+        )
+        if finding is None:
+            claim_idle = True
+            break
+        claim_findings.append(finding)
+
+    return TaskSchedulerResourcePumpReport(
+        schedule_pages_attempted=schedule_pages_attempted,
+        schedules_scanned=schedules_scanned,
+        resources_staged=resources_staged,
+        stage_blocked=stage_blocked,
+        stage_completed=stage_completed,
+        stage_next_cursor=cursor,
+        claims_attempted=claims_attempted,
+        resources_reconciled=len(claim_findings),
+        resources_applied=sum(1 for finding in claim_findings if finding.applied),
+        resources_completed=sum(1 for finding in claim_findings if finding.completed),
+        resources_blocked=sum(1 for finding in claim_findings if finding.blocked),
+        claim_idle=claim_idle,
+        stage_findings=tuple(stage_findings),
+        claim_findings=tuple(claim_findings),
+    )
+
+
 def parse_trigger_task_arguments(arguments: tuple[str, ...]) -> TriggerTaskArgumentBinding | None:
     parsed: dict[str, str | bool] = {}
     index = 0
@@ -635,6 +744,31 @@ def _definition_hash_material(
         "time_zone_id": schedule.time_zone_id,
         "trigger_type": schedule.trigger_type.value,
     }
+
+
+def _validate_task_scheduler_resource_pump_request(
+    request: TaskSchedulerResourcePumpRequest,
+) -> None:
+    _non_empty_text(request.installation_id, "TASK_SCHEDULER_INSTALLATION_ID_REQUIRED")
+    _normalized_executable_path(request.executable_path)
+    validate_schedule_reconciliation_page_request(
+        limit=request.schedule_page_limit,
+        after_schedule_id=request.after_schedule_id,
+    )
+    if not 1 <= request.max_schedule_pages <= MAX_TASK_SCHEDULER_RECONCILIATION_PUMP_PAGES:
+        raise TaskSchedulerDefinitionViolation(
+            "TASK_SCHEDULER_RECONCILIATION_PUMP_PAGE_LIMIT_OUT_OF_RANGE"
+        )
+    if not 1 <= request.max_claims <= MAX_TASK_SCHEDULER_RECONCILIATION_PUMP_CLAIMS:
+        raise TaskSchedulerDefinitionViolation(
+            "TASK_SCHEDULER_RECONCILIATION_PUMP_CLAIM_LIMIT_OUT_OF_RANGE"
+        )
+    validate_external_resource_claim(
+        resource_type=ExternalResourceType.TASK_SCHEDULER,
+        owner_instance_id=request.owner_instance_id,
+        claim_token=f"{request.claim_token_prefix}:0001",
+        claim_ttl_ms=request.claim_ttl_ms,
+    )
 
 
 def _trigger_task_arguments(

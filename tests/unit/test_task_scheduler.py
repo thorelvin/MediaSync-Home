@@ -9,6 +9,7 @@ from mediasync_home.application.task_scheduler import (
     ObservedTaskSchedulerDefinition,
     TaskSchedulerDefinitionViolation,
     TaskSchedulerPendingResourceReconciliationRequest,
+    TaskSchedulerResourcePumpRequest,
     TaskSchedulerReconciliationAction,
     TaskSchedulerReconciliationRequest,
     bind_same_user_task_scheduler_definition_hash,
@@ -17,6 +18,7 @@ from mediasync_home.application.task_scheduler import (
     parse_trigger_task_arguments,
     reconcile_claimed_task_scheduler_resource,
     reconcile_next_pending_task_scheduler_resource,
+    reconcile_task_scheduler_resources_bounded,
     reconcile_task_scheduler_page,
     stage_task_scheduler_desired_resource_page,
 )
@@ -541,6 +543,125 @@ def test_reconcile_next_pending_task_scheduler_resource_reports_idle() -> None:
     assert result is None
 
 
+def test_task_scheduler_resource_pump_stages_pages_and_drains_claims() -> None:
+    schedules = (
+        _bound_schedule(schedule_id="schedule-a"),
+        _bound_schedule(schedule_id="schedule-b"),
+        _bound_schedule(schedule_id="schedule-c"),
+    )
+    resources = _ExternalResourceStore()
+    registry = _Registry()
+
+    report = reconcile_task_scheduler_resources_bounded(
+        TaskSchedulerResourcePumpRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            owner_instance_id="host-a",
+            claim_token_prefix="pump-a",
+            claim_ttl_ms=30_000,
+            schedule_page_limit=2,
+            max_schedule_pages=2,
+            max_claims=4,
+        ),
+        schedules=_ScheduleStore(*schedules),
+        registry=registry,
+        external_resources=resources,
+    )
+
+    assert report.schedule_pages_attempted == 2
+    assert report.schedules_scanned == 3
+    assert report.resources_staged == 3
+    assert report.stage_completed is True
+    assert report.stage_next_cursor is None
+    assert report.claims_attempted == 4
+    assert report.resources_reconciled == 3
+    assert report.resources_applied == 3
+    assert report.resources_completed == 3
+    assert report.resources_blocked == 0
+    assert report.claim_idle is True
+    assert tuple(definition.task_path for definition in registry.applied) == (
+        r"\MediaSync Home\install-a\schedule-a",
+        r"\MediaSync Home\install-a\schedule-b",
+        r"\MediaSync Home\install-a\schedule-c",
+    )
+    assert tuple(completed[3] for completed in resources.completed) == (
+        "pump-a:0001",
+        "pump-a:0002",
+        "pump-a:0003",
+    )
+
+
+def test_task_scheduler_resource_pump_reports_stage_cursor_when_page_budget_exhausted() -> None:
+    resources = _ExternalResourceStore()
+
+    report = reconcile_task_scheduler_resources_bounded(
+        TaskSchedulerResourcePumpRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            owner_instance_id="host-a",
+            claim_token_prefix="pump-a",
+            claim_ttl_ms=30_000,
+            schedule_page_limit=1,
+            max_schedule_pages=1,
+            max_claims=2,
+        ),
+        schedules=_ScheduleStore(
+            _bound_schedule(schedule_id="schedule-a"),
+            _bound_schedule(schedule_id="schedule-b"),
+        ),
+        registry=_Registry(),
+        external_resources=resources,
+    )
+
+    assert report.schedule_pages_attempted == 1
+    assert report.schedules_scanned == 1
+    assert report.stage_completed is False
+    assert report.stage_next_cursor == "schedule-a"
+    assert report.resources_reconciled == 1
+    assert report.claim_idle is True
+
+
+def test_task_scheduler_resource_pump_requires_bounded_limits() -> None:
+    with pytest.raises(
+        TaskSchedulerDefinitionViolation,
+        match="TASK_SCHEDULER_RECONCILIATION_PUMP_PAGE_LIMIT_OUT_OF_RANGE",
+    ):
+        reconcile_task_scheduler_resources_bounded(
+            TaskSchedulerResourcePumpRequest(
+                installation_id="install-a",
+                executable_path=EXECUTABLE,
+                owner_instance_id="host-a",
+                claim_token_prefix="pump-a",
+                claim_ttl_ms=30_000,
+                schedule_page_limit=1,
+                max_schedule_pages=0,
+                max_claims=1,
+            ),
+            schedules=_ScheduleStore(),
+            registry=_Registry(),
+            external_resources=_ExternalResourceStore(),
+        )
+    with pytest.raises(
+        TaskSchedulerDefinitionViolation,
+        match="TASK_SCHEDULER_RECONCILIATION_PUMP_CLAIM_LIMIT_OUT_OF_RANGE",
+    ):
+        reconcile_task_scheduler_resources_bounded(
+            TaskSchedulerResourcePumpRequest(
+                installation_id="install-a",
+                executable_path=EXECUTABLE,
+                owner_instance_id="host-a",
+                claim_token_prefix="pump-a",
+                claim_ttl_ms=30_000,
+                schedule_page_limit=1,
+                max_schedule_pages=1,
+                max_claims=0,
+            ),
+            schedules=_ScheduleStore(),
+            registry=_Registry(),
+            external_resources=_ExternalResourceStore(),
+        )
+
+
 class _ScheduleStore:
     def __init__(self, *schedules: ScheduleDefinition) -> None:
         self.schedules = sorted(schedules, key=lambda item: item.schedule_id)
@@ -605,6 +726,14 @@ class _ExternalResourceStore(ExternalResourceStateStore):
         self.desired = (
             *self.desired,
             (resource_type, resource_id, desired_generation, desired_hash),
+        )
+        self.pending.append(
+            ExternalResourceRecord(
+                resource_type=resource_type,
+                resource_id=resource_id,
+                desired_generation=desired_generation,
+                desired_hash=desired_hash,
+            )
         )
         return ExternalResourceRecord(
             resource_type=resource_type,

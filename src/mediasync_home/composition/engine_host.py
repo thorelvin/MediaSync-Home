@@ -87,9 +87,12 @@ from mediasync_home.application.task_scheduler import (
     TaskSchedulerClaimedResourceReconciliation,
     TaskSchedulerDesiredResourceReport,
     TaskSchedulerPendingResourceReconciliationRequest,
+    TaskSchedulerResourcePumpReport,
+    TaskSchedulerResourcePumpRequest,
     TaskSchedulerReconciliationRequest,
     TaskSchedulerRegistryPort,
     reconcile_next_pending_task_scheduler_resource,
+    reconcile_task_scheduler_resources_bounded,
     stage_task_scheduler_desired_resource_page,
 )
 from mediasync_home.composition._role_runner import Emit, run_role
@@ -190,6 +193,42 @@ class EngineHostRuntime:
                 owner_instance_id=self.reconciler_instance_id,
                 claim_token=claim_token or uuid4().hex,
                 claim_ttl_ms=claim_ttl_ms,
+            ),
+            schedules=self.service.schedule_store,
+            registry=registry,
+            external_resources=self.service.external_resource_state_store,
+        )
+
+    def task_scheduler_reconcile_resources_bounded(
+        self,
+        *,
+        installation_id: str,
+        executable_path: str,
+        registry: TaskSchedulerRegistryPort,
+        schedule_page_limit: int,
+        max_schedule_pages: int,
+        max_claims: int,
+        claim_token_prefix: str | None = None,
+        claim_ttl_ms: int = 30_000,
+        after_schedule_id: str | None = None,
+    ) -> TaskSchedulerResourcePumpReport:
+        if (
+            self.service.schedule_store is None
+            or self.service.external_resource_state_store is None
+            or self.reconciler_instance_id is None
+        ):
+            raise RuntimeError("TASK_SCHEDULER_RUNTIME_NOT_CONFIGURED")
+        return reconcile_task_scheduler_resources_bounded(
+            TaskSchedulerResourcePumpRequest(
+                installation_id=installation_id,
+                executable_path=executable_path,
+                owner_instance_id=self.reconciler_instance_id,
+                claim_token_prefix=claim_token_prefix or uuid4().hex,
+                claim_ttl_ms=claim_ttl_ms,
+                schedule_page_limit=schedule_page_limit,
+                max_schedule_pages=max_schedule_pages,
+                max_claims=max_claims,
+                after_schedule_id=after_schedule_id,
             ),
             schedules=self.service.schedule_store,
             registry=registry,
