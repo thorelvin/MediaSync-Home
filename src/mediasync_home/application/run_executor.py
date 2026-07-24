@@ -38,6 +38,8 @@ class RunExecutorQueueStore(RunStore, Protocol):
 
     def load_next_revalidating_run_target_key(self) -> tuple[str, str] | None: ...
 
+    def load_next_executing_run_target_key(self) -> tuple[str, str] | None: ...
+
     def record_run_target_lease_reacquired(
         self,
         *,
@@ -161,6 +163,18 @@ class RunExecutorExecutionStartStepOutcome:
     run_target_id: str | None
     target: StartedRunTarget | None
     mutation_permit: MutationPermit | None
+    validation_codes: tuple[str, ...]
+    next_action: str
+
+
+@dataclass(frozen=True)
+class RunExecutorLeaseReacquireStepOutcome:
+    idle: bool
+    reacquired: bool
+    run_id: str | None
+    run_target_id: str | None
+    target: StartedRunTarget | None
+    lease: LiveEndpointLease | None
     validation_codes: tuple[str, ...]
     next_action: str
 
@@ -334,6 +348,77 @@ def execute_one_run_target_execution_start_step(
     return _execution_start_step_from_outcome(execution)
 
 
+def execute_one_executing_run_target_lease_reacquire_step(
+    *,
+    runs: RunExecutorQueueStore,
+    leases: EndpointLeaseAuthority,
+    lease_registry: RunTargetLeaseRegistry,
+) -> RunExecutorLeaseReacquireStepOutcome:
+    key = runs.load_next_executing_run_target_key()
+    if key is None:
+        return RunExecutorLeaseReacquireStepOutcome(
+            idle=True,
+            reacquired=False,
+            run_id=None,
+            run_target_id=None,
+            target=None,
+            lease=None,
+            validation_codes=(),
+            next_action="No executing run target is waiting for lease reacquire.",
+        )
+    run_id, run_target_id = key
+    if (
+        lease_registry.load_retained_run_target_lease(
+            run_id=run_id,
+            run_target_id=run_target_id,
+        )
+        is not None
+    ):
+        return RunExecutorLeaseReacquireStepOutcome(
+            idle=True,
+            reacquired=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=_load_target(runs=runs, run_id=run_id, run_target_id=run_target_id),
+            lease=None,
+            validation_codes=(),
+            next_action="Next executing run target already has a retained lease.",
+        )
+
+    reacquired = _reacquire_run_target_lease(
+        runs=runs,
+        leases=leases,
+        lease_registry=lease_registry,
+        run_id=run_id,
+        run_target_id=run_target_id,
+        expected_target_state=RunTargetState.EXECUTING,
+        target_state_validation_code="RUN_TARGET_NOT_EXECUTING",
+        target_state_next_action="Only executing targets can reacquire an executing lease.",
+    )
+    if isinstance(reacquired, RunExecutorExecutionStartStepOutcome):
+        return RunExecutorLeaseReacquireStepOutcome(
+            idle=False,
+            reacquired=False,
+            run_id=reacquired.run_id,
+            run_target_id=reacquired.run_target_id,
+            target=reacquired.target,
+            lease=None,
+            validation_codes=reacquired.validation_codes,
+            next_action=reacquired.next_action,
+        )
+    target = _load_target(runs=runs, run_id=run_id, run_target_id=run_target_id)
+    return RunExecutorLeaseReacquireStepOutcome(
+        idle=False,
+        reacquired=True,
+        run_id=run_id,
+        run_target_id=run_target_id,
+        target=target,
+        lease=reacquired,
+        validation_codes=(),
+        next_action="Executing run target has a fresh retained endpoint lease.",
+    )
+
+
 def _execution_start_step_from_outcome(
     outcome: RunTargetExecutionStartOutcome,
 ) -> RunExecutorExecutionStartStepOutcome:
@@ -369,6 +454,29 @@ def _reacquire_revalidating_target_lease(
     run_id: str,
     run_target_id: str,
 ) -> LiveEndpointLease | RunExecutorExecutionStartStepOutcome:
+    return _reacquire_run_target_lease(
+        runs=runs,
+        leases=leases,
+        lease_registry=lease_registry,
+        run_id=run_id,
+        run_target_id=run_target_id,
+        expected_target_state=RunTargetState.REVALIDATING,
+        target_state_validation_code="RUN_TARGET_NOT_REVALIDATING",
+        target_state_next_action="Only revalidating targets can reacquire an endpoint lease.",
+    )
+
+
+def _reacquire_run_target_lease(
+    *,
+    runs: RunExecutorQueueStore,
+    leases: EndpointLeaseAuthority,
+    lease_registry: RunTargetLeaseRegistry,
+    run_id: str,
+    run_target_id: str,
+    expected_target_state: RunTargetState,
+    target_state_validation_code: str,
+    target_state_next_action: str,
+) -> LiveEndpointLease | RunExecutorExecutionStartStepOutcome:
     target = _load_target(runs=runs, run_id=run_id, run_target_id=run_target_id)
     if target is None:
         return _execution_start_failed(
@@ -378,13 +486,13 @@ def _reacquire_revalidating_target_lease(
             validation_code="RUN_TARGET_NOT_FOUND",
             next_action="Reload run targets before reacquiring an endpoint lease.",
         )
-    if target.state is not RunTargetState.REVALIDATING:
+    if target.state is not expected_target_state:
         return _execution_start_failed(
             run_id=run_id,
             run_target_id=run_target_id,
             target=target,
-            validation_code="RUN_TARGET_NOT_REVALIDATING",
-            next_action="Only revalidating targets can reacquire an endpoint lease.",
+            validation_code=target_state_validation_code,
+            next_action=target_state_next_action,
         )
     if target.lease_resource_key is None or not target.lease_resource_key.strip():
         return _execution_start_failed(

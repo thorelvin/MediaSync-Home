@@ -11,6 +11,7 @@ from mediasync_home.application.run_executor import (
     RunExecutorPumpStopReason,
     RunExecutorViolation,
     execute_bounded_run_executor_preflight_pump,
+    execute_one_executing_run_target_lease_reacquire_step,
     execute_one_run_target_execution_start_step,
     execute_one_run_target_preflight_step,
 )
@@ -392,6 +393,46 @@ def test_execute_one_run_target_execution_start_step_releases_stale_retained_lea
     assert registry.retained_count == 0
 
 
+def test_execute_one_executing_run_target_lease_reacquire_step_retains_new_lease() -> None:
+    lease = _FakeLiveLease("lease-b", fencing_token=43)
+    leases = _FakeLeaseAuthority(EndpointLeaseAttempt(True, lease, (), "reacquired"))
+    registry = HeldRunTargetLeaseRegistry()
+    runs = _InMemoryRunStore(_executing_run())
+
+    outcome = execute_one_executing_run_target_lease_reacquire_step(
+        runs=runs,
+        leases=leases,
+        lease_registry=registry,
+    )
+
+    loaded = runs.load_started_run("run-a")
+    assert outcome.idle is False
+    assert outcome.reacquired is True
+    assert outcome.validation_codes == ()
+    assert outcome.lease is lease
+    assert loaded is not None
+    assert loaded.state is RunState.EXECUTING
+    assert loaded.targets[0].state is RunTargetState.EXECUTING
+    assert loaded.targets[0].last_lease_id == "lease-b"
+    assert loaded.targets[0].last_fencing_token == 43
+    assert registry.load_retained_run_target_lease(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+    ) is lease
+
+
+def test_execute_one_executing_run_target_lease_reacquire_step_reports_idle_without_executing_target() -> None:
+    outcome = execute_one_executing_run_target_lease_reacquire_step(
+        runs=_InMemoryRunStore(_preflighted_run()),
+        leases=_FakeLeaseAuthority(EndpointLeaseAttempt(False, None, (), "unused")),
+        lease_registry=HeldRunTargetLeaseRegistry(),
+    )
+
+    assert outcome.idle is True
+    assert outcome.reacquired is False
+    assert outcome.validation_codes == ()
+
+
 def test_lease_registry_releases_replaced_and_shutdown_leases() -> None:
     first = _FakeLiveLease("lease-a")
     second = _FakeLiveLease("lease-b")
@@ -440,6 +481,17 @@ class _InMemoryRunStore(RunExecutorQueueStore):
             return None
         target = next(
             (target for target in self.run.targets if target.state is RunTargetState.REVALIDATING),
+            None,
+        )
+        if target is None:
+            return None
+        return self.run.run_id, target.run_target_id
+
+    def load_next_executing_run_target_key(self) -> tuple[str, str] | None:
+        if self.run is None or self.run.state is not RunState.EXECUTING:
+            return None
+        target = next(
+            (target for target in self.run.targets if target.state is RunTargetState.EXECUTING),
             None,
         )
         if target is None:
@@ -522,12 +574,15 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         fencing_token: int,
     ) -> StartedRunTarget | None:
         run = self.load_started_run(run_id)
-        if run is None or run.state is not RunState.PREFLIGHT:
+        if run is None or run.state not in {RunState.PREFLIGHT, RunState.EXECUTING}:
             return None
         updated_targets: list[StartedRunTarget] = []
         recorded: StartedRunTarget | None = None
         for target in run.targets:
-            if target.run_target_id == run_target_id and target.state is RunTargetState.REVALIDATING:
+            if target.run_target_id == run_target_id and target.state in {
+                RunTargetState.REVALIDATING,
+                RunTargetState.EXECUTING,
+            }:
                 if (
                     target.last_lease_id != expected_lease_id
                     or target.last_ownership_epoch != expected_ownership_epoch
@@ -668,6 +723,22 @@ def _preflighted_run() -> StartedRun:
             replace(
                 _target(),
                 state=RunTargetState.REVALIDATING,
+                last_lease_id="lease-a",
+                last_ownership_epoch=1,
+                last_fencing_token=42,
+            ),
+        ),
+    )
+
+
+def _executing_run() -> StartedRun:
+    return replace(
+        _queued_run(),
+        state=RunState.EXECUTING,
+        targets=(
+            replace(
+                _target(),
+                state=RunTargetState.EXECUTING,
                 last_lease_id="lease-a",
                 last_ownership_epoch=1,
                 last_fencing_token=42,

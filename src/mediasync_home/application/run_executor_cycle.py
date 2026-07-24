@@ -22,6 +22,7 @@ from mediasync_home.application.run_executor import (
     RunExecutorViolation,
     RunTargetLeaseRegistry,
     execute_bounded_run_executor_preflight_pump,
+    execute_one_executing_run_target_lease_reacquire_step,
     execute_one_run_target_execution_start_step,
 )
 from mediasync_home.application.run_final_commits import commit_next_run_target_verified_artifact
@@ -49,6 +50,7 @@ class RunExecutorCycleAction(str, Enum):
     FINAL_COMMITTED = "FINAL_COMMITTED"
     CATALOG_HANDOFF_RECORDED = "CATALOG_HANDOFF_RECORDED"
     TARGET_COMPLETED = "TARGET_COMPLETED"
+    EXECUTING_LEASE_REACQUIRED = "EXECUTING_LEASE_REACQUIRED"
     STAGING_ADVANCED = "STAGING_ADVANCED"
     WAITING_FOR_STAGING = "WAITING_FOR_STAGING"
     IDLE = "IDLE"
@@ -185,6 +187,26 @@ def execute_one_run_executor_cycle(
             final_commit_port=final_commit_port,
             staging_transfer_port=staging_transfer_port,
             retained=retained,
+        )
+
+    reacquired = execute_one_executing_run_target_lease_reacquire_step(
+        runs=runs,
+        leases=leases,
+        lease_registry=lease_registry,
+    )
+    if not reacquired.idle:
+        if reacquired.reacquired:
+            return _advanced(
+                action=RunExecutorCycleAction.EXECUTING_LEASE_REACQUIRED,
+                run_id=reacquired.run_id,
+                run_target_id=reacquired.run_target_id,
+                next_action=reacquired.next_action,
+            )
+        return _blocked(
+            run_id=reacquired.run_id,
+            run_target_id=reacquired.run_target_id,
+            validation_codes=reacquired.validation_codes,
+            next_action=reacquired.next_action,
         )
 
     execution = execute_one_run_target_execution_start_step(

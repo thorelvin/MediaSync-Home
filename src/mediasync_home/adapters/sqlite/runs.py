@@ -228,6 +228,23 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore):
             return None
         return str(row[0]), str(row[1])
 
+    def load_next_executing_run_target_key(self) -> tuple[str, str] | None:
+        row = self._connection.execute(
+            """
+            SELECT runs.id, run_targets.id
+            FROM run_targets
+            JOIN runs ON runs.id = run_targets.run_id
+            WHERE runs.state = 'EXECUTING'
+                AND run_targets.state = 'EXECUTING'
+            ORDER BY runs.started_utc, runs.id, run_targets.id
+            LIMIT 1
+            """,
+            (),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row[0]), str(row[1])
+
     def list_recent_run_activity_summaries(
         self,
         *,
@@ -469,7 +486,7 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore):
                     row_version = row_version + 1
                 WHERE run_id = ?
                     AND id = ?
-                    AND state = 'REVALIDATING'
+                    AND state IN ('REVALIDATING', 'EXECUTING')
                     AND last_lease_id = ?
                     AND last_ownership_epoch = ?
                     AND last_fencing_token = ?
@@ -479,7 +496,10 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore):
                         SELECT 1
                         FROM runs
                         WHERE runs.id = run_targets.run_id
-                            AND runs.state = 'PREFLIGHT'
+                            AND (
+                                (run_targets.state = 'REVALIDATING' AND runs.state = 'PREFLIGHT')
+                                OR (run_targets.state = 'EXECUTING' AND runs.state = 'EXECUTING')
+                            )
                     )
                 """,
                 (

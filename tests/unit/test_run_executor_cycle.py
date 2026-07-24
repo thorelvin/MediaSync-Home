@@ -162,6 +162,53 @@ def test_executor_cycle_reacquires_revalidating_target_after_registry_loss() -> 
     ) is lease
 
 
+def test_executor_cycle_reacquires_executing_target_after_registry_loss_before_planning() -> None:
+    plan = _sealed_plan()
+    runs = _InMemoryRunStore(
+        _run(
+            state=RunState.EXECUTING,
+            plan=plan,
+            target_state=RunTargetState.EXECUTING,
+        )
+    )
+    lease = _FakeLiveLease("lease-b", fencing_token=43)
+    registry = HeldRunTargetLeaseRegistry()
+    recovery_operations = _FakeRecoveryOperationStore(())
+
+    outcome = execute_bounded_run_executor_cycle(
+        runs=runs,
+        leases=_FakeLeaseAuthority(lease),
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=recovery_operations,
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        process_instance_id="host-a",
+        max_steps=2,
+    )
+
+    loaded = runs.load_started_run("run-a")
+    operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    assert outcome.steps_attempted == 2
+    assert outcome.stopped_reason is RunExecutorPumpStopReason.STEP_LIMIT_REACHED
+    assert outcome.last_step is not None
+    assert outcome.last_step.action is RunExecutorCycleAction.OPERATIONS_PLANNED
+    assert outcome.validation_codes == ()
+    assert loaded is not None
+    assert loaded.state is RunState.EXECUTING
+    assert loaded.targets[0].state is RunTargetState.EXECUTING
+    assert loaded.targets[0].last_lease_id == "lease-b"
+    assert loaded.targets[0].last_fencing_token == 43
+    assert registry.load_retained_run_target_lease(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+    ) is lease
+    assert operation is not None
+    assert operation.phase is RecoveryOperationPhase.PLANNED
+    assert operation.lease_id == "lease-b"
+    assert operation.fencing_token == 43
+
+
 def test_executor_cycle_completes_catalog_recorded_target_and_releases_lease() -> None:
     plan = _sealed_plan()
     runs = _InMemoryRunStore(_run(state=RunState.EXECUTING, plan=plan, target_state=RunTargetState.EXECUTING))
@@ -224,6 +271,17 @@ class _InMemoryRunStore(RunExecutorQueueStore):
             return None
         target = next(
             (target for target in self.run.targets if target.state is RunTargetState.REVALIDATING),
+            None,
+        )
+        if target is None:
+            return None
+        return self.run.run_id, target.run_target_id
+
+    def load_next_executing_run_target_key(self) -> tuple[str, str] | None:
+        if self.run is None or self.run.state is not RunState.EXECUTING:
+            return None
+        target = next(
+            (target for target in self.run.targets if target.state is RunTargetState.EXECUTING),
             None,
         )
         if target is None:
@@ -304,12 +362,15 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         fencing_token: int,
     ) -> StartedRunTarget | None:
         run = self.load_started_run(run_id)
-        if run is None or run.state is not RunState.PREFLIGHT:
+        if run is None or run.state not in {RunState.PREFLIGHT, RunState.EXECUTING}:
             return None
         updated_targets: list[StartedRunTarget] = []
         recorded: StartedRunTarget | None = None
         for target in run.targets:
-            if target.run_target_id == run_target_id and target.state is RunTargetState.REVALIDATING:
+            if target.run_target_id == run_target_id and target.state in {
+                RunTargetState.REVALIDATING,
+                RunTargetState.EXECUTING,
+            }:
                 if (
                     target.last_lease_id != expected_lease_id
                     or target.last_ownership_epoch != expected_ownership_epoch

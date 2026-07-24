@@ -31,6 +31,7 @@ from mediasync_home.application.plans import (
 )
 from mediasync_home.application.run_executor import (
     HeldRunTargetLeaseRegistry,
+    execute_one_executing_run_target_lease_reacquire_step,
     execute_one_run_target_execution_start_step,
     execute_one_run_target_preflight_step,
 )
@@ -512,6 +513,84 @@ def test_sqlite_run_executor_execution_start_step_reacquires_missing_retained_le
         assert loaded.targets[0].last_lease_id == "lease-b"
         assert loaded.targets[0].last_fencing_token == 43
         assert registry.load_retained_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+        ) is new_lease
+        assert leases.requests == [
+            EndpointLeaseRequest(
+                run_id="run-a",
+                run_target_id="run-a-target-0000",
+                endpoint_id="target-a",
+                endpoint_revision_id="target-rev-a",
+                resource_key="endpoint:target-a",
+                required_owner_installation_id="owner-a",
+                required_ownership_epoch=1,
+            )
+        ]
+
+
+def test_sqlite_run_executor_reacquires_executing_target_lease_after_registry_loss(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        plans = SqlitePlanStore(connection)
+        runs = SqliteRunStore(connection)
+        plan = _sealed_plan()
+        old_lease = FixedLiveLease()
+        new_lease = FixedLiveLease("lease-b", fencing_token=43)
+        old_registry = HeldRunTargetLeaseRegistry()
+        plans.save_sealed_plan(plan)
+        start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        preflight = execute_one_run_target_preflight_step(
+            runs=runs,
+            leases=FixedLeaseAuthority(old_lease),
+        )
+        assert preflight.lease is old_lease
+        old_registry.retain_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            lease=old_lease,
+        )
+        execution = execute_one_run_target_execution_start_step(
+            runs=runs,
+            lease_registry=old_registry,
+        )
+        assert execution.execution_started is True
+        restart_registry = HeldRunTargetLeaseRegistry()
+        leases = FixedLeaseAuthority(new_lease)
+
+        selected = runs.load_next_executing_run_target_key()
+        outcome = execute_one_executing_run_target_lease_reacquire_step(
+            runs=runs,
+            leases=leases,
+            lease_registry=restart_registry,
+        )
+
+        loaded = runs.load_started_run("run-a")
+        assert selected == ("run-a", "run-a-target-0000")
+        assert outcome.idle is False
+        assert outcome.reacquired is True
+        assert outcome.validation_codes == ()
+        assert outcome.lease is new_lease
+        assert loaded is not None
+        assert loaded.state is RunState.EXECUTING
+        assert loaded.targets[0].state is RunTargetState.EXECUTING
+        assert loaded.targets[0].last_lease_id == "lease-b"
+        assert loaded.targets[0].last_fencing_token == 43
+        assert restart_registry.load_retained_run_target_lease(
             run_id="run-a",
             run_target_id="run-a-target-0000",
         ) is new_lease
