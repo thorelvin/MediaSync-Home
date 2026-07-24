@@ -15,6 +15,12 @@ from mediasync_home.application.task_scheduler import (
     classify_task_scheduler_reconciliation,
     parse_trigger_task_arguments,
     reconcile_task_scheduler_page,
+    stage_task_scheduler_desired_resource_page,
+)
+from mediasync_home.application.external_resources import (
+    ExternalResourceRecord,
+    ExternalResourceStateStore,
+    ExternalResourceType,
 )
 from mediasync_home.application.trigger_occurrences import TriggerKind
 
@@ -282,6 +288,64 @@ def test_task_scheduler_reconciliation_reports_invalid_desired_hash() -> None:
     assert report.findings[0].reason == "TASK_SCHEDULER_DESIRED_HASH_MISMATCH"
 
 
+def test_stage_task_scheduler_desired_resource_page_records_claimable_resources() -> None:
+    schedule_a = _bound_schedule(schedule_id="schedule-a")
+    schedule_b = _bound_schedule(schedule_id="schedule-b")
+    resources = _ExternalResourceStore()
+
+    report = stage_task_scheduler_desired_resource_page(
+        TaskSchedulerReconciliationRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            limit=10,
+        ),
+        schedules=_ScheduleStore(schedule_a, schedule_b),
+        external_resources=resources,
+    )
+
+    assert report.scanned == 2
+    assert report.staged == 2
+    assert report.blocked == 0
+    assert tuple(finding.schedule_id for finding in report.findings) == (
+        "schedule-a",
+        "schedule-b",
+    )
+    assert resources.desired == (
+        (
+            ExternalResourceType.TASK_SCHEDULER,
+            "schedule-a",
+            schedule_a.definition_generation,
+            schedule_a.desired_definition_hash,
+        ),
+        (
+            ExternalResourceType.TASK_SCHEDULER,
+            "schedule-b",
+            schedule_b.definition_generation,
+            schedule_b.desired_definition_hash,
+        ),
+    )
+
+
+def test_stage_task_scheduler_desired_resource_page_reports_invalid_desired_state() -> None:
+    resources = _ExternalResourceStore()
+
+    report = stage_task_scheduler_desired_resource_page(
+        TaskSchedulerReconciliationRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            limit=10,
+        ),
+        schedules=_ScheduleStore(_schedule(desired_definition_hash="b" * 64)),
+        external_resources=resources,
+    )
+
+    assert report.scanned == 1
+    assert report.staged == 0
+    assert report.blocked == 1
+    assert report.findings[0].reason == "TASK_SCHEDULER_DESIRED_HASH_MISMATCH"
+    assert resources.desired == ()
+
+
 class _ScheduleStore:
     def __init__(self, *schedules: ScheduleDefinition) -> None:
         self.schedules = sorted(schedules, key=lambda item: item.schedule_id)
@@ -325,6 +389,69 @@ class _Registry:
 
     def apply_task_definition(self, definition) -> None:
         self.applied.append(definition)
+
+
+class _ExternalResourceStore(ExternalResourceStateStore):
+    def __init__(self) -> None:
+        self.desired: tuple[tuple[ExternalResourceType, str, int, str], ...] = ()
+
+    def upsert_desired_resource_state(
+        self,
+        *,
+        resource_type: ExternalResourceType,
+        resource_id: str,
+        desired_generation: int,
+        desired_hash: str,
+    ) -> ExternalResourceRecord:
+        self.desired = (
+            *self.desired,
+            (resource_type, resource_id, desired_generation, desired_hash),
+        )
+        return ExternalResourceRecord(
+            resource_type=resource_type,
+            resource_id=resource_id,
+            desired_generation=desired_generation,
+            desired_hash=desired_hash,
+        )
+
+    def load_external_resource_state(
+        self,
+        *,
+        resource_type: ExternalResourceType,
+        resource_id: str,
+    ) -> ExternalResourceRecord | None:
+        return None
+
+    def claim_next_pending_external_resource(
+        self,
+        *,
+        resource_type: ExternalResourceType,
+        owner_instance_id: str,
+        claim_token: str,
+        claim_ttl_ms: int,
+    ) -> ExternalResourceRecord | None:
+        return None
+
+    def mark_external_resource_in_sync(
+        self,
+        *,
+        resource_type: ExternalResourceType,
+        resource_id: str,
+        desired_generation: int,
+        claim_token: str,
+        observed_hash: str,
+    ) -> ExternalResourceRecord:
+        raise AssertionError("not used by scheduler desired-resource staging")
+
+    def mark_external_resource_blocked(
+        self,
+        *,
+        resource_type: ExternalResourceType,
+        resource_id: str,
+        claim_token: str,
+        error_code: str,
+    ) -> ExternalResourceRecord:
+        raise AssertionError("not used by scheduler desired-resource staging")
 
 
 def _bound_schedule(

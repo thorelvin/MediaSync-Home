@@ -13,6 +13,10 @@ from mediasync_home.application.schedules import (
     validate_schedule_definition,
     validate_schedule_reconciliation_page_request,
 )
+from mediasync_home.application.external_resources import (
+    ExternalResourceStateStore,
+    ExternalResourceType,
+)
 from mediasync_home.application.trigger_occurrences import TriggerKind
 
 
@@ -110,6 +114,23 @@ class TaskSchedulerReconciliationReport:
     blocked: int
     next_cursor: str | None
     findings: tuple[TaskSchedulerReconciliationFinding, ...]
+
+
+@dataclass(frozen=True)
+class TaskSchedulerDesiredResourceFinding:
+    schedule_id: str
+    task_path: str | None
+    staged: bool
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskSchedulerDesiredResourceReport:
+    scanned: int
+    staged: int
+    blocked: int
+    next_cursor: str | None
+    findings: tuple[TaskSchedulerDesiredResourceFinding, ...]
 
 
 class TaskSchedulerRegistryPort(Protocol):
@@ -314,6 +335,66 @@ def reconcile_task_scheduler_page(
     return TaskSchedulerReconciliationReport(
         scanned=len(page),
         applied=applied,
+        blocked=blocked,
+        next_cursor=page[-1].schedule_id if len(page) == request.limit else None,
+        findings=tuple(findings),
+    )
+
+
+def stage_task_scheduler_desired_resource_page(
+    request: TaskSchedulerReconciliationRequest,
+    *,
+    schedules: ScheduleStore,
+    external_resources: ExternalResourceStateStore,
+) -> TaskSchedulerDesiredResourceReport:
+    validate_schedule_reconciliation_page_request(
+        limit=request.limit,
+        after_schedule_id=request.after_schedule_id,
+    )
+    page = schedules.list_schedules_for_reconciliation(
+        limit=request.limit,
+        after_schedule_id=request.after_schedule_id,
+    )
+    findings: list[TaskSchedulerDesiredResourceFinding] = []
+    staged = 0
+    blocked = 0
+    for schedule in page:
+        try:
+            definition = build_same_user_task_scheduler_definition(
+                schedule,
+                installation_id=request.installation_id,
+                executable_path=request.executable_path,
+            )
+        except TaskSchedulerDefinitionViolation as exc:
+            blocked += 1
+            findings.append(
+                TaskSchedulerDesiredResourceFinding(
+                    schedule_id=schedule.schedule_id,
+                    task_path=_task_path_or_none(request.installation_id, schedule.schedule_id),
+                    staged=False,
+                    reason=str(exc),
+                )
+            )
+            continue
+
+        external_resources.upsert_desired_resource_state(
+            resource_type=ExternalResourceType.TASK_SCHEDULER,
+            resource_id=schedule.schedule_id,
+            desired_generation=schedule.definition_generation,
+            desired_hash=definition.definition_hash,
+        )
+        staged += 1
+        findings.append(
+            TaskSchedulerDesiredResourceFinding(
+                schedule_id=schedule.schedule_id,
+                task_path=definition.task_path,
+                staged=True,
+            )
+        )
+
+    return TaskSchedulerDesiredResourceReport(
+        scanned=len(page),
+        staged=staged,
         blocked=blocked,
         next_cursor=page[-1].schedule_id if len(page) == request.limit else None,
         findings=tuple(findings),
