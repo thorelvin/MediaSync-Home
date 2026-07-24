@@ -64,6 +64,8 @@ def test_local_preview_host_run_can_enable_task_scheduler_startup_pump(
         reconcile_task_scheduler_resources=True,
         task_scheduler_executable_path=task_executable,
         run_executor_cycle_interval_ms=250,
+        task_scheduler_reconciliation_interval_ms=300,
+        task_scheduler_reconciliation_max_interval_ms=1200,
     )
 
     assert host_run.engine_host_args == (
@@ -78,6 +80,10 @@ def test_local_preview_host_run_can_enable_task_scheduler_startup_pump(
         "--reconcile-task-scheduler-resources",
         "--task-scheduler-executable-path",
         str(task_executable.resolve()),
+        "--task-scheduler-reconciliation-interval-ms",
+        "300",
+        "--task-scheduler-reconciliation-max-interval-ms",
+        "1200",
     )
 
 

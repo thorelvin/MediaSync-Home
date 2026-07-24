@@ -490,6 +490,111 @@ class ExecutorMaintenanceLoop:
         return min(self._max_interval_ms, current_interval_ms * 2)
 
 
+class TaskSchedulerMaintenanceLoop:
+    def __init__(
+        self,
+        *,
+        runtime_factory: Callable[[], EngineHostRuntime],
+        registry_factory: Callable[[], TaskSchedulerRegistryPort],
+        options: TaskSchedulerStartupReconciliationOptions,
+        interval_ms: int,
+        max_interval_ms: int | None = None,
+        output: Emit,
+        pipe_name: str,
+    ) -> None:
+        self._runtime_factory = runtime_factory
+        self._registry_factory = registry_factory
+        self._options = options
+        self._base_interval_ms = interval_ms
+        self._max_interval_ms = max_interval_ms or interval_ms
+        self._output = output
+        self._pipe_name = pipe_name
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("TASK_SCHEDULER_MAINTENANCE_LOOP_ALREADY_STARTED")
+        self._thread = threading.Thread(
+            target=self._run,
+            name="MediaSyncHomeTaskSchedulerMaintenance",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self, *, timeout_seconds: float = 5.0) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout_seconds)
+
+    def _run(self) -> None:
+        runtime: EngineHostRuntime | None = None
+        next_interval_ms = self._base_interval_ms
+        after_schedule_id = self._options.after_schedule_id
+        try:
+            runtime = self._runtime_factory()
+            registry = self._registry_factory()
+            while not self._stop_event.wait(next_interval_ms / 1000):
+                try:
+                    report = runtime.task_scheduler_reconcile_resources_bounded(
+                        installation_id=self._options.installation_id,
+                        executable_path=self._options.executable_path,
+                        registry=registry,
+                        schedule_page_limit=self._options.schedule_page_limit,
+                        max_schedule_pages=self._options.max_schedule_pages,
+                        max_claims=self._options.max_claims,
+                        claim_token_prefix=self._options.claim_token_prefix,
+                        claim_ttl_ms=self._options.claim_ttl_ms,
+                        after_schedule_id=after_schedule_id,
+                    )
+                except Exception as exc:
+                    next_interval_ms = self._backed_off_interval(next_interval_ms)
+                    _emit_task_scheduler_reconciliation_failed_event(
+                        output=self._output,
+                        pipe_name=self._pipe_name,
+                        cycle_trigger="INTERVAL",
+                        error_type=type(exc).__name__,
+                        next_interval_ms=next_interval_ms,
+                    )
+                    continue
+                after_schedule_id = report.stage_next_cursor or self._options.after_schedule_id
+                next_interval_ms = self._next_interval_after_report(
+                    current_interval_ms=next_interval_ms,
+                    report=report,
+                )
+                _emit_task_scheduler_reconciliation_event(
+                    output=self._output,
+                    pipe_name=self._pipe_name,
+                    cycle_trigger="INTERVAL",
+                    report=report,
+                    next_interval_ms=next_interval_ms,
+                )
+        except Exception as exc:
+            _emit_task_scheduler_reconciliation_failed_event(
+                output=self._output,
+                pipe_name=self._pipe_name,
+                cycle_trigger="INTERVAL",
+                error_type=type(exc).__name__,
+                next_interval_ms=None,
+            )
+        finally:
+            if runtime is not None:
+                runtime.close()
+
+    def _next_interval_after_report(
+        self,
+        *,
+        current_interval_ms: int,
+        report: TaskSchedulerResourcePumpReport,
+    ) -> int:
+        if report.stage_completed and report.resources_reconciled == 0:
+            return self._backed_off_interval(current_interval_ms)
+        return self._base_interval_ms
+
+    def _backed_off_interval(self, current_interval_ms: int) -> int:
+        return min(self._max_interval_ms, current_interval_ms * 2)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MediaSync Home Engine Host")
     parser.add_argument("--pipe-name", help="serve non-mutating IPC over this local named pipe")
@@ -577,6 +682,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--task-scheduler-claim-token-prefix",
         help="optional deterministic claim-token prefix for the bounded startup pump",
     )
+    parser.add_argument(
+        "--task-scheduler-reconciliation-interval-ms",
+        type=_positive_int,
+        help="run one bounded Task Scheduler desired-state pump on this interval",
+    )
+    parser.add_argument(
+        "--task-scheduler-reconciliation-max-interval-ms",
+        type=_positive_int,
+        default=3_600_000,
+        help="maximum backed-off interval for idle Task Scheduler reconciliation",
+    )
     return parser
 
 
@@ -584,6 +700,21 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
     args = build_parser().parse_args(argv)
     if args.reconcile_task_scheduler_resources and not args.pipe_name:
         raise RuntimeError("TASK_SCHEDULER_RECONCILIATION_REQUIRES_PIPE_MODE")
+    if args.task_scheduler_reconciliation_interval_ms is not None and not args.pipe_name:
+        raise RuntimeError("TASK_SCHEDULER_MAINTENANCE_REQUIRES_PIPE_MODE")
+    if args.task_scheduler_reconciliation_interval_ms is not None and args.state_root is None:
+        raise RuntimeError("TASK_SCHEDULER_MAINTENANCE_REQUIRES_STATE_ROOT")
+    if (
+        args.task_scheduler_reconciliation_interval_ms is not None
+        and args.task_scheduler_executable_path is None
+    ):
+        raise RuntimeError("TASK_SCHEDULER_EXECUTABLE_PATH_REQUIRED")
+    if (
+        args.task_scheduler_reconciliation_interval_ms is not None
+        and args.task_scheduler_reconciliation_max_interval_ms
+        < args.task_scheduler_reconciliation_interval_ms
+    ):
+        raise RuntimeError("TASK_SCHEDULER_MAINTENANCE_MAX_INTERVAL_TOO_SMALL")
     if args.run_executor_cycle_after_request and not args.pipe_name:
         raise RuntimeError("RUN_EXECUTOR_CYCLE_REQUIRES_PIPE_MODE")
     if args.run_executor_cycle_after_request and args.state_root is None:
@@ -618,6 +749,7 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
     host_locator_path: Path | None = None
     runtime: EngineHostRuntime | None = None
     executor_maintenance_loop: ExecutorMaintenanceLoop | None = None
+    task_scheduler_maintenance_loop: TaskSchedulerMaintenanceLoop | None = None
     task_scheduler_reconciliation: TaskSchedulerResourcePumpReport | None = None
     try:
         if args.publish_host_locator:
@@ -646,14 +778,11 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                 )
             except Exception as exc:
                 output(
-                    json.dumps(
-                        {
-                            "error_type": type(exc).__name__,
-                            "event": "ENGINE_HOST_TASK_SCHEDULER_RECONCILIATION_FAILED",
-                            "pipe_name": args.pipe_name,
-                        },
-                        sort_keys=True,
-                        separators=(",", ":"),
+                    _task_scheduler_reconciliation_failed_event_json(
+                        pipe_name=args.pipe_name,
+                        cycle_trigger="STARTUP",
+                        error_type=type(exc).__name__,
+                        next_interval_ms=None,
                     )
                 )
                 return 4
@@ -670,6 +799,12 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                     "run_executor_cycle_max_steps": args.run_executor_cycle_max_steps,
                     "serve_forever": args.serve_forever,
                     "serve_requests": args.serve_requests,
+                    "task_scheduler_reconciliation_interval_ms": (
+                        args.task_scheduler_reconciliation_interval_ms
+                    ),
+                    "task_scheduler_reconciliation_max_interval_ms": (
+                        args.task_scheduler_reconciliation_max_interval_ms
+                    ),
                     "startup_reconciliation": _startup_reconciliation_payload(
                         runtime.startup_reconciliation
                     ),
@@ -700,6 +835,14 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                 output=output,
             )
             executor_maintenance_loop.start()
+        if args.task_scheduler_reconciliation_interval_ms is not None:
+            task_scheduler_maintenance_loop = _build_task_scheduler_maintenance_loop(
+                args=args,
+                authorization=authorization,
+                service_status=service_status,
+                output=output,
+            )
+            task_scheduler_maintenance_loop.start()
         server = Win32NamedPipeServer(
             pipe_name=args.pipe_name,
             service=runtime.service,
@@ -750,6 +893,8 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
         )
         return 2
     finally:
+        if task_scheduler_maintenance_loop is not None:
+            task_scheduler_maintenance_loop.stop()
         if executor_maintenance_loop is not None:
             executor_maintenance_loop.stop()
         if runtime is not None:
@@ -1003,6 +1148,37 @@ def _build_executor_maintenance_loop(
     )
 
 
+def _build_task_scheduler_maintenance_loop(
+    *,
+    args: argparse.Namespace,
+    authorization: ClientAuthorizationPolicy,
+    service_status: RuntimeStatus,
+    output: Emit,
+) -> TaskSchedulerMaintenanceLoop:
+    if args.state_root is None:
+        raise RuntimeError("TASK_SCHEDULER_MAINTENANCE_REQUIRES_STATE_ROOT")
+    options = _task_scheduler_startup_options(args)
+
+    def runtime_factory() -> EngineHostRuntime:
+        return build_engine_host_runtime(
+            authorization=authorization,
+            service_status=service_status,
+            installation_id=args.installation_id,
+            state_root=args.state_root,
+            reconciler_instance_id=f"{args.installation_id}-task-scheduler-maintenance",
+        )
+
+    return TaskSchedulerMaintenanceLoop(
+        runtime_factory=runtime_factory,
+        registry_factory=lambda: build_task_scheduler_registry(options.backend),
+        options=options,
+        interval_ms=args.task_scheduler_reconciliation_interval_ms,
+        max_interval_ms=args.task_scheduler_reconciliation_max_interval_ms,
+        output=output,
+        pipe_name=args.pipe_name,
+    )
+
+
 def _emit_run_executor_cycle_event(
     *,
     output: Emit,
@@ -1046,6 +1222,67 @@ def _emit_run_executor_cycle_failed_event(
             sort_keys=True,
             separators=(",", ":"),
         )
+    )
+
+
+def _emit_task_scheduler_reconciliation_event(
+    *,
+    output: Emit,
+    pipe_name: str,
+    cycle_trigger: str,
+    report: TaskSchedulerResourcePumpReport,
+    next_interval_ms: int | None,
+) -> None:
+    output(
+        json.dumps(
+            {
+                "cycle_trigger": cycle_trigger,
+                "event": "ENGINE_HOST_TASK_SCHEDULER_RECONCILIATION",
+                "next_interval_ms": next_interval_ms,
+                "pipe_name": pipe_name,
+                "task_scheduler_reconciliation": _task_scheduler_resource_pump_payload(report),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+
+
+def _emit_task_scheduler_reconciliation_failed_event(
+    *,
+    output: Emit,
+    pipe_name: str,
+    cycle_trigger: str,
+    error_type: str,
+    next_interval_ms: int | None,
+) -> None:
+    output(
+        _task_scheduler_reconciliation_failed_event_json(
+            pipe_name=pipe_name,
+            cycle_trigger=cycle_trigger,
+            error_type=error_type,
+            next_interval_ms=next_interval_ms,
+        )
+    )
+
+
+def _task_scheduler_reconciliation_failed_event_json(
+    *,
+    pipe_name: str,
+    cycle_trigger: str,
+    error_type: str,
+    next_interval_ms: int | None,
+) -> str:
+    return json.dumps(
+        {
+            "cycle_trigger": cycle_trigger,
+            "error_type": error_type,
+            "event": "ENGINE_HOST_TASK_SCHEDULER_RECONCILIATION_FAILED",
+            "next_interval_ms": next_interval_ms,
+            "pipe_name": pipe_name,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 

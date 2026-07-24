@@ -157,6 +157,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=60_000,
         help="maximum backed-off interval for persistent host executor maintenance",
     )
+    parser.add_argument(
+        "--task-scheduler-reconciliation-interval-ms",
+        type=_positive_int,
+        default=300_000,
+        help="persistent host Task Scheduler reconciliation interval",
+    )
+    parser.add_argument(
+        "--task-scheduler-reconciliation-max-interval-ms",
+        type=_positive_int,
+        default=3_600_000,
+        help="maximum backed-off interval for persistent host Task Scheduler reconciliation",
+    )
     parser.add_argument("--timeout-seconds", type=_positive_float, default=10.0)
     return parser
 
@@ -182,6 +194,8 @@ def build_local_preview_host_run(
     task_scheduler_executable_path: Path | None = None,
     run_executor_cycle_interval_ms: int | None = None,
     run_executor_cycle_max_interval_ms: int | None = None,
+    task_scheduler_reconciliation_interval_ms: int | None = None,
+    task_scheduler_reconciliation_max_interval_ms: int | None = None,
 ) -> LocalPreviewHostRun:
     if host_descriptor is not None:
         if pipe_name is not None and pipe_name != host_descriptor.pipe_name:
@@ -232,6 +246,20 @@ def build_local_preview_host_run(
                 str(task_scheduler_executable_path.resolve()),
             )
         )
+        if task_scheduler_reconciliation_interval_ms is not None:
+            engine_args.extend(
+                (
+                    "--task-scheduler-reconciliation-interval-ms",
+                    str(task_scheduler_reconciliation_interval_ms),
+                )
+            )
+            if task_scheduler_reconciliation_max_interval_ms is not None:
+                engine_args.extend(
+                    (
+                        "--task-scheduler-reconciliation-max-interval-ms",
+                        str(task_scheduler_reconciliation_max_interval_ms),
+                    )
+                )
     return LocalPreviewHostRun(
         pipe_name=pipe_name,
         engine_host_args=tuple(engine_args),
@@ -500,6 +528,16 @@ def _run_local_preview_host_from_args(
         task_scheduler_executable_path=args.task_scheduler_executable_path,
         run_executor_cycle_interval_ms=args.run_executor_cycle_interval_ms,
         run_executor_cycle_max_interval_ms=args.run_executor_cycle_max_interval_ms,
+        task_scheduler_reconciliation_interval_ms=(
+            args.task_scheduler_reconciliation_interval_ms
+            if args.reconcile_task_scheduler_resources
+            else None
+        ),
+        task_scheduler_reconciliation_max_interval_ms=(
+            args.task_scheduler_reconciliation_max_interval_ms
+            if args.reconcile_task_scheduler_resources
+            else None
+        ),
     )
     from mediasync_home.composition.engine_host import run_engine_host
 

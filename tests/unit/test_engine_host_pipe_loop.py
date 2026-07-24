@@ -25,6 +25,7 @@ from mediasync_home.application.schedules import ScheduleDefinition
 from mediasync_home.application.task_scheduler import (
     TaskSchedulerDefinition,
     ObservedTaskSchedulerDefinition,
+    TaskSchedulerResourcePumpReport,
     TaskSchedulerReconciliationAction,
     bind_same_user_task_scheduler_definition_hash,
     build_same_user_task_scheduler_definition,
@@ -33,6 +34,7 @@ from mediasync_home.application.trigger_occurrences import TriggerKind
 from mediasync_home.composition import engine_host as engine_host_module
 from mediasync_home.composition.engine_host import (
     ExecutorMaintenanceLoop,
+    TaskSchedulerMaintenanceLoop,
     TaskSchedulerStartupReconciliationOptions,
     build_engine_host_runtime,
     build_parser,
@@ -201,6 +203,126 @@ def test_executor_maintenance_loop_reports_sanitized_runtime_failure() -> None:
             "cycle_trigger": "INTERVAL",
             "error_type": "RuntimeError",
             "event": "ENGINE_HOST_RUN_EXECUTOR_CYCLE_FAILED",
+            "next_interval_ms": None,
+            "pipe_name": "pipe-a",
+        }
+    ]
+
+
+def test_task_scheduler_maintenance_loop_runs_interval_reconciliation_and_closes_runtime() -> None:
+    runtime = _TaskSchedulerRuntime((_task_scheduler_pump_report(),))
+    registry = _TaskSchedulerRegistry()
+    lines: list[str] = []
+
+    loop = TaskSchedulerMaintenanceLoop(
+        runtime_factory=lambda: runtime,
+        registry_factory=lambda: registry,
+        options=TaskSchedulerStartupReconciliationOptions(
+            installation_id="install-a",
+            executable_path=TASK_SCHEDULER_EXECUTABLE,
+            schedule_page_limit=5,
+            max_schedule_pages=2,
+            max_claims=3,
+            claim_ttl_ms=12_000,
+            claim_token_prefix="maint-a",
+        ),
+        interval_ms=1,
+        max_interval_ms=4,
+        output=lines.append,
+        pipe_name="pipe-a",
+    )
+
+    loop.start()
+    _wait_until(lambda: runtime.task_scheduler_calls != [])
+    loop.stop()
+
+    events = [json.loads(line) for line in lines]
+    assert runtime.closed is True
+    assert runtime.task_scheduler_calls[0] == {
+        "after_schedule_id": None,
+        "claim_token_prefix": "maint-a",
+        "claim_ttl_ms": 12_000,
+        "executable_path": TASK_SCHEDULER_EXECUTABLE,
+        "installation_id": "install-a",
+        "max_claims": 3,
+        "max_schedule_pages": 2,
+        "registry": registry,
+        "schedule_page_limit": 5,
+    }
+    assert events[0]["event"] == "ENGINE_HOST_TASK_SCHEDULER_RECONCILIATION"
+    assert events[0]["cycle_trigger"] == "INTERVAL"
+    assert events[0]["next_interval_ms"] == 2
+    assert events[0]["task_scheduler_reconciliation"]["claim_idle"] is True
+    assert events[0]["task_scheduler_reconciliation"]["resources_reconciled"] == 0
+
+
+def test_task_scheduler_maintenance_loop_carries_stage_cursor_until_scan_completes() -> None:
+    runtime = _TaskSchedulerRuntime(
+        (
+            _task_scheduler_pump_report(
+                resources_reconciled=1,
+                stage_completed=False,
+                stage_next_cursor="schedule-a",
+            ),
+            _task_scheduler_pump_report(),
+        )
+    )
+    lines: list[str] = []
+
+    loop = TaskSchedulerMaintenanceLoop(
+        runtime_factory=lambda: runtime,
+        registry_factory=_TaskSchedulerRegistry,
+        options=TaskSchedulerStartupReconciliationOptions(
+            installation_id="install-a",
+            executable_path=TASK_SCHEDULER_EXECUTABLE,
+            schedule_page_limit=1,
+            max_schedule_pages=1,
+            max_claims=1,
+            claim_token_prefix="maint-a",
+        ),
+        interval_ms=1,
+        max_interval_ms=4,
+        output=lines.append,
+        pipe_name="pipe-a",
+    )
+
+    loop.start()
+    _wait_until(lambda: len(runtime.task_scheduler_calls) >= 2)
+    loop.stop()
+
+    events = [json.loads(line) for line in lines]
+    assert [call["after_schedule_id"] for call in runtime.task_scheduler_calls[:2]] == [
+        None,
+        "schedule-a",
+    ]
+    assert [event["next_interval_ms"] for event in events[:2]] == [1, 2]
+
+
+def test_task_scheduler_maintenance_loop_reports_sanitized_runtime_failure() -> None:
+    lines: list[str] = []
+
+    loop = TaskSchedulerMaintenanceLoop(
+        runtime_factory=lambda: (_ for _ in ()).throw(RuntimeError("detail")),
+        registry_factory=_TaskSchedulerRegistry,
+        options=TaskSchedulerStartupReconciliationOptions(
+            installation_id="install-a",
+            executable_path=TASK_SCHEDULER_EXECUTABLE,
+        ),
+        interval_ms=1,
+        max_interval_ms=4,
+        output=lines.append,
+        pipe_name="pipe-a",
+    )
+
+    loop.start()
+    loop.stop()
+
+    events = [json.loads(line) for line in lines]
+    assert events == [
+        {
+            "cycle_trigger": "INTERVAL",
+            "error_type": "RuntimeError",
+            "event": "ENGINE_HOST_TASK_SCHEDULER_RECONCILIATION_FAILED",
             "next_interval_ms": None,
             "pipe_name": "pipe-a",
         }
@@ -387,6 +509,10 @@ def test_engine_host_parser_accepts_bounded_task_scheduler_startup_pump(
             "12000",
             "--task-scheduler-claim-token-prefix",
             "startup-a",
+            "--task-scheduler-reconciliation-interval-ms",
+            "300",
+            "--task-scheduler-reconciliation-max-interval-ms",
+            "1200",
         ]
     )
 
@@ -398,6 +524,8 @@ def test_engine_host_parser_accepts_bounded_task_scheduler_startup_pump(
     assert args.task_scheduler_max_claims == 7
     assert args.task_scheduler_claim_ttl_ms == 12000
     assert args.task_scheduler_claim_token_prefix == "startup-a"
+    assert args.task_scheduler_reconciliation_interval_ms == 300
+    assert args.task_scheduler_reconciliation_max_interval_ms == 1200
 
 
 def test_engine_host_runtime_without_state_root_preserves_non_persistent_service() -> None:
@@ -772,6 +900,44 @@ class _ScriptedRuntime(_FakeRuntime):
         )
 
 
+class _TaskSchedulerRuntime(_FakeRuntime):
+    def __init__(self, reports: tuple[TaskSchedulerResourcePumpReport, ...]) -> None:
+        super().__init__()
+        self._reports = list(reports)
+        self._last_report = reports[-1]
+        self.task_scheduler_calls: list[dict[str, object]] = []
+
+    def task_scheduler_reconcile_resources_bounded(
+        self,
+        *,
+        installation_id: str,
+        executable_path: str,
+        registry: object,
+        schedule_page_limit: int,
+        max_schedule_pages: int,
+        max_claims: int,
+        claim_token_prefix: str | None = None,
+        claim_ttl_ms: int = 30_000,
+        after_schedule_id: str | None = None,
+    ) -> TaskSchedulerResourcePumpReport:
+        self.task_scheduler_calls.append(
+            {
+                "after_schedule_id": after_schedule_id,
+                "claim_token_prefix": claim_token_prefix,
+                "claim_ttl_ms": claim_ttl_ms,
+                "executable_path": executable_path,
+                "installation_id": installation_id,
+                "max_claims": max_claims,
+                "max_schedule_pages": max_schedule_pages,
+                "registry": registry,
+                "schedule_page_limit": schedule_page_limit,
+            }
+        )
+        if self._reports:
+            return self._reports.pop(0)
+        return self._last_report
+
+
 class _TaskSchedulerRegistry:
     def __init__(self, *observed: ObservedTaskSchedulerDefinition) -> None:
         self.observed = {definition.task_path: definition for definition in observed}
@@ -782,6 +948,30 @@ class _TaskSchedulerRegistry:
 
     def apply_task_definition(self, definition: object) -> None:
         self.applied.append(definition)
+
+
+def _task_scheduler_pump_report(
+    *,
+    resources_reconciled: int = 0,
+    stage_completed: bool = True,
+    stage_next_cursor: str | None = None,
+) -> TaskSchedulerResourcePumpReport:
+    return TaskSchedulerResourcePumpReport(
+        schedule_pages_attempted=1,
+        schedules_scanned=0 if stage_next_cursor is None else 1,
+        resources_staged=0,
+        stage_blocked=0,
+        stage_completed=stage_completed,
+        stage_next_cursor=stage_next_cursor,
+        claims_attempted=1,
+        resources_reconciled=resources_reconciled,
+        resources_applied=0,
+        resources_completed=resources_reconciled,
+        resources_blocked=0,
+        claim_idle=True,
+        stage_findings=(),
+        claim_findings=(),
+    )
 
 
 def _wait_until(predicate: Callable[[], bool], *, timeout_seconds: float = 2.0) -> None:
