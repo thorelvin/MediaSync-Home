@@ -14,6 +14,13 @@ from mediasync_home.application.outbox import (
     OutboxStartupReconciliationRequest,
     OutboxStartupReconciliationStore,
 )
+from mediasync_home.application.recovery_reconciliation import (
+    MAX_RECOVERY_OPERATION_STARTUP_RECONCILIATION_LIMIT,
+    RecoveryOperationStartupReconciliationReport,
+    RecoveryOperationStartupReconciliationRequest,
+    RecoveryOperationStartupReconciliationStore,
+    reconcile_recovery_operations_after_startup,
+)
 
 
 class EngineHostStartupReconciliationViolation(ValueError):
@@ -25,6 +32,7 @@ class EngineHostStartupReconciliationRequest:
     reconciler_instance_id: str
     command_receipt_limit: int = MAX_COMMAND_RECEIPT_STARTUP_RECONCILIATION_LIMIT
     outbox_limit: int = MAX_OUTBOX_STARTUP_RECONCILIATION_LIMIT
+    recovery_operation_limit: int = MAX_RECOVERY_OPERATION_STARTUP_RECONCILIATION_LIMIT
     inactive_outbox_owner_instance_ids: tuple[str, ...] = ()
 
 
@@ -33,6 +41,7 @@ class EngineHostStartupReconciliationReport:
     reconciler_instance_id: str
     command_receipts: CommandReceiptStartupReconciliationReport | None
     outbox: OutboxStartupReconciliationReport | None
+    recovery_operations: RecoveryOperationStartupReconciliationReport | None
     skipped_outbox_requeue_reason: str | None = None
 
 
@@ -41,6 +50,7 @@ def reconcile_engine_host_after_startup(
     *,
     command_receipts: CommandReceiptStartupReconciliationStore | None = None,
     outbox: OutboxStartupReconciliationStore | None = None,
+    recovery_operations: RecoveryOperationStartupReconciliationStore | None = None,
 ) -> EngineHostStartupReconciliationReport:
     validate_engine_host_startup_reconciliation_request(request)
 
@@ -67,10 +77,21 @@ def reconcile_engine_host_after_startup(
         else:
             skipped_outbox_requeue_reason = "OUTBOX_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF"
 
+    recovery_report = None
+    if recovery_operations is not None:
+        recovery_report = reconcile_recovery_operations_after_startup(
+            RecoveryOperationStartupReconciliationRequest(
+                reconciler_instance_id=request.reconciler_instance_id,
+                limit=request.recovery_operation_limit,
+            ),
+            recovery_operations=recovery_operations,
+        )
+
     return EngineHostStartupReconciliationReport(
         reconciler_instance_id=request.reconciler_instance_id,
         command_receipts=command_report,
         outbox=outbox_report,
+        recovery_operations=recovery_report,
         skipped_outbox_requeue_reason=skipped_outbox_requeue_reason,
     )
 
@@ -97,6 +118,14 @@ def validate_engine_host_startup_reconciliation_request(
     if request.outbox_limit > MAX_OUTBOX_STARTUP_RECONCILIATION_LIMIT:
         raise EngineHostStartupReconciliationViolation(
             "ENGINE_HOST_RECONCILIATION_OUTBOX_LIMIT_TOO_LARGE"
+        )
+    if request.recovery_operation_limit < 1:
+        raise EngineHostStartupReconciliationViolation(
+            "ENGINE_HOST_RECONCILIATION_RECOVERY_OPERATION_LIMIT_MUST_BE_POSITIVE"
+        )
+    if request.recovery_operation_limit > MAX_RECOVERY_OPERATION_STARTUP_RECONCILIATION_LIMIT:
+        raise EngineHostStartupReconciliationViolation(
+            "ENGINE_HOST_RECONCILIATION_RECOVERY_OPERATION_LIMIT_TOO_LARGE"
         )
 
     owners = set()

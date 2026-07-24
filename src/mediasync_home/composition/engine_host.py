@@ -70,6 +70,9 @@ from mediasync_home.application.catalog_handoff import FinalFileCatalogHandoffSt
 from mediasync_home.application.plans import PlanStore
 from mediasync_home.application.ports import FinalCommitPort
 from mediasync_home.application.recovery_intents import RecoveryIntentSegmentStore
+from mediasync_home.application.recovery_reconciliation import (
+    RecoveryOperationStartupReconciliationReport,
+)
 from mediasync_home.application.runs import EndpointLeaseAuthority, RunIds, RunTargetCompletionOutcome
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
 from mediasync_home.application.startup_reconciliation import (
@@ -451,6 +454,7 @@ def build_engine_host_runtime(
             ),
             command_receipts=command_receipts,
             outbox=outbox,
+            recovery_operations=recovery_operations,
         )
         service = EngineHostIpcService(
             authorization,
@@ -536,7 +540,34 @@ def _startup_reconciliation_payload(
         "reconciler_instance_id": report.reconciler_instance_id,
         "command_receipts": command_receipts,
         "outbox": outbox,
+        "recovery_operations": _recovery_operations_reconciliation_payload(
+            report.recovery_operations
+        ),
         "skipped_outbox_requeue_reason": report.skipped_outbox_requeue_reason,
+    }
+
+
+def _recovery_operations_reconciliation_payload(
+    report: RecoveryOperationStartupReconciliationReport | None,
+) -> dict[str, object] | None:
+    if report is None:
+        return None
+    return {
+        "scanned": report.scanned,
+        "requires_recovery_mode": report.requires_recovery_mode,
+        "manual_decision_operation_ids": report.manual_decision_operation_ids,
+        "findings": [
+            {
+                "run_id": finding.run_id,
+                "run_target_id": finding.run_target_id,
+                "operation_id": finding.operation_id,
+                "phase": finding.phase.value,
+                "classification": finding.classification.value,
+                "requires_manual_decision": finding.requires_manual_decision,
+                "next_action": finding.next_action,
+            }
+            for finding in report.findings
+        ],
     }
 
 
