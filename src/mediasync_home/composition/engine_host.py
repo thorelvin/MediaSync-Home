@@ -32,6 +32,7 @@ from mediasync_home.adapters.sqlite.migrations import (
 )
 from mediasync_home.adapters.sqlite.outbox import SqliteOutboxStore
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
+from mediasync_home.adapters.sqlite.recovery_operations import SqliteRecoveryOperationStore
 from mediasync_home.adapters.sqlite.runs import SqliteRunStore
 from mediasync_home.adapters.sqlite.schedules import SqliteScheduleStore
 from mediasync_home.adapters.sqlite.snapshots import SqliteSnapshotEntryStore
@@ -44,6 +45,12 @@ from mediasync_home.application.run_executor import (
     execute_bounded_run_executor_preflight_pump,
     execute_one_run_target_execution_start_step,
 )
+from mediasync_home.application.run_operation_planning import (
+    RunTargetOperationPlanningOutcome,
+    plan_run_target_recovery_operations,
+)
+from mediasync_home.application.plans import PlanStore
+from mediasync_home.application.recovery_operations import RecoveryOperationStore
 from mediasync_home.application.runs import EndpointLeaseAuthority, RunIds
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
 from mediasync_home.application.startup_reconciliation import (
@@ -53,6 +60,7 @@ from mediasync_home.application.startup_reconciliation import (
 )
 from mediasync_home.composition._role_runner import Emit, run_role
 from mediasync_home.domain.process_roles import ProcessRole
+from mediasync_home.domain.capabilities import MutationPermit
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy
 from mediasync_home.ipc.server import EngineHostIpcService
 
@@ -92,6 +100,9 @@ class EngineHostRuntime:
     run_executor_queue_store: RunExecutorQueueStore | None = None
     run_executor_lease_authority: EndpointLeaseAuthority | None = None
     run_executor_lease_registry: HeldRunTargetLeaseRegistry | None = None
+    run_executor_plan_store: PlanStore | None = None
+    run_executor_recovery_operation_store: RecoveryOperationStore | None = None
+    run_executor_process_instance_id: str | None = None
     catalog_connection: sqlite3.Connection | None = None
     recovery_connection: sqlite3.Connection | None = None
 
@@ -115,6 +126,26 @@ class EngineHostRuntime:
         return execute_one_run_target_execution_start_step(
             runs=self.run_executor_queue_store,
             lease_registry=self.run_executor_lease_registry,
+        )
+
+    def run_executor_plan_target_operations(
+        self,
+        *,
+        permit: MutationPermit,
+    ) -> RunTargetOperationPlanningOutcome:
+        if (
+            self.run_executor_queue_store is None
+            or self.run_executor_plan_store is None
+            or self.run_executor_recovery_operation_store is None
+            or self.run_executor_process_instance_id is None
+        ):
+            raise RuntimeError("RUN_EXECUTOR_RUNTIME_NOT_CONFIGURED")
+        return plan_run_target_recovery_operations(
+            permit=permit,
+            runs=self.run_executor_queue_store,
+            plans=self.run_executor_plan_store,
+            recovery_operations=self.run_executor_recovery_operation_store,
+            process_instance_id=self.run_executor_process_instance_id,
         )
 
     def close(self) -> None:
@@ -292,6 +323,7 @@ def build_engine_host_runtime(
         trigger_occurrences = SqliteTriggerOccurrenceStore(catalog_connection)
         catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
         resource_leases = SqliteResourceLeaseStore(recovery_connection)
+        recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
         run_executor_lease_authority = LocalResolvingEndpointLeaseAuthority(
             root_resolver=SqliteEndpointRootResolver(catalog_connection),
             resource_lease_store=resource_leases,
@@ -339,6 +371,9 @@ def build_engine_host_runtime(
         run_executor_queue_store=runs,
         run_executor_lease_authority=run_executor_lease_authority,
         run_executor_lease_registry=run_executor_lease_registry,
+        run_executor_plan_store=plans,
+        run_executor_recovery_operation_store=recovery_operations,
+        run_executor_process_instance_id=reconciler_instance_id,
         catalog_connection=catalog_connection,
         recovery_connection=recovery_connection,
     )
