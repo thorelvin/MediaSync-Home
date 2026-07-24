@@ -73,11 +73,24 @@ class LocalFileStagingTransferAdapter:
         permit: MutationPermit,
         operation: RecoveryOperation,
     ) -> TargetPreconditionEvidence:
-        if operation.target_precondition_kind is not RecoveryTargetPreconditionKind.ABSENT:
-            raise LocalFileStagingError(
-                "LOCAL_STAGING_REQUIRES_ABSENT_TARGET_PRECONDITION",
-                "Use a replace/version staging path for non-absent target preconditions.",
+        if operation.target_precondition_kind is RecoveryTargetPreconditionKind.ABSENT:
+            return self._validate_absent_target_precondition(permit=permit, operation=operation)
+        if operation.target_precondition_kind is RecoveryTargetPreconditionKind.MATCH_FINGERPRINT:
+            return self._validate_match_fingerprint_target_precondition(
+                permit=permit,
+                operation=operation,
             )
+        raise LocalFileStagingError(
+            "LOCAL_STAGING_TARGET_PRECONDITION_UNSUPPORTED",
+            "Use a specialized staging path for this target precondition.",
+        )
+
+    def _validate_absent_target_precondition(
+        self,
+        *,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> TargetPreconditionEvidence:
         final_path = self._target_final_path(permit=permit, operation=operation)
         if not final_path.parent.is_dir():
             raise LocalFileStagingError(
@@ -91,6 +104,34 @@ class LocalFileStagingTransferAdapter:
                 "Refresh analysis or use the replace/version flow before staging this operation.",
             )
         return TargetPreconditionEvidence(fingerprint_json=_canonical_json({"kind": "ABSENT"}))
+
+    def _validate_match_fingerprint_target_precondition(
+        self,
+        *,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> TargetPreconditionEvidence:
+        final_path = self._target_final_path(permit=permit, operation=operation)
+        if not final_path.parent.is_dir():
+            raise LocalFileStagingError(
+                "LOCAL_STAGING_TARGET_PARENT_MISSING",
+                "Create and verify the final parent directory before staging this operation.",
+            )
+        _reject_symlink_in_path(root=self._target_root(permit=permit, operation=operation), path=final_path.parent)
+        if not final_path.is_file() or final_path.is_symlink():
+            raise LocalFileStagingError(
+                "LOCAL_STAGING_TARGET_MATCH_REQUIRES_FILE",
+                "Refresh analysis because the target to replace is no longer a regular file.",
+            )
+        observed = _fingerprint_file(final_path)
+        if operation.expected_target_fingerprint_json is not None:
+            expected = _expected_target_fingerprint(operation.expected_target_fingerprint_json)
+            if observed != expected:
+                raise LocalFileStagingError(
+                    "LOCAL_STAGING_TARGET_FINGERPRINT_MISMATCH",
+                    "Refresh analysis because the target changed before staging.",
+                )
+        return TargetPreconditionEvidence(fingerprint_json=_canonical_json(observed))
 
     def allocate_staging_object(self, operation: RecoveryOperation) -> StagingAllocation:
         object_id = operation.staging_object_id or operation.operation_id
@@ -326,6 +367,34 @@ def _expected_content_hash(raw_payload: str | None, *, validation_code: str) -> 
     if not isinstance(content_hash, str):
         raise LocalFileStagingError(validation_code, "Refresh source validation before transfer.")
     return content_hash
+
+
+def _expected_target_fingerprint(raw_payload: str) -> dict[str, object]:
+    try:
+        payload = json.loads(raw_payload)
+    except json.JSONDecodeError as exc:
+        raise LocalFileStagingError(
+            "LOCAL_STAGING_TARGET_FINGERPRINT_INVALID",
+            "Refresh target precondition evidence before staging.",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise LocalFileStagingError(
+            "LOCAL_STAGING_TARGET_FINGERPRINT_INVALID",
+            "Refresh target precondition evidence before staging.",
+        )
+    content_hash = payload.get("content_hash")
+    byte_count = payload.get("byte_count")
+    if not isinstance(content_hash, str) or len(content_hash) != 64:
+        raise LocalFileStagingError(
+            "LOCAL_STAGING_TARGET_FINGERPRINT_INVALID",
+            "Refresh target precondition evidence before staging.",
+        )
+    if not isinstance(byte_count, int) or byte_count < 0:
+        raise LocalFileStagingError(
+            "LOCAL_STAGING_TARGET_FINGERPRINT_INVALID",
+            "Refresh target precondition evidence before staging.",
+        )
+    return {"byte_count": byte_count, "content_hash": content_hash}
 
 
 def _copy_file_with_hash(*, source: Path, destination: Path) -> dict[str, object]:

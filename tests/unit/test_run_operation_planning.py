@@ -70,6 +70,31 @@ def test_plan_run_target_recovery_operations_records_mutating_plan_operations() 
     )
 
 
+def test_plan_run_target_recovery_operations_preserves_match_fingerprint_precondition() -> None:
+    plan = _sealed_plan(
+        reason_code="REPLACE_CHANGED",
+        target_precondition_kind=TargetPreconditionKind.MATCH_FINGERPRINT,
+    )
+    run = replace(_executing_run(), plan_checksum=plan.plan_checksum)
+
+    outcome = plan_run_target_recovery_operations(
+        permit=_permit(),
+        runs=_SingleRunStore(run),
+        plans=_SinglePlanStore(plan),
+        recovery_operations=_FakeRecoveryOperationStore(),
+        process_instance_id="host-a",
+    )
+
+    assert outcome.planned is True
+    assert outcome.validation_codes == ()
+    assert len(outcome.operations) == 1
+    operation = outcome.operations[0]
+    assert operation.target_precondition_kind is RecoveryTargetPreconditionKind.MATCH_FINGERPRINT
+    assert operation.source_endpoint_id == "source-a"
+    assert operation.source_endpoint_revision_id == "source-rev-a"
+    assert operation.source_relative_path == "Pictures/A.jpg"
+
+
 def test_plan_run_target_recovery_operations_is_idempotent() -> None:
     recovery_operations = _FakeRecoveryOperationStore()
     plan = _sealed_plan()
@@ -323,7 +348,11 @@ def _target() -> StartedRunTarget:
     )
 
 
-def _sealed_plan() -> SealedPlan:
+def _sealed_plan(
+    *,
+    reason_code: str = "COPY_NEW",
+    target_precondition_kind: TargetPreconditionKind = TargetPreconditionKind.ABSENT,
+) -> SealedPlan:
     return seal_plan(
         plan_id="plan-a",
         analysis_id="analysis-a",
@@ -337,10 +366,10 @@ def _sealed_plan() -> SealedPlan:
                 sequence_no=10,
                 execution_phase=20,
                 stable_order_key="020:Pictures/A.jpg",
-                target_precondition_kind=TargetPreconditionKind.ABSENT,
+                target_precondition_kind=target_precondition_kind,
                 target_relative_path="Pictures/A.jpg",
                 planned_bytes=128,
-                reason_code="COPY_NEW",
+                reason_code=reason_code,
                 risk_level=PlanRiskLevel.LOW,
             ),
             PlanOperation(

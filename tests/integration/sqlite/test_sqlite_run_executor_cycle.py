@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from pathlib import Path
 
+from mediasync_home.adapters.final_commit import LocalVersionedReplaceFinalCommitAdapter
 from mediasync_home.adapters.staging import LocalFileStagingTransferAdapter
 from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
 from mediasync_home.adapters.sqlite.connection_policy import (
@@ -41,6 +43,7 @@ from mediasync_home.application.ports import (
 )
 from mediasync_home.application.recovery_operations import (
     RecoveryOperationPhase,
+    RecoveryTargetPreconditionKind,
 )
 from mediasync_home.application.run_executor import HeldRunTargetLeaseRegistry, RunExecutorPumpStopReason
 from mediasync_home.application.run_executor_cycle import (
@@ -103,6 +106,18 @@ class FixedLiveLease:
 
     def release(self) -> None:
         self.released = True
+
+    def assert_mutation_permit_current(self, permit: MutationPermit) -> None:
+        assert self.released is False
+        assert permit.lease_id == self.lease_id
+        assert permit.resource_key == "endpoint:target-a"
+        assert permit.owner_installation_id == self.owner_installation_id
+        assert permit.ownership_epoch == self.ownership_epoch
+        assert permit.fencing_token == self.fencing_token
+        assert permit.run_id == "run-a"
+        assert permit.run_target_id == "run-a-target-0000"
+        assert permit.endpoint_id == "target-a"
+        assert permit.endpoint_revision_id == "target-rev-a"
 
 
 def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
@@ -197,6 +212,117 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
                 content_hash=content_hash,
             ),
         )
+    finally:
+        catalog_connection.close()
+        recovery_connection.close()
+
+
+def test_sqlite_run_executor_cycle_replaces_existing_target_from_match_fingerprint_plan(
+    tmp_path: Path,
+) -> None:
+    old_payload = b"old-image"
+    new_payload = b"new-image"
+    content_hash = hashlib.sha256(new_payload).hexdigest()
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    staging_root = tmp_path / "staging"
+    (source_root / "Pictures").mkdir(parents=True)
+    (target_root / "Pictures").mkdir(parents=True)
+    (source_root / "Pictures" / "A.jpg").write_bytes(new_payload)
+    (target_root / "Pictures" / "A.jpg").write_bytes(old_payload)
+    _write_endpoint_marker(target_root)
+
+    catalog_connection = _prepared_catalog_connection(tmp_path)
+    recovery_connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _insert_plan_parent_rows(
+            catalog_connection,
+            source_root=source_root,
+            target_root=target_root,
+        )
+        _insert_receipt(catalog_connection)
+        plans = SqlitePlanStore(catalog_connection)
+        runs = SqliteRunStore(catalog_connection)
+        recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
+        intent_segments = SqliteRecoveryIntentSegmentStore(recovery_connection)
+        catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
+        lease = FixedLiveLease()
+        registry = HeldRunTargetLeaseRegistry()
+        final_commit = LocalVersionedReplaceFinalCommitAdapter(
+            target_root=target_root,
+            staging_root=staging_root,
+            permit_validator=lease,
+        )
+        staging = LocalFileStagingTransferAdapter(
+            root_resolver=SqliteEndpointRootResolver(catalog_connection),
+            staging_root=staging_root,
+        )
+        plan = _sealed_plan(
+            planned_bytes=len(new_payload),
+            reason_code="REPLACE_CHANGED",
+            target_precondition_kind=TargetPreconditionKind.MATCH_FINGERPRINT,
+        )
+        plans.save_sealed_plan(plan)
+        start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        _register_resource_lease(recovery_connection)
+
+        outcome = execute_bounded_run_executor_cycle(
+            runs=runs,
+            leases=FixedLeaseAuthority(lease),
+            lease_registry=registry,
+            plans=plans,
+            recovery_operations=recovery_operations,
+            intent_segments=intent_segments,
+            catalog_handoffs=catalog_handoffs,
+            final_commit_port=final_commit,
+            old_target_preservation_port=final_commit,
+            staging_transfer_port=staging,
+            process_instance_id="host-a",
+            max_steps=15,
+        )
+
+        loaded_run = runs.load_started_run("run-a")
+        operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+        handoff = catalog_handoffs.load_final_file_handoff("final-file:run-a:op-a")
+        version_payload = target_root / ".mediasync" / "objects" / "versions" / "op-a.payload"
+        version_manifest = target_root / ".mediasync" / "objects" / "versions" / "op-a.manifest.json"
+        assert outcome.stopped_reason is RunExecutorPumpStopReason.IDLE
+        assert outcome.last_step is not None
+        assert outcome.last_step.action is RunExecutorCycleAction.IDLE
+        assert registry.retained_count == 0
+        assert lease.released is True
+        assert loaded_run is not None
+        assert loaded_run.state is RunState.COMPLETED
+        assert loaded_run.targets[0].state is RunTargetState.SUCCEEDED
+        assert loaded_run.targets[0].completed_operations == 1
+        assert loaded_run.targets[0].completed_bytes == len(new_payload)
+        assert operation is not None
+        assert operation.phase is RecoveryOperationPhase.CATALOG_RECORDED
+        assert operation.target_precondition_kind is RecoveryTargetPreconditionKind.MATCH_FINGERPRINT
+        assert operation.version_object_id == "op-a"
+        assert operation.expected_target_fingerprint_json == json.dumps(
+            {
+                "byte_count": len(old_payload),
+                "content_hash": hashlib.sha256(old_payload).hexdigest(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        assert (target_root / "Pictures" / "A.jpg").read_bytes() == new_payload
+        assert (staging_root / "op-a.payload").read_bytes() == new_payload
+        assert version_payload.read_bytes() == old_payload
+        assert json.loads(version_manifest.read_text(encoding="utf-8"))["object_role"] == "OLD_TARGET_VERSION"
+        assert handoff is not None
+        assert handoff.content_hash == content_hash
     finally:
         catalog_connection.close()
         recovery_connection.close()
@@ -373,13 +499,18 @@ def _insert_receipt(connection: sqlite3.Connection) -> None:
     connection.commit()
 
 
-def _sealed_plan() -> SealedPlan:
+def _sealed_plan(
+    *,
+    planned_bytes: int = 128,
+    reason_code: str = "COPY_NEW",
+    target_precondition_kind: TargetPreconditionKind = TargetPreconditionKind.ABSENT,
+) -> SealedPlan:
     return seal_plan(
         plan_id="plan-a",
         analysis_id="analysis-a",
         job_id="job-a",
         job_revision_id="job-rev-a",
-        endpoints=(_source_endpoint(), _target_endpoint()),
+        endpoints=(_source_endpoint(), _target_endpoint(planned_bytes=planned_bytes)),
         operations=(
             PlanOperation(
                 operation_id="op-a",
@@ -387,10 +518,10 @@ def _sealed_plan() -> SealedPlan:
                 sequence_no=10,
                 execution_phase=20,
                 stable_order_key="020:Pictures/A.jpg",
-                target_precondition_kind=TargetPreconditionKind.ABSENT,
+                target_precondition_kind=target_precondition_kind,
                 target_relative_path="Pictures/A.jpg",
-                planned_bytes=128,
-                reason_code="COPY_NEW",
+                planned_bytes=planned_bytes,
+                reason_code=reason_code,
                 risk_level=PlanRiskLevel.LOW,
             ),
         ),
@@ -412,7 +543,7 @@ def _source_endpoint() -> PlanEndpoint:
     )
 
 
-def _target_endpoint() -> PlanEndpoint:
+def _target_endpoint(*, planned_bytes: int = 128) -> PlanEndpoint:
     return PlanEndpoint(
         endpoint_id="target-a",
         endpoint_revision_id="target-rev-a",
@@ -425,7 +556,7 @@ def _target_endpoint() -> PlanEndpoint:
         required_ownership_epoch=1,
         control_schema_version=1,
         planned_operations=1,
-        planned_bytes=128,
+        planned_bytes=planned_bytes,
     )
 
 
@@ -442,6 +573,21 @@ def _register_resource_lease(connection: sqlite3.Connection) -> None:
         lease_mode="EXCLUSIVE",
         os_lock_kind="LOCAL_OS_HANDLE",
     ) == 1
+
+
+def _write_endpoint_marker(target_root: Path) -> None:
+    (target_root / ".mediasync" / "locks").mkdir(parents=True)
+    (target_root / ".mediasync" / "endpoint.json").write_text(
+        json.dumps(
+            {
+                "endpoint_id": "target-a",
+                "owner_installation_id": "owner-a",
+                "ownership_epoch": 1,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
 
 
 class _FakeFinalCommitPort(FinalCommitPort):
