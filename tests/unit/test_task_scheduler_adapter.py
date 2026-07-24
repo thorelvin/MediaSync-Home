@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+import types
 from dataclasses import replace
 
 import pytest
@@ -149,6 +151,81 @@ def test_pywin32_task_scheduler_gateway_registers_daily_interactive_task() -> No
     assert parse_windows_argument_line(action.Arguments) == definition.arguments
 
 
+def test_pywin32_task_scheduler_gateway_wraps_custom_factory_in_requested_apartment() -> None:
+    service = _FakeTaskSchedulerService()
+    events: list[str] = []
+    gateway = Pywin32TaskSchedulerGateway(
+        service_factory=_connected_factory(service),
+        com_apartment_factory=lambda: _RecordingComApartment(events),
+    )
+    definition = _definition()
+    task = _gateway_task(definition)
+
+    gateway.apply_task(task)
+    observed = gateway.load_task(definition.task_path)
+
+    assert observed == task
+    assert events == ["enter", "exit", "enter", "exit"]
+
+
+def test_pywin32_task_scheduler_gateway_default_factory_initializes_com_apartment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _FakeTaskSchedulerService()
+    events: list[str] = []
+    pythoncom = types.ModuleType("pythoncom")
+    win32com = types.ModuleType("win32com")
+    win32com_client = types.ModuleType("win32com.client")
+
+    def co_initialize() -> None:
+        events.append("coinit")
+
+    def co_uninitialize() -> None:
+        events.append("couninit")
+
+    def dispatch(progid: str) -> object:
+        events.append(f"dispatch:{progid}")
+        return service
+
+    pythoncom.CoInitialize = co_initialize  # type: ignore[attr-defined]
+    pythoncom.CoUninitialize = co_uninitialize  # type: ignore[attr-defined]
+    win32com_client.Dispatch = dispatch  # type: ignore[attr-defined]
+    win32com.client = win32com_client  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "pythoncom", pythoncom)
+    monkeypatch.setitem(sys.modules, "win32com", win32com)
+    monkeypatch.setitem(sys.modules, "win32com.client", win32com_client)
+
+    gateway = Pywin32TaskSchedulerGateway()
+
+    assert gateway.load_task(r"\MediaSync Home\install-a\missing") is None
+    assert service.connected is True
+    assert events == ["coinit", "dispatch:Schedule.Service", "couninit"]
+
+
+def test_pywin32_task_scheduler_gateway_preserves_com_apartment_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    pythoncom = types.ModuleType("pythoncom")
+
+    def co_initialize() -> None:
+        events.append("coinit")
+        raise RuntimeError("COM init failed")
+
+    def co_uninitialize() -> None:
+        events.append("couninit")
+
+    pythoncom.CoInitialize = co_initialize  # type: ignore[attr-defined]
+    pythoncom.CoUninitialize = co_uninitialize  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "pythoncom", pythoncom)
+
+    gateway = Pywin32TaskSchedulerGateway()
+
+    with pytest.raises(TaskSchedulerAdapterError, match="TASK_SCHEDULER_COM_APARTMENT_FAILED"):
+        gateway.load_task(r"\MediaSync Home\install-a\missing")
+    assert events == ["coinit"]
+
+
 def test_pywin32_task_scheduler_gateway_loads_registered_task_back() -> None:
     service = _FakeTaskSchedulerService()
     gateway = Pywin32TaskSchedulerGateway(service_factory=_connected_factory(service))
@@ -242,6 +319,24 @@ class _Gateway:
     def apply_task(self, task: TaskSchedulerGatewayTask) -> None:
         self.applied.append(task)
         self.tasks[task.task_path] = task
+
+
+class _RecordingComApartment:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    def __enter__(self) -> None:
+        self._events.append("enter")
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: object,
+    ) -> bool:
+        del exc_type, exc, tb
+        self._events.append("exit")
+        return False
 
 
 def _connected_factory(service: "_FakeTaskSchedulerService"):

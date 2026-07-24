@@ -3,7 +3,8 @@ from __future__ import annotations
 import importlib
 import json
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol, cast
+from types import TracebackType
+from typing import Any, Callable, Literal, Protocol, cast
 
 from mediasync_home.adapters.windows_argv import (
     WindowsCommandLineError,
@@ -73,6 +74,17 @@ class TaskSchedulerGateway(Protocol):
     def apply_task(self, task: TaskSchedulerGatewayTask) -> None: ...
 
 
+class ComApartment(Protocol):
+    def __enter__(self) -> None: ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> Literal[False]: ...
+
+
 class WindowsTaskSchedulerRegistry:
     def __init__(self, gateway: TaskSchedulerGateway) -> None:
         self._gateway = gateway
@@ -110,16 +122,23 @@ class Pywin32TaskSchedulerGateway:
         self,
         *,
         service_factory: Callable[[], object] | None = None,
+        com_apartment_factory: Callable[[], ComApartment] | None = None,
         author: str = "MediaSync Home",
     ) -> None:
         self._service_factory = service_factory or _connect_pywin32_task_scheduler
+        self._com_apartment_factory = com_apartment_factory or (
+            _Pywin32ComApartment if service_factory is None else _NullComApartment
+        )
         self._author = author
 
     def load_task(self, task_path: str) -> TaskSchedulerGatewayTask | None:
         folder_path, task_name = _split_task_path(task_path)
         try:
-            folder = _call_method(self._service_factory(), "GetFolder", folder_path)
-            registered_task = _call_method(folder, "GetTask", task_name)
+            with self._com_apartment_factory():
+                folder = _call_method(self._service_factory(), "GetFolder", folder_path)
+                registered_task = _call_method(folder, "GetTask", task_name)
+        except TaskSchedulerAdapterError:
+            raise
         except Exception as exc:
             if _is_not_found_error(exc):
                 return None
@@ -128,25 +147,69 @@ class Pywin32TaskSchedulerGateway:
 
     def apply_task(self, task: TaskSchedulerGatewayTask) -> None:
         try:
-            service = self._service_factory()
-            folder = _ensure_folder(service, task.folder_path)
-            task_definition = _call_method(service, "NewTask", 0)
-            _configure_task_definition(task_definition, task, author=self._author)
-            _call_method(
-                folder,
-                "RegisterTaskDefinition",
-                task.task_name,
-                task_definition,
-                TASK_CREATE_OR_UPDATE,
-                None,
-                None,
-                _com_logon_type(task.task_logon_type),
-                None,
-            )
+            with self._com_apartment_factory():
+                service = self._service_factory()
+                folder = _ensure_folder(service, task.folder_path)
+                task_definition = _call_method(service, "NewTask", 0)
+                _configure_task_definition(task_definition, task, author=self._author)
+                _call_method(
+                    folder,
+                    "RegisterTaskDefinition",
+                    task.task_name,
+                    task_definition,
+                    TASK_CREATE_OR_UPDATE,
+                    None,
+                    None,
+                    _com_logon_type(task.task_logon_type),
+                    None,
+                )
         except TaskSchedulerAdapterError:
             raise
         except Exception as exc:
             raise TaskSchedulerAdapterError("TASK_SCHEDULER_COM_APPLY_FAILED") from exc
+
+
+class _NullComApartment:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> Literal[False]:
+        del exc_type, exc, tb
+        return False
+
+
+class _Pywin32ComApartment:
+    def __init__(self) -> None:
+        self._pythoncom: Any | None = None
+
+    def __enter__(self) -> None:
+        try:
+            pythoncom = importlib.import_module("pythoncom")
+        except ModuleNotFoundError as exc:
+            raise TaskSchedulerAdapterError("TASK_SCHEDULER_PYWIN32_UNAVAILABLE") from exc
+        co_initialize = cast(Callable[[], object], getattr(pythoncom, "CoInitialize"))
+        try:
+            co_initialize()
+        except Exception as exc:
+            raise TaskSchedulerAdapterError("TASK_SCHEDULER_COM_APARTMENT_FAILED") from exc
+        self._pythoncom = pythoncom
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> Literal[False]:
+        del exc_type, exc, tb
+        if self._pythoncom is not None:
+            co_uninitialize = cast(Callable[[], object], getattr(self._pythoncom, "CoUninitialize"))
+            co_uninitialize()
+        return False
 
 
 def _task_from_definition(definition: TaskSchedulerDefinition) -> TaskSchedulerGatewayTask:
