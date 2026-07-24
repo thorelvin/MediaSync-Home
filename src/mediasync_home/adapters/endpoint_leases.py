@@ -3,10 +3,11 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+from collections.abc import Callable
 from ctypes import wintypes
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Protocol, SupportsInt, cast
+from typing import Any, ClassVar, Mapping, Protocol, SupportsInt, cast
 from uuid import uuid4
 
 from mediasync_home.application.runs import (
@@ -285,23 +286,6 @@ class LocalEndpointLeaseAuthority(EndpointLeaseAuthority):
         )
 
 
-@dataclass
-class Win32EndpointLockHandle:
-    path: Path
-    handle_value: int
-    _closed: bool = field(default=False, init=False, repr=False)
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        kernel32 = _kernel32()
-        kernel32.CloseHandle(wintypes.HANDLE(self.handle_value))
-        self._closed = True
-
-    def is_alive(self) -> bool:
-        return not self._closed
-
-
 class Win32EndpointLockOpener(EndpointLockOpener):
     def acquire_exclusive_lock(self, lock_path: Path) -> EndpointLockHandle:
         if os.name != "nt":
@@ -343,6 +327,59 @@ ERROR_LOCK_VIOLATION = 33
 INVALID_HANDLE_VALUE = int(wintypes.HANDLE(-1).value or -1)
 
 
+class _ByHandleFileInformation(ctypes.Structure):
+    _fields_: ClassVar[list[tuple[str, Any]]] = [
+        ("dwFileAttributes", wintypes.DWORD),
+        ("ftCreationTime", wintypes.FILETIME),
+        ("ftLastAccessTime", wintypes.FILETIME),
+        ("ftLastWriteTime", wintypes.FILETIME),
+        ("dwVolumeSerialNumber", wintypes.DWORD),
+        ("nFileSizeHigh", wintypes.DWORD),
+        ("nFileSizeLow", wintypes.DWORD),
+        ("nNumberOfLinks", wintypes.DWORD),
+        ("nFileIndexHigh", wintypes.DWORD),
+        ("nFileIndexLow", wintypes.DWORD),
+    ]
+
+
+def _win32_file_handle_is_alive(handle_value: int) -> bool:
+    if os.name != "nt":
+        return False
+    info = _ByHandleFileInformation()
+    try:
+        result = _kernel32().GetFileInformationByHandle(
+            wintypes.HANDLE(handle_value),
+            ctypes.byref(info),
+        )
+    except (AttributeError, OSError):
+        return False
+    return bool(result)
+
+
+@dataclass
+class Win32EndpointLockHandle:
+    path: Path
+    handle_value: int
+    _probe_file_handle: Callable[[int], bool] = field(default=_win32_file_handle_is_alive, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
+    _lost: bool = field(default=False, init=False, repr=False)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        kernel32 = _kernel32()
+        kernel32.CloseHandle(wintypes.HANDLE(self.handle_value))
+        self._closed = True
+
+    def is_alive(self) -> bool:
+        if self._closed or self._lost:
+            return False
+        if self._probe_file_handle(self.handle_value):
+            return True
+        self._lost = True
+        return False
+
+
 def _kernel32() -> Any:
     kernel32 = cast(Any, ctypes).WinDLL("kernel32", use_last_error=True)
     kernel32.CreateFileW.argtypes = [
@@ -355,6 +392,11 @@ def _kernel32() -> Any:
         wintypes.HANDLE,
     ]
     kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.GetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_ByHandleFileInformation),
+    ]
+    kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
     return kernel32

@@ -12,6 +12,7 @@ from mediasync_home.adapters.endpoint_leases import (
     LocalEndpointLeaseAuthority,
     MutationPermitIssueError,
     ResourceLeaseRegistrationError,
+    Win32EndpointLockHandle,
     Win32EndpointLockOpener,
 )
 from mediasync_home.application.runs import EndpointLeaseRequest
@@ -296,6 +297,41 @@ def test_win32_endpoint_lock_opener_reports_non_windows(monkeypatch: pytest.Monk
         Win32EndpointLockOpener().acquire_exclusive_lock(tmp_path / "mutation.lock")
 
     assert exc_info.value.validation_code == "ENDPOINT_LEASE_REQUIRES_WINDOWS"
+
+
+def test_win32_endpoint_lock_handle_probes_file_handle_liveness(tmp_path: Path) -> None:
+    probed_handles: list[int] = []
+
+    def probe_file_handle(handle_value: int) -> bool:
+        probed_handles.append(handle_value)
+        return True
+
+    handle = Win32EndpointLockHandle(
+        path=tmp_path / "mutation.lock",
+        handle_value=1234,
+        _probe_file_handle=probe_file_handle,
+    )
+
+    assert handle.is_alive() is True
+    assert probed_handles == [1234]
+
+
+def test_win32_endpoint_lock_handle_latches_probe_loss(tmp_path: Path) -> None:
+    probe_results = [False, True]
+
+    def probe_file_handle(handle_value: int) -> bool:
+        assert handle_value == 1234
+        return probe_results.pop(0)
+
+    handle = Win32EndpointLockHandle(
+        path=tmp_path / "mutation.lock",
+        handle_value=1234,
+        _probe_file_handle=probe_file_handle,
+    )
+
+    assert handle.is_alive() is False
+    assert handle.is_alive() is False
+    assert probe_results == [True]
 
 
 class _FakeHandle:

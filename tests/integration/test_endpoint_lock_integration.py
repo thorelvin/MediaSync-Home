@@ -16,11 +16,13 @@ def test_win32_endpoint_lock_opener_keeps_mutation_lock_exclusive(tmp_path: Path
 
     first = opener.acquire_exclusive_lock(lock_path)
     try:
+        assert first.is_alive() is True
         with pytest.raises(EndpointLeaseUnavailable) as exc_info:
             opener.acquire_exclusive_lock(lock_path)
         assert exc_info.value.validation_code == "ENDPOINT_LEASE_UNAVAILABLE"
     finally:
         first.close()
+    assert first.is_alive() is False
 
     second = opener.acquire_exclusive_lock(lock_path)
     second.close()
