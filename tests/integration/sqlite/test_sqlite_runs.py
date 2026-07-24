@@ -29,6 +29,7 @@ from mediasync_home.application.plans import (
     TargetPreconditionKind,
     seal_plan,
 )
+from mediasync_home.application.run_executor import execute_one_run_target_preflight_step
 from mediasync_home.application.runs import (
     EndpointLeaseAttempt,
     EndpointLeaseAuthority,
@@ -298,6 +299,52 @@ def test_sqlite_run_store_records_acquired_run_target_lease(tmp_path: Path) -> N
                 required_ownership_epoch=1,
             )
         ]
+
+
+def test_sqlite_run_executor_step_selects_next_run_and_records_live_lease(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        plans = SqlitePlanStore(connection)
+        runs = SqliteRunStore(connection)
+        plan = _sealed_plan()
+        lease = FixedLiveLease()
+        leases = FixedLeaseAuthority(lease)
+        plans.save_sealed_plan(plan)
+        start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+
+        selected = runs.load_next_runnable_run()
+        outcome = execute_one_run_target_preflight_step(runs=runs, leases=leases)
+        idle = execute_one_run_target_preflight_step(runs=runs, leases=leases)
+
+        loaded = runs.load_started_run("run-a")
+        assert selected is not None
+        assert selected.run_id == "run-a"
+        assert outcome.idle is False
+        assert outcome.claimed is True
+        assert outcome.lease_acquired is True
+        assert outcome.lease is lease
+        assert outcome.target is not None
+        assert outcome.target.state is RunTargetState.REVALIDATING
+        assert loaded is not None
+        assert loaded.state is RunState.PREFLIGHT
+        assert loaded.targets[0] == outcome.target
+        assert runs.load_next_runnable_run() is None
+        assert idle.idle is True
+        assert len(leases.requests) == 1
 
 
 def test_sqlite_run_store_lists_recent_run_activity_summaries(tmp_path: Path) -> None:

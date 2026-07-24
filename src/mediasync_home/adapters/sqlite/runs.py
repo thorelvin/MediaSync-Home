@@ -174,6 +174,43 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore):
             (idempotency_key,),
         )
 
+    def load_next_runnable_run(self) -> StartedRun | None:
+        return self._load_one(
+            """
+            SELECT
+                id,
+                job_id,
+                job_revision_id,
+                plan_id,
+                command_request_id,
+                command_receipt_id,
+                trigger_occurrence_id,
+                logical_run_group_id,
+                resumed_from_run_id,
+                trigger_type,
+                state,
+                summary_json,
+                warning_count,
+                error_count,
+                app_version,
+                plan_checksum,
+                idempotency_key,
+                planned_operations,
+                planned_bytes
+            FROM runs
+            WHERE state IN ('QUEUED', 'PREFLIGHT')
+                AND EXISTS (
+                    SELECT 1
+                    FROM run_targets
+                    WHERE run_targets.run_id = runs.id
+                        AND run_targets.state = 'PENDING'
+                )
+            ORDER BY started_utc, id
+            LIMIT 1
+            """,
+            (),
+        )
+
     def list_recent_run_activity_summaries(
         self,
         *,
