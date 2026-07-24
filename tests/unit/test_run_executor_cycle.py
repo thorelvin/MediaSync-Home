@@ -124,6 +124,44 @@ def test_bounded_executor_cycle_reports_missing_staging_port_after_planning() ->
     assert operation.phase is RecoveryOperationPhase.PLANNED
 
 
+def test_executor_cycle_reacquires_revalidating_target_after_registry_loss() -> None:
+    plan = _sealed_plan()
+    runs = _InMemoryRunStore(
+        _run(
+            state=RunState.PREFLIGHT,
+            plan=plan,
+            target_state=RunTargetState.REVALIDATING,
+        )
+    )
+    lease = _FakeLiveLease("lease-b", fencing_token=43)
+    registry = HeldRunTargetLeaseRegistry()
+
+    outcome = execute_one_run_executor_cycle(
+        runs=runs,
+        leases=_FakeLeaseAuthority(lease),
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=_FakeRecoveryOperationStore(()),
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        process_instance_id="host-a",
+    )
+
+    loaded = runs.load_started_run("run-a")
+    assert outcome.action is RunExecutorCycleAction.EXECUTION_STARTED
+    assert outcome.advanced is True
+    assert outcome.validation_codes == ()
+    assert loaded is not None
+    assert loaded.state is RunState.EXECUTING
+    assert loaded.targets[0].state is RunTargetState.EXECUTING
+    assert loaded.targets[0].last_lease_id == "lease-b"
+    assert loaded.targets[0].last_fencing_token == 43
+    assert registry.load_retained_run_target_lease(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+    ) is lease
+
+
 def test_executor_cycle_completes_catalog_recorded_target_and_releases_lease() -> None:
     plan = _sealed_plan()
     runs = _InMemoryRunStore(_run(state=RunState.EXECUTING, plan=plan, target_state=RunTargetState.EXECUTING))
@@ -240,6 +278,46 @@ class _InMemoryRunStore(RunExecutorQueueStore):
                 recorded = replace(
                     target,
                     state=RunTargetState.REVALIDATING,
+                    last_lease_id=lease_id,
+                    last_ownership_epoch=ownership_epoch,
+                    last_fencing_token=fencing_token,
+                )
+                updated_targets.append(recorded)
+            else:
+                updated_targets.append(target)
+        if recorded is None:
+            return None
+        self.run = replace(run, targets=tuple(updated_targets))
+        return recorded
+
+    def record_run_target_lease_reacquired(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        expected_lease_id: str,
+        expected_ownership_epoch: int,
+        expected_fencing_token: int,
+        lease_id: str,
+        owner_installation_id: str,
+        ownership_epoch: int,
+        fencing_token: int,
+    ) -> StartedRunTarget | None:
+        run = self.load_started_run(run_id)
+        if run is None or run.state is not RunState.PREFLIGHT:
+            return None
+        updated_targets: list[StartedRunTarget] = []
+        recorded: StartedRunTarget | None = None
+        for target in run.targets:
+            if target.run_target_id == run_target_id and target.state is RunTargetState.REVALIDATING:
+                if (
+                    target.last_lease_id != expected_lease_id
+                    or target.last_ownership_epoch != expected_ownership_epoch
+                    or target.last_fencing_token != expected_fencing_token
+                ):
+                    return None
+                recorded = replace(
+                    target,
                     last_lease_id=lease_id,
                     last_ownership_epoch=ownership_epoch,
                     last_fencing_token=fencing_token,
@@ -463,12 +541,12 @@ class _FakeLeaseAuthority(EndpointLeaseAuthority):
 
 
 class _FakeLiveLease:
-    lease_id = "lease-a"
     owner_installation_id = "owner-a"
     ownership_epoch = 1
-    fencing_token = 42
 
-    def __init__(self) -> None:
+    def __init__(self, lease_id: str = "lease-a", *, fencing_token: int = 42) -> None:
+        self.lease_id = lease_id
+        self.fencing_token = fencing_token
         self.released = False
 
     def release(self) -> None:

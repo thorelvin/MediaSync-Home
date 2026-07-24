@@ -304,6 +304,74 @@ def test_execute_one_run_target_execution_start_step_requires_retained_lease() -
     assert loaded.state is RunState.PREFLIGHT
 
 
+def test_execute_one_run_target_execution_start_step_reacquires_missing_retained_lease() -> None:
+    lease = _FakeLiveLease("lease-b", fencing_token=43)
+    leases = _FakeLeaseAuthority(EndpointLeaseAttempt(True, lease, (), "reacquired"))
+    registry = HeldRunTargetLeaseRegistry()
+    runs = _InMemoryRunStore(_preflighted_run())
+
+    outcome = execute_one_run_target_execution_start_step(
+        runs=runs,
+        lease_registry=registry,
+        leases=leases,
+    )
+
+    loaded = runs.load_started_run("run-a")
+    assert outcome.execution_started is True
+    assert outcome.validation_codes == ()
+    assert outcome.mutation_permit is not None
+    assert outcome.mutation_permit.lease_id == "lease-b"
+    assert loaded is not None
+    assert loaded.state is RunState.EXECUTING
+    assert loaded.targets[0].state is RunTargetState.EXECUTING
+    assert loaded.targets[0].last_lease_id == "lease-b"
+    assert loaded.targets[0].last_fencing_token == 43
+    assert registry.load_retained_run_target_lease(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+    ) is lease
+    assert leases.requests == (
+        EndpointLeaseRequest(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            endpoint_id="target-a",
+            endpoint_revision_id="target-rev-a",
+            resource_key="endpoint:target-a",
+            required_owner_installation_id="owner-a",
+            required_ownership_epoch=1,
+        ),
+    )
+
+
+def test_execute_one_run_target_execution_start_step_blocks_when_reacquire_unavailable() -> None:
+    leases = _FakeLeaseAuthority(
+        EndpointLeaseAttempt(
+            acquired=False,
+            lease=None,
+            validation_codes=("ENDPOINT_LEASE_UNAVAILABLE",),
+            next_action="Wait for the current endpoint writer to release the lock.",
+        )
+    )
+    registry = HeldRunTargetLeaseRegistry()
+    runs = _InMemoryRunStore(_preflighted_run())
+
+    outcome = execute_one_run_target_execution_start_step(
+        runs=runs,
+        lease_registry=registry,
+        leases=leases,
+    )
+
+    loaded = runs.load_started_run("run-a")
+    assert outcome.execution_started is False
+    assert outcome.validation_codes == ("ENDPOINT_LEASE_UNAVAILABLE",)
+    assert outcome.next_action == "Wait for the current endpoint writer to release the lock."
+    assert registry.retained_count == 0
+    assert loaded is not None
+    assert loaded.state is RunState.PREFLIGHT
+    assert loaded.targets[0].state is RunTargetState.REVALIDATING
+    assert loaded.targets[0].last_lease_id == "lease-a"
+
+
 def test_execute_one_run_target_execution_start_step_releases_stale_retained_lease() -> None:
     stale_lease = _FakeLiveLease("stale-lease")
     registry = HeldRunTargetLeaseRegistry()
@@ -440,6 +508,50 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         self.run = replace(run, targets=tuple(updated_targets))
         return recorded
 
+    def record_run_target_lease_reacquired(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        expected_lease_id: str,
+        expected_ownership_epoch: int,
+        expected_fencing_token: int,
+        lease_id: str,
+        owner_installation_id: str,
+        ownership_epoch: int,
+        fencing_token: int,
+    ) -> StartedRunTarget | None:
+        run = self.load_started_run(run_id)
+        if run is None or run.state is not RunState.PREFLIGHT:
+            return None
+        updated_targets: list[StartedRunTarget] = []
+        recorded: StartedRunTarget | None = None
+        for target in run.targets:
+            if target.run_target_id == run_target_id and target.state is RunTargetState.REVALIDATING:
+                if (
+                    target.last_lease_id != expected_lease_id
+                    or target.last_ownership_epoch != expected_ownership_epoch
+                    or target.last_fencing_token != expected_fencing_token
+                ):
+                    return None
+                if target.required_owner_installation_id not in (None, owner_installation_id):
+                    return None
+                if target.required_ownership_epoch not in (None, ownership_epoch):
+                    return None
+                recorded = replace(
+                    target,
+                    last_lease_id=lease_id,
+                    last_ownership_epoch=ownership_epoch,
+                    last_fencing_token=fencing_token,
+                )
+                updated_targets.append(recorded)
+            else:
+                updated_targets.append(target)
+        if recorded is None:
+            return None
+        self.run = replace(run, targets=tuple(updated_targets))
+        return recorded
+
     def record_run_target_execution_started(
         self,
         *,
@@ -502,10 +614,10 @@ class _SequencedLeaseAuthority(EndpointLeaseAuthority):
 class _FakeLiveLease:
     owner_installation_id = "owner-a"
     ownership_epoch = 1
-    fencing_token = 42
 
-    def __init__(self, lease_id: str = "lease-a") -> None:
+    def __init__(self, lease_id: str = "lease-a", *, fencing_token: int = 42) -> None:
         self.lease_id = lease_id
+        self.fencing_token = fencing_token
         self.released = False
 
     def release(self) -> None:

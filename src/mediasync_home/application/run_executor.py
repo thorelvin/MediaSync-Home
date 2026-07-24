@@ -6,9 +6,11 @@ from typing import Protocol
 
 from mediasync_home.application.runs import (
     EndpointLeaseAuthority,
+    EndpointLeaseRequest,
     LiveEndpointLease,
     RunTargetExecutionStartOutcome,
     RunStore,
+    RunTargetState,
     StartedRun,
     StartedRunTarget,
     acquire_run_target_lease,
@@ -35,6 +37,20 @@ class RunExecutorQueueStore(RunStore, Protocol):
     def load_next_runnable_run(self) -> StartedRun | None: ...
 
     def load_next_revalidating_run_target_key(self) -> tuple[str, str] | None: ...
+
+    def record_run_target_lease_reacquired(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        expected_lease_id: str,
+        expected_ownership_epoch: int,
+        expected_fencing_token: int,
+        lease_id: str,
+        owner_installation_id: str,
+        ownership_epoch: int,
+        fencing_token: int,
+    ) -> StartedRunTarget | None: ...
 
 
 class RunTargetLeaseRegistry(Protocol):
@@ -260,6 +276,7 @@ def execute_one_run_target_execution_start_step(
     *,
     runs: RunExecutorQueueStore,
     lease_registry: RunTargetLeaseRegistry,
+    leases: EndpointLeaseAuthority | None = None,
 ) -> RunExecutorExecutionStartStepOutcome:
     key = runs.load_next_revalidating_run_target_key()
     if key is None:
@@ -280,17 +297,28 @@ def execute_one_run_target_execution_start_step(
         run_target_id=run_target_id,
     )
     if lease is None:
-        target = _load_target(runs=runs, run_id=run_id, run_target_id=run_target_id)
-        return RunExecutorExecutionStartStepOutcome(
-            idle=False,
-            execution_started=False,
+        if leases is None:
+            target = _load_target(runs=runs, run_id=run_id, run_target_id=run_target_id)
+            return RunExecutorExecutionStartStepOutcome(
+                idle=False,
+                execution_started=False,
+                run_id=run_id,
+                run_target_id=run_target_id,
+                target=target,
+                mutation_permit=None,
+                validation_codes=("RUN_TARGET_RETAINED_LEASE_NOT_FOUND",),
+                next_action="Reacquire the endpoint lease before starting target execution.",
+            )
+        reacquired = _reacquire_revalidating_target_lease(
+            runs=runs,
+            leases=leases,
+            lease_registry=lease_registry,
             run_id=run_id,
             run_target_id=run_target_id,
-            target=target,
-            mutation_permit=None,
-            validation_codes=("RUN_TARGET_RETAINED_LEASE_NOT_FOUND",),
-            next_action="Reacquire the endpoint lease before starting target execution.",
         )
+        if isinstance(reacquired, RunExecutorExecutionStartStepOutcome):
+            return reacquired
+        lease = reacquired
 
     execution = start_run_target_execution(
         run_id=run_id,
@@ -331,3 +359,132 @@ def _load_target(
     if run is None:
         return None
     return next((target for target in run.targets if target.run_target_id == run_target_id), None)
+
+
+def _reacquire_revalidating_target_lease(
+    *,
+    runs: RunExecutorQueueStore,
+    leases: EndpointLeaseAuthority,
+    lease_registry: RunTargetLeaseRegistry,
+    run_id: str,
+    run_target_id: str,
+) -> LiveEndpointLease | RunExecutorExecutionStartStepOutcome:
+    target = _load_target(runs=runs, run_id=run_id, run_target_id=run_target_id)
+    if target is None:
+        return _execution_start_failed(
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=None,
+            validation_code="RUN_TARGET_NOT_FOUND",
+            next_action="Reload run targets before reacquiring an endpoint lease.",
+        )
+    if target.state is not RunTargetState.REVALIDATING:
+        return _execution_start_failed(
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=target,
+            validation_code="RUN_TARGET_NOT_REVALIDATING",
+            next_action="Only revalidating targets can reacquire an endpoint lease.",
+        )
+    if target.lease_resource_key is None or not target.lease_resource_key.strip():
+        return _execution_start_failed(
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=target,
+            validation_code="RUN_TARGET_REQUIRES_LEASE_RESOURCE_KEY",
+            next_action="Refresh the sealed plan so the target has a lease resource key.",
+        )
+    if (
+        target.last_lease_id is None
+        or target.last_ownership_epoch is None
+        or target.last_fencing_token is None
+    ):
+        return _execution_start_failed(
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=target,
+            validation_code="RUN_TARGET_LEASE_METADATA_MISSING",
+            next_action="Reacquire the endpoint lease only after persisted lease metadata is present.",
+        )
+
+    attempt = leases.acquire_endpoint_lease(
+        EndpointLeaseRequest(
+            run_id=run_id,
+            run_target_id=run_target_id,
+            endpoint_id=target.endpoint_id,
+            endpoint_revision_id=target.endpoint_revision_id,
+            resource_key=target.lease_resource_key,
+            required_owner_installation_id=target.required_owner_installation_id,
+            required_ownership_epoch=target.required_ownership_epoch,
+        )
+    )
+    if not attempt.acquired:
+        return _execution_start_failed(
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=target,
+            validation_code=(
+                attempt.validation_codes[0]
+                if attempt.validation_codes
+                else "RUN_TARGET_ENDPOINT_LEASE_UNAVAILABLE"
+            ),
+            validation_codes=attempt.validation_codes,
+            next_action=attempt.next_action,
+        )
+    lease = attempt.lease
+    if lease is None:
+        return _execution_start_failed(
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=target,
+            validation_code="RUN_TARGET_ENDPOINT_LEASE_INVALID",
+            next_action="The lease adapter reported success without a live lease handle.",
+        )
+
+    updated = runs.record_run_target_lease_reacquired(
+        run_id=run_id,
+        run_target_id=run_target_id,
+        expected_lease_id=target.last_lease_id,
+        expected_ownership_epoch=target.last_ownership_epoch,
+        expected_fencing_token=target.last_fencing_token,
+        lease_id=lease.lease_id,
+        owner_installation_id=lease.owner_installation_id,
+        ownership_epoch=lease.ownership_epoch,
+        fencing_token=lease.fencing_token,
+    )
+    if updated is None:
+        lease.release()
+        return _execution_start_failed(
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=None,
+            validation_code="RUN_TARGET_LEASE_REACQUIRE_RECORD_CONFLICT",
+            next_action="Released the endpoint lease because run-target state changed during reacquire.",
+        )
+    lease_registry.retain_run_target_lease(
+        run_id=run_id,
+        run_target_id=run_target_id,
+        lease=lease,
+    )
+    return lease
+
+
+def _execution_start_failed(
+    *,
+    run_id: str,
+    run_target_id: str,
+    target: StartedRunTarget | None,
+    validation_code: str,
+    next_action: str,
+    validation_codes: tuple[str, ...] | None = None,
+) -> RunExecutorExecutionStartStepOutcome:
+    return RunExecutorExecutionStartStepOutcome(
+        idle=False,
+        execution_started=False,
+        run_id=run_id,
+        run_target_id=run_target_id,
+        target=target,
+        mutation_permit=None,
+        validation_codes=validation_codes or (validation_code,),
+        next_action=next_action,
+    )

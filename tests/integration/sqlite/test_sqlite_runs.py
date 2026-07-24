@@ -93,12 +93,12 @@ class FixedLeaseAuthority(EndpointLeaseAuthority):
 
 
 class FixedLiveLease:
-    lease_id = "lease-a"
     owner_installation_id = "owner-a"
     ownership_epoch = 1
-    fencing_token = 42
 
-    def __init__(self) -> None:
+    def __init__(self, lease_id: str = "lease-a", *, fencing_token: int = 42) -> None:
+        self.lease_id = lease_id
+        self.fencing_token = fencing_token
         self.released = False
 
     def issue_mutation_permit(self) -> MutationPermit:
@@ -418,6 +418,114 @@ def test_sqlite_run_executor_execution_start_step_revalidates_retained_lease(
         assert runs.load_next_revalidating_run_target_key() is None
         assert registry.retained_count == 1
         assert lease.released is False
+
+
+def test_sqlite_run_store_records_revalidating_target_lease_reacquired(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        plans = SqlitePlanStore(connection)
+        runs = SqliteRunStore(connection)
+        plan = _sealed_plan()
+        lease = FixedLiveLease()
+        plans.save_sealed_plan(plan)
+        start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        execute_one_run_target_preflight_step(runs=runs, leases=FixedLeaseAuthority(lease))
+
+        updated = runs.record_run_target_lease_reacquired(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            expected_lease_id="lease-a",
+            expected_ownership_epoch=1,
+            expected_fencing_token=42,
+            lease_id="lease-b",
+            owner_installation_id="owner-a",
+            ownership_epoch=1,
+            fencing_token=43,
+        )
+
+        loaded = runs.load_started_run("run-a")
+        assert updated is not None
+        assert updated.state is RunTargetState.REVALIDATING
+        assert updated.last_lease_id == "lease-b"
+        assert updated.last_fencing_token == 43
+        assert loaded is not None
+        assert loaded.state is RunState.PREFLIGHT
+        assert loaded.targets[0] == updated
+
+
+def test_sqlite_run_executor_execution_start_step_reacquires_missing_retained_lease(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        plans = SqlitePlanStore(connection)
+        runs = SqliteRunStore(connection)
+        plan = _sealed_plan()
+        old_lease = FixedLiveLease()
+        new_lease = FixedLiveLease("lease-b", fencing_token=43)
+        leases = FixedLeaseAuthority(new_lease)
+        registry = HeldRunTargetLeaseRegistry()
+        plans.save_sealed_plan(plan)
+        start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        execute_one_run_target_preflight_step(runs=runs, leases=FixedLeaseAuthority(old_lease))
+
+        outcome = execute_one_run_target_execution_start_step(
+            runs=runs,
+            lease_registry=registry,
+            leases=leases,
+        )
+
+        loaded = runs.load_started_run("run-a")
+        assert outcome.execution_started is True
+        assert outcome.validation_codes == ()
+        assert outcome.mutation_permit is not None
+        assert outcome.mutation_permit.lease_id == "lease-b"
+        assert loaded is not None
+        assert loaded.state is RunState.EXECUTING
+        assert loaded.targets[0].state is RunTargetState.EXECUTING
+        assert loaded.targets[0].last_lease_id == "lease-b"
+        assert loaded.targets[0].last_fencing_token == 43
+        assert registry.load_retained_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+        ) is new_lease
+        assert leases.requests == [
+            EndpointLeaseRequest(
+                run_id="run-a",
+                run_target_id="run-a-target-0000",
+                endpoint_id="target-a",
+                endpoint_revision_id="target-rev-a",
+                resource_key="endpoint:target-a",
+                required_owner_installation_id="owner-a",
+                required_ownership_epoch=1,
+            )
+        ]
 
 
 def test_sqlite_run_store_rejects_execution_start_with_stale_lease_metadata(

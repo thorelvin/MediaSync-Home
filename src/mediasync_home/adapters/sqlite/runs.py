@@ -442,6 +442,76 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore):
                 raise
             raise SqliteRunStoreError("RUN_TARGET_LEASE_RECORD_FAILED") from exc
 
+    def record_run_target_lease_reacquired(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        expected_lease_id: str,
+        expected_ownership_epoch: int,
+        expected_fencing_token: int,
+        lease_id: str,
+        owner_installation_id: str,
+        ownership_epoch: int,
+        fencing_token: int,
+    ) -> StartedRunTarget | None:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            cursor = self._connection.execute(
+                """
+                UPDATE run_targets
+                SET
+                    last_lease_id = ?,
+                    last_ownership_epoch = ?,
+                    last_fencing_token = ?,
+                    row_version = row_version + 1
+                WHERE run_id = ?
+                    AND id = ?
+                    AND state = 'REVALIDATING'
+                    AND last_lease_id = ?
+                    AND last_ownership_epoch = ?
+                    AND last_fencing_token = ?
+                    AND (required_owner_installation_id IS NULL OR required_owner_installation_id = ?)
+                    AND (required_ownership_epoch IS NULL OR required_ownership_epoch = ?)
+                    AND EXISTS (
+                        SELECT 1
+                        FROM runs
+                        WHERE runs.id = run_targets.run_id
+                            AND runs.state = 'PREFLIGHT'
+                    )
+                """,
+                (
+                    lease_id,
+                    ownership_epoch,
+                    fencing_token,
+                    run_id,
+                    run_target_id,
+                    expected_lease_id,
+                    expected_ownership_epoch,
+                    expected_fencing_token,
+                    owner_installation_id,
+                    ownership_epoch,
+                ),
+            )
+            if cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            target = self._load_target(run_id=run_id, run_target_id=run_target_id)
+            if target is None:
+                raise SqliteRunStoreError("RUN_TARGET_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return target
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_TARGET_LEASE_REACQUIRE_FAILED") from exc
+
     def record_run_target_execution_started(
         self,
         *,

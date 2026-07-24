@@ -190,6 +190,7 @@ def execute_one_run_executor_cycle(
     execution = execute_one_run_target_execution_start_step(
         runs=runs,
         lease_registry=lease_registry,
+        leases=leases,
     )
     if not execution.idle:
         if execution.execution_started:

@@ -148,11 +148,16 @@ class EngineHostRuntime:
         )
 
     def run_executor_execution_start_step(self) -> RunExecutorExecutionStartStepOutcome:
-        if self.run_executor_queue_store is None or self.run_executor_lease_registry is None:
+        if (
+            self.run_executor_queue_store is None
+            or self.run_executor_lease_authority is None
+            or self.run_executor_lease_registry is None
+        ):
             raise RuntimeError("RUN_EXECUTOR_RUNTIME_NOT_CONFIGURED")
         return execute_one_run_target_execution_start_step(
             runs=self.run_executor_queue_store,
             lease_registry=self.run_executor_lease_registry,
+            leases=self.run_executor_lease_authority,
         )
 
     def run_executor_plan_target_operations(
