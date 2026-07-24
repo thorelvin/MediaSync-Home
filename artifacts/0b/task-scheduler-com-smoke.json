@@ -1,0 +1,17 @@
+{
+  "applied": true,
+  "error_type": null,
+  "event": "TASK_SCHEDULER_COM_SMOKE",
+  "folder_deleted": true,
+  "in_sync": true,
+  "installation_id": "smoke-0b307ace3a0640f4",
+  "loaded": true,
+  "pywin32_version": "312",
+  "reason": null,
+  "root_deleted": true,
+  "root_existed_before": false,
+  "schedule_id": "schedule-smoke",
+  "status": "PASS",
+  "task_deleted": true,
+  "task_path": "\\MediaSync Home\\smoke-0b307ace3a0640f4\\schedule-smoke"
+}

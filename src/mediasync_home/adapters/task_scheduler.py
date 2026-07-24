@@ -500,7 +500,20 @@ def _bool_attr(source: object, name: str) -> bool:
 
 
 def _is_not_found_error(exc: Exception) -> bool:
+    for hresult in _hresult_candidates(exc):
+        if hresult & 0xFFFFFFFF in _NOT_FOUND_HRESULTS:
+            return True
+    return False
+
+
+def _hresult_candidates(exc: Exception) -> tuple[int, ...]:
+    candidates: list[int] = []
     hresult = getattr(exc, "hresult", None)
     if not isinstance(hresult, int):
-        return False
-    return hresult & 0xFFFFFFFF in _NOT_FOUND_HRESULTS
+        hresult = None
+    if hresult is not None:
+        candidates.append(hresult)
+    excepinfo = getattr(exc, "excepinfo", None)
+    if isinstance(excepinfo, tuple) and len(excepinfo) >= 6 and isinstance(excepinfo[5], int):
+        candidates.append(excepinfo[5])
+    return tuple(candidates)

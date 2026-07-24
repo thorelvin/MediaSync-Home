@@ -253,7 +253,8 @@ def _connected_factory(service: "_FakeTaskSchedulerService"):
 
 
 class _ComNotFoundError(Exception):
-    hresult = 0x80070002
+    hresult = -2147352567
+    excepinfo = (0, None, None, None, 0, -2147024894)
 
 
 class _FakeTaskSchedulerService:
