@@ -7,12 +7,15 @@ from typing import Protocol
 from mediasync_home.application.runs import (
     EndpointLeaseAuthority,
     LiveEndpointLease,
+    RunTargetExecutionStartOutcome,
     RunStore,
     StartedRun,
     StartedRunTarget,
     acquire_run_target_lease,
     begin_next_run_target_preflight,
+    start_run_target_execution,
 )
+from mediasync_home.domain.capabilities import MutationPermit
 
 
 MAX_RUN_EXECUTOR_PUMP_STEPS = 100
@@ -31,6 +34,8 @@ class RunExecutorPumpStopReason(str, Enum):
 class RunExecutorQueueStore(RunStore, Protocol):
     def load_next_runnable_run(self) -> StartedRun | None: ...
 
+    def load_next_revalidating_run_target_key(self) -> tuple[str, str] | None: ...
+
 
 class RunTargetLeaseRegistry(Protocol):
     def retain_run_target_lease(
@@ -39,6 +44,20 @@ class RunTargetLeaseRegistry(Protocol):
         run_id: str,
         run_target_id: str,
         lease: LiveEndpointLease,
+    ) -> None: ...
+
+    def load_retained_run_target_lease(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+    ) -> LiveEndpointLease | None: ...
+
+    def release_retained_run_target_lease(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
     ) -> None: ...
 
 
@@ -73,6 +92,16 @@ class HeldRunTargetLeaseRegistry(RunTargetLeaseRegistry):
     ) -> LiveEndpointLease | None:
         return self._leases.get((run_id, run_target_id))
 
+    def release_retained_run_target_lease(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+    ) -> None:
+        lease = self._leases.pop((run_id, run_target_id), None)
+        if lease is not None:
+            lease.release()
+
     def release_all(self) -> None:
         leases = tuple(self._leases.values())
         self._leases.clear()
@@ -99,6 +128,18 @@ class RunExecutorPumpOutcome:
     leases_retained: int
     stopped_reason: RunExecutorPumpStopReason
     last_step: RunExecutorStepOutcome | None
+    validation_codes: tuple[str, ...]
+    next_action: str
+
+
+@dataclass(frozen=True)
+class RunExecutorExecutionStartStepOutcome:
+    idle: bool
+    execution_started: bool
+    run_id: str | None
+    run_target_id: str | None
+    target: StartedRunTarget | None
+    mutation_permit: MutationPermit | None
     validation_codes: tuple[str, ...]
     next_action: str
 
@@ -208,3 +249,80 @@ def execute_one_run_target_preflight_step(
         validation_codes=lease_outcome.validation_codes,
         next_action=lease_outcome.next_action,
     )
+
+
+def execute_one_run_target_execution_start_step(
+    *,
+    runs: RunExecutorQueueStore,
+    lease_registry: RunTargetLeaseRegistry,
+) -> RunExecutorExecutionStartStepOutcome:
+    key = runs.load_next_revalidating_run_target_key()
+    if key is None:
+        return RunExecutorExecutionStartStepOutcome(
+            idle=True,
+            execution_started=False,
+            run_id=None,
+            run_target_id=None,
+            target=None,
+            mutation_permit=None,
+            validation_codes=(),
+            next_action="No preflighted run target is waiting for execution start.",
+        )
+
+    run_id, run_target_id = key
+    lease = lease_registry.load_retained_run_target_lease(
+        run_id=run_id,
+        run_target_id=run_target_id,
+    )
+    if lease is None:
+        target = _load_target(runs=runs, run_id=run_id, run_target_id=run_target_id)
+        return RunExecutorExecutionStartStepOutcome(
+            idle=False,
+            execution_started=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=target,
+            mutation_permit=None,
+            validation_codes=("RUN_TARGET_RETAINED_LEASE_NOT_FOUND",),
+            next_action="Reacquire the endpoint lease before starting target execution.",
+        )
+
+    execution = start_run_target_execution(
+        run_id=run_id,
+        run_target_id=run_target_id,
+        runs=runs,
+        lease=lease,
+    )
+    if not execution.started:
+        lease_registry.release_retained_run_target_lease(
+            run_id=run_id,
+            run_target_id=run_target_id,
+        )
+    return _execution_start_step_from_outcome(execution)
+
+
+def _execution_start_step_from_outcome(
+    outcome: RunTargetExecutionStartOutcome,
+) -> RunExecutorExecutionStartStepOutcome:
+    return RunExecutorExecutionStartStepOutcome(
+        idle=False,
+        execution_started=outcome.started,
+        run_id=outcome.run_id,
+        run_target_id=outcome.run_target_id,
+        target=outcome.target,
+        mutation_permit=outcome.mutation_permit,
+        validation_codes=outcome.validation_codes,
+        next_action=outcome.next_action,
+    )
+
+
+def _load_target(
+    *,
+    runs: RunExecutorQueueStore,
+    run_id: str,
+    run_target_id: str,
+) -> StartedRunTarget | None:
+    run = runs.load_started_run(run_id)
+    if run is None:
+        return None
+    return next((target for target in run.targets if target.run_target_id == run_target_id), None)

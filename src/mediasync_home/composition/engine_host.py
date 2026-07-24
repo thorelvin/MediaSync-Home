@@ -38,9 +38,11 @@ from mediasync_home.adapters.sqlite.snapshots import SqliteSnapshotEntryStore
 from mediasync_home.adapters.sqlite.trigger_occurrences import SqliteTriggerOccurrenceStore
 from mediasync_home.application.run_executor import (
     HeldRunTargetLeaseRegistry,
+    RunExecutorExecutionStartStepOutcome,
     RunExecutorPumpOutcome,
     RunExecutorQueueStore,
     execute_bounded_run_executor_preflight_pump,
+    execute_one_run_target_execution_start_step,
 )
 from mediasync_home.application.runs import EndpointLeaseAuthority, RunIds
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
@@ -105,6 +107,14 @@ class EngineHostRuntime:
             leases=self.run_executor_lease_authority,
             lease_registry=self.run_executor_lease_registry,
             max_steps=max_steps,
+        )
+
+    def run_executor_execution_start_step(self) -> RunExecutorExecutionStartStepOutcome:
+        if self.run_executor_queue_store is None or self.run_executor_lease_registry is None:
+            raise RuntimeError("RUN_EXECUTOR_RUNTIME_NOT_CONFIGURED")
+        return execute_one_run_target_execution_start_step(
+            runs=self.run_executor_queue_store,
+            lease_registry=self.run_executor_lease_registry,
         )
 
     def close(self) -> None:

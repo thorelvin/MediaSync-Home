@@ -29,7 +29,11 @@ from mediasync_home.application.plans import (
     TargetPreconditionKind,
     seal_plan,
 )
-from mediasync_home.application.run_executor import execute_one_run_target_preflight_step
+from mediasync_home.application.run_executor import (
+    HeldRunTargetLeaseRegistry,
+    execute_one_run_target_execution_start_step,
+    execute_one_run_target_preflight_step,
+)
 from mediasync_home.application.runs import (
     EndpointLeaseAttempt,
     EndpointLeaseAuthority,
@@ -56,6 +60,7 @@ from mediasync_home.application.trigger_occurrences import (
     payload_hash,
 )
 from mediasync_home.domain.process_roles import ProcessRole
+from mediasync_home.domain.capabilities import MutationPermit, _issue_mutation_permit
 from mediasync_home.ipc.client import InProcessIpcClient
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
 from mediasync_home.ipc.protocol import IpcStatus
@@ -94,6 +99,19 @@ class FixedLiveLease:
 
     def __init__(self) -> None:
         self.released = False
+
+    def issue_mutation_permit(self) -> MutationPermit:
+        return _issue_mutation_permit(
+            lease_id=self.lease_id,
+            resource_key="endpoint:target-a",
+            owner_installation_id=self.owner_installation_id,
+            ownership_epoch=self.ownership_epoch,
+            fencing_token=self.fencing_token,
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            endpoint_id="target-a",
+            endpoint_revision_id="target-rev-a",
+        )
 
     def release(self) -> None:
         self.released = True
@@ -345,6 +363,102 @@ def test_sqlite_run_executor_step_selects_next_run_and_records_live_lease(
         assert runs.load_next_runnable_run() is None
         assert idle.idle is True
         assert len(leases.requests) == 1
+
+
+def test_sqlite_run_executor_execution_start_step_revalidates_retained_lease(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        plans = SqlitePlanStore(connection)
+        runs = SqliteRunStore(connection)
+        plan = _sealed_plan()
+        lease = FixedLiveLease()
+        leases = FixedLeaseAuthority(lease)
+        registry = HeldRunTargetLeaseRegistry()
+        plans.save_sealed_plan(plan)
+        start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        preflight = execute_one_run_target_preflight_step(runs=runs, leases=leases)
+        assert preflight.lease is lease
+        registry.retain_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            lease=lease,
+        )
+
+        selected = runs.load_next_revalidating_run_target_key()
+        outcome = execute_one_run_target_execution_start_step(
+            runs=runs,
+            lease_registry=registry,
+        )
+
+        loaded = runs.load_started_run("run-a")
+        assert selected == ("run-a", "run-a-target-0000")
+        assert outcome.execution_started is True
+        assert outcome.validation_codes == ()
+        assert outcome.mutation_permit is not None
+        assert outcome.target is not None
+        assert outcome.target.state is RunTargetState.EXECUTING
+        assert loaded is not None
+        assert loaded.state is RunState.EXECUTING
+        assert loaded.targets[0] == outcome.target
+        assert runs.load_next_revalidating_run_target_key() is None
+        assert registry.retained_count == 1
+        assert lease.released is False
+
+
+def test_sqlite_run_store_rejects_execution_start_with_stale_lease_metadata(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        plans = SqlitePlanStore(connection)
+        runs = SqliteRunStore(connection)
+        plan = _sealed_plan()
+        lease = FixedLiveLease()
+        leases = FixedLeaseAuthority(lease)
+        plans.save_sealed_plan(plan)
+        start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        execute_one_run_target_preflight_step(runs=runs, leases=leases)
+
+        outcome = runs.record_run_target_execution_started(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            lease_id="stale-lease",
+            owner_installation_id="owner-a",
+            ownership_epoch=1,
+            fencing_token=42,
+        )
+
+        loaded = runs.load_started_run("run-a")
+        assert outcome is None
+        assert loaded is not None
+        assert loaded.state is RunState.PREFLIGHT
+        assert loaded.targets[0].state is RunTargetState.REVALIDATING
 
 
 def test_sqlite_run_store_lists_recent_run_activity_summaries(tmp_path: Path) -> None:

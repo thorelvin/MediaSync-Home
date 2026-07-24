@@ -211,6 +211,23 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore):
             (),
         )
 
+    def load_next_revalidating_run_target_key(self) -> tuple[str, str] | None:
+        row = self._connection.execute(
+            """
+            SELECT runs.id, run_targets.id
+            FROM run_targets
+            JOIN runs ON runs.id = run_targets.run_id
+            WHERE runs.state IN ('PREFLIGHT', 'EXECUTING')
+                AND run_targets.state = 'REVALIDATING'
+            ORDER BY runs.started_utc, runs.id, run_targets.id
+            LIMIT 1
+            """,
+            (),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row[0]), str(row[1])
+
     def list_recent_run_activity_summaries(
         self,
         *,
@@ -395,7 +412,7 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore):
                         SELECT 1
                         FROM runs
                         WHERE runs.id = run_targets.run_id
-                            AND runs.state = 'PREFLIGHT'
+                            AND runs.state IN ('PREFLIGHT', 'EXECUTING')
                     )
                 """,
                 (
@@ -424,6 +441,83 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore):
             if isinstance(exc, SqliteRunStoreError):
                 raise
             raise SqliteRunStoreError("RUN_TARGET_LEASE_RECORD_FAILED") from exc
+
+    def record_run_target_execution_started(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        lease_id: str,
+        owner_installation_id: str,
+        ownership_epoch: int,
+        fencing_token: int,
+    ) -> StartedRunTarget | None:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            target_cursor = self._connection.execute(
+                """
+                UPDATE run_targets
+                SET
+                    state = 'EXECUTING',
+                    row_version = row_version + 1
+                WHERE run_id = ?
+                    AND id = ?
+                    AND state = 'REVALIDATING'
+                    AND last_lease_id = ?
+                    AND last_ownership_epoch = ?
+                    AND last_fencing_token = ?
+                    AND (required_owner_installation_id IS NULL OR required_owner_installation_id = ?)
+                    AND (required_ownership_epoch IS NULL OR required_ownership_epoch = ?)
+                    AND EXISTS (
+                        SELECT 1
+                        FROM runs
+                        WHERE runs.id = run_targets.run_id
+                            AND runs.state = 'PREFLIGHT'
+                    )
+                """,
+                (
+                    run_id,
+                    run_target_id,
+                    lease_id,
+                    ownership_epoch,
+                    fencing_token,
+                    owner_installation_id,
+                    ownership_epoch,
+                ),
+            )
+            if target_cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            run_cursor = self._connection.execute(
+                """
+                UPDATE runs
+                SET
+                    state = 'EXECUTING',
+                    row_version = row_version + 1
+                WHERE id = ?
+                    AND state IN ('PREFLIGHT', 'EXECUTING')
+                """,
+                (run_id,),
+            )
+            if run_cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            target = self._load_target(run_id=run_id, run_target_id=run_target_id)
+            if target is None:
+                raise SqliteRunStoreError("RUN_TARGET_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return target
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_TARGET_EXECUTION_START_FAILED") from exc
 
     def _load_one(
         self,

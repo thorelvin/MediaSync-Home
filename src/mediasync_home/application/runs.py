@@ -205,6 +205,17 @@ class RunTargetLeaseOutcome:
     next_action: str
 
 
+@dataclass(frozen=True)
+class RunTargetExecutionStartOutcome:
+    started: bool
+    run_id: str
+    run_target_id: str
+    target: StartedRunTarget | None
+    mutation_permit: MutationPermit | None
+    validation_codes: tuple[str, ...]
+    next_action: str
+
+
 class RunStore(Protocol):
     def save_started_run(self, run: StartedRun) -> None: ...
 
@@ -222,6 +233,17 @@ class RunStore(Protocol):
     ) -> StartedRunTarget | None: ...
 
     def record_run_target_lease_acquired(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        lease_id: str,
+        owner_installation_id: str,
+        ownership_epoch: int,
+        fencing_token: int,
+    ) -> StartedRunTarget | None: ...
+
+    def record_run_target_execution_started(
         self,
         *,
         run_id: str,
@@ -506,6 +528,141 @@ def acquire_run_target_lease(
     )
 
 
+def start_run_target_execution(
+    *,
+    run_id: str,
+    run_target_id: str,
+    runs: RunStore,
+    lease: LiveEndpointLease,
+) -> RunTargetExecutionStartOutcome:
+    run = runs.load_started_run(run_id)
+    if run is None:
+        return RunTargetExecutionStartOutcome(
+            started=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=None,
+            mutation_permit=None,
+            validation_codes=("RUN_NOT_FOUND",),
+            next_action="Create a preflighted run before starting target execution.",
+        )
+    if run.state not in {RunState.PREFLIGHT, RunState.EXECUTING}:
+        return RunTargetExecutionStartOutcome(
+            started=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=None,
+            mutation_permit=None,
+            validation_codes=("RUN_NOT_READY_FOR_EXECUTION_START",),
+            next_action="Acquire all endpoint leases before starting target execution.",
+        )
+
+    target = _target_by_id(run, run_target_id)
+    if target is None:
+        return RunTargetExecutionStartOutcome(
+            started=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=None,
+            mutation_permit=None,
+            validation_codes=("RUN_TARGET_NOT_FOUND",),
+            next_action="Reload run targets before starting target execution.",
+        )
+    if target.state is not RunTargetState.REVALIDATING:
+        return RunTargetExecutionStartOutcome(
+            started=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=target,
+            mutation_permit=None,
+            validation_codes=("RUN_TARGET_NOT_REVALIDATING",),
+            next_action="Only revalidating targets can start execution.",
+        )
+    if (
+        target.last_lease_id is None
+        or target.last_ownership_epoch is None
+        or target.last_fencing_token is None
+    ):
+        return RunTargetExecutionStartOutcome(
+            started=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=target,
+            mutation_permit=None,
+            validation_codes=("RUN_TARGET_LEASE_METADATA_MISSING",),
+            next_action="Reacquire the endpoint lease before starting target execution.",
+        )
+    if (
+        lease.lease_id != target.last_lease_id
+        or lease.ownership_epoch != target.last_ownership_epoch
+        or lease.fencing_token != target.last_fencing_token
+    ):
+        return RunTargetExecutionStartOutcome(
+            started=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=target,
+            mutation_permit=None,
+            validation_codes=("RUN_TARGET_RETAINED_LEASE_MISMATCH",),
+            next_action="Release the stale retained lease and reacquire the endpoint lock.",
+        )
+
+    try:
+        permit = lease.issue_mutation_permit()
+    except RuntimeError as exc:
+        return RunTargetExecutionStartOutcome(
+            started=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=target,
+            mutation_permit=None,
+            validation_codes=(_exception_validation_code(exc),),
+            next_action=_exception_next_action(
+                exc,
+                "Reacquire the endpoint lease before starting target execution.",
+            ),
+        )
+
+    if not _permit_matches_run_target(permit=permit, run_id=run_id, target=target):
+        return RunTargetExecutionStartOutcome(
+            started=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=target,
+            mutation_permit=None,
+            validation_codes=("RUN_TARGET_MUTATION_PERMIT_MISMATCH",),
+            next_action="Discard the stale mutation permit and reacquire the endpoint lease.",
+        )
+
+    updated = runs.record_run_target_execution_started(
+        run_id=run_id,
+        run_target_id=run_target_id,
+        lease_id=permit.lease_id,
+        owner_installation_id=permit.owner_installation_id,
+        ownership_epoch=permit.ownership_epoch,
+        fencing_token=permit.fencing_token,
+    )
+    if updated is None:
+        return RunTargetExecutionStartOutcome(
+            started=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target=None,
+            mutation_permit=None,
+            validation_codes=("RUN_TARGET_EXECUTION_START_CONFLICT",),
+            next_action="Reload run state before retrying target execution.",
+        )
+    return RunTargetExecutionStartOutcome(
+        started=True,
+        run_id=run_id,
+        run_target_id=run_target_id,
+        target=updated,
+        mutation_permit=permit,
+        validation_codes=(),
+        next_action="Target is executing with a live mutation permit.",
+    )
+
+
 def _readiness_for_plan(*, command: StartRunCommand, plan: SealedPlan) -> RunStartReadiness:
     validation_codes: list[str] = []
     checksum_matches = plan.plan_checksum == command.plan_checksum
@@ -589,6 +746,38 @@ def _target_endpoints(plan: SealedPlan) -> tuple[PlanEndpoint, ...]:
 
 def _target_by_id(run: StartedRun, run_target_id: str) -> StartedRunTarget | None:
     return next((target for target in run.targets if target.run_target_id == run_target_id), None)
+
+
+def _permit_matches_run_target(
+    *,
+    permit: MutationPermit,
+    run_id: str,
+    target: StartedRunTarget,
+) -> bool:
+    return (
+        permit.run_id == run_id
+        and permit.run_target_id == target.run_target_id
+        and permit.endpoint_id == target.endpoint_id
+        and permit.endpoint_revision_id == target.endpoint_revision_id
+        and permit.resource_key == target.lease_resource_key
+        and permit.lease_id == target.last_lease_id
+        and permit.ownership_epoch == target.last_ownership_epoch
+        and permit.fencing_token == target.last_fencing_token
+    )
+
+
+def _exception_validation_code(exc: RuntimeError) -> str:
+    validation_code = getattr(exc, "validation_code", None)
+    if isinstance(validation_code, str) and validation_code.strip():
+        return validation_code
+    return "RUN_TARGET_MUTATION_PERMIT_UNAVAILABLE"
+
+
+def _exception_next_action(exc: RuntimeError, fallback: str) -> str:
+    next_action = getattr(exc, "next_action", None)
+    if isinstance(next_action, str) and next_action.strip():
+        return next_action
+    return fallback
 
 
 def _started_run_target(run_id: str, endpoint: PlanEndpoint) -> StartedRunTarget:
