@@ -18,7 +18,11 @@ from mediasync_home.application.plans import (
     TargetPreconditionKind,
     seal_plan,
 )
-from mediasync_home.application.recovery_intents import RecoveryIntentSegment, RecoveryIntentSegmentStore
+from mediasync_home.application.recovery_intents import (
+    RecoveryIntentSegment,
+    RecoveryIntentSegmentStore,
+    durable_recovery_intent_segment,
+)
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
     RecoveryOperationPhase,
@@ -244,6 +248,52 @@ def test_executor_cycle_rebinds_pre_commit_operation_after_reacquired_executing_
     assert operation.phase is RecoveryOperationPhase.PLANNED
     assert operation.lease_id == "lease-b"
     assert operation.fencing_token == 43
+
+
+def test_executor_cycle_refreshes_commit_intent_after_reacquired_executing_lease() -> None:
+    plan = _sealed_plan()
+    runs = _InMemoryRunStore(
+        _run(
+            state=RunState.EXECUTING,
+            plan=plan,
+            target_state=RunTargetState.EXECUTING,
+        )
+    )
+    lease = _FakeLiveLease("lease-b", fencing_token=43)
+    registry = HeldRunTargetLeaseRegistry()
+    recovery_operations = _FakeRecoveryOperationStore((_commit_intent_operation(),))
+    intent_segments = _FakeIntentSegmentStore((_intent_segment(),))
+
+    outcome = execute_bounded_run_executor_cycle(
+        runs=runs,
+        leases=_FakeLeaseAuthority(lease),
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=recovery_operations,
+        intent_segments=intent_segments,
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        process_instance_id="host-a",
+        max_steps=2,
+    )
+
+    operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    refreshed_segment = intent_segments.load_intent_segment("run-a-target-0000-intent-000001")
+    assert outcome.steps_attempted == 2
+    assert outcome.stopped_reason is RunExecutorPumpStopReason.STEP_LIMIT_REACHED
+    assert outcome.last_step is not None
+    assert outcome.last_step.action is RunExecutorCycleAction.COMMIT_INTENT_REFRESHED
+    assert outcome.validation_codes == ()
+    assert operation is not None
+    assert operation.phase is RecoveryOperationPhase.COMMIT_INTENT_RECORDED
+    assert operation.lease_id == "lease-b"
+    assert operation.fencing_token == 43
+    assert operation.intent_segment_id == "run-a-target-0000-intent-000001"
+    assert operation.intent_ordinal == 0
+    assert refreshed_segment is not None
+    assert refreshed_segment.segment_sequence == 1
+    assert refreshed_segment.previous_segment_hash == _intent_segment().segment_hash
+    assert refreshed_segment.lease_id == "lease-b"
+    assert refreshed_segment.fencing_token == 43
 
 
 def test_executor_cycle_completes_catalog_recorded_target_and_releases_lease() -> None:
@@ -590,6 +640,44 @@ class _FakeRecoveryOperationStore(RunExecutorCycleRecoveryOperationStore):
         self.operations[(run_id, operation_id)] = updated
         return updated
 
+    def record_commit_intent_refreshed(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        expected_lease_id: str,
+        expected_ownership_epoch: int,
+        expected_fencing_token: int,
+        lease_id: str,
+        owner_installation_id: str,
+        ownership_epoch: int,
+        fencing_token: int,
+        intent_segment_id: str,
+        intent_ordinal: int,
+        process_instance_id: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> RecoveryOperation | None:
+        operation = self.operations.get((run_id, operation_id))
+        if (
+            operation is None
+            or operation.phase is not RecoveryOperationPhase.COMMIT_INTENT_RECORDED
+            or operation.lease_id != expected_lease_id
+            or operation.ownership_epoch != expected_ownership_epoch
+            or operation.fencing_token != expected_fencing_token
+        ):
+            return None
+        updated = replace(
+            operation,
+            owner_installation_id=owner_installation_id,
+            ownership_epoch=ownership_epoch,
+            lease_id=lease_id,
+            fencing_token=fencing_token,
+            intent_segment_id=intent_segment_id,
+            intent_ordinal=intent_ordinal,
+        )
+        self.operations[(run_id, operation_id)] = updated
+        return updated
+
     def load_operation(self, *, run_id: str, operation_id: str) -> RecoveryOperation | None:
         return self.operations.get((run_id, operation_id))
 
@@ -700,11 +788,30 @@ class _FakeLiveLease:
 
 
 class _FakeIntentSegmentStore(RecoveryIntentSegmentStore):
+    def __init__(self, segments: tuple[RecoveryIntentSegment, ...] = ()) -> None:
+        self.segments = {segment.segment_id: segment for segment in segments}
+
     def publish_intent_segment(self, segment: RecoveryIntentSegment) -> RecoveryIntentSegment:
+        self.segments.setdefault(segment.segment_id, segment)
         return segment
 
     def load_intent_segment(self, segment_id: str) -> RecoveryIntentSegment | None:
-        return None
+        return self.segments.get(segment_id)
+
+    def load_latest_intent_segment_for_run_target(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+    ) -> RecoveryIntentSegment | None:
+        matches = tuple(
+            segment
+            for segment in self.segments.values()
+            if segment.run_id == run_id and segment.run_target_id == run_target_id
+        )
+        if not matches:
+            return None
+        return max(matches, key=lambda segment: segment.segment_sequence)
 
 
 class _FakeCatalogHandoffStore(FinalFileCatalogHandoffStore):
@@ -793,6 +900,48 @@ def _planned_operation() -> RecoveryOperation:
         final_relative_path="Pictures/A.jpg",
         target_precondition_kind=RecoveryTargetPreconditionKind.ABSENT,
     )
+
+
+def _commit_intent_operation() -> RecoveryOperation:
+    return replace(
+        _planned_operation(),
+        phase=RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
+        staging_object_id="op-a",
+        intent_segment_id="run-a-target-0000-intent-000000",
+        intent_ordinal=0,
+        expected_staging_fingerprint_json=_fingerprint_json(),
+        expected_final_fingerprint_json=_fingerprint_json(),
+    )
+
+
+def _intent_segment(
+    *,
+    segment_id: str = "run-a-target-0000-intent-000000",
+    segment_sequence: int = 0,
+    lease_id: str = "lease-a",
+    fencing_token: int = 42,
+    previous_segment_hash: str | None = None,
+) -> RecoveryIntentSegment:
+    return durable_recovery_intent_segment(
+        segment_id=segment_id,
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+        target_endpoint_id="target-a",
+        target_endpoint_revision_id="target-rev-a",
+        endpoint_generation=1,
+        owner_installation_id="owner-a",
+        ownership_epoch=1,
+        lease_id=lease_id,
+        fencing_token=fencing_token,
+        segment_sequence=segment_sequence,
+        relative_path=f"installations/owner-a/recovery/run-a/segment-{segment_sequence:06d}.intent.jsonl",
+        schema_version=1,
+        operation_count=1,
+        byte_count=128,
+        segment_hash="a" * 64 if segment_sequence == 0 else "b" * 64,
+        previous_segment_hash=previous_segment_hash,
+    )
+
 
 def _sealed_plan() -> SealedPlan:
     return seal_plan(

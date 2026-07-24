@@ -95,6 +95,46 @@ class SqliteRecoveryIntentSegmentStore(RecoveryIntentSegmentStore):
             return None
         return _segment_from_row(row)
 
+    def load_latest_intent_segment_for_run_target(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+    ) -> RecoveryIntentSegment | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                id,
+                run_id,
+                run_target_id,
+                target_endpoint_id,
+                target_endpoint_revision_id,
+                endpoint_generation,
+                owner_installation_id,
+                ownership_epoch,
+                lease_id,
+                fencing_token,
+                segment_sequence,
+                relative_path,
+                schema_version,
+                operation_count,
+                byte_count,
+                segment_hash,
+                previous_segment_hash,
+                durability_state,
+                state
+            FROM recovery_intent_segments
+            WHERE run_id = ?
+                AND run_target_id = ?
+            ORDER BY segment_sequence DESC
+            LIMIT 1
+            """,
+            (run_id, run_target_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return _segment_from_row(row)
+
     def _require_active_matching_lease(self, segment: RecoveryIntentSegment) -> None:
         row = self._connection.execute(
             """

@@ -115,6 +115,34 @@ def test_sqlite_recovery_intent_segment_store_chains_segments_by_previous_hash(
         connection.close()
 
 
+def test_sqlite_recovery_intent_segment_store_loads_latest_segment_for_run_target(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _register_resource_lease(connection)
+        store = SqliteRecoveryIntentSegmentStore(connection)
+        first = _segment()
+        second = _segment(
+            segment_id="segment-b",
+            segment_sequence=1,
+            relative_path="installations/owner-a/recovery/run-a/segment-000001.intent.jsonl",
+            segment_hash="b" * 64,
+            previous_segment_hash=first.segment_hash,
+        )
+        store.publish_intent_segment(first)
+        store.publish_intent_segment(second)
+
+        latest = store.load_latest_intent_segment_for_run_target(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+        )
+
+        assert latest == second
+    finally:
+        connection.close()
+
+
 def test_sqlite_recovery_intent_segment_store_rejects_duplicate_sequence(
     tmp_path: Path,
 ) -> None:

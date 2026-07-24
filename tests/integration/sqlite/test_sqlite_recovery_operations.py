@@ -216,6 +216,79 @@ def test_sqlite_recovery_operation_store_records_commit_intent_with_matching_seg
         connection.close()
 
 
+def test_sqlite_recovery_operation_store_refreshes_commit_intent_to_fresh_lease(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_recovery_connection(tmp_path)
+    try:
+        old_token = _register_resource_lease(connection)
+        intent_store = SqliteRecoveryIntentSegmentStore(connection)
+        intent_store.publish_intent_segment(_segment(operation_count=1, byte_count=128))
+        store = SqliteRecoveryOperationStore(connection)
+        _record_staging_verified_operation(store)
+        operation = store.record_operation_phase_transition(
+            run_id="run-a",
+            operation_id="operation-a",
+            expected_phase=RecoveryOperationPhase.STAGING_VERIFIED,
+            next_phase=RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
+            process_instance_id="host-a",
+            intent_segment_id="segment-a",
+            intent_ordinal=0,
+        )
+        assert operation is not None
+        SqliteResourceLeaseStore(connection).release_resource_lease(lease_id="lease-a")
+        new_token = _register_resource_lease(connection, lease_id="lease-b")
+        intent_store.publish_intent_segment(
+            _segment(
+                segment_id="segment-b",
+                lease_id="lease-b",
+                fencing_token=new_token,
+                segment_sequence=1,
+                relative_path="installations/owner-a/recovery/run-a/segment-000001.intent.jsonl",
+                operation_count=1,
+                byte_count=128,
+                segment_hash="b" * 64,
+                previous_segment_hash="a" * 64,
+            )
+        )
+
+        updated = store.record_commit_intent_refreshed(
+            run_id="run-a",
+            operation_id="operation-a",
+            expected_lease_id="lease-a",
+            expected_ownership_epoch=1,
+            expected_fencing_token=old_token,
+            lease_id="lease-b",
+            owner_installation_id="owner-a",
+            ownership_epoch=1,
+            fencing_token=new_token,
+            intent_segment_id="segment-b",
+            intent_ordinal=0,
+            process_instance_id="host-b",
+            payload={"reason": "restart"},
+        )
+
+        assert updated is not None
+        assert updated.phase is RecoveryOperationPhase.COMMIT_INTENT_RECORDED
+        assert updated.lease_id == "lease-b"
+        assert updated.fencing_token == new_token
+        assert updated.intent_segment_id == "segment-b"
+        assert updated.intent_ordinal == 0
+        assert store.load_operation(run_id="run-a", operation_id="operation-a") == updated
+        rows = connection.execute(
+            """
+            SELECT from_phase, to_phase, payload_json
+            FROM recovery_events
+            WHERE run_id = ?
+            ORDER BY run_sequence
+            """,
+            ("run-a",),
+        ).fetchall()
+        assert rows[-1] == ("COMMIT_INTENT_RECORDED", "COMMIT_INTENT_RECORDED", '{"reason":"restart"}')
+    finally:
+        connection.close()
+
+
 def test_sqlite_recovery_operation_store_rejects_commit_intent_lease_rebind(
     tmp_path: Path,
 ) -> None:

@@ -15,6 +15,9 @@ from mediasync_home.application.recovery_operations import (
 )
 from mediasync_home.application.run_catalog_handoffs import record_next_run_target_catalog_handoff
 from mediasync_home.application.run_completion import complete_run_target_after_catalog_handoffs
+from mediasync_home.application.run_commit_intent_refresh import (
+    refresh_next_run_target_commit_intent_for_fresh_lease,
+)
 from mediasync_home.application.run_executor import (
     MAX_RUN_EXECUTOR_PUMP_STEPS,
     RunExecutorPumpStopReason,
@@ -55,6 +58,7 @@ class RunExecutorCycleAction(str, Enum):
     TARGET_COMPLETED = "TARGET_COMPLETED"
     EXECUTING_LEASE_REACQUIRED = "EXECUTING_LEASE_REACQUIRED"
     OPERATION_LEASE_REBOUND = "OPERATION_LEASE_REBOUND"
+    COMMIT_INTENT_REFRESHED = "COMMIT_INTENT_REFRESHED"
     STAGING_ADVANCED = "STAGING_ADVANCED"
     WAITING_FOR_STAGING = "WAITING_FOR_STAGING"
     IDLE = "IDLE"
@@ -325,6 +329,27 @@ def _advance_retained_target(
         phase=RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
         limit=target.planned_operations + 1,
     ):
+        refresh_outcome = refresh_next_run_target_commit_intent_for_fresh_lease(
+            permit=permit,
+            recovery_operations=recovery_operations,
+            intent_segments=intent_segments,
+            process_instance_id=process_instance_id,
+            max_operations=target.planned_operations + 1,
+        )
+        if not refresh_outcome.idle:
+            if refresh_outcome.refreshed:
+                return _advanced(
+                    action=RunExecutorCycleAction.COMMIT_INTENT_REFRESHED,
+                    run_id=refresh_outcome.run_id,
+                    run_target_id=refresh_outcome.run_target_id,
+                    next_action=refresh_outcome.next_action,
+                )
+            return _blocked(
+                run_id=refresh_outcome.run_id,
+                run_target_id=refresh_outcome.run_target_id,
+                validation_codes=refresh_outcome.validation_codes,
+                next_action=refresh_outcome.next_action,
+            )
         if final_commit_port is None:
             return _blocked(
                 run_id=permit.run_id,

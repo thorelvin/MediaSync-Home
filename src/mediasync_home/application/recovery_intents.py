@@ -57,6 +57,13 @@ class RecoveryIntentSegmentStore(Protocol):
 
     def load_intent_segment(self, segment_id: str) -> RecoveryIntentSegment | None: ...
 
+    def load_latest_intent_segment_for_run_target(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+    ) -> RecoveryIntentSegment | None: ...
+
 
 def durable_recovery_intent_segment(
     *,

@@ -311,6 +311,120 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                 self._connection.execute("ROLLBACK")
             raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_PERSISTENCE_FAILED") from exc
 
+    def record_commit_intent_refreshed(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        expected_lease_id: str,
+        expected_ownership_epoch: int,
+        expected_fencing_token: int,
+        lease_id: str,
+        owner_installation_id: str,
+        ownership_epoch: int,
+        fencing_token: int,
+        intent_segment_id: str,
+        intent_ordinal: int,
+        process_instance_id: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> RecoveryOperation | None:
+        _validate_process_instance_id(process_instance_id)
+
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            operation = self.load_operation(run_id=run_id, operation_id=operation_id)
+            if operation is None or operation.phase is not RecoveryOperationPhase.COMMIT_INTENT_RECORDED:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            if (
+                operation.lease_id != expected_lease_id
+                or operation.ownership_epoch != expected_ownership_epoch
+                or operation.fencing_token != expected_fencing_token
+            ):
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+
+            updated = replace(
+                operation,
+                owner_installation_id=owner_installation_id,
+                ownership_epoch=ownership_epoch,
+                lease_id=lease_id,
+                fencing_token=fencing_token,
+                intent_segment_id=intent_segment_id,
+                intent_ordinal=intent_ordinal,
+            )
+            validate_recovery_operation(updated)
+            self._require_active_matching_lease(updated)
+            self._require_matching_intent_segment(updated)
+
+            cursor = self._connection.execute(
+                """
+                UPDATE recovery_operations
+                SET
+                    owner_installation_id = ?,
+                    ownership_epoch = ?,
+                    lease_id = ?,
+                    fencing_token = ?,
+                    intent_segment_id = ?,
+                    intent_ordinal = ?,
+                    updated_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE run_id = ?
+                    AND operation_id = ?
+                    AND phase = 'COMMIT_INTENT_RECORDED'
+                    AND lease_id = ?
+                    AND ownership_epoch = ?
+                    AND fencing_token = ?
+                """,
+                (
+                    updated.owner_installation_id,
+                    updated.ownership_epoch,
+                    updated.lease_id,
+                    updated.fencing_token,
+                    updated.intent_segment_id,
+                    updated.intent_ordinal,
+                    run_id,
+                    operation_id,
+                    expected_lease_id,
+                    expected_ownership_epoch,
+                    expected_fencing_token,
+                ),
+            )
+            if cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+
+            self._append_event(
+                run_id=run_id,
+                operation_id=operation_id,
+                from_phase=RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
+                to_phase=RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
+                process_instance_id=process_instance_id,
+                payload=payload,
+            )
+            loaded = self.load_operation(run_id=run_id, operation_id=operation_id)
+            if loaded is None:
+                raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return loaded
+        except SqliteRecoveryOperationStoreError:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        except sqlite3.IntegrityError as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_PERSISTENCE_CONFLICT") from exc
+        except sqlite3.Error as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_PERSISTENCE_FAILED") from exc
+
     def load_operation(self, *, run_id: str, operation_id: str) -> RecoveryOperation | None:
         row = self._connection.execute(
             f"""

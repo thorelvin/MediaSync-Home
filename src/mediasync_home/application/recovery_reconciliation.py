@@ -22,6 +22,7 @@ class RecoveryOperationReconciliationViolation(ValueError):
 class RecoveryOperationStartupClassification(str, Enum):
     DISCARD_UNVERIFIED_INBOX = "DISCARD_UNVERIFIED_INBOX"
     REACQUIRE_AND_REBIND_PRE_COMMIT = "REACQUIRE_AND_REBIND_PRE_COMMIT"
+    REFRESH_COMMIT_INTENT = "REFRESH_COMMIT_INTENT"
     CONTINUE_FROM_VERIFIED_OBJECT = "CONTINUE_FROM_VERIFIED_OBJECT"
     REVERIFY_FINAL = "REVERIFY_FINAL"
     FILESYSTEM_APPLIED_NEEDS_CATALOG = "FILESYSTEM_APPLIED_NEEDS_CATALOG"
@@ -141,8 +142,9 @@ def _classification_for_phase(
 ) -> RecoveryOperationStartupClassification:
     if phase in PRE_COMMIT_LEASE_REBIND_PHASES:
         return RecoveryOperationStartupClassification.REACQUIRE_AND_REBIND_PRE_COMMIT
+    if phase is RecoveryOperationPhase.COMMIT_INTENT_RECORDED:
+        return RecoveryOperationStartupClassification.REFRESH_COMMIT_INTENT
     if phase in {
-        RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
         RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
     }:
         return RecoveryOperationStartupClassification.CONTINUE_FROM_VERIFIED_OBJECT
@@ -165,6 +167,8 @@ def _next_action_for_classification(
         return "Reacquire the endpoint lease, discard unverified staging evidence and rerun staging."
     if classification is RecoveryOperationStartupClassification.REACQUIRE_AND_REBIND_PRE_COMMIT:
         return "Reacquire the endpoint lease and rebind pre-commit recovery operations before continuing."
+    if classification is RecoveryOperationStartupClassification.REFRESH_COMMIT_INTENT:
+        return "Reacquire the endpoint lease and refresh commit intent before final commit."
     if classification is RecoveryOperationStartupClassification.CONTINUE_FROM_VERIFIED_OBJECT:
         return "Reacquire the endpoint lease and reverify the staged object before commit."
     if classification is RecoveryOperationStartupClassification.REVERIFY_FINAL:

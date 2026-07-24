@@ -97,7 +97,7 @@ def publish_run_target_recovery_intent_segment(
             next_action="Reacquire the endpoint lease before publishing commit intent.",
         )
 
-    segment = _intent_segment(
+    segment = build_run_target_recovery_intent_segment(
         permit=permit,
         operations=ordered_operations,
         segment_sequence=segment_sequence,
@@ -169,7 +169,7 @@ def publish_run_target_recovery_intent_segment(
     )
 
 
-def _intent_segment(
+def build_run_target_recovery_intent_segment(
     *,
     permit: MutationPermit,
     operations: tuple[RecoveryOperation, ...],

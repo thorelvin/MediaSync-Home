@@ -150,6 +150,24 @@ class RecoveryOperationStore(Protocol):
         payload: Mapping[str, object] | None = None,
     ) -> RecoveryOperation | None: ...
 
+    def record_commit_intent_refreshed(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        expected_lease_id: str,
+        expected_ownership_epoch: int,
+        expected_fencing_token: int,
+        lease_id: str,
+        owner_installation_id: str,
+        ownership_epoch: int,
+        fencing_token: int,
+        intent_segment_id: str,
+        intent_ordinal: int,
+        process_instance_id: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> RecoveryOperation | None: ...
+
     def load_operation(self, *, run_id: str, operation_id: str) -> RecoveryOperation | None: ...
 
 
