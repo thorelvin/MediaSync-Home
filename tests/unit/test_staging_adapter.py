@@ -69,6 +69,43 @@ def test_local_staging_rejects_match_fingerprint_missing_target(tmp_path: Path) 
     assert exc_info.value.validation_code == "LOCAL_STAGING_TARGET_MATCH_REQUIRES_FILE"
 
 
+def test_local_staging_binds_directory_empty_target_precondition(tmp_path: Path) -> None:
+    target_root = tmp_path / "target"
+    (target_root / "Pictures" / "A.jpg").mkdir(parents=True)
+    adapter = LocalFileStagingTransferAdapter(
+        root_resolver=_RootResolver(target_root=target_root),
+    )
+
+    evidence = adapter.validate_target_precondition(
+        _permit(),
+        _operation(RecoveryTargetPreconditionKind.DIRECTORY_EMPTY),
+    )
+
+    assert json.loads(evidence.fingerprint_json) == {
+        "entry_count": 0,
+        "kind": "DIRECTORY_EMPTY",
+    }
+
+
+def test_local_staging_rejects_non_empty_directory_target_precondition(
+    tmp_path: Path,
+) -> None:
+    target_root = tmp_path / "target"
+    (target_root / "Pictures" / "A.jpg").mkdir(parents=True)
+    (target_root / "Pictures" / "A.jpg" / "child.txt").write_text("child", encoding="utf-8")
+    adapter = LocalFileStagingTransferAdapter(
+        root_resolver=_RootResolver(target_root=target_root),
+    )
+
+    with pytest.raises(LocalFileStagingError) as exc_info:
+        adapter.validate_target_precondition(
+            _permit(),
+            _operation(RecoveryTargetPreconditionKind.DIRECTORY_EMPTY),
+        )
+
+    assert exc_info.value.validation_code == "LOCAL_STAGING_TARGET_DIRECTORY_NOT_EMPTY"
+
+
 class _RootResolver:
     def __init__(self, *, target_root: Path) -> None:
         self._target_root = target_root

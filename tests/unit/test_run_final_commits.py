@@ -131,6 +131,40 @@ def test_commit_next_run_target_verified_artifact_resumes_preserved_replacement(
     ]
 
 
+def test_commit_next_run_target_verified_artifact_resumes_quarantined_directory_commit() -> None:
+    operation = _directory_quarantined_operation()
+    recovery_operations = _FakeRecoveryOperationStore((operation,))
+    final_commit = _FakeFinalCommitPort()
+
+    outcome = commit_next_run_target_verified_artifact(
+        permit=_permit(),
+        recovery_operations=recovery_operations,
+        final_commit_port=final_commit,
+        process_instance_id="host-a",
+    )
+
+    stored = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    assert outcome.committed is True
+    assert outcome.validation_codes == ()
+    assert stored.phase is RecoveryOperationPhase.FINAL_VERIFIED
+    assert stored.quarantine_object_id == "op-a"
+    assert final_commit.calls == (
+        (
+            "lease-a",
+            VerifiedStagingArtifact(
+                object_id="op-a",
+                relative_path=RelativePath("Pictures/A.jpg"),
+                content_hash="a" * 64,
+            ),
+        ),
+    )
+    assert [transition[2] for transition in recovery_operations.transitions] == [
+        RecoveryOperationPhase.FILESYSTEM_APPLIED,
+        RecoveryOperationPhase.FINAL_DURABLE,
+        RecoveryOperationPhase.FINAL_VERIFIED,
+    ]
+
+
 def test_commit_next_run_target_verified_artifact_requires_preserved_old_target() -> None:
     operation = _old_target_preserved_operation(version_object_id=None)
     final_commit = _FakeFinalCommitPort()
@@ -405,6 +439,16 @@ def _old_target_preserved_operation(
         target_precondition_kind=RecoveryTargetPreconditionKind.MATCH_FINGERPRINT,
         expected_target_fingerprint_json='{"content_hash":"' + ("b" * 64) + '"}',
         version_object_id=version_object_id,
+    )
+
+
+def _directory_quarantined_operation() -> RecoveryOperation:
+    return replace(
+        _operation(),
+        phase=RecoveryOperationPhase.OLD_TARGET_PRESERVED,
+        target_precondition_kind=RecoveryTargetPreconditionKind.DIRECTORY_EMPTY,
+        expected_target_fingerprint_json='{"entry_count":0,"kind":"DIRECTORY_EMPTY"}',
+        quarantine_object_id="op-a",
     )
 
 

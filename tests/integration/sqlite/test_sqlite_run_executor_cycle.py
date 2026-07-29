@@ -328,6 +328,119 @@ def test_sqlite_run_executor_cycle_replaces_existing_target_from_match_fingerpri
         recovery_connection.close()
 
 
+def test_sqlite_run_executor_cycle_quarantines_empty_directory_before_file_commit(
+    tmp_path: Path,
+) -> None:
+    payload = b"new-image"
+    content_hash = hashlib.sha256(payload).hexdigest()
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    staging_root = tmp_path / "staging"
+    (source_root / "Pictures").mkdir(parents=True)
+    (target_root / "Pictures" / "A.jpg").mkdir(parents=True)
+    (source_root / "Pictures" / "A.jpg").write_bytes(payload)
+    _write_endpoint_marker(target_root)
+
+    catalog_connection = _prepared_catalog_connection(tmp_path)
+    recovery_connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _insert_plan_parent_rows(
+            catalog_connection,
+            source_root=source_root,
+            target_root=target_root,
+        )
+        _insert_receipt(catalog_connection)
+        plans = SqlitePlanStore(catalog_connection)
+        runs = SqliteRunStore(catalog_connection)
+        recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
+        intent_segments = SqliteRecoveryIntentSegmentStore(recovery_connection)
+        catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
+        lease = FixedLiveLease()
+        registry = HeldRunTargetLeaseRegistry()
+        final_commit = LocalResolvingFinalCommitAdapter(
+            root_resolver=SqliteEndpointRootResolver(catalog_connection),
+            staging_root=staging_root,
+            permit_validator=lease,
+        )
+        staging = LocalFileStagingTransferAdapter(
+            root_resolver=SqliteEndpointRootResolver(catalog_connection),
+            staging_root=staging_root,
+        )
+        plan = _sealed_plan(
+            planned_bytes=len(payload),
+            reason_code="COPY_OVER_EMPTY_DIRECTORY",
+            target_precondition_kind=TargetPreconditionKind.DIRECTORY_EMPTY,
+        )
+        plans.save_sealed_plan(plan)
+        start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        _register_resource_lease(recovery_connection)
+
+        outcome = execute_bounded_run_executor_cycle(
+            runs=runs,
+            leases=FixedLeaseAuthority(lease),
+            lease_registry=registry,
+            plans=plans,
+            recovery_operations=recovery_operations,
+            intent_segments=intent_segments,
+            catalog_handoffs=catalog_handoffs,
+            final_commit_port=final_commit,
+            old_target_preservation_port=final_commit,
+            staging_transfer_port=staging,
+            process_instance_id="host-a",
+            max_steps=15,
+        )
+
+        loaded_run = runs.load_started_run("run-a")
+        operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+        handoff = catalog_handoffs.load_final_file_handoff("final-file:run-a:op-a")
+        quarantine_payload = target_root / ".mediasync" / "objects" / "quarantine" / "op-a.payload"
+        quarantine_manifest = (
+            target_root / ".mediasync" / "objects" / "quarantine" / "op-a.manifest.json"
+        )
+        assert outcome.stopped_reason is RunExecutorPumpStopReason.IDLE
+        assert outcome.last_step is not None
+        assert outcome.last_step.action is RunExecutorCycleAction.IDLE
+        assert registry.retained_count == 0
+        assert lease.released is True
+        assert loaded_run is not None
+        assert loaded_run.state is RunState.COMPLETED
+        assert loaded_run.targets[0].state is RunTargetState.SUCCEEDED
+        assert loaded_run.targets[0].completed_operations == 1
+        assert loaded_run.targets[0].completed_bytes == len(payload)
+        assert operation is not None
+        assert operation.phase is RecoveryOperationPhase.CATALOG_RECORDED
+        assert operation.target_precondition_kind is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY
+        assert operation.quarantine_object_id == "op-a"
+        assert operation.expected_target_fingerprint_json == json.dumps(
+            {
+                "entry_count": 0,
+                "kind": "DIRECTORY_EMPTY",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        assert (target_root / "Pictures" / "A.jpg").is_file()
+        assert (target_root / "Pictures" / "A.jpg").read_bytes() == payload
+        assert quarantine_payload.is_dir()
+        assert json.loads(quarantine_manifest.read_text(encoding="utf-8"))["object_role"] == (
+            "EMPTY_DIRECTORY_QUARANTINE"
+        )
+        assert handoff is not None
+        assert handoff.content_hash == content_hash
+    finally:
+        catalog_connection.close()
+        recovery_connection.close()
+
+
 def _prepared_catalog_connection(tmp_path: Path) -> sqlite3.Connection:
     database = tmp_path / "catalog.sqlite"
     connection = sqlite3.connect(database)

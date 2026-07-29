@@ -80,6 +80,11 @@ class LocalFileStagingTransferAdapter:
                 permit=permit,
                 operation=operation,
             )
+        if operation.target_precondition_kind is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY:
+            return self._validate_directory_empty_target_precondition(
+                permit=permit,
+                operation=operation,
+            )
         raise LocalFileStagingError(
             "LOCAL_STAGING_TARGET_PRECONDITION_UNSUPPORTED",
             "Use a specialized staging path for this target precondition.",
@@ -132,6 +137,46 @@ class LocalFileStagingTransferAdapter:
                     "Refresh analysis because the target changed before staging.",
                 )
         return TargetPreconditionEvidence(fingerprint_json=_canonical_json(observed))
+
+    def _validate_directory_empty_target_precondition(
+        self,
+        *,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> TargetPreconditionEvidence:
+        final_path = self._target_final_path(permit=permit, operation=operation)
+        if not final_path.parent.is_dir():
+            raise LocalFileStagingError(
+                "LOCAL_STAGING_TARGET_PARENT_MISSING",
+                "Create and verify the final parent directory before staging this operation.",
+            )
+        target_root = self._target_root(permit=permit, operation=operation)
+        _reject_symlink_in_path(root=target_root, path=final_path)
+        if not final_path.is_dir() or final_path.is_symlink():
+            raise LocalFileStagingError(
+                "LOCAL_STAGING_TARGET_DIRECTORY_EMPTY_REQUIRES_DIRECTORY",
+                "Refresh analysis because the target is no longer an empty directory.",
+            )
+        try:
+            next(final_path.iterdir())
+        except StopIteration:
+            return TargetPreconditionEvidence(
+                fingerprint_json=_canonical_json(
+                    {
+                        "entry_count": 0,
+                        "kind": RecoveryTargetPreconditionKind.DIRECTORY_EMPTY.value,
+                    }
+                )
+            )
+        except OSError as exc:
+            raise LocalFileStagingError(
+                "LOCAL_STAGING_TARGET_DIRECTORY_EMPTY_READ_FAILED",
+                "Refresh analysis because the target directory contents cannot be proven empty.",
+            ) from exc
+        raise LocalFileStagingError(
+            "LOCAL_STAGING_TARGET_DIRECTORY_NOT_EMPTY",
+            "Refresh analysis because the target directory is no longer empty.",
+        )
 
     def allocate_staging_object(self, operation: RecoveryOperation) -> StagingAllocation:
         object_id = operation.staging_object_id or operation.operation_id

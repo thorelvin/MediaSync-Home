@@ -151,6 +151,43 @@ def test_journaled_final_commit_records_old_target_preservation_before_replace()
     assert store.operation.final_durability_state == "FINAL_COMMIT_ADAPTER_COMPLETED"
 
 
+def test_journaled_final_commit_records_directory_quarantine_before_commit() -> None:
+    actions: list[str] = []
+    operation = replace(
+        _operation(),
+        target_precondition_kind=RecoveryTargetPreconditionKind.DIRECTORY_EMPTY,
+        expected_target_fingerprint_json='{"entry_count":0,"kind":"DIRECTORY_EMPTY"}',
+    )
+    store = _FakeRecoveryOperationStore(operation, actions=actions)
+    preservation = _FakeOldTargetPreservationPort(actions=actions, quarantine=True)
+    inner = _FakeFinalCommitPort(actions=actions)
+    runner = JournaledFinalCommitPort(
+        recovery_operations=store,
+        final_commit_port=inner,
+        old_target_preservation_port=preservation,
+        process_instance_id="host-a",
+    )
+
+    receipt = runner.commit_verified_artifact(_permit(), _artifact())
+
+    assert receipt == CommitReceipt(
+        operation_id="operation-a",
+        final_relative_path=RelativePath("Photos/image.jpg"),
+    )
+    assert actions == [
+        "transition:COMMIT_PRECONDITIONS_REVALIDATED",
+        "preserve",
+        "transition:OLD_TARGET_PRESERVED",
+        "commit",
+        "transition:FILESYSTEM_APPLIED",
+        "transition:FINAL_DURABLE",
+        "transition:FINAL_VERIFIED",
+    ]
+    assert store.operation is not None
+    assert store.operation.quarantine_object_id == "quarantine-a"
+    assert store.operation.version_object_id is None
+
+
 def test_journaled_final_commit_rejects_permit_mismatch_before_filesystem_call() -> None:
     store = _FakeRecoveryOperationStore(replace(_operation(), lease_id="lease-b"))
     inner = _FakeFinalCommitPort()
@@ -211,6 +248,29 @@ def test_journaled_final_commit_requires_preservation_port_for_matching_target()
         runner.commit_verified_artifact(_permit(), _artifact())
 
     assert exc_info.value.validation_code == "RECOVERY_COMMIT_REQUIRES_OLD_TARGET_PRESERVATION_PORT"
+    assert store.transitions == []
+    assert inner.calls == []
+
+
+def test_journaled_final_commit_requires_quarantine_port_for_empty_directory() -> None:
+    store = _FakeRecoveryOperationStore(
+        replace(
+            _operation(),
+            target_precondition_kind=RecoveryTargetPreconditionKind.DIRECTORY_EMPTY,
+            expected_target_fingerprint_json='{"entry_count":0,"kind":"DIRECTORY_EMPTY"}',
+        )
+    )
+    inner = _FakeFinalCommitPort()
+    runner = JournaledFinalCommitPort(
+        recovery_operations=store,
+        final_commit_port=inner,
+        process_instance_id="host-a",
+    )
+
+    with pytest.raises(JournaledFinalCommitError) as exc_info:
+        runner.commit_verified_artifact(_permit(), _artifact())
+
+    assert exc_info.value.validation_code == "RECOVERY_COMMIT_REQUIRES_DIRECTORY_QUARANTINE_PORT"
     assert store.transitions == []
     assert inner.calls == []
 
@@ -426,8 +486,9 @@ class _FakeFinalCommitPort(FinalCommitPort):
 
 
 class _FakeOldTargetPreservationPort:
-    def __init__(self, *, actions: list[str] | None = None) -> None:
+    def __init__(self, *, actions: list[str] | None = None, quarantine: bool = False) -> None:
         self._actions = actions
+        self._quarantine = quarantine
         self.calls: list[tuple[MutationPermit, RecoveryOperationPhase]] = []
 
     def preserve_old_target(
@@ -438,6 +499,13 @@ class _FakeOldTargetPreservationPort:
         if self._actions is not None:
             self._actions.append("preserve")
         self.calls.append((permit, operation.phase))
+        if self._quarantine:
+            return OldTargetPreservationReceipt(
+                operation_id=operation.operation_id,
+                final_relative_path=RelativePath(operation.final_relative_path),
+                quarantine_object_id="quarantine-a",
+                fingerprint_json='{"entry_count":0,"kind":"DIRECTORY_EMPTY"}',
+            )
         return OldTargetPreservationReceipt(
             operation_id=operation.operation_id,
             final_relative_path=RelativePath(operation.final_relative_path),

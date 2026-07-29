@@ -255,10 +255,12 @@ def _validate_target_precondition_support(
             )
         return
     if operation.target_precondition_kind is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY:
-        raise JournaledFinalCommitError(
-            "RECOVERY_COMMIT_REQUIRES_DIRECTORY_QUARANTINE_FLOW",
-            "Use the directory quarantine flow for directory-empty target preconditions.",
-        )
+        if old_target_preservation_port is None:
+            raise JournaledFinalCommitError(
+                "RECOVERY_COMMIT_REQUIRES_DIRECTORY_QUARANTINE_PORT",
+                "Use a final commit adapter that quarantines empty directories before replacement.",
+            )
+        return
     raise JournaledFinalCommitError(
         "RECOVERY_COMMIT_REQUIRES_TARGET_PRECONDITION",
         "Refresh the sealed operation with an explicit mutating target precondition.",
@@ -266,7 +268,10 @@ def _validate_target_precondition_support(
 
 
 def _requires_old_target_preservation(operation: RecoveryOperation) -> bool:
-    return operation.target_precondition_kind is RecoveryTargetPreconditionKind.MATCH_FINGERPRINT
+    return operation.target_precondition_kind in {
+        RecoveryTargetPreconditionKind.DIRECTORY_EMPTY,
+        RecoveryTargetPreconditionKind.MATCH_FINGERPRINT,
+    }
 
 
 def _validate_preservation_receipt(

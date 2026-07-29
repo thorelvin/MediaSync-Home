@@ -104,6 +104,8 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
             missing_code="LOCAL_REPLACE_FINAL_COMMIT_ENDPOINT_MARKER_MISSING",
         )
         _validate_replace_operation_binding(operation=operation, permit=permit)
+        if operation.target_precondition_kind is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY:
+            return self._preserve_empty_directory_target(operation)
         if operation.target_precondition_kind is not RecoveryTargetPreconditionKind.MATCH_FINGERPRINT:
             raise FinalCommitAdapterError(
                 "LOCAL_REPLACE_FINAL_COMMIT_REQUIRES_MATCH_FINGERPRINT_PRECONDITION",
@@ -162,6 +164,67 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
             final_relative_path=RelativePath(operation.final_relative_path),
             version_object_id=version_object_id,
             fingerprint_json=fingerprint_json,
+        )
+
+    def _preserve_empty_directory_target(
+        self,
+        operation: RecoveryOperation,
+    ) -> OldTargetPreservationReceipt:
+        if operation.quarantine_object_id not in (None, operation.operation_id):
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_REQUIRES_DETERMINISTIC_OBJECT_ID",
+                "Use the operation id as the local quarantine object id for this preview adapter.",
+            )
+        expected = _expected_empty_directory_precondition(
+            operation.expected_target_fingerprint_json,
+            validation_code="LOCAL_DIRECTORY_QUARANTINE_REQUIRES_EMPTY_DIRECTORY_EVIDENCE",
+            next_action="Revalidate the empty-directory target precondition before quarantine.",
+        )
+        quarantine_object_id = operation.operation_id
+        quarantine_payload, quarantine_manifest = _quarantine_object_paths(
+            target_root=self._target_root,
+            quarantine_object_id=quarantine_object_id,
+        )
+        final_path = _directory_empty_final_path(self._target_root, operation.final_relative_path)
+        manifest = _quarantine_manifest(
+            operation=operation,
+            quarantine_object_id=quarantine_object_id,
+            fingerprint=expected,
+            payload_path=quarantine_payload,
+        )
+
+        if quarantine_payload.exists():
+            _validate_existing_quarantine_payload(
+                payload_path=quarantine_payload,
+                final_path=final_path,
+            )
+            _write_quarantine_manifest(manifest_path=quarantine_manifest, manifest=manifest)
+            return OldTargetPreservationReceipt(
+                operation_id=operation.operation_id,
+                final_relative_path=RelativePath(operation.final_relative_path),
+                quarantine_object_id=quarantine_object_id,
+                fingerprint_json=_canonical_json(expected),
+            )
+
+        if final_path.is_symlink() or not final_path.is_dir():
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_TARGET_TYPE_CHANGED",
+                "Refresh analysis because the target is no longer an empty directory.",
+            )
+        _require_empty_directory(final_path)
+        try:
+            os.replace(final_path, quarantine_payload)
+        except OSError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_MOVE_FAILED",
+                "Enter recovery and inspect final path plus quarantine object postconditions.",
+            ) from exc
+        _write_quarantine_manifest(manifest_path=quarantine_manifest, manifest=manifest)
+        return OldTargetPreservationReceipt(
+            operation_id=operation.operation_id,
+            final_relative_path=RelativePath(operation.final_relative_path),
+            quarantine_object_id=quarantine_object_id,
+            fingerprint_json=_canonical_json(expected),
         )
 
     def restore_old_target(
@@ -931,6 +994,47 @@ def _version_object_paths(
     )
 
 
+def _quarantine_object_paths(
+    *,
+    target_root: Path,
+    quarantine_object_id: str,
+    create: bool = True,
+) -> tuple[Path, Path]:
+    if OBJECT_ID_PATTERN.fullmatch(quarantine_object_id) is None:
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_REQUIRES_SAFE_OBJECT_ID",
+            "Use an opaque quarantine object id before preserving a directory.",
+        )
+    try:
+        root = target_root.resolve(strict=True)
+    except OSError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_TARGET_ROOT_MISSING",
+            "Create the target endpoint root before directory quarantine.",
+        ) from exc
+    relative_parts = (".mediasync", "objects", "quarantine")
+    _reject_symlink_in_path(
+        root=root,
+        relative_parts=relative_parts,
+        validation_code="LOCAL_DIRECTORY_QUARANTINE_REPARSE_UNSUPPORTED",
+        next_action="Revalidate the endpoint control area before preserving a directory.",
+    )
+    quarantine_root = root.joinpath(*relative_parts)
+    if create:
+        quarantine_root.mkdir(parents=True, exist_ok=True)
+    try:
+        quarantine_root.resolve(strict=create).relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_STORE_ESCAPES_ROOT",
+            "Revalidate the endpoint control area before preserving a directory.",
+        ) from exc
+    return (
+        quarantine_root / f"{quarantine_object_id}.payload",
+        quarantine_root / f"{quarantine_object_id}.manifest.json",
+    )
+
+
 def _version_manifest_exists(*, target_root: Path, object_id: str) -> bool:
     _, manifest_path = _version_object_paths(
         target_root=target_root,
@@ -938,6 +1042,119 @@ def _version_manifest_exists(*, target_root: Path, object_id: str) -> bool:
         create=False,
     )
     return manifest_path.is_file() and not manifest_path.is_symlink()
+
+
+def _directory_empty_final_path(target_root: Path, relative_path: str) -> Path:
+    parts = _relative_path_parts_for_adapter(
+        relative_path,
+        validation_code="LOCAL_DIRECTORY_QUARANTINE_REQUIRES_RELATIVE_PATH",
+        next_action="Provide an endpoint-relative final path before directory quarantine.",
+    )
+    try:
+        root = target_root.resolve(strict=True)
+    except OSError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_TARGET_ROOT_MISSING",
+            "Create the target endpoint root before directory quarantine.",
+        ) from exc
+    final_path = root.joinpath(*parts)
+    parent = final_path.parent
+    if not parent.is_dir():
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_TARGET_PARENT_MISSING",
+            "Create and verify the final parent directory before directory quarantine.",
+        )
+    _reject_symlink_in_path(
+        root=root,
+        relative_parts=parts,
+        validation_code="LOCAL_DIRECTORY_QUARANTINE_REPARSE_UNSUPPORTED",
+        next_action="Revalidate the final path chain before directory quarantine.",
+    )
+    try:
+        parent.resolve(strict=True).relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_TARGET_ESCAPES_ROOT",
+            "Resolve the final path through a validated endpoint root before directory quarantine.",
+        ) from exc
+    return final_path
+
+
+def _validate_existing_quarantine_payload(*, payload_path: Path, final_path: Path) -> None:
+    if payload_path.is_symlink() or not payload_path.is_dir():
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_PAYLOAD_INVALID",
+            "Enter recovery because the quarantine object path is not a directory.",
+        )
+    _require_empty_directory(payload_path)
+    if final_path.exists() or final_path.is_symlink():
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_DUPLICATE_TARGET",
+            "Enter recovery because both final path and quarantine object exist.",
+        )
+
+
+def _require_empty_directory(path: Path) -> None:
+    try:
+        next(path.iterdir())
+    except StopIteration:
+        return
+    except OSError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_READ_FAILED",
+            "Refresh analysis because the directory contents cannot be proven empty.",
+        ) from exc
+    raise FinalCommitAdapterError(
+        "LOCAL_DIRECTORY_QUARANTINE_TARGET_NOT_EMPTY",
+        "Refresh analysis because the target directory is no longer empty.",
+    )
+
+
+def _write_quarantine_manifest(*, manifest_path: Path, manifest: dict[str, object]) -> None:
+    payload = _canonical_json(manifest)
+    if manifest_path.exists():
+        try:
+            existing = manifest_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_MANIFEST_INVALID",
+                "Enter recovery because the quarantine manifest cannot be read.",
+            ) from exc
+        if existing != payload:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_MANIFEST_CONFLICT",
+                "Enter recovery because the existing quarantine manifest differs from this operation.",
+            )
+        return
+    temp_path = manifest_path.with_name(f".{manifest_path.name}.{uuid4().hex}.tmp")
+    try:
+        with temp_path.open("x", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, manifest_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _quarantine_manifest(
+    *,
+    operation: RecoveryOperation,
+    quarantine_object_id: str,
+    fingerprint: dict[str, object],
+    payload_path: Path,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "object_role": "EMPTY_DIRECTORY_QUARANTINE",
+        "quarantine_object_id": quarantine_object_id,
+        "operation_id": operation.operation_id,
+        "run_id": operation.run_id,
+        "run_target_id": operation.run_target_id,
+        "final_relative_path": _relative_path(operation.final_relative_path),
+        "payload_name": payload_path.name,
+        "fingerprint": fingerprint,
+    }
 
 
 def _preserve_version_payload(
@@ -1066,6 +1283,30 @@ def _expected_fingerprint(
     if not isinstance(byte_count, int) or byte_count < 0:
         raise FinalCommitAdapterError(validation_code, next_action)
     return {"byte_count": byte_count, "content_hash": content_hash}
+
+
+def _expected_empty_directory_precondition(
+    raw_payload: str | None,
+    *,
+    validation_code: str,
+    next_action: str,
+) -> dict[str, object]:
+    if raw_payload is None:
+        raise FinalCommitAdapterError(validation_code, next_action)
+    try:
+        payload = json.loads(raw_payload)
+    except json.JSONDecodeError as exc:
+        raise FinalCommitAdapterError(validation_code, next_action) from exc
+    if not isinstance(payload, dict):
+        raise FinalCommitAdapterError(validation_code, next_action)
+    if payload.get("kind") != RecoveryTargetPreconditionKind.DIRECTORY_EMPTY.value:
+        raise FinalCommitAdapterError(validation_code, next_action)
+    if payload.get("entry_count") != 0:
+        raise FinalCommitAdapterError(validation_code, next_action)
+    return {
+        "entry_count": 0,
+        "kind": RecoveryTargetPreconditionKind.DIRECTORY_EMPTY.value,
+    }
 
 
 def _copy_file_durable(*, source: Path, destination: Path) -> None:

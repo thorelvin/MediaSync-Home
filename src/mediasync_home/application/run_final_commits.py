@@ -254,16 +254,24 @@ def _commit_preserved_target_replacement(
 
 
 def _validate_preserved_target_replacement(operation: RecoveryOperation) -> None:
-    if operation.target_precondition_kind is not RecoveryTargetPreconditionKind.MATCH_FINGERPRINT:
-        raise RunTargetFinalCommitError(
-            "RUN_TARGET_FINAL_COMMIT_REQUIRES_PRESERVED_REPLACE_PRECONDITION",
-            "Reload recovery state before resuming a preserved replacement.",
-        )
-    if operation.version_object_id is None and operation.quarantine_object_id is None:
-        raise RunTargetFinalCommitError(
-            "RUN_TARGET_FINAL_COMMIT_REQUIRES_PRESERVED_OLD_TARGET",
-            "Recover or reconcile the preserved old target before applying replacement bytes.",
-        )
+    if operation.target_precondition_kind is RecoveryTargetPreconditionKind.MATCH_FINGERPRINT:
+        if operation.version_object_id is None and operation.quarantine_object_id is None:
+            raise RunTargetFinalCommitError(
+                "RUN_TARGET_FINAL_COMMIT_REQUIRES_PRESERVED_OLD_TARGET",
+                "Recover or reconcile the preserved old target before applying replacement bytes.",
+            )
+        return
+    if operation.target_precondition_kind is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY:
+        if operation.quarantine_object_id is None or not operation.quarantine_object_id.strip():
+            raise RunTargetFinalCommitError(
+                "RUN_TARGET_FINAL_COMMIT_REQUIRES_QUARANTINED_DIRECTORY",
+                "Recover or reconcile the quarantined empty directory before applying replacement bytes.",
+            )
+        return
+    raise RunTargetFinalCommitError(
+        "RUN_TARGET_FINAL_COMMIT_REQUIRES_PRESERVED_REPLACE_PRECONDITION",
+        "Reload recovery state before resuming preserved final-path work.",
+    )
 
 
 def _transition(

@@ -318,6 +318,48 @@ def test_local_resolving_final_commit_preserves_then_replaces(tmp_path: Path) ->
     ).read_bytes() == b"old-image"
 
 
+def test_local_resolving_final_commit_quarantines_empty_directory_then_inserts_file(
+    tmp_path: Path,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    final = fixture.target_root / "Photos" / "image.jpg"
+    final.mkdir()
+    adapter = LocalResolvingFinalCommitAdapter(
+        root_resolver=_RootResolver(target_root=fixture.target_root),
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    artifact = fixture.stage(object_id="operation-a", relative_path="Photos/image.jpg", payload=b"image")
+    operation = _directory_empty_operation(fixture)
+
+    preservation = adapter.preserve_old_target(permit, operation)
+    receipt = adapter.commit_verified_artifact(permit, artifact)
+
+    quarantine_payload = fixture.target_root / ".mediasync" / "objects" / "quarantine" / "operation-a.payload"
+    quarantine_manifest = (
+        fixture.target_root
+        / ".mediasync"
+        / "objects"
+        / "quarantine"
+        / "operation-a.manifest.json"
+    )
+    assert preservation.version_object_id is None
+    assert preservation.quarantine_object_id == "operation-a"
+    assert preservation.fingerprint_json == '{"entry_count":0,"kind":"DIRECTORY_EMPTY"}'
+    assert receipt.final_relative_path == artifact.relative_path
+    assert final.is_file()
+    assert final.read_bytes() == b"image"
+    assert quarantine_payload.is_dir()
+    manifest = json.loads(quarantine_manifest.read_text(encoding="utf-8"))
+    assert manifest["object_role"] == "EMPTY_DIRECTORY_QUARANTINE"
+    assert manifest["operation_id"] == "operation-a"
+    assert manifest["fingerprint"] == {
+        "entry_count": 0,
+        "kind": "DIRECTORY_EMPTY",
+    }
+
+
 class _CommitFixture:
     def __init__(
         self,
@@ -434,6 +476,38 @@ def _replace_operation(
             {
                 "byte_count": len(expected_target_payload),
                 "content_hash": _sha256(expected_target_payload),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+
+
+def _directory_empty_operation(fixture: _CommitFixture) -> RecoveryOperation:
+    return replace(
+        planned_recovery_operation(
+            run_id=fixture.lease.run_id,
+            run_target_id=fixture.lease.run_target_id,
+            operation_id="operation-a",
+            target_endpoint_id=fixture.lease.endpoint_id,
+            target_endpoint_revision_id=fixture.lease.endpoint_revision_id,
+            endpoint_generation=1,
+            owner_installation_id=fixture.lease.owner_installation_id,
+            ownership_epoch=fixture.lease.ownership_epoch,
+            lease_id=fixture.lease.lease_id,
+            lease_resource_key=fixture.lease.resource_key,
+            fencing_token=fixture.lease.fencing_token,
+            final_relative_path="Photos/image.jpg",
+            target_precondition_kind=RecoveryTargetPreconditionKind.DIRECTORY_EMPTY,
+        ),
+        phase=RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
+        intent_segment_id="segment-a",
+        intent_ordinal=0,
+        staging_object_id="operation-a",
+        expected_target_fingerprint_json=json.dumps(
+            {
+                "entry_count": 0,
+                "kind": "DIRECTORY_EMPTY",
             },
             sort_keys=True,
             separators=(",", ":"),
