@@ -6,7 +6,11 @@ from typing import Protocol
 
 from mediasync_home.application.catalog_handoff import FinalFileCatalogHandoffStore
 from mediasync_home.application.plans import PlanStore
-from mediasync_home.application.ports import FinalCommitPort, OldTargetPreservationPort
+from mediasync_home.application.ports import (
+    FinalCommitPort,
+    OldTargetPreservationPort,
+    RecoveryObjectCleanupPort,
+)
 from mediasync_home.application.recovery_intents import RecoveryIntentSegmentStore
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
@@ -40,6 +44,9 @@ from mediasync_home.application.run_operation_planning import plan_run_target_re
 from mediasync_home.application.run_preserved_commit_refresh import (
     refresh_next_run_target_preserved_commit_intent_for_fresh_lease,
 )
+from mediasync_home.application.run_recovery_object_cleanup import (
+    cleanup_next_run_target_recovery_object,
+)
 from mediasync_home.application.run_staging import (
     RunTargetStagingPort,
     execute_next_run_target_staging_step,
@@ -61,6 +68,7 @@ class RunExecutorCycleAction(str, Enum):
     INTENT_PUBLISHED = "INTENT_PUBLISHED"
     FINAL_COMMITTED = "FINAL_COMMITTED"
     CATALOG_HANDOFF_RECORDED = "CATALOG_HANDOFF_RECORDED"
+    RECOVERY_OBJECT_CLEANED = "RECOVERY_OBJECT_CLEANED"
     TARGET_COMPLETED = "TARGET_COMPLETED"
     TARGET_CANCELLED = "TARGET_CANCELLED"
     TARGET_RECOVERY_REQUIRED = "TARGET_RECOVERY_REQUIRED"
@@ -128,6 +136,7 @@ def execute_bounded_run_executor_cycle(
     max_steps: int,
     final_commit_port: FinalCommitPort | None = None,
     old_target_preservation_port: OldTargetPreservationPort | None = None,
+    recovery_object_cleanup_port: RecoveryObjectCleanupPort | None = None,
     staging_transfer_port: RunTargetStagingPort | None = None,
 ) -> RunExecutorCyclePumpOutcome:
     if max_steps < 1:
@@ -148,6 +157,7 @@ def execute_bounded_run_executor_cycle(
             process_instance_id=process_instance_id,
             final_commit_port=final_commit_port,
             old_target_preservation_port=old_target_preservation_port,
+            recovery_object_cleanup_port=recovery_object_cleanup_port,
             staging_transfer_port=staging_transfer_port,
         )
         if last_step.idle:
@@ -188,6 +198,7 @@ def execute_one_run_executor_cycle(
     process_instance_id: str,
     final_commit_port: FinalCommitPort | None = None,
     old_target_preservation_port: OldTargetPreservationPort | None = None,
+    recovery_object_cleanup_port: RecoveryObjectCleanupPort | None = None,
     staging_transfer_port: RunTargetStagingPort | None = None,
 ) -> RunExecutorCycleOutcome:
     retained = _next_retained_executing_target(
@@ -205,6 +216,7 @@ def execute_one_run_executor_cycle(
             process_instance_id=process_instance_id,
             final_commit_port=final_commit_port,
             old_target_preservation_port=old_target_preservation_port,
+            recovery_object_cleanup_port=recovery_object_cleanup_port,
             staging_transfer_port=staging_transfer_port,
             retained=retained,
         )
@@ -304,6 +316,7 @@ def _advance_retained_target(
     process_instance_id: str,
     final_commit_port: FinalCommitPort | None,
     old_target_preservation_port: OldTargetPreservationPort | None,
+    recovery_object_cleanup_port: RecoveryObjectCleanupPort | None,
     staging_transfer_port: RunTargetStagingPort | None,
     retained: _RetainedTarget,
 ) -> RunExecutorCycleOutcome:
@@ -571,6 +584,29 @@ def _advance_retained_target(
             next_action=planning_outcome.next_action,
         )
 
+    if recovery_object_cleanup_port is not None:
+        cleanup_outcome = cleanup_next_run_target_recovery_object(
+            permit=permit,
+            recovery_operations=recovery_operations,
+            cleanup_port=recovery_object_cleanup_port,
+            process_instance_id=process_instance_id,
+            max_operations=target.planned_operations + 1,
+        )
+        if not cleanup_outcome.idle:
+            if cleanup_outcome.cleaned:
+                return _advanced(
+                    action=RunExecutorCycleAction.RECOVERY_OBJECT_CLEANED,
+                    run_id=cleanup_outcome.run_id,
+                    run_target_id=cleanup_outcome.run_target_id,
+                    next_action=cleanup_outcome.next_action,
+                )
+            return _blocked(
+                run_id=cleanup_outcome.run_id,
+                run_target_id=cleanup_outcome.run_target_id,
+                validation_codes=cleanup_outcome.validation_codes,
+                next_action=cleanup_outcome.next_action,
+            )
+
     if _catalog_recorded_count(
         recovery_operations=recovery_operations,
         permit=permit,
@@ -718,6 +754,7 @@ def _has_any_operation(
         RecoveryOperationPhase.FINAL_DURABLE,
         RecoveryOperationPhase.FINAL_VERIFIED,
         RecoveryOperationPhase.CATALOG_RECORDED,
+        RecoveryOperationPhase.CLEANED,
     ):
         if _has_phase(
             recovery_operations=recovery_operations,
@@ -810,13 +847,19 @@ def _catalog_recorded_count(
     permit: MutationPermit,
     target: StartedRunTarget,
 ) -> int:
-    operations = recovery_operations.list_operations_for_run_target_in_phase(
+    cataloged = recovery_operations.list_operations_for_run_target_in_phase(
         run_id=permit.run_id,
         run_target_id=permit.run_target_id,
         phase=RecoveryOperationPhase.CATALOG_RECORDED,
         limit=max(target.planned_operations + 1, 1),
     )
-    return len(operations)
+    cleaned = recovery_operations.list_operations_for_run_target_in_phase(
+        run_id=permit.run_id,
+        run_target_id=permit.run_target_id,
+        phase=RecoveryOperationPhase.CLEANED,
+        limit=max(target.planned_operations + 1, 1),
+    )
+    return len(cataloged) + len(cleaned)
 
 
 def _advanced(

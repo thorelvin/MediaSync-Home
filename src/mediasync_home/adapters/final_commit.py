@@ -14,6 +14,7 @@ from mediasync_home.application.ports import (
     FinalCommitPort,
     OldTargetPreservationReceipt,
     OldTargetRestoreReceipt,
+    RecoveryObjectCleanupReceipt,
     RelativePath,
     VerifiedStagingArtifact,
 )
@@ -481,6 +482,46 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
             final_relative_path=artifact.relative_path,
         )
 
+    def cleanup_recovery_objects(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> RecoveryObjectCleanupReceipt:
+        self._permit_validator.assert_mutation_permit_current(permit)
+        _require_endpoint_marker(
+            self._target_root,
+            permit,
+            validation_code="LOCAL_DIRECTORY_QUARANTINE_CLEANUP_ENDPOINT_MARKER_MISMATCH",
+            missing_code="LOCAL_DIRECTORY_QUARANTINE_CLEANUP_ENDPOINT_MARKER_MISSING",
+        )
+        _validate_replace_operation_binding(operation=operation, permit=permit)
+        if operation.phase is not RecoveryOperationPhase.CATALOG_RECORDED:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_CLEANUP_REQUIRES_CATALOG_RECORDED",
+                "Clean recovery objects only after catalog handoff is recorded.",
+            )
+        if operation.target_precondition_kind is not RecoveryTargetPreconditionKind.DIRECTORY_EMPTY:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_CLEANUP_REQUIRES_DIRECTORY_EMPTY",
+                "Use quarantine cleanup only for directory-empty target preconditions.",
+            )
+        if operation.quarantine_object_id is None or not operation.quarantine_object_id.strip():
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_CLEANUP_REQUIRES_QUARANTINE_OBJECT",
+                "Recover or reconcile the quarantine object id before cleanup.",
+            )
+
+        _cleanup_empty_directory_quarantine_object(
+            target_root=self._target_root,
+            operation=operation,
+            quarantine_object_id=operation.quarantine_object_id,
+        )
+        return RecoveryObjectCleanupReceipt(
+            operation_id=operation.operation_id,
+            final_relative_path=RelativePath(operation.final_relative_path),
+            cleaned_object_ids=(operation.quarantine_object_id,),
+        )
+
 
 def _insert_replacement_payload_without_overwrite(
     *,
@@ -577,6 +618,18 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
             endpoint_revision_id=operation.target_endpoint_revision_id,
         )
         return self._replace_adapter(target_root).restore_old_target(permit, operation)
+
+    def cleanup_recovery_objects(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> RecoveryObjectCleanupReceipt:
+        target_root = self._target_root(
+            permit=permit,
+            endpoint_id=operation.target_endpoint_id,
+            endpoint_revision_id=operation.target_endpoint_revision_id,
+        )
+        return self._replace_adapter(target_root).cleanup_recovery_objects(permit, operation)
 
     def commit_verified_artifact(
         self,
@@ -1263,18 +1316,24 @@ def _load_quarantine_manifest(
     expected_operation_id: str,
     expected_quarantine_object_id: str,
     expected_final_relative_path: str,
+    missing_code: str = "LOCAL_DIRECTORY_QUARANTINE_RESTORE_MANIFEST_MISSING",
+    invalid_code: str = "LOCAL_DIRECTORY_QUARANTINE_RESTORE_MANIFEST_INVALID",
+    mismatch_code: str = "LOCAL_DIRECTORY_QUARANTINE_RESTORE_MANIFEST_MISMATCH",
+    missing_next_action: str = "Recover or reconcile the quarantine manifest before restoring the directory.",
+    invalid_next_action: str = "Enter recovery because the quarantine manifest is invalid.",
+    mismatch_next_action: str = "Reload recovery state before restoring the quarantined directory.",
 ) -> dict[str, object]:
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise FinalCommitAdapterError(
-            "LOCAL_DIRECTORY_QUARANTINE_RESTORE_MANIFEST_MISSING",
-            "Recover or reconcile the quarantine manifest before restoring the directory.",
+            missing_code,
+            missing_next_action,
         ) from exc
     if not isinstance(manifest, dict) or manifest.get("object_role") != "EMPTY_DIRECTORY_QUARANTINE":
         raise FinalCommitAdapterError(
-            "LOCAL_DIRECTORY_QUARANTINE_RESTORE_MANIFEST_INVALID",
-            "Enter recovery because the quarantine manifest is invalid.",
+            invalid_code,
+            invalid_next_action,
         )
     if (
         manifest.get("operation_id") != expected_operation_id
@@ -1282,10 +1341,99 @@ def _load_quarantine_manifest(
         or manifest.get("final_relative_path") != _relative_path(expected_final_relative_path)
     ):
         raise FinalCommitAdapterError(
-            "LOCAL_DIRECTORY_QUARANTINE_RESTORE_MANIFEST_MISMATCH",
-            "Reload recovery state before restoring the quarantined directory.",
+            mismatch_code,
+            mismatch_next_action,
         )
     return manifest
+
+
+def _cleanup_empty_directory_quarantine_object(
+    *,
+    target_root: Path,
+    operation: RecoveryOperation,
+    quarantine_object_id: str,
+) -> None:
+    quarantine_payload, quarantine_manifest = _quarantine_object_paths(
+        target_root=target_root,
+        quarantine_object_id=quarantine_object_id,
+        create=False,
+    )
+    payload_exists = quarantine_payload.exists() or quarantine_payload.is_symlink()
+    manifest_exists = quarantine_manifest.exists() or quarantine_manifest.is_symlink()
+    if not payload_exists and not manifest_exists:
+        return
+    if not manifest_exists:
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_CLEANUP_MANIFEST_MISSING",
+            "Recover or reconcile the quarantine manifest before cleanup.",
+        )
+    if quarantine_manifest.is_symlink() or not quarantine_manifest.is_file():
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_CLEANUP_MANIFEST_INVALID",
+            "Enter recovery because the quarantine manifest path is not a regular file.",
+        )
+
+    manifest = _load_quarantine_manifest(
+        manifest_path=quarantine_manifest,
+        expected_operation_id=operation.operation_id,
+        expected_quarantine_object_id=quarantine_object_id,
+        expected_final_relative_path=operation.final_relative_path,
+        missing_code="LOCAL_DIRECTORY_QUARANTINE_CLEANUP_MANIFEST_MISSING",
+        invalid_code="LOCAL_DIRECTORY_QUARANTINE_CLEANUP_MANIFEST_INVALID",
+        mismatch_code="LOCAL_DIRECTORY_QUARANTINE_CLEANUP_MANIFEST_MISMATCH",
+        missing_next_action="Recover or reconcile the quarantine manifest before cleanup.",
+        invalid_next_action="Enter recovery because the quarantine manifest is invalid.",
+        mismatch_next_action="Reload recovery state before cleaning the quarantined directory.",
+    )
+    expected = _manifest_empty_directory_precondition(
+        manifest,
+        validation_code="LOCAL_DIRECTORY_QUARANTINE_CLEANUP_MANIFEST_INVALID",
+        next_action="Reload recovery state before cleaning the quarantined directory.",
+    )
+    if operation.expected_target_fingerprint_json is not None:
+        bound_expected = _expected_empty_directory_precondition(
+            operation.expected_target_fingerprint_json,
+            validation_code="LOCAL_DIRECTORY_QUARANTINE_CLEANUP_EVIDENCE_MISMATCH",
+            next_action="Reload recovery state before cleaning the quarantined directory.",
+        )
+        if bound_expected != expected:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_CLEANUP_EVIDENCE_MISMATCH",
+                "Reload recovery state before cleaning the quarantined directory.",
+            )
+    if manifest.get("payload_name") != quarantine_payload.name:
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_CLEANUP_MANIFEST_MISMATCH",
+            "Reload recovery state before cleaning the quarantined directory.",
+        )
+
+    if payload_exists:
+        if quarantine_payload.is_symlink() or not quarantine_payload.is_dir():
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_CLEANUP_PAYLOAD_INVALID",
+                "Enter recovery because the quarantine object path is not an empty directory.",
+            )
+        _require_empty_directory(
+            quarantine_payload,
+            read_failed_code="LOCAL_DIRECTORY_QUARANTINE_CLEANUP_PAYLOAD_READ_FAILED",
+            not_empty_code="LOCAL_DIRECTORY_QUARANTINE_CLEANUP_PAYLOAD_NOT_EMPTY",
+            next_action="Do not cleanup a quarantine payload whose contents changed.",
+        )
+        try:
+            quarantine_payload.rmdir()
+        except OSError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_CLEANUP_PAYLOAD_REMOVE_FAILED",
+                "Retry cleanup after inspecting the quarantine payload.",
+            ) from exc
+
+    try:
+        quarantine_manifest.unlink(missing_ok=True)
+    except OSError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_CLEANUP_MANIFEST_REMOVE_FAILED",
+            "Retry cleanup after inspecting the quarantine manifest.",
+        ) from exc
 
 
 def _manifest_empty_directory_precondition(

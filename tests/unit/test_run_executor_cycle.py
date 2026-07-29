@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Mapping
+from typing import Any, Mapping, cast
 
 from mediasync_home.application.catalog_handoff import (
     FinalFileCatalogHandoff,
@@ -10,6 +10,7 @@ from mediasync_home.application.catalog_handoff import (
 from mediasync_home.application.ports import (
     CommitReceipt,
     FinalCommitPort,
+    RecoveryObjectCleanupReceipt,
     RelativePath,
     VerifiedStagingArtifact,
 )
@@ -428,6 +429,46 @@ def test_executor_cycle_completes_catalog_recorded_target_and_releases_lease() -
     assert loaded.targets[0].state is RunTargetState.SUCCEEDED
 
 
+def test_executor_cycle_cleans_catalog_recorded_quarantine_before_completion() -> None:
+    plan = _sealed_plan()
+    runs = _InMemoryRunStore(_run(state=RunState.EXECUTING, plan=plan, target_state=RunTargetState.EXECUTING))
+    lease = _FakeLiveLease()
+    registry = HeldRunTargetLeaseRegistry()
+    registry.retain_run_target_lease(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+        lease=lease,
+    )
+    recovery_operations = _FakeRecoveryOperationStore((_directory_cataloged_operation(),))
+    cleanup_port = _FakeRecoveryObjectCleanupPort()
+
+    outcome = execute_one_run_executor_cycle(
+        runs=runs,
+        leases=_FakeLeaseAuthority(lease),
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=recovery_operations,
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        recovery_object_cleanup_port=cleanup_port,
+        process_instance_id="host-a",
+    )
+
+    operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    loaded = runs.load_started_run("run-a")
+    assert outcome.action is RunExecutorCycleAction.RECOVERY_OBJECT_CLEANED
+    assert outcome.advanced is True
+    assert outcome.validation_codes == ()
+    assert registry.retained_count == 1
+    assert lease.released is False
+    assert operation is not None
+    assert operation.phase is RecoveryOperationPhase.CLEANED
+    assert cleanup_port.calls == (("lease-a", "op-a"),)
+    assert loaded is not None
+    assert loaded.state is RunState.EXECUTING
+    assert loaded.targets[0].state is RunTargetState.EXECUTING
+
+
 def test_executor_cycle_marks_user_decision_target_recovery_required_and_releases_lease() -> None:
     plan = _sealed_plan()
     runs = _InMemoryRunStore(_run(state=RunState.EXECUTING, plan=plan, target_state=RunTargetState.EXECUTING))
@@ -839,7 +880,7 @@ class _FakeRecoveryOperationStore(RunExecutorCycleRecoveryOperationStore):
             intent_segment_id=intent_segment_id or operation.intent_segment_id,
             intent_ordinal=operation.intent_ordinal if intent_ordinal is None else intent_ordinal,
             catalog_handoff_id=catalog_handoff_id or operation.catalog_handoff_id,
-            **metadata_updates,
+            **cast(Any, metadata_updates),
         )
         self.operations[(run_id, operation_id)] = updated
         return updated
@@ -1041,6 +1082,23 @@ class _FakeFinalCommitPort(FinalCommitPort):
         )
 
 
+class _FakeRecoveryObjectCleanupPort:
+    def __init__(self) -> None:
+        self.calls: tuple[tuple[str, str], ...] = ()
+
+    def cleanup_recovery_objects(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> RecoveryObjectCleanupReceipt:
+        self.calls = (*self.calls, (permit.lease_id, operation.operation_id))
+        return RecoveryObjectCleanupReceipt(
+            operation_id=operation.operation_id,
+            final_relative_path=RelativePath(operation.final_relative_path),
+            cleaned_object_ids=(operation.quarantine_object_id or "",),
+        )
+
+
 class _FakeLeaseAuthority(EndpointLeaseAuthority):
     def __init__(self, lease: "_FakeLiveLease") -> None:
         self.lease = lease
@@ -1179,6 +1237,15 @@ def _operation(
         catalog_handoff_id="final-file:run-a:op-a",
         expected_final_fingerprint_json='{"byte_count":128,"content_hash":"' + ("a" * 64) + '"}',
         last_error_code=last_error_code,
+    )
+
+
+def _directory_cataloged_operation() -> RecoveryOperation:
+    return replace(
+        _operation(),
+        target_precondition_kind=RecoveryTargetPreconditionKind.DIRECTORY_EMPTY,
+        expected_target_fingerprint_json='{"entry_count":0,"kind":"DIRECTORY_EMPTY"}',
+        quarantine_object_id="op-a",
     )
 
 

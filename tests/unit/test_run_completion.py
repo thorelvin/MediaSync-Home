@@ -44,6 +44,28 @@ def test_complete_run_target_after_catalog_handoffs_counts_cataloged_operations(
     assert loaded.state is RunState.COMPLETED
 
 
+def test_complete_run_target_after_catalog_handoffs_counts_cleaned_operations() -> None:
+    runs = _InMemoryRunStore(_executing_run())
+
+    outcome = complete_run_target_after_catalog_handoffs(
+        permit=_permit(),
+        runs=runs,
+        recovery_operations=_FakeRecoveryOperationStore(
+            (_operation(phase=RecoveryOperationPhase.CLEANED),)
+        ),
+    )
+
+    loaded = runs.load_started_run("run-a")
+    assert outcome.completed is True
+    assert outcome.run_completed is True
+    assert outcome.validation_codes == ()
+    assert outcome.target is not None
+    assert outcome.target.completed_operations == 1
+    assert outcome.target.completed_bytes == 128
+    assert loaded is not None
+    assert loaded.state is RunState.COMPLETED
+
+
 def test_complete_run_target_after_catalog_handoffs_requires_all_catalog_handoffs() -> None:
     outcome = complete_run_target_after_catalog_handoffs(
         permit=_permit(),

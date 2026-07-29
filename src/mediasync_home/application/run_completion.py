@@ -260,12 +260,19 @@ def _cataloged_operations(
 ) -> tuple[RecoveryOperation, ...]:
     if target.planned_operations == 0:
         return ()
-    return recovery_operations.list_operations_for_run_target_in_phase(
+    cataloged = recovery_operations.list_operations_for_run_target_in_phase(
         run_id=permit.run_id,
         run_target_id=permit.run_target_id,
         phase=RecoveryOperationPhase.CATALOG_RECORDED,
         limit=target.planned_operations + 1,
     )
+    cleaned = recovery_operations.list_operations_for_run_target_in_phase(
+        run_id=permit.run_id,
+        run_target_id=permit.run_target_id,
+        phase=RecoveryOperationPhase.CLEANED,
+        limit=target.planned_operations + 1,
+    )
+    return tuple(sorted((*cataloged, *cleaned), key=lambda operation: operation.operation_id))
 
 
 def _terminal_operations(
@@ -320,7 +327,7 @@ def _terminal_operation_mismatch(
 
 def _operation_matches_permit(*, operation: RecoveryOperation, permit: MutationPermit) -> bool:
     return (
-        operation.phase is RecoveryOperationPhase.CATALOG_RECORDED
+        operation.phase in {RecoveryOperationPhase.CATALOG_RECORDED, RecoveryOperationPhase.CLEANED}
         and operation.run_id == permit.run_id
         and operation.run_target_id == permit.run_target_id
         and operation.target_endpoint_id == permit.endpoint_id

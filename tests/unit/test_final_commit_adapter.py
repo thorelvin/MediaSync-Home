@@ -423,6 +423,92 @@ def test_local_resolving_final_commit_quarantines_empty_directory_then_inserts_f
     }
 
 
+def test_local_versioned_replace_cleans_quarantined_empty_directory_after_catalog(
+    tmp_path: Path,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    final = fixture.target_root / "Photos" / "image.jpg"
+    final.mkdir()
+    operation = _directory_empty_operation(fixture)
+    adapter = LocalVersionedReplaceFinalCommitAdapter(
+        target_root=fixture.target_root,
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    preservation = adapter.preserve_old_target(permit, operation)
+    final.write_bytes(b"image")
+    cataloged_operation = replace(
+        operation,
+        phase=RecoveryOperationPhase.CATALOG_RECORDED,
+        quarantine_object_id=preservation.quarantine_object_id,
+        catalog_handoff_id="final-file:run-a:operation-a",
+        expected_final_fingerprint_json=json.dumps(
+            {
+                "byte_count": len(b"image"),
+                "content_hash": _sha256(b"image"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+
+    receipt = adapter.cleanup_recovery_objects(permit, cataloged_operation)
+
+    quarantine_payload = fixture.target_root / ".mediasync" / "objects" / "quarantine" / "operation-a.payload"
+    quarantine_manifest = (
+        fixture.target_root
+        / ".mediasync"
+        / "objects"
+        / "quarantine"
+        / "operation-a.manifest.json"
+    )
+    assert receipt.operation_id == "operation-a"
+    assert receipt.final_relative_path == RelativePath("Photos/image.jpg")
+    assert receipt.cleaned_object_ids == ("operation-a",)
+    assert not quarantine_payload.exists()
+    assert not quarantine_manifest.exists()
+    assert final.read_bytes() == b"image"
+
+
+def test_local_versioned_replace_cleanup_refuses_changed_quarantine_payload(
+    tmp_path: Path,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    final = fixture.target_root / "Photos" / "image.jpg"
+    final.mkdir()
+    operation = _directory_empty_operation(fixture)
+    adapter = LocalVersionedReplaceFinalCommitAdapter(
+        target_root=fixture.target_root,
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    preservation = adapter.preserve_old_target(permit, operation)
+    cataloged_operation = replace(
+        operation,
+        phase=RecoveryOperationPhase.CATALOG_RECORDED,
+        quarantine_object_id=preservation.quarantine_object_id,
+        catalog_handoff_id="final-file:run-a:operation-a",
+    )
+    quarantine_payload = fixture.target_root / ".mediasync" / "objects" / "quarantine" / "operation-a.payload"
+    quarantine_manifest = (
+        fixture.target_root
+        / ".mediasync"
+        / "objects"
+        / "quarantine"
+        / "operation-a.manifest.json"
+    )
+    (quarantine_payload / "child.txt").write_text("changed", encoding="utf-8")
+
+    with pytest.raises(FinalCommitAdapterError) as exc_info:
+        adapter.cleanup_recovery_objects(permit, cataloged_operation)
+
+    assert exc_info.value.validation_code == "LOCAL_DIRECTORY_QUARANTINE_CLEANUP_PAYLOAD_NOT_EMPTY"
+    assert (quarantine_payload / "child.txt").read_text(encoding="utf-8") == "changed"
+    assert quarantine_manifest.is_file()
+
+
 class _CommitFixture:
     def __init__(
         self,

@@ -611,6 +611,10 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
             runtime.run_executor_old_target_preservation_port
             is runtime.run_executor_final_commit_port
         )
+        assert (
+            runtime.run_executor_recovery_object_cleanup_port
+            is runtime.run_executor_final_commit_port
+        )
         assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 21
         assert current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY) == 5
         assert runtime.startup_reconciliation is not None

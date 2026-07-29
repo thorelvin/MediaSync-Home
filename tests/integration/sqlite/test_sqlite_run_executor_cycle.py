@@ -394,9 +394,10 @@ def test_sqlite_run_executor_cycle_quarantines_empty_directory_before_file_commi
             catalog_handoffs=catalog_handoffs,
             final_commit_port=final_commit,
             old_target_preservation_port=final_commit,
+            recovery_object_cleanup_port=final_commit,
             staging_transfer_port=staging,
             process_instance_id="host-a",
-            max_steps=15,
+            max_steps=16,
         )
 
         loaded_run = runs.load_started_run("run-a")
@@ -417,7 +418,7 @@ def test_sqlite_run_executor_cycle_quarantines_empty_directory_before_file_commi
         assert loaded_run.targets[0].completed_operations == 1
         assert loaded_run.targets[0].completed_bytes == len(payload)
         assert operation is not None
-        assert operation.phase is RecoveryOperationPhase.CATALOG_RECORDED
+        assert operation.phase is RecoveryOperationPhase.CLEANED
         assert operation.target_precondition_kind is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY
         assert operation.quarantine_object_id == "op-a"
         assert operation.expected_target_fingerprint_json == json.dumps(
@@ -430,10 +431,8 @@ def test_sqlite_run_executor_cycle_quarantines_empty_directory_before_file_commi
         )
         assert (target_root / "Pictures" / "A.jpg").is_file()
         assert (target_root / "Pictures" / "A.jpg").read_bytes() == payload
-        assert quarantine_payload.is_dir()
-        assert json.loads(quarantine_manifest.read_text(encoding="utf-8"))["object_role"] == (
-            "EMPTY_DIRECTORY_QUARANTINE"
-        )
+        assert not quarantine_payload.exists()
+        assert not quarantine_manifest.exists()
         assert handoff is not None
         assert handoff.content_hash == content_hash
     finally:

@@ -82,7 +82,11 @@ from mediasync_home.application.run_catalog_handoffs import (
 from mediasync_home.application.run_completion import complete_run_target_after_catalog_handoffs
 from mediasync_home.application.catalog_handoff import FinalFileCatalogHandoffStore
 from mediasync_home.application.plans import PlanStore
-from mediasync_home.application.ports import FinalCommitPort, OldTargetPreservationPort
+from mediasync_home.application.ports import (
+    FinalCommitPort,
+    OldTargetPreservationPort,
+    RecoveryObjectCleanupPort,
+)
 from mediasync_home.application.recovery_intents import RecoveryIntentSegmentStore
 from mediasync_home.application.recovery_reconciliation import (
     RecoveryOperationStartupReconciliationReport,
@@ -197,6 +201,7 @@ class EngineHostRuntime:
     run_executor_staging_transfer_port: RunTargetStagingPort | None = None
     run_executor_final_commit_port: FinalCommitPort | None = None
     run_executor_old_target_preservation_port: OldTargetPreservationPort | None = None
+    run_executor_recovery_object_cleanup_port: RecoveryObjectCleanupPort | None = None
     run_executor_process_instance_id: str | None = None
     catalog_connection: sqlite3.Connection | None = None
     recovery_connection: sqlite3.Connection | None = None
@@ -398,6 +403,7 @@ class EngineHostRuntime:
         max_steps: int,
         final_commit_port: FinalCommitPort | None = None,
         old_target_preservation_port: OldTargetPreservationPort | None = None,
+        recovery_object_cleanup_port: RecoveryObjectCleanupPort | None = None,
         staging_transfer_port: RunTargetStagingPort | None = None,
     ) -> RunExecutorCyclePumpOutcome:
         if (
@@ -424,6 +430,9 @@ class EngineHostRuntime:
             final_commit_port=final_commit_port or self.run_executor_final_commit_port,
             old_target_preservation_port=(
                 old_target_preservation_port or self.run_executor_old_target_preservation_port
+            ),
+            recovery_object_cleanup_port=(
+                recovery_object_cleanup_port or self.run_executor_recovery_object_cleanup_port
             ),
             staging_transfer_port=staging_transfer_port or self.run_executor_staging_transfer_port,
         )
@@ -1075,6 +1084,7 @@ def build_engine_host_runtime(
         run_executor_staging_transfer_port=run_executor_staging_transfer_port,
         run_executor_final_commit_port=run_executor_final_commit_port,
         run_executor_old_target_preservation_port=run_executor_final_commit_port,
+        run_executor_recovery_object_cleanup_port=run_executor_final_commit_port,
         run_executor_process_instance_id=reconciler_instance_id,
         catalog_connection=catalog_connection,
         recovery_connection=recovery_connection,

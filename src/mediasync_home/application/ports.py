@@ -44,6 +44,13 @@ class OldTargetRestoreReceipt:
 
 
 @dataclass(frozen=True)
+class RecoveryObjectCleanupReceipt:
+    operation_id: str
+    final_relative_path: RelativePath
+    cleaned_object_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class FinalArtifactVerificationEvidence:
     fingerprint_json: str
 
@@ -78,3 +85,11 @@ class OldTargetRestorePort(Protocol):
         permit: MutationPermit,
         operation: RecoveryOperation,
     ) -> OldTargetRestoreReceipt: ...
+
+
+class RecoveryObjectCleanupPort(Protocol):
+    def cleanup_recovery_objects(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> RecoveryObjectCleanupReceipt: ...
