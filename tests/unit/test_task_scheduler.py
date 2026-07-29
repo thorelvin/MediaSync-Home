@@ -7,6 +7,7 @@ import pytest
 from mediasync_home.application.schedules import ScheduleDefinition
 from mediasync_home.application.task_scheduler import (
     ObservedTaskSchedulerDefinition,
+    TaskSchedulerDefinition,
     TaskSchedulerDefinitionViolation,
     TaskSchedulerPendingResourceReconciliationRequest,
     TaskSchedulerResourcePumpRequest,
@@ -26,6 +27,8 @@ from mediasync_home.application.external_resources import (
     ExternalResourceRecord,
     ExternalResourceState,
     ExternalResourceStateStore,
+    ExternalResourceStartupReconciliationReport,
+    ExternalResourceStartupReconciliationRequest,
     ExternalResourceType,
 )
 from mediasync_home.application.trigger_occurrences import TriggerKind
@@ -110,27 +113,52 @@ def test_task_scheduler_reconciliation_classifies_missing_and_in_sync_tasks() ->
     assert in_sync.reason is None
 
 
-def test_task_scheduler_reconciliation_updates_owned_definition_drift() -> None:
+def test_task_scheduler_reconciliation_classifies_safe_owned_updates() -> None:
     schedule = _bound_schedule()
     definition = build_same_user_task_scheduler_definition(
         schedule,
         installation_id="install-a",
         executable_path=EXECUTABLE,
     )
-    observed = replace(
-        _observed(definition),
-        enabled=False,
-    )
-
-    plan = classify_task_scheduler_reconciliation(
+    enable_plan = classify_task_scheduler_reconciliation(
         schedule,
         installation_id="install-a",
         executable_path=EXECUTABLE,
-        observed=observed,
+        observed=replace(_observed(definition), enabled=False),
     )
 
-    assert plan.action is TaskSchedulerReconciliationAction.UPDATE_DRIFTED
-    assert plan.reason == "TASK_SCHEDULER_OWNED_DEFINITION_DRIFT"
+    disabled_schedule = _bound_schedule(enabled=False)
+    disabled_definition = build_same_user_task_scheduler_definition(
+        disabled_schedule,
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    disable_plan = classify_task_scheduler_reconciliation(
+        disabled_schedule,
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+        observed=replace(_observed(disabled_definition), enabled=True),
+    )
+
+    network_schedule = _bound_schedule(requires_network=True)
+    network_definition = build_same_user_task_scheduler_definition(
+        network_schedule,
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    definition_plan = classify_task_scheduler_reconciliation(
+        network_schedule,
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+        observed=replace(_observed(network_definition), requires_network=False),
+    )
+
+    assert enable_plan.action is TaskSchedulerReconciliationAction.ENABLE_OWNED_TASK
+    assert enable_plan.reason == "TASK_SCHEDULER_OWNED_TASK_DISABLED"
+    assert disable_plan.action is TaskSchedulerReconciliationAction.DISABLE_OWNED_TASK
+    assert disable_plan.reason == "TASK_SCHEDULER_OWNED_TASK_STILL_ENABLED"
+    assert definition_plan.action is TaskSchedulerReconciliationAction.UPDATE_OWNED_DEFINITION
+    assert definition_plan.reason == "TASK_SCHEDULER_OWNED_DEFINITION_DRIFT"
 
 
 def test_task_scheduler_reconciliation_blocks_unknown_or_unsafe_drift() -> None:
@@ -245,7 +273,7 @@ def test_task_scheduler_reconciliation_page_applies_safe_actions_and_blocks_drif
     assert report.next_cursor is None
     assert tuple(finding.action for finding in report.findings) == (
         TaskSchedulerReconciliationAction.CREATE,
-        TaskSchedulerReconciliationAction.UPDATE_DRIFTED,
+        TaskSchedulerReconciliationAction.ENABLE_OWNED_TASK,
         TaskSchedulerReconciliationAction.BLOCK_BINARY_DRIFT,
     )
     assert tuple(definition.task_path for definition in registry.applied) == (
@@ -371,7 +399,7 @@ def test_reconcile_claimed_task_scheduler_resource_applies_and_completes_claim()
         external_resources=resources,
     )
 
-    assert result.action is TaskSchedulerReconciliationAction.UPDATE_DRIFTED
+    assert result.action is TaskSchedulerReconciliationAction.ENABLE_OWNED_TASK
     assert result.applied is True
     assert result.completed is True
     assert result.blocked is False
@@ -698,12 +726,12 @@ class _ScheduleStore:
 class _Registry:
     def __init__(self, *observed: ObservedTaskSchedulerDefinition) -> None:
         self.observed = {definition.task_path: definition for definition in observed}
-        self.applied = []
+        self.applied: list[TaskSchedulerDefinition] = []
 
     def load_task(self, task_path: str) -> ObservedTaskSchedulerDefinition | None:
         return self.observed.get(task_path)
 
-    def apply_task_definition(self, definition) -> None:
+    def apply_task_definition(self, definition: TaskSchedulerDefinition) -> None:
         self.applied.append(definition)
 
 
@@ -818,14 +846,32 @@ class _ExternalResourceStore(ExternalResourceStateStore):
             last_error_code=error_code,
         )
 
+    def requeue_claimed_after_startup(
+        self,
+        request: ExternalResourceStartupReconciliationRequest,
+    ) -> ExternalResourceStartupReconciliationReport:
+        return ExternalResourceStartupReconciliationReport(
+            reconciler_instance_id=request.reconciler_instance_id,
+            resource_type=request.resource_type,
+            scanned=0,
+            requeued_resource_ids=(),
+        )
+
 
 def _bound_schedule(
     *,
     schedule_id: str = "schedule-a",
     configuration_json: str = '{"kind":"daily"}',
+    enabled: bool = True,
+    requires_network: bool = False,
 ) -> ScheduleDefinition:
     return bind_same_user_task_scheduler_definition_hash(
-        _schedule(schedule_id=schedule_id, configuration_json=configuration_json),
+        _schedule(
+            schedule_id=schedule_id,
+            configuration_json=configuration_json,
+            enabled=enabled,
+            requires_network=requires_network,
+        ),
         installation_id="install-a",
         executable_path=EXECUTABLE,
     )
@@ -836,6 +882,8 @@ def _schedule(
     schedule_id: str = "schedule-a",
     desired_definition_hash: str = "0" * 64,
     configuration_json: str = '{"kind":"daily"}',
+    enabled: bool = True,
+    requires_network: bool = False,
 ) -> ScheduleDefinition:
     return ScheduleDefinition(
         schedule_id=schedule_id,
@@ -851,15 +899,15 @@ def _schedule(
         misfire_policy="QUEUE_ONCE",
         coalescing_window_seconds=60,
         task_logon_type="INTERACTIVE_TOKEN",
-        requires_network=False,
+        requires_network=requires_network,
         run_only_when_logged_on=True,
-        enabled=True,
+        enabled=enabled,
         row_version=1,
     )
 
 
 def _observed(
-    definition,
+    definition: TaskSchedulerDefinition,
     *,
     executable_path: str | None = None,
     enabled: bool | None = None,

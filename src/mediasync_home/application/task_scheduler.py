@@ -37,10 +37,24 @@ class TaskSchedulerReconciliationAction(str, Enum):
     CREATE = "CREATE"
     IN_SYNC = "IN_SYNC"
     UPDATE_DRIFTED = "UPDATE_DRIFTED"
+    ENABLE_OWNED_TASK = "ENABLE_OWNED_TASK"
+    DISABLE_OWNED_TASK = "DISABLE_OWNED_TASK"
+    UPDATE_OWNED_DEFINITION = "UPDATE_OWNED_DEFINITION"
     BLOCK_ARGUMENT_DRIFT = "BLOCK_ARGUMENT_DRIFT"
     BLOCK_BINARY_DRIFT = "BLOCK_BINARY_DRIFT"
     BLOCK_INVALID_DESIRED_STATE = "BLOCK_INVALID_DESIRED_STATE"
     BLOCK_UNKNOWN_TASK = "BLOCK_UNKNOWN_TASK"
+
+
+SAFE_TASK_SCHEDULER_APPLY_ACTIONS = frozenset(
+    {
+        TaskSchedulerReconciliationAction.CREATE,
+        TaskSchedulerReconciliationAction.UPDATE_DRIFTED,
+        TaskSchedulerReconciliationAction.ENABLE_OWNED_TASK,
+        TaskSchedulerReconciliationAction.DISABLE_OWNED_TASK,
+        TaskSchedulerReconciliationAction.UPDATE_OWNED_DEFINITION,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -311,14 +325,30 @@ def classify_task_scheduler_reconciliation(
             observed=observed,
             reason="TASK_SCHEDULER_EXECUTABLE_DRIFT",
         )
-    if _observed_payload(observed) == _desired_payload(desired):
+    observed_payload = _observed_payload(observed)
+    desired_payload = _desired_payload(desired)
+    if observed_payload == desired_payload:
         return TaskSchedulerReconciliationPlan(
             TaskSchedulerReconciliationAction.IN_SYNC,
             desired=desired,
             observed=observed,
         )
+    if _payload_without_enabled(observed_payload) == _payload_without_enabled(desired_payload):
+        if desired.enabled:
+            return TaskSchedulerReconciliationPlan(
+                TaskSchedulerReconciliationAction.ENABLE_OWNED_TASK,
+                desired=desired,
+                observed=observed,
+                reason="TASK_SCHEDULER_OWNED_TASK_DISABLED",
+            )
+        return TaskSchedulerReconciliationPlan(
+            TaskSchedulerReconciliationAction.DISABLE_OWNED_TASK,
+            desired=desired,
+            observed=observed,
+            reason="TASK_SCHEDULER_OWNED_TASK_STILL_ENABLED",
+        )
     return TaskSchedulerReconciliationPlan(
-        TaskSchedulerReconciliationAction.UPDATE_DRIFTED,
+        TaskSchedulerReconciliationAction.UPDATE_OWNED_DEFINITION,
         desired=desired,
         observed=observed,
         reason="TASK_SCHEDULER_OWNED_DEFINITION_DRIFT",
@@ -368,10 +398,7 @@ def reconcile_task_scheduler_page(
             observed=registry.load_task(desired.task_path),
         )
         did_apply = False
-        if plan.action in {
-            TaskSchedulerReconciliationAction.CREATE,
-            TaskSchedulerReconciliationAction.UPDATE_DRIFTED,
-        }:
+        if plan.action in SAFE_TASK_SCHEDULER_APPLY_ACTIONS:
             registry.apply_task_definition(plan.desired)
             applied += 1
             did_apply = True
@@ -535,10 +562,7 @@ def reconcile_claimed_task_scheduler_resource(
         )
 
     applied = False
-    if plan.action in {
-        TaskSchedulerReconciliationAction.CREATE,
-        TaskSchedulerReconciliationAction.UPDATE_DRIFTED,
-    }:
+    if plan.action in SAFE_TASK_SCHEDULER_APPLY_ACTIONS:
         registry.apply_task_definition(plan.desired)
         applied = True
     external_resources.mark_external_resource_in_sync(
@@ -870,3 +894,7 @@ def _observed_payload(definition: ObservedTaskSchedulerDefinition) -> dict[str, 
         "time_zone_id": definition.time_zone_id,
         "trigger_type": definition.trigger_type,
     }
+
+
+def _payload_without_enabled(payload: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in payload.items() if key != "enabled"}
