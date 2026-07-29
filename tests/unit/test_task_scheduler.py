@@ -88,6 +88,30 @@ def test_task_scheduler_definition_requires_matching_desired_hash() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("task_logon_type", "run_only_when_logged_on", "reason"),
+    (
+        ("PASSWORD", True, "TASK_SCHEDULER_PASSWORD_LOGON_UNSUPPORTED"),
+        ("S4U", True, "TASK_SCHEDULER_S4U_LOGON_UNSUPPORTED"),
+        ("INTERACTIVE_TOKEN", False, "TASK_SCHEDULER_LOGGED_OFF_RUN_UNSUPPORTED"),
+    ),
+)
+def test_same_user_task_scheduler_definition_rejects_advanced_logon_policy(
+    task_logon_type: str,
+    run_only_when_logged_on: bool,
+    reason: str,
+) -> None:
+    with pytest.raises(TaskSchedulerDefinitionViolation, match=reason):
+        bind_same_user_task_scheduler_definition_hash(
+            _schedule(
+                task_logon_type=task_logon_type,
+                run_only_when_logged_on=run_only_when_logged_on,
+            ),
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+        )
+
+
 def test_task_scheduler_reconciliation_classifies_missing_and_in_sync_tasks() -> None:
     schedule = _bound_schedule()
     definition = build_same_user_task_scheduler_definition(
@@ -379,6 +403,26 @@ def test_stage_task_scheduler_desired_resource_page_reports_invalid_desired_stat
     assert report.staged == 0
     assert report.blocked == 1
     assert report.findings[0].reason == "TASK_SCHEDULER_DESIRED_HASH_MISMATCH"
+    assert resources.desired == ()
+
+
+def test_stage_task_scheduler_desired_resource_page_blocks_advanced_logon_policy() -> None:
+    resources = _ExternalResourceStore()
+
+    report = stage_task_scheduler_desired_resource_page(
+        TaskSchedulerReconciliationRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            limit=10,
+        ),
+        schedules=_ScheduleStore(_schedule(task_logon_type="S4U")),
+        external_resources=resources,
+    )
+
+    assert report.scanned == 1
+    assert report.staged == 0
+    assert report.blocked == 1
+    assert report.findings[0].reason == "TASK_SCHEDULER_S4U_LOGON_UNSUPPORTED"
     assert resources.desired == ()
 
 
@@ -1068,6 +1112,8 @@ def _schedule(
     configuration_json: str = '{"kind":"daily"}',
     enabled: bool = True,
     requires_network: bool = False,
+    task_logon_type: str = "INTERACTIVE_TOKEN",
+    run_only_when_logged_on: bool = True,
 ) -> ScheduleDefinition:
     return ScheduleDefinition(
         schedule_id=schedule_id,
@@ -1082,9 +1128,9 @@ def _schedule(
         dst_policy="PRESERVE_WALL_TIME",
         misfire_policy="QUEUE_ONCE",
         coalescing_window_seconds=60,
-        task_logon_type="INTERACTIVE_TOKEN",
+        task_logon_type=task_logon_type,
         requires_network=requires_network,
-        run_only_when_logged_on=True,
+        run_only_when_logged_on=run_only_when_logged_on,
         enabled=enabled,
         row_version=1,
     )

@@ -25,6 +25,7 @@ from mediasync_home.application.trigger_occurrences import TriggerKind
 
 TASK_SCHEDULER_HASH_PLACEHOLDER = "<TASK_DEFINITION_HASH>"
 TASK_SCHEDULER_SCHEMA_VERSION = 1
+LOCAL_TASK_SCHEDULER_LOGON_TYPE = "INTERACTIVE_TOKEN"
 MAX_TASK_SCHEDULER_RECONCILIATION_PUMP_PAGES = 100
 MAX_TASK_SCHEDULER_RECONCILIATION_PUMP_CLAIMS = 500
 MAX_TASK_SCHEDULER_ORPHAN_RECONCILIATION_LIMIT = 100
@@ -278,6 +279,7 @@ def build_same_user_task_scheduler_definition(
     executable_path: str,
 ) -> TaskSchedulerDefinition:
     validate_schedule_definition(schedule)
+    _validate_same_user_task_scheduler_policy(schedule)
     expected_hash = derive_same_user_task_scheduler_definition_hash(
         schedule,
         installation_id=installation_id,
@@ -315,6 +317,7 @@ def derive_same_user_task_scheduler_definition_hash(
     executable_path: str,
 ) -> str:
     validate_schedule_definition(schedule)
+    _validate_same_user_task_scheduler_policy(schedule)
     material = _definition_hash_material(
         schedule,
         installation_id=installation_id,
@@ -868,6 +871,17 @@ def _definition_hash_material(
         "time_zone_id": schedule.time_zone_id,
         "trigger_type": schedule.trigger_type.value,
     }
+
+
+def _validate_same_user_task_scheduler_policy(schedule: ScheduleDefinition) -> None:
+    if schedule.task_logon_type == "PASSWORD":
+        raise TaskSchedulerDefinitionViolation("TASK_SCHEDULER_PASSWORD_LOGON_UNSUPPORTED")
+    if schedule.task_logon_type == "S4U":
+        raise TaskSchedulerDefinitionViolation("TASK_SCHEDULER_S4U_LOGON_UNSUPPORTED")
+    if schedule.task_logon_type != LOCAL_TASK_SCHEDULER_LOGON_TYPE:
+        raise TaskSchedulerDefinitionViolation("TASK_SCHEDULER_LOGON_TYPE_UNSUPPORTED")
+    if not schedule.run_only_when_logged_on:
+        raise TaskSchedulerDefinitionViolation("TASK_SCHEDULER_LOGGED_OFF_RUN_UNSUPPORTED")
 
 
 def _validate_task_scheduler_resource_pump_request(

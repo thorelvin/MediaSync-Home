@@ -73,8 +73,9 @@ Regler:
 - Taskargumentet inneholder bare installasjons-/schedule-ID, forventet schedule-/taskdefinisjonshash og protokollmarkør; forekomst-ID beregnes aldri som en statisk taskparameter.
 - `MultipleInstancesPolicy` settes eksplisitt slik at en task-eid host ikke gjør at senere forekomster ignoreres; Engine Host håndterer dedup/coalescing.
 - Execution time limit og stop-policy er eksplisitte i desired-state-hash og skal ikke bruke en kort vilkårlig killgrense.
-- «Kjør selv om brukeren ikke er logget inn» er et eksplisitt avansert valg med Windows-credential-flyt.
+- «Kjør selv om brukeren ikke er logget inn» er et eksplisitt avansert valg med Windows-credential-flyt; lokal preview avviser dette inntil credential-flyten finnes.
 - GUI viser logontype, nettverkstilgang og begrensning før ønsket task lagres.
+- Same-user Task Scheduler-policyen aksepterer foreløpig bare `INTERACTIVE_TOKEN` med `run_only_when_logged_on=true`; `PASSWORD`, `S4U` og logged-off run markeres som unsupported desired state.
 - Taskdefinisjonen er **desired state** i `schedules`; en reconciler sammenligner faktisk Task Scheduler-tilstand med `desired_definition_hash`.
 - Oppretting, oppdatering og sletting er idempotent og kan gjentas etter krasj.
 - Foreldreløse tasks identifiseres etter installasjons-ID og bruker-SID; de slettes ikke blindt hvis eierskap er tvetydig.
