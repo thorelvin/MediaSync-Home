@@ -11,6 +11,7 @@ from mediasync_home.adapters.final_verification import (
     FinalArtifactVerificationError,
     LocalFinalArtifactVerificationAdapter,
 )
+from mediasync_home.adapters.reparse_guard import LocalReparseGuard, ReparseInspection
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
     RecoveryOperationPhase,
@@ -60,6 +61,22 @@ def test_local_final_artifact_verifier_rejects_unsafe_relative_path(tmp_path: Pa
     assert exc_info.value.validation_code == "FINAL_ARTIFACT_VERIFY_REQUIRES_RELATIVE_PATH"
 
 
+def test_local_final_artifact_verifier_rejects_reparse_parent(tmp_path: Path) -> None:
+    root = tmp_path / "target"
+    reparse_parent = root / "Pictures"
+    reparse_parent.mkdir(parents=True)
+    (reparse_parent / "A.jpg").write_bytes(b"image")
+    verifier = LocalFinalArtifactVerificationAdapter(
+        root_resolver=_RootResolver(root),
+        reparse_guard=LocalReparseGuard(probe=_OverlayProbe(reparse_paths={reparse_parent})),
+    )
+
+    with pytest.raises(FinalArtifactVerificationError) as exc_info:
+        verifier.verify_final_artifact(_operation(payload=b"image"))
+
+    assert exc_info.value.validation_code == "FINAL_ARTIFACT_VERIFY_REPARSE_UNSUPPORTED"
+
+
 class _RootResolver:
     def __init__(self, root: Path) -> None:
         self._root = root
@@ -75,6 +92,19 @@ class _RootResolver:
         assert endpoint_id == "target-a"
         assert endpoint_revision_id == "target-rev-a"
         return self._root
+
+
+class _OverlayProbe:
+    def __init__(self, *, reparse_paths: set[Path]) -> None:
+        self._reparse_paths = {path.resolve(strict=False) for path in reparse_paths}
+
+    def inspect_path(self, path: Path) -> ReparseInspection:
+        resolved = path.resolve(strict=False)
+        return ReparseInspection(
+            path=path,
+            exists=path.exists() or path.is_symlink(),
+            is_reparse_point=resolved in self._reparse_paths,
+        )
 
 
 def _operation(*, payload: bytes) -> RecoveryOperation:

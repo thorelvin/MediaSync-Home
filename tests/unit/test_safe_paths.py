@@ -32,6 +32,7 @@ def test_endpoint_relative_path_normalizes_separators_and_exposes_parts() -> Non
         ("Photos/trailing-space ", "SAFE_PATH_AMBIGUOUS_WHITESPACE"),
         ("Photos/trailing-dot.", "SAFE_PATH_AMBIGUOUS_TRAILING_DOT"),
         ("Photos/CON.txt", "SAFE_PATH_RESERVED_DEVICE_NAME"),
+        ("Photos/.mediasync/file.txt", "SAFE_PATH_CONTROL_AREA_RESERVED"),
         ("LPT1", "SAFE_PATH_RESERVED_DEVICE_NAME"),
     ],
 )

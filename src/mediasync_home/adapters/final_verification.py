@@ -6,6 +6,11 @@ import re
 from pathlib import Path
 
 from mediasync_home.adapters.endpoint_leases import EndpointLeaseUnavailable, EndpointRootResolver
+from mediasync_home.adapters.reparse_guard import (
+    LocalReparseGuard,
+    ReparseGuard,
+    ReparseGuardError,
+)
 from mediasync_home.application.ports import FinalArtifactVerificationEvidence
 from mediasync_home.application.recovery_operations import RecoveryOperation
 from mediasync_home.application.safe_paths import SafePathViolation, parse_endpoint_relative_path
@@ -22,8 +27,14 @@ class FinalArtifactVerificationError(RuntimeError):
 
 
 class LocalFinalArtifactVerificationAdapter:
-    def __init__(self, *, root_resolver: EndpointRootResolver) -> None:
+    def __init__(
+        self,
+        *,
+        root_resolver: EndpointRootResolver,
+        reparse_guard: ReparseGuard | None = None,
+    ) -> None:
         self._root_resolver = root_resolver
+        self._reparse_guard = reparse_guard or LocalReparseGuard()
 
     def verify_final_artifact(
         self,
@@ -47,7 +58,11 @@ class LocalFinalArtifactVerificationAdapter:
     def _final_path(self, operation: RecoveryOperation) -> Path:
         root = self._resolve_target_root(operation)
         final_path = root.joinpath(*_relative_parts(operation.final_relative_path))
-        _reject_symlink_in_path(root=root, path=final_path.parent)
+        _reject_reparse_in_path(
+            guard=self._reparse_guard,
+            root=root,
+            path=final_path.parent,
+        )
         try:
             final_path.resolve(strict=False).relative_to(root.resolve(strict=True))
         except (OSError, ValueError) as exc:
@@ -72,11 +87,21 @@ class LocalFinalArtifactVerificationAdapter:
                 "Register endpoint roots before verifying final artifact state.",
             )
         try:
-            return root.resolve(strict=True)
-        except OSError as exc:
+            return self._reparse_guard.resolve_existing_root(
+                root,
+                missing_code="FINAL_ARTIFACT_VERIFY_ENDPOINT_ROOT_MISSING",
+                missing_next_action=(
+                    "Ensure the target endpoint root is reachable before recovery resume."
+                ),
+                reparse_code="FINAL_ARTIFACT_VERIFY_ENDPOINT_ROOT_REPARSE_UNSUPPORTED",
+                reparse_next_action=(
+                    "Revalidate endpoint adoption before verifying through this root."
+                ),
+            )
+        except ReparseGuardError as exc:
             raise FinalArtifactVerificationError(
-                "FINAL_ARTIFACT_VERIFY_ENDPOINT_ROOT_MISSING",
-                "Ensure the target endpoint root is reachable before recovery resume.",
+                exc.validation_code,
+                exc.next_action,
             ) from exc
 
 
@@ -124,22 +149,34 @@ def _relative_parts(value: str) -> tuple[str, ...]:
         ) from exc
 
 
-def _reject_symlink_in_path(*, root: Path, path: Path) -> None:
-    current = root
+def _reject_reparse_in_path(*, guard: ReparseGuard, root: Path, path: Path) -> None:
     try:
-        relative_parts = path.resolve(strict=False).relative_to(root).parts
+        relative_parts = path.relative_to(root).parts
     except ValueError as exc:
         raise FinalArtifactVerificationError(
             "FINAL_ARTIFACT_VERIFY_PATH_ESCAPES_ROOT",
             "Refresh endpoint adoption before verifying final artifact state.",
         ) from exc
-    for part in relative_parts:
-        current = current / part
-        if current.is_symlink():
-            raise FinalArtifactVerificationError(
-                "FINAL_ARTIFACT_VERIFY_REPARSE_UNSUPPORTED",
-                "Revalidate paths with a production ReparseGuard before recovery resume.",
-            )
+    try:
+        guard.reject_reparse_chain(
+            root=root,
+            relative_parts=relative_parts,
+            missing_code="FINAL_ARTIFACT_VERIFY_PATH_CHAIN_MISSING",
+            missing_next_action="Refresh recovery state because the final path chain changed.",
+            reparse_code="FINAL_ARTIFACT_VERIFY_REPARSE_UNSUPPORTED",
+            reparse_next_action=(
+                "Revalidate paths with a production ReparseGuard before recovery resume."
+            ),
+        )
+        guard.require_resolved_under_root(
+            root=root,
+            path=path,
+            strict=True,
+            escape_code="FINAL_ARTIFACT_VERIFY_PATH_ESCAPES_ROOT",
+            escape_next_action="Refresh endpoint adoption before verifying final artifact state.",
+        )
+    except ReparseGuardError as exc:
+        raise FinalArtifactVerificationError(exc.validation_code, exc.next_action) from exc
 
 
 def _fingerprint_file(path: Path) -> dict[str, object]:

@@ -10,6 +10,7 @@ from typing import Protocol
 
 from mediasync_home.adapters.endpoint_leases import EndpointRootResolver
 from mediasync_home.adapters.process_supervisor import Win32JobObjectTransferSupervisor
+from mediasync_home.adapters.reparse_guard import ReparseGuard
 from mediasync_home.adapters.staging import (
     LocalFileStagingError,
     LocalFileStagingTransferAdapter,
@@ -135,9 +136,14 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
         robocopy_work_root: Path | None = None,
         process_supervisor: RobocopyTransferSupervisor | None = None,
         executable_resolver: SystemExecutableResolver | None = None,
+        reparse_guard: ReparseGuard | None = None,
         profile: RobocopyTransferProfile = RobocopyTransferProfile(),
     ) -> None:
-        super().__init__(root_resolver=root_resolver, staging_root=staging_root)
+        super().__init__(
+            root_resolver=root_resolver,
+            staging_root=staging_root,
+            reparse_guard=reparse_guard,
+        )
         validate_robocopy_switches(profile.switches)
         self._robocopy_work_root = None if robocopy_work_root is None else Path(robocopy_work_root)
         self._process_supervisor = process_supervisor or Win32JobObjectTransferSupervisor()

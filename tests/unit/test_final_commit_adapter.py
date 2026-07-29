@@ -8,6 +8,7 @@ from typing import cast
 
 import pytest
 
+import mediasync_home.adapters.final_commit as final_commit_module
 from mediasync_home.adapters.endpoint_leases import (
     EndpointLeaseUnavailable,
     LocalEndpointLease,
@@ -20,6 +21,7 @@ from mediasync_home.adapters.final_commit import (
     LocalResolvingFinalCommitAdapter,
     LocalVersionedReplaceFinalCommitAdapter,
 )
+from mediasync_home.adapters.reparse_guard import ReparseGuardError
 from mediasync_home.application.ports import RelativePath, VerifiedStagingArtifact
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
@@ -87,6 +89,26 @@ def test_lab_final_commit_revalidates_staging_hash(tmp_path: Path) -> None:
         fixture.adapter.commit_verified_artifact(permit, artifact)
 
     assert exc_info.value.validation_code == "LAB_FINAL_COMMIT_STAGING_HASH_MISMATCH"
+    assert not (fixture.target_root / "Photos" / "image.jpg").exists()
+
+
+def test_lab_final_commit_rejects_reparse_staging_root_before_final_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    permit = fixture.lease.issue_mutation_permit()
+    artifact = fixture.stage(object_id="object-a", relative_path="Photos/image.jpg", payload=b"image")
+    monkeypatch.setattr(
+        final_commit_module,
+        "DEFAULT_REPARSE_GUARD",
+        _RejectingRootGuard(),
+    )
+
+    with pytest.raises(FinalCommitAdapterError) as exc_info:
+        fixture.adapter.commit_verified_artifact(permit, artifact)
+
+    assert exc_info.value.validation_code == "LAB_FINAL_COMMIT_STAGING_ROOT_REPARSE_UNSUPPORTED"
     assert not (fixture.target_root / "Photos" / "image.jpg").exists()
 
 
@@ -719,3 +741,40 @@ class _RootResolver:
         ):
             return self._target_root
         return None
+
+
+class _RejectingRootGuard:
+    def resolve_existing_root(
+        self,
+        root: Path,
+        *,
+        missing_code: str,
+        missing_next_action: str,
+        reparse_code: str,
+        reparse_next_action: str,
+    ) -> Path:
+        raise ReparseGuardError(reparse_code, reparse_next_action)
+
+    def reject_reparse_chain(
+        self,
+        *,
+        root: Path,
+        relative_parts: tuple[str, ...],
+        missing_code: str,
+        missing_next_action: str,
+        reparse_code: str,
+        reparse_next_action: str,
+        allow_missing_suffix: bool = False,
+    ) -> object:
+        raise AssertionError("commit should reject the staging root before path-chain checks")
+
+    def require_resolved_under_root(
+        self,
+        *,
+        root: Path,
+        path: Path,
+        strict: bool,
+        escape_code: str,
+        escape_next_action: str,
+    ) -> None:
+        raise AssertionError("commit should reject the staging root before escape checks")

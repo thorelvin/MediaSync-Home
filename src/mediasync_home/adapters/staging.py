@@ -8,6 +8,11 @@ from pathlib import Path
 from uuid import uuid4
 
 from mediasync_home.adapters.endpoint_leases import EndpointLeaseUnavailable, EndpointRootResolver
+from mediasync_home.adapters.reparse_guard import (
+    LocalReparseGuard,
+    ReparseGuard,
+    ReparseGuardError,
+)
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
     RecoveryTargetPreconditionKind,
@@ -41,9 +46,11 @@ class LocalFileStagingTransferAdapter:
         *,
         root_resolver: EndpointRootResolver,
         staging_root: Path | None = None,
+        reparse_guard: ReparseGuard | None = None,
     ) -> None:
         self._root_resolver = root_resolver
         self._staging_root = None if staging_root is None else Path(staging_root)
+        self._reparse_guard = reparse_guard or LocalReparseGuard()
 
     def validate_source_file(self, operation: RecoveryOperation) -> SourceValidationEvidence:
         source_path = self._source_path(operation)
@@ -102,7 +109,11 @@ class LocalFileStagingTransferAdapter:
                 "LOCAL_STAGING_TARGET_PARENT_MISSING",
                 "Create and verify the final parent directory before staging this operation.",
             )
-        _reject_symlink_in_path(root=self._target_root(permit=permit, operation=operation), path=final_path.parent)
+        _reject_reparse_in_path(
+            guard=self._reparse_guard,
+            root=self._target_root(permit=permit, operation=operation),
+            path=final_path.parent,
+        )
         if final_path.exists() or final_path.is_symlink():
             raise LocalFileStagingError(
                 "LOCAL_STAGING_TARGET_EXISTS",
@@ -122,7 +133,11 @@ class LocalFileStagingTransferAdapter:
                 "LOCAL_STAGING_TARGET_PARENT_MISSING",
                 "Create and verify the final parent directory before staging this operation.",
             )
-        _reject_symlink_in_path(root=self._target_root(permit=permit, operation=operation), path=final_path.parent)
+        _reject_reparse_in_path(
+            guard=self._reparse_guard,
+            root=self._target_root(permit=permit, operation=operation),
+            path=final_path.parent,
+        )
         if not final_path.is_file() or final_path.is_symlink():
             raise LocalFileStagingError(
                 "LOCAL_STAGING_TARGET_MATCH_REQUIRES_FILE",
@@ -151,7 +166,11 @@ class LocalFileStagingTransferAdapter:
                 "Create and verify the final parent directory before staging this operation.",
             )
         target_root = self._target_root(permit=permit, operation=operation)
-        _reject_symlink_in_path(root=target_root, path=final_path)
+        _reject_reparse_in_path(
+            guard=self._reparse_guard,
+            root=target_root,
+            path=final_path,
+        )
         if not final_path.is_dir() or final_path.is_symlink():
             raise LocalFileStagingError(
                 "LOCAL_STAGING_TARGET_DIRECTORY_EMPTY_REQUIRES_DIRECTORY",
@@ -264,7 +283,11 @@ class LocalFileStagingTransferAdapter:
             endpoint_revision_id=operation.source_endpoint_revision_id,
         )
         path = root.joinpath(*_relative_parts(operation.source_relative_path))
-        _reject_symlink_in_path(root=root, path=path.parent)
+        _reject_reparse_in_path(
+            guard=self._reparse_guard,
+            root=root,
+            path=path.parent,
+        )
         try:
             path.resolve(strict=False).relative_to(root.resolve(strict=True))
         except (OSError, ValueError) as exc:
@@ -337,11 +360,19 @@ class LocalFileStagingTransferAdapter:
                 "Register endpoint roots before staging run-target operations.",
             )
         try:
-            return root.resolve(strict=True)
-        except OSError as exc:
+            return self._reparse_guard.resolve_existing_root(
+                root,
+                missing_code="LOCAL_STAGING_ENDPOINT_ROOT_MISSING",
+                missing_next_action=(
+                    "Ensure the source and target endpoint roots are reachable before staging."
+                ),
+                reparse_code="LOCAL_STAGING_ENDPOINT_ROOT_REPARSE_UNSUPPORTED",
+                reparse_next_action="Revalidate endpoint adoption before staging through this root.",
+            )
+        except ReparseGuardError as exc:
             raise LocalFileStagingError(
-                "LOCAL_STAGING_ENDPOINT_ROOT_MISSING",
-                "Ensure the source and target endpoint roots are reachable before staging.",
+                exc.validation_code,
+                exc.next_action,
             ) from exc
 
 
@@ -355,22 +386,39 @@ def _relative_parts(value: str) -> tuple[str, ...]:
         ) from exc
 
 
-def _reject_symlink_in_path(*, root: Path, path: Path) -> None:
-    current = root
+def _reject_reparse_in_path(
+    *,
+    guard: ReparseGuard,
+    root: Path,
+    path: Path,
+    validation_code: str = "LOCAL_STAGING_REPARSE_UNSUPPORTED",
+    next_action: str = "Revalidate paths with a production ReparseGuard before staging.",
+) -> None:
     try:
-        relative_parts = path.resolve(strict=False).relative_to(root).parts
+        relative_parts = path.relative_to(root).parts
     except ValueError as exc:
         raise LocalFileStagingError(
             "LOCAL_STAGING_PATH_ESCAPES_ROOT",
             "Refresh endpoint adoption before staging this path.",
         ) from exc
-    for part in relative_parts:
-        current = current / part
-        if current.is_symlink():
-            raise LocalFileStagingError(
-                "LOCAL_STAGING_REPARSE_UNSUPPORTED",
-                "Revalidate paths with a production ReparseGuard before staging.",
-            )
+    try:
+        guard.reject_reparse_chain(
+            root=root,
+            relative_parts=relative_parts,
+            missing_code="LOCAL_STAGING_PATH_CHAIN_MISSING",
+            missing_next_action="Refresh analysis because the staging path chain changed.",
+            reparse_code=validation_code,
+            reparse_next_action=next_action,
+        )
+        guard.require_resolved_under_root(
+            root=root,
+            path=path,
+            strict=True,
+            escape_code="LOCAL_STAGING_PATH_ESCAPES_ROOT",
+            escape_next_action="Refresh endpoint adoption before staging this path.",
+        )
+    except ReparseGuardError as exc:
+        raise LocalFileStagingError(exc.validation_code, exc.next_action) from exc
 
 
 def _expected_fingerprint(raw_payload: str | None) -> dict[str, object]:

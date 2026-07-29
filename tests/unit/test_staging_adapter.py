@@ -11,6 +11,7 @@ from mediasync_home.adapters.staging import (
     LocalFileStagingError,
     LocalFileStagingTransferAdapter,
 )
+from mediasync_home.adapters.reparse_guard import LocalReparseGuard, ReparseInspection
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
     RecoveryTargetPreconditionKind,
@@ -69,6 +70,25 @@ def test_local_staging_rejects_match_fingerprint_missing_target(tmp_path: Path) 
     assert exc_info.value.validation_code == "LOCAL_STAGING_TARGET_MATCH_REQUIRES_FILE"
 
 
+def test_local_staging_rejects_reparse_target_parent(tmp_path: Path) -> None:
+    target_root = tmp_path / "target"
+    reparse_parent = target_root / "Pictures"
+    reparse_parent.mkdir(parents=True)
+    (reparse_parent / "A.jpg").write_bytes(b"old-image")
+    adapter = LocalFileStagingTransferAdapter(
+        root_resolver=_RootResolver(target_root=target_root),
+        reparse_guard=LocalReparseGuard(probe=_OverlayProbe(reparse_paths={reparse_parent})),
+    )
+
+    with pytest.raises(LocalFileStagingError) as exc_info:
+        adapter.validate_target_precondition(
+            _permit(),
+            _operation(RecoveryTargetPreconditionKind.MATCH_FINGERPRINT),
+        )
+
+    assert exc_info.value.validation_code == "LOCAL_STAGING_REPARSE_UNSUPPORTED"
+
+
 def test_local_staging_binds_directory_empty_target_precondition(tmp_path: Path) -> None:
     target_root = tmp_path / "target"
     (target_root / "Pictures" / "A.jpg").mkdir(parents=True)
@@ -124,6 +144,19 @@ class _RootResolver:
         ):
             return self._target_root
         return None
+
+
+class _OverlayProbe:
+    def __init__(self, *, reparse_paths: set[Path]) -> None:
+        self._reparse_paths = {path.resolve(strict=False) for path in reparse_paths}
+
+    def inspect_path(self, path: Path) -> ReparseInspection:
+        resolved = path.resolve(strict=False)
+        return ReparseInspection(
+            path=path,
+            exists=path.exists() or path.is_symlink(),
+            is_reparse_point=resolved in self._reparse_paths,
+        )
 
 
 def _operation(target_precondition_kind: RecoveryTargetPreconditionKind) -> RecoveryOperation:

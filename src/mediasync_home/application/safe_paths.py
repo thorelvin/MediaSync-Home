@@ -13,6 +13,7 @@ WINDOWS_RESERVED_BASENAMES = {
     *(f"COM{index}" for index in range(1, 10)),
     *(f"LPT{index}" for index in range(1, 10)),
 }
+CONTROL_AREA_BASENAME = ".mediasync"
 
 
 class SafePathViolation(ValueError):
@@ -59,3 +60,5 @@ def _validate_part(part: str) -> None:
     basename = part.split(".", 1)[0].upper()
     if basename in WINDOWS_RESERVED_BASENAMES:
         raise SafePathViolation("SAFE_PATH_RESERVED_DEVICE_NAME")
+    if part.casefold() == CONTROL_AREA_BASENAME:
+        raise SafePathViolation("SAFE_PATH_CONTROL_AREA_RESERVED")

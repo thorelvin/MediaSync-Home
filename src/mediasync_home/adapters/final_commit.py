@@ -9,6 +9,7 @@ from typing import Protocol
 from uuid import uuid4
 
 from mediasync_home.adapters.endpoint_leases import EndpointLeaseUnavailable, EndpointRootResolver
+from mediasync_home.adapters.reparse_guard import LocalReparseGuard, ReparseGuardError
 from mediasync_home.application.ports import (
     CommitReceipt,
     FinalCommitPort,
@@ -30,6 +31,7 @@ from mediasync_home.domain.capabilities import MutationPermit
 HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 OBJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 LAB_MARKER_NAME = ".mediasync_test_root"
+DEFAULT_REPARSE_GUARD = LocalReparseGuard()
 
 
 class FinalCommitAdapterError(RuntimeError):
@@ -719,13 +721,13 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
                 "LOCAL_FINAL_COMMIT_ENDPOINT_ROOT_UNKNOWN",
                 "Register endpoint roots before applying final filesystem changes.",
             )
-        try:
-            return root.resolve(strict=True)
-        except OSError as exc:
-            raise FinalCommitAdapterError(
-                "LOCAL_FINAL_COMMIT_TARGET_ROOT_MISSING",
-                "Ensure the target endpoint root is reachable before final commit.",
-            ) from exc
+        return _resolve_existing_root(
+            root,
+            missing_code="LOCAL_FINAL_COMMIT_TARGET_ROOT_MISSING",
+            missing_next_action="Ensure the target endpoint root is reachable before final commit.",
+            reparse_code="LOCAL_FINAL_COMMIT_TARGET_ROOT_REPARSE_UNSUPPORTED",
+            reparse_next_action="Revalidate endpoint adoption before committing through this root.",
+        )
 
 
 def _require_lab_marker(target_root: Path, run_id: str) -> None:
@@ -775,6 +777,26 @@ def _require_endpoint_marker(
         )
 
 
+def _resolve_existing_root(
+    root: Path,
+    *,
+    missing_code: str,
+    missing_next_action: str,
+    reparse_code: str,
+    reparse_next_action: str,
+) -> Path:
+    try:
+        return DEFAULT_REPARSE_GUARD.resolve_existing_root(
+            root,
+            missing_code=missing_code,
+            missing_next_action=missing_next_action,
+            reparse_code=reparse_code,
+            reparse_next_action=reparse_next_action,
+        )
+    except ReparseGuardError as exc:
+        raise FinalCommitAdapterError(exc.validation_code, exc.next_action) from exc
+
+
 def _staging_payload_path(staging_root: Path, artifact: VerifiedStagingArtifact) -> Path:
     if OBJECT_ID_PATTERN.fullmatch(artifact.object_id) is None:
         raise FinalCommitAdapterError(
@@ -786,13 +808,13 @@ def _staging_payload_path(staging_root: Path, artifact: VerifiedStagingArtifact)
             "LAB_FINAL_COMMIT_REQUIRES_CONTENT_HASH",
             "Verify the staging artifact and provide a lowercase SHA-256 content hash.",
         )
-    try:
-        root = staging_root.resolve(strict=True)
-    except OSError as exc:
-        raise FinalCommitAdapterError(
-            "LAB_FINAL_COMMIT_STAGING_ROOT_MISSING",
-            "Create the staging root before final commit.",
-        ) from exc
+    root = _resolve_existing_root(
+        staging_root,
+        missing_code="LAB_FINAL_COMMIT_STAGING_ROOT_MISSING",
+        missing_next_action="Create the staging root before final commit.",
+        reparse_code="LAB_FINAL_COMMIT_STAGING_ROOT_REPARSE_UNSUPPORTED",
+        reparse_next_action="Revalidate the staging root before final commit.",
+    )
     payload = root / f"{artifact.object_id}.payload"
     if not payload.is_file() or payload.is_symlink():
         raise FinalCommitAdapterError(
@@ -816,13 +838,13 @@ def _replace_staging_payload_path(
             "LOCAL_REPLACE_FINAL_COMMIT_REQUIRES_CONTENT_HASH",
             "Verify the staging artifact and provide a lowercase SHA-256 content hash.",
         )
-    try:
-        root = staging_root.resolve(strict=True)
-    except OSError as exc:
-        raise FinalCommitAdapterError(
-            "LOCAL_REPLACE_FINAL_COMMIT_STAGING_ROOT_MISSING",
-            "Create the staging root before final commit.",
-        ) from exc
+    root = _resolve_existing_root(
+        staging_root,
+        missing_code="LOCAL_REPLACE_FINAL_COMMIT_STAGING_ROOT_MISSING",
+        missing_next_action="Create the staging root before final commit.",
+        reparse_code="LOCAL_REPLACE_FINAL_COMMIT_STAGING_ROOT_REPARSE_UNSUPPORTED",
+        reparse_next_action="Revalidate the staging root before replacement.",
+    )
     payload = root / f"{artifact.object_id}.payload"
     if not payload.is_file() or payload.is_symlink():
         raise FinalCommitAdapterError(
@@ -843,13 +865,13 @@ def _local_staging_payload_path(staging_root: Path, artifact: VerifiedStagingArt
             "LOCAL_FINAL_COMMIT_REQUIRES_CONTENT_HASH",
             "Verify the staging artifact and provide a lowercase SHA-256 content hash.",
         )
-    try:
-        root = staging_root.resolve(strict=True)
-    except OSError as exc:
-        raise FinalCommitAdapterError(
-            "LOCAL_FINAL_COMMIT_STAGING_ROOT_MISSING",
-            "Create the staging root before final commit.",
-        ) from exc
+    root = _resolve_existing_root(
+        staging_root,
+        missing_code="LOCAL_FINAL_COMMIT_STAGING_ROOT_MISSING",
+        missing_next_action="Create the staging root before final commit.",
+        reparse_code="LOCAL_FINAL_COMMIT_STAGING_ROOT_REPARSE_UNSUPPORTED",
+        reparse_next_action="Revalidate the staging root before final commit.",
+    )
     payload = root / f"{artifact.object_id}.payload"
     if not payload.is_file() or payload.is_symlink():
         raise FinalCommitAdapterError(
@@ -861,13 +883,13 @@ def _local_staging_payload_path(staging_root: Path, artifact: VerifiedStagingArt
 
 def _final_path(target_root: Path, artifact: VerifiedStagingArtifact) -> Path:
     parts = _relative_path_parts(artifact.relative_path.value)
-    try:
-        root = target_root.resolve(strict=True)
-    except OSError as exc:
-        raise FinalCommitAdapterError(
-            "LAB_FINAL_COMMIT_TARGET_ROOT_MISSING",
-            "Create the marked lab target root before final commit.",
-        ) from exc
+    root = _resolve_existing_root(
+        target_root,
+        missing_code="LAB_FINAL_COMMIT_TARGET_ROOT_MISSING",
+        missing_next_action="Create the marked lab target root before final commit.",
+        reparse_code="LAB_FINAL_COMMIT_TARGET_ROOT_REPARSE_UNSUPPORTED",
+        reparse_next_action="Revalidate the lab target root before final commit.",
+    )
     final_path = root.joinpath(*parts)
     parent = final_path.parent
     if not parent.is_dir():
@@ -897,13 +919,13 @@ def _local_final_path(target_root: Path, relative_path: str) -> Path:
         validation_code="LOCAL_FINAL_COMMIT_REQUIRES_RELATIVE_PATH",
         next_action="Provide an endpoint-relative final path before commit.",
     )
-    try:
-        root = target_root.resolve(strict=True)
-    except OSError as exc:
-        raise FinalCommitAdapterError(
-            "LOCAL_FINAL_COMMIT_TARGET_ROOT_MISSING",
-            "Create the target endpoint root before final commit.",
-        ) from exc
+    root = _resolve_existing_root(
+        target_root,
+        missing_code="LOCAL_FINAL_COMMIT_TARGET_ROOT_MISSING",
+        missing_next_action="Create the target endpoint root before final commit.",
+        reparse_code="LOCAL_FINAL_COMMIT_TARGET_ROOT_REPARSE_UNSUPPORTED",
+        reparse_next_action="Revalidate the target endpoint root before final commit.",
+    )
     final_path = root.joinpath(*parts)
     parent = final_path.parent
     if not parent.is_dir():
@@ -933,13 +955,13 @@ def _replace_final_path(target_root: Path, relative_path: str) -> Path:
         validation_code="LOCAL_REPLACE_FINAL_COMMIT_REQUIRES_RELATIVE_PATH",
         next_action="Provide an endpoint-relative final path before replacement.",
     )
-    try:
-        root = target_root.resolve(strict=True)
-    except OSError as exc:
-        raise FinalCommitAdapterError(
-            "LOCAL_REPLACE_FINAL_COMMIT_TARGET_ROOT_MISSING",
-            "Create the target endpoint root before replacement.",
-        ) from exc
+    root = _resolve_existing_root(
+        target_root,
+        missing_code="LOCAL_REPLACE_FINAL_COMMIT_TARGET_ROOT_MISSING",
+        missing_next_action="Create the target endpoint root before replacement.",
+        reparse_code="LOCAL_REPLACE_FINAL_COMMIT_TARGET_ROOT_REPARSE_UNSUPPORTED",
+        reparse_next_action="Revalidate the target endpoint root before replacement.",
+    )
     final_path = root.joinpath(*parts)
     parent = final_path.parent
     if not parent.is_dir():
@@ -987,15 +1009,20 @@ def _reject_symlink_in_path(
     relative_parts: tuple[str, ...],
     validation_code: str = "LAB_FINAL_COMMIT_REPARSE_UNSUPPORTED",
     next_action: str = "Revalidate the final path chain before committing through reparse points.",
+    allow_missing_suffix: bool = False,
 ) -> None:
-    current = root
-    for part in relative_parts:
-        current = current / part
-        if current.is_symlink():
-            raise FinalCommitAdapterError(
-                validation_code,
-                next_action,
-            )
+    try:
+        DEFAULT_REPARSE_GUARD.reject_reparse_chain(
+            root=root,
+            relative_parts=relative_parts,
+            missing_code="LOCAL_FINAL_COMMIT_PATH_CHAIN_MISSING",
+            missing_next_action="Refresh analysis because the final path chain changed.",
+            reparse_code=validation_code,
+            reparse_next_action=next_action,
+            allow_missing_suffix=allow_missing_suffix,
+        )
+    except ReparseGuardError as exc:
+        raise FinalCommitAdapterError(exc.validation_code, exc.next_action) from exc
 
 
 def _link_verified_payload_without_overwrite(
@@ -1116,15 +1143,15 @@ def _version_object_paths(
             "LOCAL_REPLACE_FINAL_COMMIT_REQUIRES_SAFE_VERSION_OBJECT_ID",
             "Use an opaque version object id before preserving an old target.",
         )
-    try:
-        root = target_root.resolve(strict=True)
-    except OSError as exc:
-        raise FinalCommitAdapterError(
-            "LOCAL_REPLACE_FINAL_COMMIT_TARGET_ROOT_MISSING",
-            "Create the target endpoint root before replacement.",
-        ) from exc
+    root = _resolve_existing_root(
+        target_root,
+        missing_code="LOCAL_REPLACE_FINAL_COMMIT_TARGET_ROOT_MISSING",
+        missing_next_action="Create the target endpoint root before replacement.",
+        reparse_code="LOCAL_REPLACE_FINAL_COMMIT_TARGET_ROOT_REPARSE_UNSUPPORTED",
+        reparse_next_action="Revalidate the target endpoint root before replacement.",
+    )
     relative_parts = (".mediasync", "objects", "versions")
-    _reject_symlink_in_path(root=root, relative_parts=relative_parts)
+    _reject_symlink_in_path(root=root, relative_parts=relative_parts, allow_missing_suffix=True)
     version_root = root.joinpath(*relative_parts)
     if create:
         version_root.mkdir(parents=True, exist_ok=True)
@@ -1152,19 +1179,20 @@ def _quarantine_object_paths(
             "LOCAL_DIRECTORY_QUARANTINE_REQUIRES_SAFE_OBJECT_ID",
             "Use an opaque quarantine object id before preserving a directory.",
         )
-    try:
-        root = target_root.resolve(strict=True)
-    except OSError as exc:
-        raise FinalCommitAdapterError(
-            "LOCAL_DIRECTORY_QUARANTINE_TARGET_ROOT_MISSING",
-            "Create the target endpoint root before directory quarantine.",
-        ) from exc
+    root = _resolve_existing_root(
+        target_root,
+        missing_code="LOCAL_DIRECTORY_QUARANTINE_TARGET_ROOT_MISSING",
+        missing_next_action="Create the target endpoint root before directory quarantine.",
+        reparse_code="LOCAL_DIRECTORY_QUARANTINE_TARGET_ROOT_REPARSE_UNSUPPORTED",
+        reparse_next_action="Revalidate the target endpoint root before directory quarantine.",
+    )
     relative_parts = (".mediasync", "objects", "quarantine")
     _reject_symlink_in_path(
         root=root,
         relative_parts=relative_parts,
         validation_code="LOCAL_DIRECTORY_QUARANTINE_REPARSE_UNSUPPORTED",
         next_action="Revalidate the endpoint control area before preserving a directory.",
+        allow_missing_suffix=True,
     )
     quarantine_root = root.joinpath(*relative_parts)
     if create:
@@ -1197,13 +1225,13 @@ def _directory_empty_final_path(target_root: Path, relative_path: str) -> Path:
         validation_code="LOCAL_DIRECTORY_QUARANTINE_REQUIRES_RELATIVE_PATH",
         next_action="Provide an endpoint-relative final path before directory quarantine.",
     )
-    try:
-        root = target_root.resolve(strict=True)
-    except OSError as exc:
-        raise FinalCommitAdapterError(
-            "LOCAL_DIRECTORY_QUARANTINE_TARGET_ROOT_MISSING",
-            "Create the target endpoint root before directory quarantine.",
-        ) from exc
+    root = _resolve_existing_root(
+        target_root,
+        missing_code="LOCAL_DIRECTORY_QUARANTINE_TARGET_ROOT_MISSING",
+        missing_next_action="Create the target endpoint root before directory quarantine.",
+        reparse_code="LOCAL_DIRECTORY_QUARANTINE_TARGET_ROOT_REPARSE_UNSUPPORTED",
+        reparse_next_action="Revalidate the target endpoint root before directory quarantine.",
+    )
     final_path = root.joinpath(*parts)
     parent = final_path.parent
     if not parent.is_dir():
@@ -1216,6 +1244,7 @@ def _directory_empty_final_path(target_root: Path, relative_path: str) -> Path:
         relative_parts=parts,
         validation_code="LOCAL_DIRECTORY_QUARANTINE_REPARSE_UNSUPPORTED",
         next_action="Revalidate the final path chain before directory quarantine.",
+        allow_missing_suffix=True,
     )
     try:
         parent.resolve(strict=True).relative_to(root)
