@@ -6471,6 +6471,8 @@ Round-trip-suiten skal minst dekke mellomrom, tomme argumenter, Unicode, UNC, tr
 
 Job Object skal minst ha kill-on-close. Engine Host-krasj eller tvungen upgrade skal derfor ikke etterlate Robocopy som fortsetter uten lease/recoveryeier. Containment er en precondition, ikke best-effort. Dersom child kan kjøre før assignment eller assignment ikke kan bevises, startes ikke batchen.
 
+0B-implementasjonsnote: Prosesssupervisoren har nå en egen Win32 transferchild-adapterflate for `CREATE_SUSPENDED`, kill-on-close Job Object, assignment før resume og suspended-child cleanup på pre-resume feil. Denne flaten er ennå ikke koblet til en full Robocopy command/profile adapter, System32-resolver, batchmanifestbinding eller fault-injection-lab.
+
 Ingen brukerverdi tolkes som flagg. Kilde, staginginbox og eksakte filer kommer fra forseglet plan/manifest og går gjennom `SafePath`/handlebasert rotvalidering.
 
 ### 15.3 Kort staginginbox, objektallokering og batchmanifest

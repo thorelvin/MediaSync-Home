@@ -80,6 +80,33 @@ def build_internal_role_launch_plan(
     return plan
 
 
+def build_transfer_child_launch_plan(
+    *,
+    executable: Path,
+    arguments: tuple[str, ...],
+    working_directory: Path,
+    working_directory_root: Path,
+    owner_role: ProcessRole = ProcessRole.ENGINE_HOST,
+    environment: dict[str, str] | None = None,
+) -> ProcessLaunchPlan:
+    plan = ProcessLaunchPlan(
+        role=owner_role,
+        executable=executable,
+        arguments=arguments,
+        working_directory=working_directory,
+        environment=_minimal_environment(environment or {}),
+        shell=False,
+        requires_elevation=False,
+        window_mode=WindowMode.HIDDEN,
+        dll_search_policy=DllSearchPolicy.SAFE_SYSTEM32_AND_APPLICATION_DIR,
+        handle_inheritance_policy=HandleInheritancePolicy.EXPLICIT_EMPTY_HANDLE_LIST,
+        inherited_handles=(),
+        containment_policy=ChildContainmentPolicy.TRANSFER_CHILD_REQUIRES_SUSPENDED_JOB_OBJECT,
+    )
+    validate_process_launch_plan(plan, repo_root=working_directory_root)
+    return plan
+
+
 def validate_process_launch_plan(plan: ProcessLaunchPlan, *, repo_root: Path) -> None:
     if not plan.executable.is_absolute():
         raise ProcessLaunchViolation("PROCESS_EXECUTABLE_MUST_BE_ABSOLUTE")
@@ -99,7 +126,20 @@ def validate_process_launch_plan(plan: ProcessLaunchPlan, *, repo_root: Path) ->
     if any(name.upper() == "PATH" for name, _value in plan.environment):
         raise ProcessLaunchViolation("PATH_ENVIRONMENT_FORBIDDEN_IN_MINIMAL_ROLE_PLAN")
     if plan.containment_policy is ChildContainmentPolicy.TRANSFER_CHILD_REQUIRES_SUSPENDED_JOB_OBJECT:
-        raise ProcessLaunchViolation("TRANSFER_CHILD_SUPERVISION_NOT_IMPLEMENTED_IN_0B")
+        _validate_transfer_child_launch_plan(plan)
+
+
+def _validate_transfer_child_launch_plan(plan: ProcessLaunchPlan) -> None:
+    if plan.window_mode is not WindowMode.HIDDEN:
+        raise ProcessLaunchViolation("TRANSFER_CHILD_WINDOW_MUST_BE_HIDDEN")
+    if plan.dll_search_policy is not DllSearchPolicy.SAFE_SYSTEM32_AND_APPLICATION_DIR:
+        raise ProcessLaunchViolation("TRANSFER_CHILD_DLL_SEARCH_POLICY_UNSAFE")
+    if plan.handle_inheritance_policy is not HandleInheritancePolicy.EXPLICIT_EMPTY_HANDLE_LIST:
+        raise ProcessLaunchViolation("TRANSFER_CHILD_HANDLE_INHERITANCE_FORBIDDEN")
+    if plan.inherited_handles:
+        raise ProcessLaunchViolation("HANDLE_LIST_MUST_BE_EMPTY")
+    if any(name.upper() == "COMSPEC" for name, _value in plan.environment):
+        raise ProcessLaunchViolation("COMSPEC_ENVIRONMENT_FORBIDDEN_IN_TRANSFER_PLAN")
 
 
 def _minimal_environment(environment: dict[str, str]) -> tuple[tuple[str, str], ...]:
