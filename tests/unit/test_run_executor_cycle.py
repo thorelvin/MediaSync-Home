@@ -428,6 +428,86 @@ def test_executor_cycle_completes_catalog_recorded_target_and_releases_lease() -
     assert loaded.targets[0].state is RunTargetState.SUCCEEDED
 
 
+def test_executor_cycle_marks_user_decision_target_recovery_required_and_releases_lease() -> None:
+    plan = _sealed_plan()
+    runs = _InMemoryRunStore(_run(state=RunState.EXECUTING, plan=plan, target_state=RunTargetState.EXECUTING))
+    lease = _FakeLiveLease()
+    registry = HeldRunTargetLeaseRegistry()
+    registry.retain_run_target_lease(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+        lease=lease,
+    )
+
+    outcome = execute_one_run_executor_cycle(
+        runs=runs,
+        leases=_FakeLeaseAuthority(lease),
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=_FakeRecoveryOperationStore(
+            (
+                _operation(
+                    phase=RecoveryOperationPhase.USER_DECISION_REQUIRED,
+                    last_error_code="LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE",
+                ),
+            )
+        ),
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        process_instance_id="host-a",
+    )
+
+    loaded = runs.load_started_run("run-a")
+    assert outcome.action is RunExecutorCycleAction.TARGET_RECOVERY_REQUIRED
+    assert outcome.advanced is True
+    assert outcome.validation_codes == ()
+    assert registry.retained_count == 0
+    assert lease.released is True
+    assert loaded is not None
+    assert loaded.state is RunState.RECOVERY_REQUIRED
+    assert loaded.targets[0].state is RunTargetState.RECOVERY_REQUIRED
+
+
+def test_executor_cycle_marks_restored_old_target_cancelled_and_releases_lease() -> None:
+    plan = _sealed_plan()
+    runs = _InMemoryRunStore(_run(state=RunState.EXECUTING, plan=plan, target_state=RunTargetState.EXECUTING))
+    lease = _FakeLiveLease()
+    registry = HeldRunTargetLeaseRegistry()
+    registry.retain_run_target_lease(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+        lease=lease,
+    )
+
+    outcome = execute_one_run_executor_cycle(
+        runs=runs,
+        leases=_FakeLeaseAuthority(lease),
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=_FakeRecoveryOperationStore(
+            (
+                _operation(
+                    phase=RecoveryOperationPhase.CANCELLED,
+                    last_error_code="RUN_TARGET_PRESERVED_OLD_TARGET_RESTORED",
+                ),
+            )
+        ),
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        process_instance_id="host-a",
+    )
+
+    loaded = runs.load_started_run("run-a")
+    assert outcome.action is RunExecutorCycleAction.TARGET_CANCELLED
+    assert outcome.advanced is True
+    assert outcome.validation_codes == ()
+    assert registry.retained_count == 0
+    assert lease.released is True
+    assert loaded is not None
+    assert loaded.state is RunState.CANCELLED
+    assert loaded.targets[0].state is RunTargetState.CANCELLED
+
+
 class _InMemoryRunStore(RunExecutorQueueStore):
     def __init__(self, run: StartedRun | None) -> None:
         self.run = run
@@ -635,6 +715,63 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         if completed is None:
             return None
         self.run = replace(run, state=RunState.COMPLETED, targets=tuple(updated_targets))
+        return self.run
+
+    def record_run_target_recovery_required(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        last_error_code: str,
+    ) -> StartedRun | None:
+        return self._record_terminal_target(
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target_state=RunTargetState.RECOVERY_REQUIRED,
+            run_state=RunState.RECOVERY_REQUIRED,
+        )
+
+    def record_run_target_cancelled(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        last_error_code: str,
+    ) -> StartedRun | None:
+        return self._record_terminal_target(
+            run_id=run_id,
+            run_target_id=run_target_id,
+            target_state=RunTargetState.CANCELLED,
+            run_state=RunState.CANCELLED,
+        )
+
+    def _record_terminal_target(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        target_state: RunTargetState,
+        run_state: RunState,
+    ) -> StartedRun | None:
+        run = self.load_started_run(run_id)
+        if run is None or run.state is not RunState.EXECUTING:
+            return None
+        updated_targets: list[StartedRunTarget] = []
+        completed: StartedRunTarget | None = None
+        for target in run.targets:
+            if target.run_target_id == run_target_id and target.state is RunTargetState.EXECUTING:
+                completed = replace(target, state=target_state)
+                updated_targets.append(completed)
+            else:
+                updated_targets.append(target)
+        if completed is None:
+            return None
+        self.run = replace(
+            run,
+            state=run_state,
+            targets=tuple(updated_targets),
+            error_count=run.error_count + 1,
+        )
         return self.run
 
 
@@ -1028,15 +1165,20 @@ def _target(*, state: RunTargetState) -> StartedRunTarget:
     )
 
 
-def _operation() -> RecoveryOperation:
+def _operation(
+    *,
+    phase: RecoveryOperationPhase = RecoveryOperationPhase.CATALOG_RECORDED,
+    last_error_code: str | None = None,
+) -> RecoveryOperation:
     return replace(
         _planned_operation(),
-        phase=RecoveryOperationPhase.CATALOG_RECORDED,
+        phase=phase,
         staging_object_id="op-a",
         intent_segment_id="segment-a",
         intent_ordinal=0,
         catalog_handoff_id="final-file:run-a:op-a",
         expected_final_fingerprint_json='{"byte_count":128,"content_hash":"' + ("a" * 64) + '"}',
+        last_error_code=last_error_code,
     )
 
 

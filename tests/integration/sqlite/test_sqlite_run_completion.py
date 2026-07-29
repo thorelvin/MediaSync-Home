@@ -34,11 +34,15 @@ from mediasync_home.application.plans import (
 from mediasync_home.application.recovery_intents import durable_recovery_intent_segment
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationMetadata,
     RecoveryOperationPhase,
     RecoveryTargetPreconditionKind,
     planned_recovery_operation,
 )
-from mediasync_home.application.run_completion import complete_run_target_after_catalog_handoffs
+from mediasync_home.application.run_completion import (
+    complete_run_target_after_catalog_handoffs,
+    complete_run_target_after_terminal_recovery,
+)
 from mediasync_home.application.run_executor import (
     HeldRunTargetLeaseRegistry,
     execute_one_run_target_execution_start_step,
@@ -156,6 +160,78 @@ def test_sqlite_run_completion_bridge_completes_catalog_recorded_target(
         assert outcome.target.completed_bytes == 128
         assert loaded is not None
         assert loaded.state is RunState.COMPLETED
+    finally:
+        catalog_connection.close()
+        recovery_connection.close()
+
+
+def test_sqlite_run_completion_bridge_marks_terminal_user_decision_required(
+    tmp_path: Path,
+) -> None:
+    catalog_connection = _prepared_catalog_connection(tmp_path)
+    recovery_connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _insert_plan_parent_rows(catalog_connection)
+        _insert_receipt(catalog_connection)
+        plans = SqlitePlanStore(catalog_connection)
+        runs = SqliteRunStore(catalog_connection)
+        plan = _sealed_plan()
+        lease = FixedLiveLease()
+        registry = HeldRunTargetLeaseRegistry()
+        plans.save_sealed_plan(plan)
+        start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        preflight = execute_one_run_target_preflight_step(
+            runs=runs,
+            leases=FixedLeaseAuthority(lease),
+        )
+        assert preflight.lease is lease
+        registry.retain_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            lease=lease,
+        )
+        execute_one_run_target_execution_start_step(runs=runs, lease_registry=registry)
+
+        _register_resource_lease(recovery_connection)
+        recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
+        operation = recovery_operations.record_planned_operation(
+            _operation(),
+            process_instance_id="host-a",
+        )
+        terminal = recovery_operations.record_operation_phase_transition(
+            run_id=operation.run_id,
+            operation_id=operation.operation_id,
+            expected_phase=operation.phase,
+            next_phase=RecoveryOperationPhase.USER_DECISION_REQUIRED,
+            process_instance_id="host-a",
+            operation_metadata=RecoveryOperationMetadata(
+                last_error_code="LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE",
+            ),
+        )
+        assert terminal is not None
+
+        outcome = complete_run_target_after_terminal_recovery(
+            permit=lease.issue_mutation_permit(),
+            runs=runs,
+            recovery_operations=recovery_operations,
+        )
+
+        loaded = runs.load_started_run("run-a")
+        assert outcome.completed is True
+        assert outcome.validation_codes == ()
+        assert outcome.target is not None
+        assert outcome.target.state is RunTargetState.RECOVERY_REQUIRED
+        assert loaded is not None
+        assert loaded.state is RunState.RECOVERY_REQUIRED
     finally:
         catalog_connection.close()
         recovery_connection.close()

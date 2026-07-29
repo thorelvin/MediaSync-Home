@@ -704,6 +704,86 @@ def test_sqlite_run_store_records_successful_run_target_completion(
         assert _run_target_finished_utc(connection, "run-a-target-0000") is not None
 
 
+def test_sqlite_run_store_records_recovery_required_run_target_completion(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        runs = _start_sqlite_executing_run(connection)
+
+        outcome = runs.record_run_target_recovery_required(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            last_error_code="LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE",
+        )
+
+        loaded = runs.load_started_run("run-a")
+        result_row = connection.execute(
+            "SELECT error_count, result_json FROM run_targets WHERE id = 'run-a-target-0000'"
+        ).fetchone()
+        run_finished = connection.execute(
+            "SELECT finished_utc, error_count FROM runs WHERE id = 'run-a'"
+        ).fetchone()
+        assert outcome is not None
+        assert outcome.state is RunState.RECOVERY_REQUIRED
+        assert outcome.targets[0].state is RunTargetState.RECOVERY_REQUIRED
+        assert loaded is not None
+        assert loaded.state is RunState.RECOVERY_REQUIRED
+        assert loaded.error_count == 1
+        assert result_row == (
+            1,
+            '{"last_error_code":"LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE",'
+            '"terminal_recovery_phase":"USER_DECISION_REQUIRED"}',
+        )
+        assert run_finished is not None
+        assert run_finished[0] is not None
+        assert run_finished[1] == 1
+        assert _run_target_finished_utc(connection, "run-a-target-0000") is not None
+
+
+def test_sqlite_run_store_records_cancelled_run_target_completion(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        runs = _start_sqlite_executing_run(connection)
+
+        outcome = runs.record_run_target_cancelled(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            last_error_code="RUN_TARGET_PRESERVED_OLD_TARGET_RESTORED",
+        )
+
+        loaded = runs.load_started_run("run-a")
+        result_row = connection.execute(
+            "SELECT error_count, result_json FROM run_targets WHERE id = 'run-a-target-0000'"
+        ).fetchone()
+        run_finished = connection.execute(
+            "SELECT finished_utc, error_count FROM runs WHERE id = 'run-a'"
+        ).fetchone()
+        assert outcome is not None
+        assert outcome.state is RunState.CANCELLED
+        assert outcome.targets[0].state is RunTargetState.CANCELLED
+        assert loaded is not None
+        assert loaded.state is RunState.CANCELLED
+        assert loaded.error_count == 1
+        assert result_row == (
+            1,
+            '{"last_error_code":"RUN_TARGET_PRESERVED_OLD_TARGET_RESTORED",'
+            '"terminal_recovery_phase":"CANCELLED"}',
+        )
+        assert run_finished is not None
+        assert run_finished[0] is not None
+        assert run_finished[1] == 1
+        assert _run_target_finished_utc(connection, "run-a-target-0000") is not None
+
+
 def test_sqlite_run_store_lists_recent_run_activity_summaries(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
@@ -1084,6 +1164,35 @@ def _insert_receipt_with_id(
         ),
     )
     connection.commit()
+
+
+def _start_sqlite_executing_run(connection: sqlite3.Connection) -> SqliteRunStore:
+    plans = SqlitePlanStore(connection)
+    runs = SqliteRunStore(connection)
+    plan = _sealed_plan()
+    lease = FixedLiveLease()
+    leases = FixedLeaseAuthority(lease)
+    registry = HeldRunTargetLeaseRegistry()
+    plans.save_sealed_plan(plan)
+    start_run_from_sealed_plan(
+        command=parse_start_run_command(
+            request_id="request-a",
+            idempotency_key="idempotency-a",
+            payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+        ),
+        plans=plans,
+        runs=runs,
+        id_factory=FixedRunIdFactory(),
+    )
+    preflight = execute_one_run_target_preflight_step(runs=runs, leases=leases)
+    assert preflight.lease is lease
+    registry.retain_run_target_lease(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+        lease=lease,
+    )
+    execute_one_run_target_execution_start_step(runs=runs, lease_registry=registry)
+    return runs
 
 
 def _sealed_plan() -> SealedPlan:

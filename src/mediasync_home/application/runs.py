@@ -277,6 +277,22 @@ class RunStore(Protocol):
         completed_bytes: int,
     ) -> StartedRun | None: ...
 
+    def record_run_target_recovery_required(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        last_error_code: str,
+    ) -> StartedRun | None: ...
+
+    def record_run_target_cancelled(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        last_error_code: str,
+    ) -> StartedRun | None: ...
+
 
 class RunIdFactory(Protocol):
     def new_run_ids(self) -> RunIds: ...
@@ -798,6 +814,202 @@ def complete_run_target_success(
         validation_codes=(),
         next_action="Target succeeded; run is complete." if updated_run.state is RunState.COMPLETED else "Target succeeded; remaining targets continue.",
     )
+
+
+def complete_run_target_recovery_required(
+    *,
+    run_id: str,
+    run_target_id: str,
+    runs: RunStore,
+    last_error_code: str,
+) -> RunTargetCompletionOutcome:
+    normalized_error_code = _normalized_error_code(last_error_code)
+    if normalized_error_code is None:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=None,
+            target=None,
+            validation_codes=("RUN_TARGET_TERMINAL_RECOVERY_REQUIRES_ERROR_CODE",),
+            next_action="Retry terminal recovery completion with a non-empty error code.",
+        )
+    readiness = _terminal_completion_readiness(
+        run_id=run_id,
+        run_target_id=run_target_id,
+        runs=runs,
+        target_state_validation_code="RUN_TARGET_NOT_EXECUTING",
+        target_state_next_action="Only executing targets can be marked recovery-required.",
+    )
+    if readiness.completed is False:
+        return readiness
+
+    updated_run = runs.record_run_target_recovery_required(
+        run_id=run_id,
+        run_target_id=run_target_id,
+        last_error_code=normalized_error_code,
+    )
+    if updated_run is None:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=None,
+            target=None,
+            validation_codes=("RUN_TARGET_TERMINAL_RECOVERY_CONFLICT",),
+            next_action="Reload run state before retrying terminal recovery completion.",
+        )
+    updated_target = _target_by_id(updated_run, run_target_id)
+    if updated_target is None:
+        raise RunStartViolation("RUN_TARGET_TERMINAL_RECOVERY_LOAD_FAILED")
+    return RunTargetCompletionOutcome(
+        completed=True,
+        run_completed=updated_run.state is RunState.RECOVERY_REQUIRED,
+        run_id=run_id,
+        run_target_id=run_target_id,
+        run=updated_run,
+        target=updated_target,
+        validation_codes=(),
+        next_action="Target requires user recovery before the run can continue.",
+    )
+
+
+def complete_run_target_cancelled(
+    *,
+    run_id: str,
+    run_target_id: str,
+    runs: RunStore,
+    last_error_code: str,
+) -> RunTargetCompletionOutcome:
+    normalized_error_code = _normalized_error_code(last_error_code)
+    if normalized_error_code is None:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=None,
+            target=None,
+            validation_codes=("RUN_TARGET_TERMINAL_RECOVERY_REQUIRES_ERROR_CODE",),
+            next_action="Retry terminal recovery completion with a non-empty cancellation code.",
+        )
+    readiness = _terminal_completion_readiness(
+        run_id=run_id,
+        run_target_id=run_target_id,
+        runs=runs,
+        target_state_validation_code="RUN_TARGET_NOT_EXECUTING",
+        target_state_next_action="Only executing targets can be marked cancelled.",
+    )
+    if readiness.completed is False:
+        return readiness
+
+    updated_run = runs.record_run_target_cancelled(
+        run_id=run_id,
+        run_target_id=run_target_id,
+        last_error_code=normalized_error_code,
+    )
+    if updated_run is None:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=None,
+            target=None,
+            validation_codes=("RUN_TARGET_TERMINAL_RECOVERY_CONFLICT",),
+            next_action="Reload run state before retrying terminal recovery completion.",
+        )
+    updated_target = _target_by_id(updated_run, run_target_id)
+    if updated_target is None:
+        raise RunStartViolation("RUN_TARGET_TERMINAL_RECOVERY_LOAD_FAILED")
+    return RunTargetCompletionOutcome(
+        completed=True,
+        run_completed=updated_run.state in {RunState.CANCELLED, RunState.PARTIAL_FAILURE},
+        run_id=run_id,
+        run_target_id=run_target_id,
+        run=updated_run,
+        target=updated_target,
+        validation_codes=(),
+        next_action="Target cancelled after terminal recovery; remaining targets continue."
+        if updated_run.state is RunState.EXECUTING
+        else "Target cancelled after terminal recovery; run is terminal.",
+    )
+
+
+def _terminal_completion_readiness(
+    *,
+    run_id: str,
+    run_target_id: str,
+    runs: RunStore,
+    target_state_validation_code: str,
+    target_state_next_action: str,
+) -> RunTargetCompletionOutcome:
+    run = runs.load_started_run(run_id)
+    if run is None:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=None,
+            target=None,
+            validation_codes=("RUN_NOT_FOUND",),
+            next_action="Create and execute a run before completing target work.",
+        )
+    if run.state is not RunState.EXECUTING:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=run,
+            target=None,
+            validation_codes=("RUN_NOT_EXECUTING",),
+            next_action="Only executing runs can complete target work.",
+        )
+
+    target = _target_by_id(run, run_target_id)
+    if target is None:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=run,
+            target=None,
+            validation_codes=("RUN_TARGET_NOT_FOUND",),
+            next_action="Reload run targets before completing target work.",
+        )
+    if target.state is not RunTargetState.EXECUTING:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=run,
+            target=target,
+            validation_codes=(target_state_validation_code,),
+            next_action=target_state_next_action,
+        )
+    return RunTargetCompletionOutcome(
+        completed=True,
+        run_completed=False,
+        run_id=run_id,
+        run_target_id=run_target_id,
+        run=run,
+        target=target,
+        validation_codes=(),
+        next_action="Target can be completed from terminal recovery state.",
+    )
+
+
+def _normalized_error_code(value: str) -> str | None:
+    normalized = value.strip()
+    if not normalized:
+        return None
+    return normalized
 
 
 def _readiness_for_plan(*, command: StartRunCommand, plan: SealedPlan) -> RunStartReadiness:

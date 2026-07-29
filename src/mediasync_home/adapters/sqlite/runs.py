@@ -702,6 +702,197 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore):
                 raise
             raise SqliteRunStoreError("RUN_TARGET_COMPLETION_FAILED") from exc
 
+    def record_run_target_recovery_required(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        last_error_code: str,
+    ) -> StartedRun | None:
+        normalized_error_code = last_error_code.strip()
+        if not normalized_error_code:
+            return None
+        result_json = _json_dump(
+            {
+                "last_error_code": normalized_error_code,
+                "terminal_recovery_phase": "USER_DECISION_REQUIRED",
+            }
+        )
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            target_cursor = self._connection.execute(
+                """
+                UPDATE run_targets
+                SET
+                    state = 'RECOVERY_REQUIRED',
+                    error_count = error_count + 1,
+                    result_json = ?,
+                    finished_utc = COALESCE(finished_utc, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    row_version = row_version + 1
+                WHERE run_id = ?
+                    AND id = ?
+                    AND state = 'EXECUTING'
+                    AND EXISTS (
+                        SELECT 1
+                        FROM runs
+                        WHERE runs.id = run_targets.run_id
+                            AND runs.state = 'EXECUTING'
+                    )
+                """,
+                (result_json, run_id, run_target_id),
+            )
+            if target_cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            run_cursor = self._connection.execute(
+                """
+                UPDATE runs
+                SET
+                    state = 'RECOVERY_REQUIRED',
+                    error_count = error_count + 1,
+                    finished_utc = COALESCE(finished_utc, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    row_version = row_version + 1
+                WHERE id = ?
+                    AND state = 'EXECUTING'
+                """,
+                (run_id,),
+            )
+            if run_cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            run = self.load_started_run(run_id)
+            if run is None:
+                raise SqliteRunStoreError("RUN_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return run
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_TARGET_TERMINAL_RECOVERY_FAILED") from exc
+
+    def record_run_target_cancelled(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        last_error_code: str,
+    ) -> StartedRun | None:
+        normalized_error_code = last_error_code.strip()
+        if not normalized_error_code:
+            return None
+        result_json = _json_dump(
+            {
+                "last_error_code": normalized_error_code,
+                "terminal_recovery_phase": "CANCELLED",
+            }
+        )
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            target_cursor = self._connection.execute(
+                """
+                UPDATE run_targets
+                SET
+                    state = 'CANCELLED',
+                    error_count = error_count + 1,
+                    result_json = ?,
+                    finished_utc = COALESCE(finished_utc, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    row_version = row_version + 1
+                WHERE run_id = ?
+                    AND id = ?
+                    AND state = 'EXECUTING'
+                    AND EXISTS (
+                        SELECT 1
+                        FROM runs
+                        WHERE runs.id = run_targets.run_id
+                            AND runs.state = 'EXECUTING'
+                    )
+                """,
+                (result_json, run_id, run_target_id),
+            )
+            if target_cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            run_cursor = self._connection.execute(
+                """
+                UPDATE runs
+                SET
+                    state = CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM run_targets
+                            WHERE run_targets.run_id = runs.id
+                                AND run_targets.state IN (
+                                    'PENDING',
+                                    'ACQUIRING_LEASE',
+                                    'REVALIDATING',
+                                    'EXECUTING',
+                                    'PAUSED',
+                                    'WAITING_FOR_ENDPOINT',
+                                    'NEEDS_REVIEW'
+                                )
+                        )
+                        THEN state
+                        WHEN NOT EXISTS (
+                            SELECT 1
+                            FROM run_targets
+                            WHERE run_targets.run_id = runs.id
+                                AND run_targets.state != 'CANCELLED'
+                        )
+                        THEN 'CANCELLED'
+                        ELSE 'PARTIAL_FAILURE'
+                    END,
+                    finished_utc = CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM run_targets
+                            WHERE run_targets.run_id = runs.id
+                                AND run_targets.state IN (
+                                    'PENDING',
+                                    'ACQUIRING_LEASE',
+                                    'REVALIDATING',
+                                    'EXECUTING',
+                                    'PAUSED',
+                                    'WAITING_FOR_ENDPOINT',
+                                    'NEEDS_REVIEW'
+                                )
+                        )
+                        THEN finished_utc
+                        ELSE COALESCE(finished_utc, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                    END,
+                    error_count = error_count + 1,
+                    row_version = row_version + 1
+                WHERE id = ?
+                    AND state = 'EXECUTING'
+                """,
+                (run_id,),
+            )
+            if run_cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            run = self.load_started_run(run_id)
+            if run is None:
+                raise SqliteRunStoreError("RUN_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return run
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_TARGET_TERMINAL_RECOVERY_FAILED") from exc
+
     def _load_one(
         self,
         query: str,

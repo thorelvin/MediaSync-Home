@@ -14,7 +14,10 @@ from mediasync_home.application.recovery_operations import (
     RecoveryOperationStore,
 )
 from mediasync_home.application.run_catalog_handoffs import record_next_run_target_catalog_handoff
-from mediasync_home.application.run_completion import complete_run_target_after_catalog_handoffs
+from mediasync_home.application.run_completion import (
+    complete_run_target_after_catalog_handoffs,
+    complete_run_target_after_terminal_recovery,
+)
 from mediasync_home.application.run_commit_intent_refresh import (
     refresh_next_run_target_commit_intent_for_fresh_lease,
 )
@@ -59,6 +62,8 @@ class RunExecutorCycleAction(str, Enum):
     FINAL_COMMITTED = "FINAL_COMMITTED"
     CATALOG_HANDOFF_RECORDED = "CATALOG_HANDOFF_RECORDED"
     TARGET_COMPLETED = "TARGET_COMPLETED"
+    TARGET_CANCELLED = "TARGET_CANCELLED"
+    TARGET_RECOVERY_REQUIRED = "TARGET_RECOVERY_REQUIRED"
     EXECUTING_LEASE_REACQUIRED = "EXECUTING_LEASE_REACQUIRED"
     OPERATION_LEASE_REBOUND = "OPERATION_LEASE_REBOUND"
     COMMIT_INTENT_REFRESHED = "COMMIT_INTENT_REFRESHED"
@@ -304,6 +309,34 @@ def _advance_retained_target(
 ) -> RunExecutorCycleOutcome:
     permit = retained.permit
     target = retained.target
+
+    if _terminal_recovery_ready(
+        recovery_operations=recovery_operations,
+        permit=permit,
+        target=target,
+    ):
+        completion_outcome = complete_run_target_after_terminal_recovery(
+            permit=permit,
+            runs=runs,
+            recovery_operations=recovery_operations,
+        )
+        if completion_outcome.completed:
+            lease_registry.release_retained_run_target_lease(
+                run_id=permit.run_id,
+                run_target_id=permit.run_target_id,
+            )
+            return _advanced(
+                action=_terminal_completion_action(completion_outcome.target),
+                run_id=completion_outcome.run_id,
+                run_target_id=completion_outcome.run_target_id,
+                next_action=completion_outcome.next_action,
+            )
+        return _blocked(
+            run_id=completion_outcome.run_id,
+            run_target_id=completion_outcome.run_target_id,
+            validation_codes=completion_outcome.validation_codes,
+            next_action=completion_outcome.next_action,
+        )
 
     if _has_phase(
         recovery_operations=recovery_operations,
@@ -696,6 +729,48 @@ def _has_any_operation(
     return False
 
 
+def _terminal_recovery_ready(
+    *,
+    recovery_operations: RunExecutorCycleRecoveryOperationStore,
+    permit: MutationPermit,
+    target: StartedRunTarget,
+) -> bool:
+    if _has_phase(
+        recovery_operations=recovery_operations,
+        permit=permit,
+        phase=RecoveryOperationPhase.USER_DECISION_REQUIRED,
+        limit=target.planned_operations + 1,
+    ):
+        return True
+    cancelled_count = _phase_count(
+        recovery_operations=recovery_operations,
+        permit=permit,
+        phase=RecoveryOperationPhase.CANCELLED,
+        limit=target.planned_operations + 1,
+    )
+    if cancelled_count == 0:
+        return False
+    return (
+        cancelled_count
+        + _catalog_recorded_count(
+            recovery_operations=recovery_operations,
+            permit=permit,
+            target=target,
+        )
+        >= target.planned_operations
+    )
+
+
+def _terminal_completion_action(
+    target: StartedRunTarget | None,
+) -> RunExecutorCycleAction:
+    if target is not None and target.state is RunTargetState.RECOVERY_REQUIRED:
+        return RunExecutorCycleAction.TARGET_RECOVERY_REQUIRED
+    if target is not None and target.state is RunTargetState.CANCELLED:
+        return RunExecutorCycleAction.TARGET_CANCELLED
+    return RunExecutorCycleAction.TARGET_COMPLETED
+
+
 def _has_early_operation(
     *,
     recovery_operations: RunExecutorCycleRecoveryOperationStore,
@@ -711,6 +786,22 @@ def _has_early_operation(
         ):
             return True
     return False
+
+
+def _phase_count(
+    *,
+    recovery_operations: RunExecutorCycleRecoveryOperationStore,
+    permit: MutationPermit,
+    phase: RecoveryOperationPhase,
+    limit: int,
+) -> int:
+    operations = recovery_operations.list_operations_for_run_target_in_phase(
+        run_id=permit.run_id,
+        run_target_id=permit.run_target_id,
+        phase=phase,
+        limit=max(limit, 1),
+    )
+    return len(operations)
 
 
 def _catalog_recorded_count(
