@@ -212,6 +212,36 @@ def test_commit_next_run_target_verified_artifact_reports_adapter_failure() -> N
     assert operation.phase is RecoveryOperationPhase.FAILED_RETRYABLE
 
 
+def test_commit_next_run_target_verified_artifact_records_user_decision_for_ambiguous_preserved_drift() -> None:
+    recovery_operations = _FakeRecoveryOperationStore((_old_target_preserved_operation(),))
+    final_commit = _FakeFinalCommitPort(
+        failure=_FinalCommitFailure(
+            "LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE",
+            "Refresh analysis because the final target changed after old-target preservation.",
+        )
+    )
+
+    outcome = commit_next_run_target_verified_artifact(
+        permit=_permit(),
+        recovery_operations=recovery_operations,
+        final_commit_port=final_commit,
+        process_instance_id="host-a",
+    )
+
+    operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    assert outcome.committed is False
+    assert outcome.validation_codes == ("LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE",)
+    assert operation.phase is RecoveryOperationPhase.USER_DECISION_REQUIRED
+    assert operation.last_error_code == "LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE"
+    assert recovery_operations.transitions == (
+        (
+            "op-a",
+            RecoveryOperationPhase.OLD_TARGET_PRESERVED,
+            RecoveryOperationPhase.USER_DECISION_REQUIRED,
+        ),
+    )
+
+
 class _FakeRecoveryOperationStore(RunTargetFinalCommitOperationStore):
     def __init__(self, operations: tuple[RecoveryOperation, ...]) -> None:
         self.operations = {
@@ -261,6 +291,9 @@ class _FakeRecoveryOperationStore(RunTargetFinalCommitOperationStore):
                 final_durability_state=operation_metadata.final_durability_state
                 if operation_metadata.final_durability_state is not None
                 else updated.final_durability_state,
+                last_error_code=operation_metadata.last_error_code
+                if operation_metadata.last_error_code is not None
+                else updated.last_error_code,
             )
         self.operations[(run_id, operation_id)] = updated
         self.transitions = (*self.transitions, (operation_id, expected_phase, next_phase))

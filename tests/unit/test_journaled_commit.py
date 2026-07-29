@@ -259,6 +259,45 @@ def test_journaled_final_commit_records_retryable_failure_when_adapter_fails() -
     }
 
 
+def test_journaled_final_commit_records_user_decision_for_ambiguous_preserved_drift() -> None:
+    actions: list[str] = []
+    operation = replace(
+        _operation(),
+        target_precondition_kind=RecoveryTargetPreconditionKind.MATCH_FINGERPRINT,
+        expected_target_fingerprint_json='{"byte_count":5,"content_hash":"' + ("b" * 64) + '"}',
+    )
+    store = _FakeRecoveryOperationStore(operation, actions=actions)
+    preservation = _FakeOldTargetPreservationPort(actions=actions)
+    inner = _FakeFinalCommitPort(
+        actions=actions,
+        failure=_CommitFailure("LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE"),
+    )
+    runner = JournaledFinalCommitPort(
+        recovery_operations=store,
+        final_commit_port=inner,
+        old_target_preservation_port=preservation,
+        process_instance_id="host-a",
+    )
+
+    with pytest.raises(_CommitFailure):
+        runner.commit_verified_artifact(_permit(), _artifact())
+
+    assert actions == [
+        "transition:COMMIT_PRECONDITIONS_REVALIDATED",
+        "preserve",
+        "transition:OLD_TARGET_PRESERVED",
+        "commit",
+        "transition:USER_DECISION_REQUIRED",
+    ]
+    assert store.transitions[-1].next_phase is RecoveryOperationPhase.USER_DECISION_REQUIRED
+    assert store.transitions[-1].payload == {
+        "error_code": "LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE",
+        "error_type": "_CommitFailure",
+    }
+    assert store.operation is not None
+    assert store.operation.last_error_code == "LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE"
+
+
 class _Transition:
     def __init__(
         self,
@@ -344,6 +383,9 @@ class _FakeRecoveryOperationStore(RecoveryOperationStore):
                 final_durability_state=operation_metadata.final_durability_state
                 if operation_metadata.final_durability_state is not None
                 else updated.final_durability_state,
+                last_error_code=operation_metadata.last_error_code
+                if operation_metadata.last_error_code is not None
+                else updated.last_error_code,
             )
         self.operation = updated
         return self.operation
@@ -405,7 +447,9 @@ class _FakeOldTargetPreservationPort:
 
 
 class _CommitFailure(RuntimeError):
-    validation_code = "LAB_FINAL_COMMIT_STAGING_HASH_MISMATCH"
+    def __init__(self, validation_code: str = "LAB_FINAL_COMMIT_STAGING_HASH_MISMATCH") -> None:
+        super().__init__(validation_code)
+        self.validation_code = validation_code
 
 
 class _FakeHandle:

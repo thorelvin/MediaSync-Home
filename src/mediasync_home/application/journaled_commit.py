@@ -9,6 +9,9 @@ from mediasync_home.application.ports import (
     OldTargetPreservationReceipt,
     VerifiedStagingArtifact,
 )
+from mediasync_home.application.recovery_failure_classification import (
+    recovery_phase_for_commit_failure,
+)
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
     RecoveryOperationMetadata,
@@ -176,16 +179,21 @@ class JournaledFinalCommitPort(FinalCommitPort):
         return updated
 
     def _record_failure(self, *, operation: RecoveryOperation, exc: Exception) -> None:
+        error_code = _error_code(exc)
         updated = self._recovery_operations.record_operation_phase_transition(
             run_id=operation.run_id,
             operation_id=operation.operation_id,
             expected_phase=operation.phase,
-            next_phase=RecoveryOperationPhase.FAILED_RETRYABLE,
+            next_phase=recovery_phase_for_commit_failure(
+                operation=operation,
+                validation_code=error_code,
+            ),
             process_instance_id=self._process_instance_id,
             payload={
-                "error_code": _error_code(exc),
+                "error_code": error_code,
                 "error_type": type(exc).__name__,
             },
+            operation_metadata=RecoveryOperationMetadata(last_error_code=error_code),
         )
         if updated is None:
             raise JournaledFinalCommitError(
