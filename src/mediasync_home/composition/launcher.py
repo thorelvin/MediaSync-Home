@@ -158,6 +158,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum backed-off interval for persistent host executor maintenance",
     )
     parser.add_argument(
+        "--run-executor-staging-backend",
+        choices=("local-file", "robocopy"),
+        default="local-file",
+        help="staging transfer backend for the persistent Engine Host",
+    )
+    parser.add_argument(
         "--task-scheduler-reconciliation-interval-ms",
         type=_positive_int,
         default=300_000,
@@ -194,6 +200,7 @@ def build_local_preview_host_run(
     task_scheduler_executable_path: Path | None = None,
     run_executor_cycle_interval_ms: int | None = None,
     run_executor_cycle_max_interval_ms: int | None = None,
+    run_executor_staging_backend: str = "local-file",
     task_scheduler_reconciliation_interval_ms: int | None = None,
     task_scheduler_reconciliation_max_interval_ms: int | None = None,
 ) -> LocalPreviewHostRun:
@@ -234,6 +241,13 @@ def build_local_preview_host_run(
                         str(run_executor_cycle_max_interval_ms),
                     )
                 )
+        if run_executor_staging_backend != "local-file":
+            engine_args.extend(
+                (
+                    "--run-executor-staging-backend",
+                    run_executor_staging_backend,
+                )
+            )
     if reconcile_task_scheduler_resources:
         if state_root is None:
             raise ValueError("TASK_SCHEDULER_RECONCILIATION_REQUIRES_STATE_ROOT")
@@ -528,6 +542,7 @@ def _run_local_preview_host_from_args(
         task_scheduler_executable_path=args.task_scheduler_executable_path,
         run_executor_cycle_interval_ms=args.run_executor_cycle_interval_ms,
         run_executor_cycle_max_interval_ms=args.run_executor_cycle_max_interval_ms,
+        run_executor_staging_backend=args.run_executor_staging_backend,
         task_scheduler_reconciliation_interval_ms=(
             args.task_scheduler_reconciliation_interval_ms
             if args.reconcile_task_scheduler_resources

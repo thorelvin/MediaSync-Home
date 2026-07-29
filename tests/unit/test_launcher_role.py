@@ -64,6 +64,7 @@ def test_local_preview_host_run_can_enable_task_scheduler_startup_pump(
         reconcile_task_scheduler_resources=True,
         task_scheduler_executable_path=task_executable,
         run_executor_cycle_interval_ms=250,
+        run_executor_staging_backend="robocopy",
         task_scheduler_reconciliation_interval_ms=300,
         task_scheduler_reconciliation_max_interval_ms=1200,
     )
@@ -77,6 +78,8 @@ def test_local_preview_host_run_can_enable_task_scheduler_startup_pump(
         "--run-executor-cycle-after-request",
         "--run-executor-cycle-interval-ms",
         "250",
+        "--run-executor-staging-backend",
+        "robocopy",
         "--reconcile-task-scheduler-resources",
         "--task-scheduler-executable-path",
         str(task_executable.resolve()),

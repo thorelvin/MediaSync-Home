@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from mediasync_home.adapters.robocopy import RobocopyStagingTransferAdapter
 from mediasync_home.adapters.sqlite.connection_policy import SqliteStore
 from mediasync_home.adapters.sqlite.migrations import current_schema_version
 from mediasync_home.application.external_resources import ExternalResourceState, ExternalResourceType
@@ -114,6 +115,8 @@ def test_engine_host_parser_accepts_explicit_long_running_pipe_mode() -> None:
             "50",
             "--run-executor-cycle-max-interval-ms",
             "400",
+            "--run-executor-staging-backend",
+            "robocopy",
         ]
     )
 
@@ -124,6 +127,7 @@ def test_engine_host_parser_accepts_explicit_long_running_pipe_mode() -> None:
     assert args.run_executor_cycle_max_steps == 7
     assert args.run_executor_cycle_interval_ms == 50
     assert args.run_executor_cycle_max_interval_ms == 400
+    assert args.run_executor_staging_backend == "robocopy"
 
 
 def test_executor_maintenance_loop_runs_interval_cycle_and_closes_runtime() -> None:
@@ -752,6 +756,23 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert row == (
             "REJECTED",
             IpcReason.MUTATING_COMMANDS_DISABLED.value,
+        )
+    finally:
+        runtime.close()
+
+
+def test_engine_host_runtime_can_select_robocopy_staging_backend(tmp_path: Path) -> None:
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=startup_status(ProcessRole.ENGINE_HOST),
+        state_root=tmp_path / "state",
+        run_executor_staging_backend="robocopy",
+    )
+
+    try:
+        assert isinstance(
+            runtime.run_executor_staging_transfer_port,
+            RobocopyStagingTransferAdapter,
         )
     finally:
         runtime.close()

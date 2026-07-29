@@ -12,11 +12,13 @@ from typing import Protocol
 from uuid import uuid4
 
 from mediasync_home.adapters.endpoint_leases import (
+    EndpointRootResolver,
     LocalResolvingEndpointLeaseAuthority,
     MutationPermitIssueError,
 )
 from mediasync_home.adapters.final_commit import LocalResolvingFinalCommitAdapter
 from mediasync_home.adapters.final_verification import LocalFinalArtifactVerificationAdapter
+from mediasync_home.adapters.robocopy import RobocopyStagingTransferAdapter
 from mediasync_home.adapters.runtime_policy import current_process_runtime_policy
 from mediasync_home.adapters.staging import LocalFileStagingTransferAdapter
 from mediasync_home.adapters.task_scheduler import (
@@ -691,6 +693,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=60_000,
         help="maximum backed-off interval for idle executor maintenance",
     )
+    parser.add_argument(
+        "--run-executor-staging-backend",
+        choices=("local-file", "robocopy"),
+        default="local-file",
+        help="staging transfer backend used by the run executor",
+    )
     parser.add_argument("--state-root", type=Path, help="optional local preview state root")
     parser.add_argument("--host-mutex-name", help="optional local Engine Host singleton mutex")
     parser.add_argument(
@@ -845,6 +853,7 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
             inactive_external_resource_owner_instance_ids=(
                 _inactive_external_resource_owner_instance_ids(args)
             ),
+            run_executor_staging_backend=args.run_executor_staging_backend,
         )
         if args.reconcile_task_scheduler_resources:
             try:
@@ -875,6 +884,7 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                         args.run_executor_cycle_max_interval_ms
                     ),
                     "run_executor_cycle_max_steps": args.run_executor_cycle_max_steps,
+                    "run_executor_staging_backend": args.run_executor_staging_backend,
                     "serve_forever": args.serve_forever,
                     "serve_requests": args.serve_requests,
                     "task_scheduler_reconciliation_interval_ms": (
@@ -990,6 +1000,7 @@ def build_engine_host_runtime(
     reconciler_instance_id: str = "local-dev",
     inactive_outbox_owner_instance_ids: tuple[str, ...] = (),
     inactive_external_resource_owner_instance_ids: tuple[str, ...] = (),
+    run_executor_staging_backend: str = "local-file",
 ) -> EngineHostRuntime:
     if state_root is None:
         return EngineHostRuntime(
@@ -1034,7 +1045,8 @@ def build_engine_host_runtime(
             root_resolver=endpoint_root_resolver,
             resource_lease_store=resource_leases,
         )
-        run_executor_staging_transfer_port = LocalFileStagingTransferAdapter(
+        run_executor_staging_transfer_port = build_run_executor_staging_transfer_port(
+            backend=run_executor_staging_backend,
             root_resolver=endpoint_root_resolver,
         )
         run_executor_lease_registry = HeldRunTargetLeaseRegistry()
@@ -1113,6 +1125,18 @@ def build_engine_host_runtime(
         catalog_connection=catalog_connection,
         recovery_connection=recovery_connection,
     )
+
+
+def build_run_executor_staging_transfer_port(
+    *,
+    backend: str,
+    root_resolver: EndpointRootResolver,
+) -> RunTargetStagingPort:
+    if backend == "local-file":
+        return LocalFileStagingTransferAdapter(root_resolver=root_resolver)
+    if backend == "robocopy":
+        return RobocopyStagingTransferAdapter(root_resolver=root_resolver)
+    raise RuntimeError("RUN_EXECUTOR_STAGING_BACKEND_UNSUPPORTED")
 
 
 def build_task_scheduler_registry(backend: str) -> TaskSchedulerRegistryPort:
@@ -1231,6 +1255,7 @@ def _build_executor_maintenance_loop(
             installation_id=args.installation_id,
             state_root=args.state_root,
             reconciler_instance_id=f"{args.installation_id}-executor-maintenance",
+            run_executor_staging_backend=args.run_executor_staging_backend,
         )
 
     return ExecutorMaintenanceLoop(
@@ -1261,6 +1286,7 @@ def _build_task_scheduler_maintenance_loop(
             installation_id=args.installation_id,
             state_root=args.state_root,
             reconciler_instance_id=f"{args.installation_id}-task-scheduler-maintenance",
+            run_executor_staging_backend=args.run_executor_staging_backend,
         )
 
     return TaskSchedulerMaintenanceLoop(
