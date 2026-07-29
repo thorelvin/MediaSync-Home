@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import json
 import os
+import re
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +47,10 @@ DEFAULT_ROBOCOPY_SWITCHES = (
 )
 ROBOCOPY_SUCCESS_MAX_EXIT_CODE = 7
 ROBOCOPY_CONTAINMENT_TIMEOUT_EXIT_CODE = 98
+ROBOCOPY_MANIFEST_SCHEMA_VERSION = 1
+ROBOCOPY_CONSERVATIVE_COMMAND_LINE_LIMIT = 24_000
+ROBOCOPY_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class RobocopyConfigurationError(RuntimeError):
@@ -69,6 +75,30 @@ class RobocopyTransferProfile:
 
 
 @dataclass(frozen=True)
+class RobocopyBatchManifestEntry:
+    operation_id: str
+    staging_object_id: str
+    source_file_name: str
+    source_relative_path: str
+    final_relative_path: str
+    payload_path: Path
+    expected_byte_count: int
+    expected_content_hash: str
+
+
+@dataclass(frozen=True)
+class RobocopyBatchManifest:
+    batch_id: str
+    source_parent: Path
+    staging_inbox: Path
+    log_path: Path
+    entries: tuple[RobocopyBatchManifestEntry, ...]
+    profile_hash: str
+    canonical_json: str
+    manifest_hash: str
+
+
+@dataclass(frozen=True)
 class RobocopyCommandPlan:
     executable: ResolvedSystemExecutable
     launch_plan: ProcessLaunchPlan
@@ -79,6 +109,9 @@ class RobocopyCommandPlan:
     staging_inbox: Path
     file_name: str
     log_path: Path
+    file_names: tuple[str, ...] = ()
+    batch_manifest_hash: str | None = None
+    manifest_path: Path | None = None
 
 
 class SystemExecutableResolver(Protocol):
@@ -181,11 +214,27 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            command_plan = build_robocopy_single_file_command_plan(
-                executable=self._executable_resolver.resolve("Robocopy.exe"),
-                source_file=source_path,
+            manifest = build_robocopy_batch_manifest(
+                batch_id=_safe_staging_name(operation),
+                source_parent=source_path.parent,
                 staging_inbox=inbox,
                 log_path=log_path,
+                entries=(
+                    build_robocopy_manifest_entry(
+                        operation=operation,
+                        source_file=source_path,
+                        payload_path=payload_path,
+                        expected_fingerprint=expected,
+                    ),
+                ),
+                profile=self._profile,
+            )
+            manifest_path = self._robocopy_manifest_path(operation)
+            write_robocopy_batch_manifest(manifest=manifest, manifest_path=manifest_path)
+            command_plan = build_robocopy_directory_manifest_command_plan(
+                executable=self._executable_resolver.resolve("Robocopy.exe"),
+                manifest=manifest,
+                manifest_path=manifest_path,
                 working_directory=self._robocopy_work_root_for(operation),
                 working_directory_root=self._robocopy_work_root_for(operation),
                 profile=self._profile,
@@ -196,12 +245,7 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
                     "ROBOCOPY_TRANSFER_FAILED",
                     "Retry the transfer after reviewing the Robocopy batch log.",
                 )
-            _publish_robocopy_inbox_file(
-                inbox=inbox,
-                source_file_name=source_path.name,
-                payload_path=payload_path,
-                expected_fingerprint=expected,
-            )
+            publish_robocopy_batch_inbox(manifest)
         except (RobocopyConfigurationError, WindowsCommandLineError) as exc:
             raise LocalFileStagingError(
                 "ROBOCOPY_TRANSFER_CONFIGURATION_INVALID",
@@ -248,6 +292,175 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
             / f"{_safe_staging_name(operation)}.robocopy.log"
         )
 
+    def _robocopy_manifest_path(self, operation: RecoveryOperation) -> Path:
+        return (
+            self._robocopy_work_root_for(operation)
+            / "manifests"
+            / f"{_safe_staging_name(operation)}.manifest.json"
+        )
+
+
+def build_robocopy_manifest_entry(
+    *,
+    operation: RecoveryOperation,
+    source_file: Path,
+    payload_path: Path,
+    expected_fingerprint: dict[str, object],
+) -> RobocopyBatchManifestEntry:
+    byte_count = expected_fingerprint.get("byte_count")
+    content_hash = expected_fingerprint.get("content_hash")
+    if not isinstance(byte_count, int) or byte_count < 0:
+        raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_FINGERPRINT_INVALID")
+    if not isinstance(content_hash, str) or HASH_PATTERN.fullmatch(content_hash) is None:
+        raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_FINGERPRINT_INVALID")
+    staging_object_id = operation.staging_object_id
+    if staging_object_id is None or ROBOCOPY_ID_PATTERN.fullmatch(staging_object_id) is None:
+        raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_REQUIRES_SAFE_STAGING_OBJECT_ID")
+    _validate_manifest_id(operation.operation_id, "ROBOCOPY_MANIFEST_REQUIRES_SAFE_OPERATION_ID")
+    return RobocopyBatchManifestEntry(
+        operation_id=operation.operation_id,
+        staging_object_id=staging_object_id,
+        source_file_name=_robocopy_source_file_name(source_file),
+        source_relative_path=operation.source_relative_path or "",
+        final_relative_path=operation.final_relative_path,
+        payload_path=payload_path,
+        expected_byte_count=byte_count,
+        expected_content_hash=content_hash,
+    )
+
+
+def build_robocopy_batch_manifest(
+    *,
+    batch_id: str,
+    source_parent: Path,
+    staging_inbox: Path,
+    log_path: Path,
+    entries: tuple[RobocopyBatchManifestEntry, ...],
+    profile: RobocopyTransferProfile = RobocopyTransferProfile(),
+) -> RobocopyBatchManifest:
+    _validate_manifest_id(batch_id, "ROBOCOPY_MANIFEST_REQUIRES_SAFE_BATCH_ID")
+    if not source_parent.is_absolute():
+        raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_SOURCE_PARENT_MUST_BE_ABSOLUTE")
+    if not staging_inbox.is_absolute():
+        raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_INBOX_MUST_BE_ABSOLUTE")
+    if not log_path.is_absolute():
+        raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_LOG_PATH_MUST_BE_ABSOLUTE")
+    if not entries:
+        raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_REQUIRES_ENTRIES")
+    validate_robocopy_switches(profile.switches)
+    _validate_manifest_entries(entries)
+    profile_hash = _sha256_text(
+        _canonical_json(
+            {
+                "success_max_exit_code": profile.success_max_exit_code,
+                "switches": list(profile.switches),
+                "timeout_seconds": profile.timeout_seconds,
+            }
+        )
+    )
+    payload = _robocopy_manifest_payload(
+        batch_id=batch_id,
+        source_parent=source_parent,
+        staging_inbox=staging_inbox,
+        log_path=log_path,
+        entries=entries,
+        profile=profile,
+        profile_hash=profile_hash,
+        manifest_hash=None,
+    )
+    manifest_hash = _manifest_hash(payload)
+    canonical_json = _canonical_json({**payload, "canonical_manifest_hash": manifest_hash})
+    return RobocopyBatchManifest(
+        batch_id=batch_id,
+        source_parent=source_parent,
+        staging_inbox=staging_inbox,
+        log_path=log_path,
+        entries=entries,
+        profile_hash=profile_hash,
+        canonical_json=canonical_json,
+        manifest_hash=manifest_hash,
+    )
+
+
+def write_robocopy_batch_manifest(
+    *,
+    manifest: RobocopyBatchManifest,
+    manifest_path: Path,
+) -> None:
+    if not manifest_path.is_absolute():
+        raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_PATH_MUST_BE_ABSOLUTE")
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with manifest_path.open("x", encoding="utf-8") as handle:
+            handle.write(manifest.canonical_json)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileExistsError as exc:
+        try:
+            existing = manifest_path.read_text(encoding="utf-8")
+        except OSError as read_exc:
+            raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_EXISTING_UNREADABLE") from read_exc
+        if existing == manifest.canonical_json:
+            return
+        raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_CONFLICT") from exc
+
+
+def build_robocopy_directory_manifest_command_plan(
+    *,
+    executable: ResolvedSystemExecutable,
+    manifest: RobocopyBatchManifest,
+    manifest_path: Path,
+    working_directory: Path,
+    working_directory_root: Path,
+    profile: RobocopyTransferProfile = RobocopyTransferProfile(),
+) -> RobocopyCommandPlan:
+    if not working_directory.is_absolute():
+        raise RobocopyConfigurationError("ROBOCOPY_WORKING_DIRECTORY_MUST_BE_ABSOLUTE")
+    if not manifest_path.is_absolute():
+        raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_PATH_MUST_BE_ABSOLUTE")
+    validate_robocopy_switches(profile.switches)
+    file_names = tuple(entry.source_file_name for entry in manifest.entries)
+    argv = (
+        str(executable.executable_path),
+        str(manifest.source_parent),
+        str(manifest.staging_inbox),
+        *file_names,
+        *profile.switches,
+        f"/UNILOG:{manifest.log_path}",
+    )
+    validate_robocopy_switches(argv[3:])
+    command_line = build_windows_command_line(argv)
+    if len(command_line) > ROBOCOPY_CONSERVATIVE_COMMAND_LINE_LIMIT:
+        raise RobocopyConfigurationError("ROBOCOPY_COMMAND_LINE_TOO_LONG")
+    parsed_argv = validate_robocopy_command_line(
+        command_line,
+        executable_path=executable.executable_path,
+    )
+    if parsed_argv != argv:
+        raise RobocopyConfigurationError("ROBOCOPY_COMMAND_LINE_ROUND_TRIP_MISMATCH")
+
+    launch_plan = build_transfer_child_launch_plan(
+        executable=executable.executable_path,
+        arguments=argv[1:],
+        working_directory=working_directory,
+        working_directory_root=working_directory_root,
+        environment=_robocopy_environment(executable.system_directory),
+    )
+    return RobocopyCommandPlan(
+        executable=executable,
+        launch_plan=launch_plan,
+        argv=argv,
+        parsed_argv=parsed_argv,
+        command_line_sha256=_sha256_text(command_line),
+        source_parent=manifest.source_parent,
+        staging_inbox=manifest.staging_inbox,
+        file_name=file_names[0],
+        log_path=manifest.log_path,
+        file_names=file_names,
+        batch_manifest_hash=manifest.manifest_hash,
+        manifest_path=manifest_path,
+    )
+
 
 def build_robocopy_single_file_command_plan(
     *,
@@ -268,17 +481,20 @@ def build_robocopy_single_file_command_plan(
     if not working_directory.is_absolute():
         raise RobocopyConfigurationError("ROBOCOPY_WORKING_DIRECTORY_MUST_BE_ABSOLUTE")
     validate_robocopy_switches(profile.switches)
+    source_file_name = _validate_source_file_name(source_file.name)
 
     argv = (
         str(executable.executable_path),
         str(source_file.parent),
         str(staging_inbox),
-        source_file.name,
+        source_file_name,
         *profile.switches,
         f"/UNILOG:{log_path}",
     )
     validate_robocopy_switches(argv[3:])
     command_line = build_windows_command_line(argv)
+    if len(command_line) > ROBOCOPY_CONSERVATIVE_COMMAND_LINE_LIMIT:
+        raise RobocopyConfigurationError("ROBOCOPY_COMMAND_LINE_TOO_LONG")
     parsed_argv = validate_robocopy_command_line(command_line, executable_path=executable.executable_path)
     if parsed_argv != argv:
         raise RobocopyConfigurationError("ROBOCOPY_COMMAND_LINE_ROUND_TRIP_MISMATCH")
@@ -298,8 +514,9 @@ def build_robocopy_single_file_command_plan(
         command_line_sha256=_sha256_text(command_line),
         source_parent=source_file.parent,
         staging_inbox=staging_inbox,
-        file_name=source_file.name,
+        file_name=source_file_name,
         log_path=log_path,
+        file_names=(source_file_name,),
     )
 
 
@@ -474,47 +691,181 @@ class _WindowsSystemExecutableApi:
             return None
 
 
-def _publish_robocopy_inbox_file(
-    *,
-    inbox: Path,
-    source_file_name: str,
-    payload_path: Path,
-    expected_fingerprint: dict[str, object],
-) -> None:
-    copied_path = inbox / source_file_name
-    if not copied_path.is_file() or copied_path.is_symlink():
-        raise LocalFileStagingError(
-            "ROBOCOPY_STAGING_INBOX_FILE_MISSING",
-            "Retry the transfer because Robocopy did not produce the expected staging file.",
-        )
-    extras = [path.name for path in inbox.iterdir() if path.name != source_file_name]
-    if extras:
-        raise LocalFileStagingError(
-            "ROBOCOPY_STAGING_INBOX_CONTAINS_EXTRA_ENTRIES",
-            "Quarantine the unexpected staging inbox and retry the transfer.",
-        )
-    observed = _fingerprint_file(copied_path)
-    if observed != expected_fingerprint:
-        raise LocalFileStagingError(
-            "ROBOCOPY_STAGING_SOURCE_CHANGED",
-            "Refresh analysis because the source file changed during transfer.",
-        )
-    payload_path.parent.mkdir(parents=True, exist_ok=True)
+def publish_robocopy_batch_inbox(manifest: RobocopyBatchManifest) -> None:
+    expected_by_name = {entry.source_file_name: entry for entry in manifest.entries}
+    observed_by_name: dict[str, dict[str, object]] = {}
     try:
-        os.link(copied_path, payload_path)
-    except FileExistsError as exc:
-        raise LocalFileStagingError(
-            "ROBOCOPY_STAGING_PAYLOAD_RACE",
-            "Reload staging state before retrying the transfer.",
-        ) from exc
+        actual_entries = tuple(manifest.staging_inbox.iterdir())
     except OSError as exc:
         raise LocalFileStagingError(
-            "ROBOCOPY_STAGING_PAYLOAD_PUBLISH_FAILED",
-            "Retry staging on a filesystem that supports controlled object publication.",
+            "STAGING_MANIFEST_MISMATCH",
+            "Retry the transfer because the Robocopy staging inbox cannot be enumerated.",
         ) from exc
-    copied_path.unlink()
+    actual_names = {path.name for path in actual_entries}
+    if actual_names != set(expected_by_name):
+        raise LocalFileStagingError(
+            "STAGING_MANIFEST_MISMATCH",
+            "Quarantine the staging inbox because it does not match the batch manifest.",
+        )
+    for path in actual_entries:
+        entry = expected_by_name[path.name]
+        if not path.is_file() or path.is_symlink():
+            raise LocalFileStagingError(
+                "STAGING_MANIFEST_MISMATCH",
+                "Quarantine the staging inbox because it contains a non-file or reparse entry.",
+            )
+        observed = _fingerprint_file(path)
+        expected = {
+            "byte_count": entry.expected_byte_count,
+            "content_hash": entry.expected_content_hash,
+        }
+        if observed != expected:
+            raise LocalFileStagingError(
+                "ROBOCOPY_STAGING_SOURCE_CHANGED",
+                "Refresh analysis because source bytes changed during transfer.",
+            )
+        observed_by_name[path.name] = observed
+
+    for source_file_name, entry in expected_by_name.items():
+        copied_path = manifest.staging_inbox / source_file_name
+        payload_path = entry.payload_path
+        payload_path.parent.mkdir(parents=True, exist_ok=True)
+        if payload_path.exists():
+            if _fingerprint_file(payload_path) == observed_by_name[source_file_name]:
+                copied_path.unlink()
+                continue
+            raise LocalFileStagingError(
+                "ROBOCOPY_STAGING_PAYLOAD_RACE",
+                "Reload staging state before retrying the transfer.",
+            )
+        try:
+            os.link(copied_path, payload_path)
+        except FileExistsError as exc:
+            raise LocalFileStagingError(
+                "ROBOCOPY_STAGING_PAYLOAD_RACE",
+                "Reload staging state before retrying the transfer.",
+            ) from exc
+        except OSError as exc:
+            raise LocalFileStagingError(
+                "ROBOCOPY_STAGING_PAYLOAD_PUBLISH_FAILED",
+                "Retry staging on a filesystem that supports controlled object publication.",
+            ) from exc
+        copied_path.unlink()
     with suppress(OSError):
-        inbox.rmdir()
+        manifest.staging_inbox.rmdir()
+
+
+def _robocopy_manifest_payload(
+    *,
+    batch_id: str,
+    source_parent: Path,
+    staging_inbox: Path,
+    log_path: Path,
+    entries: tuple[RobocopyBatchManifestEntry, ...],
+    profile: RobocopyTransferProfile,
+    profile_hash: str,
+    manifest_hash: str | None,
+) -> dict[str, object]:
+    return {
+        "batch_id": batch_id,
+        "batch_kind": "DIRECTORY_MANIFEST",
+        "canonical_manifest_hash": manifest_hash,
+        "entry_count": len(entries),
+        "entries": [
+            {
+                "expected_fingerprint": {
+                    "byte_count": entry.expected_byte_count,
+                    "content_hash": entry.expected_content_hash,
+                },
+                "final_relative_path": entry.final_relative_path,
+                "operation_id": entry.operation_id,
+                "payload_name": entry.payload_path.name,
+                "source_file_name": entry.source_file_name,
+                "source_relative_path": entry.source_relative_path,
+                "staging_object_id": entry.staging_object_id,
+            }
+            for entry in entries
+        ],
+        "log_name": log_path.name,
+        "profile": {
+            "success_max_exit_code": profile.success_max_exit_code,
+            "switches": list(profile.switches),
+            "timeout_seconds": profile.timeout_seconds,
+        },
+        "profile_hash": profile_hash,
+        "schema_version": ROBOCOPY_MANIFEST_SCHEMA_VERSION,
+        "source_parent_name": source_parent.name,
+        "staging_inbox_name": staging_inbox.name,
+    }
+
+
+def _manifest_hash(payload: dict[str, object]) -> str:
+    manifest_payload = dict(payload)
+    manifest_payload["canonical_manifest_hash"] = None
+    return _sha256_text(_canonical_json(manifest_payload))
+
+
+def _canonical_json(payload: dict[str, object]) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _validate_manifest_entries(entries: tuple[RobocopyBatchManifestEntry, ...]) -> None:
+    operation_ids: set[str] = set()
+    staging_object_ids: set[str] = set()
+    file_names: set[str] = set()
+    payload_names: set[str] = set()
+    for entry in entries:
+        _validate_manifest_id(entry.operation_id, "ROBOCOPY_MANIFEST_REQUIRES_SAFE_OPERATION_ID")
+        _validate_manifest_id(
+            entry.staging_object_id,
+            "ROBOCOPY_MANIFEST_REQUIRES_SAFE_STAGING_OBJECT_ID",
+        )
+        _validate_source_file_name(entry.source_file_name)
+        if entry.expected_byte_count < 0 or HASH_PATTERN.fullmatch(entry.expected_content_hash) is None:
+            raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_FINGERPRINT_INVALID")
+        if not entry.payload_path.name.endswith(".payload"):
+            raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_PAYLOAD_NAME_INVALID")
+        _add_unique(operation_ids, entry.operation_id, "ROBOCOPY_MANIFEST_DUPLICATE_OPERATION")
+        _add_unique(
+            staging_object_ids,
+            entry.staging_object_id,
+            "ROBOCOPY_MANIFEST_DUPLICATE_STAGING_OBJECT",
+        )
+        _add_unique(file_names, entry.source_file_name, "ROBOCOPY_MANIFEST_DUPLICATE_SOURCE_NAME")
+        _add_unique(payload_names, entry.payload_path.name, "ROBOCOPY_MANIFEST_DUPLICATE_PAYLOAD")
+
+
+def _add_unique(values: set[str], value: str, validation_code: str) -> None:
+    if value in values:
+        raise RobocopyConfigurationError(validation_code)
+    values.add(value)
+
+
+def _validate_manifest_id(value: str, validation_code: str) -> None:
+    if ROBOCOPY_ID_PATTERN.fullmatch(value) is None:
+        raise RobocopyConfigurationError(validation_code)
+
+
+def _robocopy_source_file_name(source_file: Path) -> str:
+    return _validate_source_file_name(source_file.name)
+
+
+def _validate_source_file_name(value: str) -> str:
+    if (
+        not value
+        or Path(value).name != value
+        or any(separator in value for separator in ("/", "\\"))
+        or value.startswith("-")
+        or value.startswith("/")
+        or value.startswith("\\")
+        or "*" in value
+        or "?" in value
+        or "\x00" in value
+    ):
+        raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_SOURCE_NAME_UNSAFE")
+    if _robocopy_switch_name(value) is not None:
+        raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_SOURCE_NAME_UNSAFE")
+    return value
 
 
 def _robocopy_environment(system_directory: Path) -> dict[str, str]:

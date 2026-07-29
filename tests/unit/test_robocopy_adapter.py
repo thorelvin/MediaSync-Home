@@ -9,13 +9,19 @@ from pathlib import Path
 import pytest
 
 from mediasync_home.adapters.robocopy import (
+    ROBOCOPY_CONSERVATIVE_COMMAND_LINE_LIMIT,
+    RobocopyBatchManifestEntry,
     RobocopyConfigurationError,
     RobocopyStagingTransferAdapter,
     RobocopyTransferProfile,
     ResolvedSystemExecutable,
     WindowsSystemExecutableResolver,
+    build_robocopy_batch_manifest,
+    build_robocopy_directory_manifest_command_plan,
+    publish_robocopy_batch_inbox,
     build_robocopy_single_file_command_plan,
     validate_robocopy_command_line,
+    write_robocopy_batch_manifest,
 )
 from mediasync_home.adapters.staging import LocalFileStagingError
 from mediasync_home.adapters.windows_argv import build_windows_command_line
@@ -105,6 +111,241 @@ def test_robocopy_profile_rejects_forbidden_typed_switch(tmp_path: Path) -> None
         )
 
 
+def test_robocopy_batch_manifest_is_canonical_and_immutable(tmp_path: Path) -> None:
+    source_parent = tmp_path / "source" / "Pictures"
+    inbox = tmp_path / "work" / "inbox" / "batch-a"
+    log_path = tmp_path / "work" / "logs" / "batch-a.log"
+    manifest_path = tmp_path / "work" / "manifests" / "batch-a.manifest.json"
+    entry = _manifest_entry(
+        operation_id="op-a",
+        staging_object_id="object-a",
+        source_file_name="A.jpg",
+        payload_path=tmp_path / "staging" / "object-a.payload",
+        payload=b"image",
+    )
+
+    manifest = build_robocopy_batch_manifest(
+        batch_id="batch-a",
+        source_parent=source_parent,
+        staging_inbox=inbox,
+        log_path=log_path,
+        entries=(entry,),
+        profile=RobocopyTransferProfile(switches=("/E", "/R:1", "/W:1")),
+    )
+    write_robocopy_batch_manifest(manifest=manifest, manifest_path=manifest_path)
+    write_robocopy_batch_manifest(manifest=manifest, manifest_path=manifest_path)
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["canonical_manifest_hash"] == manifest.manifest_hash
+    assert payload["entries"][0]["operation_id"] == "op-a"
+    assert payload["entries"][0]["payload_name"] == "object-a.payload"
+    assert payload["profile_hash"] == manifest.profile_hash
+    manifest_path.write_text("changed", encoding="utf-8")
+    with pytest.raises(RobocopyConfigurationError, match="ROBOCOPY_MANIFEST_CONFLICT"):
+        write_robocopy_batch_manifest(manifest=manifest, manifest_path=manifest_path)
+
+
+def test_robocopy_batch_manifest_rejects_duplicate_or_unsafe_file_names(
+    tmp_path: Path,
+) -> None:
+    source_parent = tmp_path / "source"
+    inbox = tmp_path / "inbox"
+    log_path = tmp_path / "log.txt"
+    entry = _manifest_entry(
+        operation_id="op-a",
+        staging_object_id="object-a",
+        source_file_name="A.jpg",
+        payload_path=tmp_path / "object-a.payload",
+        payload=b"image",
+    )
+
+    with pytest.raises(RobocopyConfigurationError, match="ROBOCOPY_MANIFEST_DUPLICATE_SOURCE_NAME"):
+        build_robocopy_batch_manifest(
+            batch_id="batch-a",
+            source_parent=source_parent,
+            staging_inbox=inbox,
+            log_path=log_path,
+            entries=(
+                entry,
+                _manifest_entry(
+                    operation_id="op-b",
+                    staging_object_id="object-b",
+                    source_file_name="A.jpg",
+                    payload_path=tmp_path / "object-b.payload",
+                    payload=b"other",
+                ),
+            ),
+        )
+    with pytest.raises(RobocopyConfigurationError, match="ROBOCOPY_MANIFEST_SOURCE_NAME_UNSAFE"):
+        build_robocopy_batch_manifest(
+            batch_id="batch-a",
+            source_parent=source_parent,
+            staging_inbox=inbox,
+            log_path=log_path,
+            entries=(
+                _manifest_entry(
+                    operation_id="op-c",
+                    staging_object_id="object-c",
+                    source_file_name="*.jpg",
+                    payload_path=tmp_path / "object-c.payload",
+                    payload=b"other",
+                ),
+            ),
+        )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
+def test_robocopy_directory_manifest_command_plan_uses_exact_file_list(
+    tmp_path: Path,
+) -> None:
+    source_parent = tmp_path / "source root" / "Pictures"
+    inbox = tmp_path / "work" / "inbox" / "batch-a"
+    log_path = tmp_path / "work" / "logs" / "batch-a.log"
+    manifest_path = tmp_path / "work" / "manifests" / "batch-a.manifest.json"
+    manifest = build_robocopy_batch_manifest(
+        batch_id="batch-a",
+        source_parent=source_parent,
+        staging_inbox=inbox,
+        log_path=log_path,
+        entries=(
+            _manifest_entry(
+                operation_id="op-a",
+                staging_object_id="object-a",
+                source_file_name="A file.jpg",
+                payload_path=tmp_path / "staging" / "object-a.payload",
+                payload=b"a",
+            ),
+            _manifest_entry(
+                operation_id="op-b",
+                staging_object_id="object-b",
+                source_file_name="B.jpg",
+                payload_path=tmp_path / "staging" / "object-b.payload",
+                payload=b"b",
+            ),
+        ),
+        profile=RobocopyTransferProfile(switches=("/E", "/R:1", "/W:1")),
+    )
+
+    plan = build_robocopy_directory_manifest_command_plan(
+        executable=_resolved_executable(tmp_path),
+        manifest=manifest,
+        manifest_path=manifest_path,
+        working_directory=tmp_path / "work",
+        working_directory_root=tmp_path / "work",
+        profile=RobocopyTransferProfile(switches=("/E", "/R:1", "/W:1")),
+    )
+
+    assert plan.file_names == ("A file.jpg", "B.jpg")
+    assert plan.batch_manifest_hash == manifest.manifest_hash
+    assert plan.manifest_path == manifest_path
+    assert plan.launch_plan.arguments[:4] == (
+        str(source_parent),
+        str(inbox),
+        "A file.jpg",
+        "B.jpg",
+    )
+    assert len(build_windows_command_line(plan.argv)) <= ROBOCOPY_CONSERVATIVE_COMMAND_LINE_LIMIT
+
+
+def test_robocopy_directory_manifest_command_plan_rejects_conservative_limit(
+    tmp_path: Path,
+) -> None:
+    source_parent = tmp_path / "source"
+    entries = tuple(
+        _manifest_entry(
+            operation_id=f"op-{index}",
+            staging_object_id=f"object-{index}",
+            source_file_name=f"{index:04d}-{'x' * 40}.jpg",
+            payload_path=tmp_path / "staging" / f"object-{index}.payload",
+            payload=b"x",
+        )
+        for index in range(520)
+    )
+    manifest = build_robocopy_batch_manifest(
+        batch_id="batch-a",
+        source_parent=source_parent,
+        staging_inbox=tmp_path / "inbox",
+        log_path=tmp_path / "log.txt",
+        entries=entries,
+    )
+
+    with pytest.raises(RobocopyConfigurationError, match="ROBOCOPY_COMMAND_LINE_TOO_LONG"):
+        build_robocopy_directory_manifest_command_plan(
+            executable=_resolved_executable(tmp_path),
+            manifest=manifest,
+            manifest_path=tmp_path / "manifest.json",
+            working_directory=tmp_path / "work",
+            working_directory_root=tmp_path / "work",
+        )
+
+
+def test_publish_robocopy_batch_inbox_requires_exact_manifest_contents(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "A.jpg").write_bytes(b"image")
+    (inbox / "extra.jpg").write_bytes(b"extra")
+    manifest = build_robocopy_batch_manifest(
+        batch_id="batch-a",
+        source_parent=tmp_path / "source",
+        staging_inbox=inbox,
+        log_path=tmp_path / "log.txt",
+        entries=(
+            _manifest_entry(
+                operation_id="op-a",
+                staging_object_id="object-a",
+                source_file_name="A.jpg",
+                payload_path=tmp_path / "staging" / "object-a.payload",
+                payload=b"image",
+            ),
+        ),
+    )
+
+    with pytest.raises(LocalFileStagingError) as exc_info:
+        publish_robocopy_batch_inbox(manifest)
+
+    assert exc_info.value.validation_code == "STAGING_MANIFEST_MISMATCH"
+    assert not (tmp_path / "staging" / "object-a.payload").exists()
+
+
+def test_publish_robocopy_batch_inbox_publishes_all_manifest_entries(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "A.jpg").write_bytes(b"image-a")
+    (inbox / "B.jpg").write_bytes(b"image-b")
+    manifest = build_robocopy_batch_manifest(
+        batch_id="batch-a",
+        source_parent=tmp_path / "source",
+        staging_inbox=inbox,
+        log_path=tmp_path / "log.txt",
+        entries=(
+            _manifest_entry(
+                operation_id="op-a",
+                staging_object_id="object-a",
+                source_file_name="A.jpg",
+                payload_path=tmp_path / "staging" / "object-a.payload",
+                payload=b"image-a",
+            ),
+            _manifest_entry(
+                operation_id="op-b",
+                staging_object_id="object-b",
+                source_file_name="B.jpg",
+                payload_path=tmp_path / "staging" / "object-b.payload",
+                payload=b"image-b",
+            ),
+        ),
+    )
+
+    publish_robocopy_batch_inbox(manifest)
+
+    assert (tmp_path / "staging" / "object-a.payload").read_bytes() == b"image-a"
+    assert (tmp_path / "staging" / "object-b.payload").read_bytes() == b"image-b"
+    assert not inbox.exists()
+
+
 def test_windows_system_executable_resolver_rejects_escaped_final_path(tmp_path: Path) -> None:
     system_dir = tmp_path / "System32"
     system_dir.mkdir()
@@ -168,6 +409,12 @@ def test_robocopy_staging_transfer_starts_contained_process_and_publishes_payloa
 
     assert evidence.transfer_state == "ROBOCOPY_EXIT_1_TRANSFERRED_TO_STAGING"
     assert (staging_root / "object-a.payload").read_bytes() == b"image-bytes"
+    manifest_payload = json.loads(
+        (work_root / "manifests" / "object-a.manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest_payload["batch_kind"] == "DIRECTORY_MANIFEST"
+    assert manifest_payload["entries"][0]["operation_id"] == "op-a"
+    assert manifest_payload["entries"][0]["payload_name"] == "object-a.payload"
     assert supervisor.launch_plans[0].containment_policy is (
         ChildContainmentPolicy.TRANSFER_CHILD_REQUIRES_SUSPENDED_JOB_OBJECT
     )
@@ -407,6 +654,26 @@ def _resolved_executable(tmp_path: Path) -> ResolvedSystemExecutable:
         final_path=str(executable),
         sha256=hashlib.sha256(b"robocopy").hexdigest(),
         file_version="1.2.3.4",
+    )
+
+
+def _manifest_entry(
+    *,
+    operation_id: str,
+    staging_object_id: str,
+    source_file_name: str,
+    payload_path: Path,
+    payload: bytes,
+) -> RobocopyBatchManifestEntry:
+    return RobocopyBatchManifestEntry(
+        operation_id=operation_id,
+        staging_object_id=staging_object_id,
+        source_file_name=source_file_name,
+        source_relative_path=f"Pictures/{source_file_name}",
+        final_relative_path=f"Pictures/{source_file_name}",
+        payload_path=payload_path,
+        expected_byte_count=len(payload),
+        expected_content_hash=hashlib.sha256(payload).hexdigest(),
     )
 
 
