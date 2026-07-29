@@ -28,6 +28,9 @@ from mediasync_home.application.recovery_operations import (
 )
 from mediasync_home.application.run_final_commits import commit_next_run_target_verified_artifact
 from mediasync_home.application.run_intent_segments import publish_run_target_recovery_intent_segment
+from mediasync_home.application.run_preserved_old_target_restore import (
+    restore_next_run_target_preserved_old_target,
+)
 
 
 def test_sqlite_run_final_commit_bridge_applies_lab_commit(
@@ -244,6 +247,84 @@ def test_sqlite_run_final_commit_bridge_completes_preserved_replacement_when_fin
             "FINAL_DURABLE",
             "FINAL_VERIFIED",
         ]
+    finally:
+        connection.close()
+
+
+def test_sqlite_preserved_old_target_restore_records_cancelled_operation(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _register_resource_lease(connection)
+        recovery_operations = SqliteRecoveryOperationStore(connection)
+        intent_segments = SqliteRecoveryIntentSegmentStore(connection)
+        old_payload = b"old-image"
+        new_payload = b"new-image"
+        operation = _record_staging_verified_operation(
+            recovery_operations,
+            content_hash=_sha256(new_payload),
+            content_byte_count=len(new_payload),
+            target_precondition_kind=RecoveryTargetPreconditionKind.MATCH_FINGERPRINT,
+            expected_target_payload=old_payload,
+        )
+        target_root = tmp_path / "target"
+        staging_root = tmp_path / "staging"
+        _prepare_lab_target(target_root=target_root, staging_root=staging_root)
+        final = target_root / "Pictures" / "A.jpg"
+        final.write_bytes(old_payload)
+        (staging_root / "op-a.payload").write_bytes(new_payload)
+        lease = _lease(target_root / ".mediasync" / "locks" / "mutation.lock")
+        adapter = LocalVersionedReplaceFinalCommitAdapter(
+            target_root=target_root,
+            staging_root=staging_root,
+            permit_validator=lease,
+        )
+        intent = publish_run_target_recovery_intent_segment(
+            permit=lease.issue_mutation_permit(),
+            recovery_operations=recovery_operations,
+            intent_segments=intent_segments,
+            process_instance_id="host-a",
+        )
+        assert intent.published is True
+        preconditions = recovery_operations.record_operation_phase_transition(
+            run_id=operation.run_id,
+            operation_id=operation.operation_id,
+            expected_phase=RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
+            next_phase=RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
+            process_instance_id="host-a",
+        )
+        assert preconditions is not None
+        preservation = adapter.preserve_old_target(lease.issue_mutation_permit(), preconditions)
+        preserved = recovery_operations.record_operation_phase_transition(
+            run_id=preconditions.run_id,
+            operation_id=preconditions.operation_id,
+            expected_phase=RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
+            next_phase=RecoveryOperationPhase.OLD_TARGET_PRESERVED,
+            process_instance_id="host-a",
+            operation_metadata=RecoveryOperationMetadata(
+                version_object_id=preservation.version_object_id,
+            ),
+        )
+        assert preserved is not None
+        final.unlink()
+
+        outcome = restore_next_run_target_preserved_old_target(
+            permit=lease.issue_mutation_permit(),
+            recovery_operations=recovery_operations,
+            old_target_restore_port=adapter,
+            process_instance_id="host-a",
+        )
+
+        loaded = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+        assert outcome.restored is True
+        assert outcome.validation_codes == ()
+        assert loaded is not None
+        assert loaded.phase is RecoveryOperationPhase.CANCELLED
+        assert loaded.last_error_code == "RUN_TARGET_PRESERVED_OLD_TARGET_RESTORED"
+        assert final.read_bytes() == old_payload
+        assert (target_root / ".mediasync" / "objects" / "versions" / "op-a.payload").read_bytes() == old_payload
+        assert _event_phases(connection)[-1:] == ["CANCELLED"]
     finally:
         connection.close()
 

@@ -220,6 +220,62 @@ def test_local_versioned_replace_completes_when_final_missing_after_old_target_p
     ).read_bytes() == b"old-image"
 
 
+def test_local_versioned_replace_restores_old_target_when_final_missing(
+    tmp_path: Path,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    final = fixture.target_root / "Photos" / "image.jpg"
+    final.write_bytes(b"old-image")
+    operation = _replace_operation(fixture, expected_target_payload=b"old-image")
+    adapter = LocalVersionedReplaceFinalCommitAdapter(
+        target_root=fixture.target_root,
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    preservation = adapter.preserve_old_target(permit, operation)
+    preserved_operation = replace(
+        operation,
+        phase=RecoveryOperationPhase.OLD_TARGET_PRESERVED,
+        version_object_id=preservation.version_object_id,
+    )
+    final.unlink()
+
+    receipt = adapter.restore_old_target(permit, preserved_operation)
+
+    assert receipt.operation_id == "operation-a"
+    assert receipt.final_relative_path == RelativePath("Photos/image.jpg")
+    assert final.read_bytes() == b"old-image"
+
+
+def test_local_versioned_replace_restore_never_overwrites_changed_final(
+    tmp_path: Path,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    final = fixture.target_root / "Photos" / "image.jpg"
+    final.write_bytes(b"old-image")
+    operation = _replace_operation(fixture, expected_target_payload=b"old-image")
+    adapter = LocalVersionedReplaceFinalCommitAdapter(
+        target_root=fixture.target_root,
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    preservation = adapter.preserve_old_target(permit, operation)
+    preserved_operation = replace(
+        operation,
+        phase=RecoveryOperationPhase.OLD_TARGET_PRESERVED,
+        version_object_id=preservation.version_object_id,
+    )
+    final.write_bytes(b"edited-after-preserve")
+
+    with pytest.raises(FinalCommitAdapterError) as exc_info:
+        adapter.restore_old_target(permit, preserved_operation)
+
+    assert exc_info.value.validation_code == "LOCAL_REPLACE_OLD_TARGET_RESTORE_TARGET_EXISTS"
+    assert final.read_bytes() == b"edited-after-preserve"
+
+
 def test_local_resolving_final_commit_inserts_without_lab_marker(tmp_path: Path) -> None:
     fixture = _commit_fixture(tmp_path)
     (fixture.target_root / ".mediasync_test_root").unlink()

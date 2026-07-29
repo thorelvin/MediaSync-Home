@@ -13,11 +13,13 @@ from mediasync_home.application.ports import (
     CommitReceipt,
     FinalCommitPort,
     OldTargetPreservationReceipt,
+    OldTargetRestoreReceipt,
     RelativePath,
     VerifiedStagingArtifact,
 )
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationPhase,
     RecoveryTargetPreconditionKind,
 )
 from mediasync_home.application.safe_paths import SafePathViolation, parse_endpoint_relative_path
@@ -162,6 +164,91 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
             fingerprint_json=fingerprint_json,
         )
 
+    def restore_old_target(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> OldTargetRestoreReceipt:
+        self._permit_validator.assert_mutation_permit_current(permit)
+        _require_endpoint_marker(
+            self._target_root,
+            permit,
+            validation_code="LOCAL_REPLACE_OLD_TARGET_RESTORE_ENDPOINT_MARKER_MISMATCH",
+            missing_code="LOCAL_REPLACE_OLD_TARGET_RESTORE_ENDPOINT_MARKER_MISSING",
+        )
+        _validate_replace_operation_binding(operation=operation, permit=permit)
+        if operation.phase is not RecoveryOperationPhase.OLD_TARGET_PRESERVED:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_OLD_TARGET_RESTORE_REQUIRES_PRESERVED_PHASE",
+                "Restore old target bytes only after the old target has been preserved.",
+            )
+        if operation.target_precondition_kind is not RecoveryTargetPreconditionKind.MATCH_FINGERPRINT:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_OLD_TARGET_RESTORE_REQUIRES_MATCH_FINGERPRINT_PRECONDITION",
+                "Restore old target bytes only for versioned replacements.",
+            )
+        if operation.version_object_id is None or not operation.version_object_id.strip():
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_OLD_TARGET_RESTORE_REQUIRES_VERSION_OBJECT",
+                "Recover or reconcile the preserved old target version object before restore.",
+            )
+
+        version_payload, version_manifest = _version_object_paths(
+            target_root=self._target_root,
+            version_object_id=operation.version_object_id,
+            create=False,
+        )
+        manifest = _load_version_manifest(
+            manifest_path=version_manifest,
+            expected_operation_id=operation.operation_id,
+            expected_final_relative_path=operation.final_relative_path,
+        )
+        expected_old = _manifest_fingerprint(
+            manifest,
+            validation_code="LOCAL_REPLACE_OLD_TARGET_RESTORE_VERSION_MANIFEST_INVALID",
+            next_action="Reload recovery state before restoring the old target.",
+        )
+        if not version_payload.is_file() or version_payload.is_symlink():
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_OLD_TARGET_RESTORE_VERSION_PAYLOAD_MISSING",
+                "Recover or reconcile the preserved old target payload before restore.",
+            )
+        if _fingerprint_file(version_payload) != expected_old:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_OLD_TARGET_RESTORE_VERSION_PAYLOAD_MISMATCH",
+                "Enter recovery because the preserved old target no longer matches its manifest.",
+            )
+
+        final_path = _replace_final_path(self._target_root, operation.final_relative_path)
+        if final_path.is_symlink() or (final_path.exists() and not final_path.is_file()):
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_OLD_TARGET_RESTORE_TARGET_TYPE_CHANGED",
+                "Inspect the final target path before restoring old target bytes.",
+            )
+        fingerprint_json = _canonical_json(expected_old)
+        if final_path.is_file():
+            if _fingerprint_file(final_path) == expected_old:
+                return OldTargetRestoreReceipt(
+                    operation_id=operation.operation_id,
+                    final_relative_path=RelativePath(operation.final_relative_path),
+                    fingerprint_json=fingerprint_json,
+                )
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_OLD_TARGET_RESTORE_TARGET_EXISTS",
+                "Do not restore over an existing final file; inspect preserved and final bytes manually.",
+            )
+
+        _restore_version_payload_without_overwrite(
+            version_payload=version_payload,
+            final_path=final_path,
+            expected_fingerprint=expected_old,
+        )
+        return OldTargetRestoreReceipt(
+            operation_id=operation.operation_id,
+            final_relative_path=RelativePath(operation.final_relative_path),
+            fingerprint_json=fingerprint_json,
+        )
+
     def commit_verified_artifact(
         self,
         permit: MutationPermit,
@@ -268,6 +355,36 @@ def _insert_replacement_payload_without_overwrite(
         temp_path.unlink(missing_ok=True)
 
 
+def _restore_version_payload_without_overwrite(
+    *,
+    version_payload: Path,
+    final_path: Path,
+    expected_fingerprint: dict[str, object],
+) -> None:
+    temp_path = final_path.parent / f".{final_path.name}.{uuid4().hex}.mediasync-restore-old.tmp"
+    try:
+        _copy_file_durable(source=version_payload, destination=temp_path)
+        if _fingerprint_file(temp_path) != expected_fingerprint:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_OLD_TARGET_RESTORE_TEMP_MISMATCH",
+                "Recover or reconcile the preserved old target payload before restore.",
+            )
+        try:
+            os.link(temp_path, final_path)
+        except FileExistsError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_OLD_TARGET_RESTORE_TARGET_REAPPEARED",
+                "Reload recovery state because the final target reappeared during restore.",
+            ) from exc
+        except OSError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_OLD_TARGET_RESTORE_NO_OVERWRITE_UNSUPPORTED",
+                "Use an endpoint profile with proven same-volume no-overwrite restore support.",
+            ) from exc
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 class LocalResolvingFinalCommitAdapter(FinalCommitPort):
     def __init__(
         self,
@@ -291,6 +408,18 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
             endpoint_revision_id=operation.target_endpoint_revision_id,
         )
         return self._replace_adapter(target_root).preserve_old_target(permit, operation)
+
+    def restore_old_target(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> OldTargetRestoreReceipt:
+        target_root = self._target_root(
+            permit=permit,
+            endpoint_id=operation.target_endpoint_id,
+            endpoint_revision_id=operation.target_endpoint_revision_id,
+        )
+        return self._replace_adapter(target_root).restore_old_target(permit, operation)
 
     def commit_verified_artifact(
         self,
@@ -896,6 +1025,24 @@ def _load_version_manifest(
             "Reload recovery state before retrying replacement.",
         )
     return manifest
+
+
+def _manifest_fingerprint(
+    manifest: dict[str, object],
+    *,
+    validation_code: str,
+    next_action: str,
+) -> dict[str, object]:
+    raw_fingerprint = manifest.get("fingerprint")
+    if not isinstance(raw_fingerprint, dict):
+        raise FinalCommitAdapterError(validation_code, next_action)
+    content_hash = raw_fingerprint.get("content_hash")
+    byte_count = raw_fingerprint.get("byte_count")
+    if not isinstance(content_hash, str) or HASH_PATTERN.fullmatch(content_hash) is None:
+        raise FinalCommitAdapterError(validation_code, next_action)
+    if not isinstance(byte_count, int) or byte_count < 0:
+        raise FinalCommitAdapterError(validation_code, next_action)
+    return {"byte_count": byte_count, "content_hash": content_hash}
 
 
 def _expected_fingerprint(

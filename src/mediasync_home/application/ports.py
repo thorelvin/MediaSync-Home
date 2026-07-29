@@ -37,6 +37,13 @@ class OldTargetPreservationReceipt:
 
 
 @dataclass(frozen=True)
+class OldTargetRestoreReceipt:
+    operation_id: str
+    final_relative_path: RelativePath
+    fingerprint_json: str
+
+
+@dataclass(frozen=True)
 class FinalArtifactVerificationEvidence:
     fingerprint_json: str
 
@@ -63,3 +70,11 @@ class OldTargetPreservationPort(Protocol):
         permit: MutationPermit,
         operation: RecoveryOperation,
     ) -> OldTargetPreservationReceipt: ...
+
+
+class OldTargetRestorePort(Protocol):
+    def restore_old_target(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> OldTargetRestoreReceipt: ...
