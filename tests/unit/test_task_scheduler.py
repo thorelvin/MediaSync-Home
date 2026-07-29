@@ -9,6 +9,7 @@ from mediasync_home.application.task_scheduler import (
     ObservedTaskSchedulerDefinition,
     TaskSchedulerDefinition,
     TaskSchedulerDefinitionViolation,
+    TaskSchedulerOrphanReconciliationRequest,
     TaskSchedulerPendingResourceReconciliationRequest,
     TaskSchedulerResourcePumpRequest,
     TaskSchedulerReconciliationAction,
@@ -19,6 +20,7 @@ from mediasync_home.application.task_scheduler import (
     parse_trigger_task_arguments,
     reconcile_claimed_task_scheduler_resource,
     reconcile_next_pending_task_scheduler_resource,
+    reconcile_task_scheduler_orphan_page,
     reconcile_task_scheduler_resources_bounded,
     reconcile_task_scheduler_page,
     stage_task_scheduler_desired_resource_page,
@@ -571,6 +573,157 @@ def test_reconcile_next_pending_task_scheduler_resource_reports_idle() -> None:
     assert result is None
 
 
+def test_task_scheduler_orphan_page_deletes_only_owned_absent_schedules() -> None:
+    schedule = _bound_schedule(schedule_id="schedule-a")
+    orphan_schedule = _bound_schedule(schedule_id="schedule-b")
+    binary_drift_schedule = _bound_schedule(schedule_id="schedule-c")
+    owned_definition = build_same_user_task_scheduler_definition(
+        schedule,
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    orphan_definition = build_same_user_task_scheduler_definition(
+        orphan_schedule,
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    binary_drift_definition = build_same_user_task_scheduler_definition(
+        binary_drift_schedule,
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    registry = _Registry(
+        _observed(owned_definition),
+        _observed(orphan_definition),
+        _observed(binary_drift_definition, executable_path=r"C:\Other\App.exe"),
+    )
+
+    report = reconcile_task_scheduler_orphan_page(
+        TaskSchedulerOrphanReconciliationRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            limit=10,
+        ),
+        schedules=_ScheduleStore(schedule),
+        registry=registry,
+    )
+
+    assert report.scanned == 3
+    assert report.deleted == 1
+    assert report.blocked == 1
+    assert report.next_cursor is None
+    assert tuple(finding.action for finding in report.findings) == (
+        TaskSchedulerReconciliationAction.IN_SYNC,
+        TaskSchedulerReconciliationAction.DELETE_OWNED_TASK,
+        TaskSchedulerReconciliationAction.BLOCK_BINARY_DRIFT,
+    )
+    assert registry.deleted == (r"\MediaSync Home\install-a\schedule-b",)
+    assert r"\MediaSync Home\install-a\schedule-c" in registry.observed
+
+
+def test_task_scheduler_orphan_page_blocks_unknown_or_ambiguous_tasks() -> None:
+    owned_schedule = _bound_schedule(schedule_id="schedule-a")
+    wrong_owner_schedule = _bound_schedule(schedule_id="schedule-b")
+    unparseable_schedule = _bound_schedule(schedule_id="schedule-c")
+    owned_definition = build_same_user_task_scheduler_definition(
+        owned_schedule,
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    wrong_owner_definition = build_same_user_task_scheduler_definition(
+        wrong_owner_schedule,
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    unparseable_definition = build_same_user_task_scheduler_definition(
+        unparseable_schedule,
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    registry = _Registry(
+        replace(
+            _observed(wrong_owner_definition),
+            arguments=(
+                "--enqueue-trigger-occurrence",
+                "--installation-id",
+                "install-b",
+                "--schedule-id",
+                "schedule-b",
+                "--schedule-revision-hash",
+                wrong_owner_schedule.desired_definition_hash,
+                "--trigger-kind",
+                "SCHEDULED_TIME",
+                "--task-definition-hash",
+                wrong_owner_schedule.desired_definition_hash,
+            ),
+        ),
+        replace(_observed(unparseable_definition), arguments=("--unknown",)),
+        replace(
+            _observed(owned_definition),
+            task_path=r"\MediaSync Home\install-a\renamed-task",
+        ),
+    )
+
+    report = reconcile_task_scheduler_orphan_page(
+        TaskSchedulerOrphanReconciliationRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            limit=10,
+        ),
+        schedules=_ScheduleStore(),
+        registry=registry,
+    )
+
+    assert report.deleted == 0
+    assert report.blocked == 3
+    assert tuple(finding.reason for finding in report.findings) == (
+        "TASK_SCHEDULER_TASK_PATH_MISMATCH",
+        "TASK_SCHEDULER_ARGUMENT_OWNER_MISMATCH",
+        "TASK_SCHEDULER_ARGUMENTS_NOT_RECOGNIZED",
+    )
+    assert registry.deleted == ()
+
+
+def test_task_scheduler_orphan_page_is_bounded_with_task_cursor() -> None:
+    definitions = tuple(
+        build_same_user_task_scheduler_definition(
+            _bound_schedule(schedule_id=schedule_id),
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+        )
+        for schedule_id in ("schedule-a", "schedule-b", "schedule-c")
+    )
+    registry = _Registry(*(_observed(definition) for definition in definitions))
+
+    first = reconcile_task_scheduler_orphan_page(
+        TaskSchedulerOrphanReconciliationRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            limit=2,
+        ),
+        schedules=_ScheduleStore(*(_bound_schedule(schedule_id="schedule-a"),)),
+        registry=registry,
+    )
+    second = reconcile_task_scheduler_orphan_page(
+        TaskSchedulerOrphanReconciliationRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            limit=2,
+            after_task_name=first.next_cursor,
+        ),
+        schedules=_ScheduleStore(*(_bound_schedule(schedule_id="schedule-a"),)),
+        registry=registry,
+    )
+
+    assert first.next_cursor == "schedule-b"
+    assert tuple(finding.task_name for finding in first.findings) == (
+        "schedule-a",
+        "schedule-b",
+    )
+    assert second.next_cursor is None
+    assert tuple(finding.task_name for finding in second.findings) == ("schedule-c",)
+
+
 def test_task_scheduler_resource_pump_stages_pages_and_drains_claims() -> None:
     schedules = (
         _bound_schedule(schedule_id="schedule-a"),
@@ -617,6 +770,8 @@ def test_task_scheduler_resource_pump_stages_pages_and_drains_claims() -> None:
         "pump-a:0002",
         "pump-a:0003",
     )
+    assert report.orphan_tasks_scanned == 0
+    assert report.orphan_tasks_deleted == 0
 
 
 def test_task_scheduler_resource_pump_reports_stage_cursor_when_page_budget_exhausted() -> None:
@@ -727,12 +882,41 @@ class _Registry:
     def __init__(self, *observed: ObservedTaskSchedulerDefinition) -> None:
         self.observed = {definition.task_path: definition for definition in observed}
         self.applied: list[TaskSchedulerDefinition] = []
+        self.deleted: tuple[str, ...] = ()
 
     def load_task(self, task_path: str) -> ObservedTaskSchedulerDefinition | None:
         return self.observed.get(task_path)
 
+    def list_tasks(
+        self,
+        folder_path: str,
+        *,
+        limit: int,
+        after_task_name: str | None = None,
+    ) -> tuple[ObservedTaskSchedulerDefinition, ...]:
+        folder_prefix = folder_path.rstrip("\\") + "\\"
+        tasks = sorted(
+            (
+                definition
+                for definition in self.observed.values()
+                if definition.task_path.startswith(folder_prefix)
+            ),
+            key=lambda definition: definition.task_path.rsplit("\\", 1)[-1],
+        )
+        if after_task_name is not None:
+            tasks = [
+                definition
+                for definition in tasks
+                if definition.task_path.rsplit("\\", 1)[-1] > after_task_name
+            ]
+        return tuple(tasks[:limit])
+
     def apply_task_definition(self, definition: TaskSchedulerDefinition) -> None:
         self.applied.append(definition)
+
+    def delete_task(self, task_path: str) -> None:
+        self.deleted = (*self.deleted, task_path)
+        self.observed.pop(task_path, None)
 
 
 class _ExternalResourceStore(ExternalResourceStateStore):

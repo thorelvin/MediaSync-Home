@@ -64,6 +64,22 @@ def test_windows_task_scheduler_registry_loads_observed_definition_from_gateway(
     assert observed.task_logon_type == "INTERACTIVE_TOKEN"
 
 
+def test_windows_task_scheduler_registry_lists_and_deletes_gateway_tasks() -> None:
+    first = _definition()
+    second = replace(first, task_path=r"\MediaSync Home\install-a\schedule-b")
+    first_task = _gateway_task(first)
+    second_task = replace(_gateway_task(second), task_name="schedule-b")
+    gateway = _Gateway(second_task, first_task)
+    registry = WindowsTaskSchedulerRegistry(gateway)
+
+    listed = registry.list_tasks(r"\MediaSync Home\install-a", limit=1)
+    registry.delete_task(first.task_path)
+
+    assert tuple(task.task_path for task in listed) == (first.task_path,)
+    assert gateway.deleted == (first.task_path,)
+    assert gateway.load_task(first.task_path) is None
+
+
 def test_windows_task_scheduler_registry_turns_unparseable_arguments_into_safe_drift() -> None:
     schedule = bind_same_user_task_scheduler_definition_hash(
         _schedule(),
@@ -244,6 +260,32 @@ def test_pywin32_task_scheduler_gateway_loads_registered_task_back() -> None:
     assert observed == task
 
 
+def test_pywin32_task_scheduler_gateway_lists_and_deletes_tasks_idempotently() -> None:
+    service = _FakeTaskSchedulerService()
+    gateway = Pywin32TaskSchedulerGateway(service_factory=_connected_factory(service))
+    first = _gateway_task(_definition())
+    second = replace(
+        _gateway_task(replace(_definition(), task_path=r"\MediaSync Home\install-a\schedule-b")),
+        task_name="schedule-b",
+    )
+    gateway.apply_task(second)
+    gateway.apply_task(first)
+
+    first_page = gateway.list_tasks(r"\MediaSync Home\install-a", limit=1)
+    second_page = gateway.list_tasks(
+        r"\MediaSync Home\install-a",
+        limit=2,
+        after_task_name="schedule-a",
+    )
+    gateway.delete_task(first.task_path)
+    gateway.delete_task(first.task_path)
+
+    assert first_page == (first,)
+    assert second_page == (second,)
+    assert gateway.load_task(first.task_path) is None
+    assert gateway.load_task(second.task_path) == second
+
+
 def test_pywin32_task_scheduler_gateway_loads_missing_action_as_safe_drift() -> None:
     service = _FakeTaskSchedulerService()
     gateway = Pywin32TaskSchedulerGateway(service_factory=_connected_factory(service))
@@ -312,13 +354,33 @@ class _Gateway:
     def __init__(self, *tasks: TaskSchedulerGatewayTask) -> None:
         self.tasks = {task.task_path: task for task in tasks}
         self.applied: list[TaskSchedulerGatewayTask] = []
+        self.deleted: tuple[str, ...] = ()
 
     def load_task(self, task_path: str) -> TaskSchedulerGatewayTask | None:
         return self.tasks.get(task_path)
 
+    def list_tasks(
+        self,
+        folder_path: str,
+        *,
+        limit: int,
+        after_task_name: str | None = None,
+    ) -> tuple[TaskSchedulerGatewayTask, ...]:
+        tasks = sorted(
+            (task for task in self.tasks.values() if task.folder_path == folder_path),
+            key=lambda task: task.task_name,
+        )
+        if after_task_name is not None:
+            tasks = [task for task in tasks if task.task_name > after_task_name]
+        return tuple(tasks[:limit])
+
     def apply_task(self, task: TaskSchedulerGatewayTask) -> None:
         self.applied.append(task)
         self.tasks[task.task_path] = task
+
+    def delete_task(self, task_path: str) -> None:
+        self.deleted = (*self.deleted, task_path)
+        self.tasks.pop(task_path, None)
 
 
 class _RecordingComApartment:
@@ -398,6 +460,10 @@ class _FakeTaskFolder:
         except KeyError as exc:
             raise _ComNotFoundError from exc
 
+    def GetTasks(self, flags: int) -> "_FakeRegisteredTaskCollection":
+        assert flags == 0
+        return _FakeRegisteredTaskCollection(tuple(self.tasks.values()))
+
     def RegisterTaskDefinition(
         self,
         task_name: str,
@@ -421,6 +487,13 @@ class _FakeTaskFolder:
         self.registered.append(task)
         return task
 
+    def DeleteTask(self, task_name: str, flags: int) -> None:
+        assert flags == 0
+        try:
+            del self.tasks[task_name]
+        except KeyError as exc:
+            raise _ComNotFoundError from exc
+
 
 class _FakeRegisteredTask:
     def __init__(
@@ -434,12 +507,25 @@ class _FakeRegisteredTask:
         logon_type: int,
     ) -> None:
         self.task_name = task_name
+        self.Name = task_name
         self.Definition = definition
         self.definition = definition
         self.flags = flags
         self.user_id = user_id
         self.password = password
         self.logon_type = logon_type
+
+
+class _FakeRegisteredTaskCollection:
+    def __init__(self, tasks: tuple[_FakeRegisteredTask, ...]) -> None:
+        self._tasks = tasks
+
+    @property
+    def Count(self) -> int:
+        return len(self._tasks)
+
+    def Item(self, index: int) -> "_FakeRegisteredTask":
+        return self._tasks[index - 1]
 
 
 class _FakeTaskDefinition:

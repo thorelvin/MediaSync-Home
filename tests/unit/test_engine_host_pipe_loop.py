@@ -240,12 +240,14 @@ def test_task_scheduler_maintenance_loop_runs_interval_reconciliation_and_closes
     assert runtime.closed is True
     assert runtime.task_scheduler_calls[0] == {
         "after_schedule_id": None,
+        "after_orphan_task_name": None,
         "claim_token_prefix": "maint-a",
         "claim_ttl_ms": 12_000,
         "executable_path": TASK_SCHEDULER_EXECUTABLE,
         "installation_id": "install-a",
         "max_claims": 3,
         "max_schedule_pages": 2,
+        "orphan_task_page_limit": 100,
         "registry": registry,
         "schedule_page_limit": 5,
     }
@@ -292,6 +294,48 @@ def test_task_scheduler_maintenance_loop_carries_stage_cursor_until_scan_complet
 
     events = [json.loads(line) for line in lines]
     assert [call["after_schedule_id"] for call in runtime.task_scheduler_calls[:2]] == [
+        None,
+        "schedule-a",
+    ]
+    assert [event["next_interval_ms"] for event in events[:2]] == [1, 2]
+
+
+def test_task_scheduler_maintenance_loop_carries_orphan_cursor_until_scan_completes() -> None:
+    runtime = _TaskSchedulerRuntime(
+        (
+            _task_scheduler_pump_report(
+                orphan_tasks_scanned=1,
+                orphan_next_cursor="schedule-a",
+            ),
+            _task_scheduler_pump_report(),
+        )
+    )
+    lines: list[str] = []
+
+    loop = TaskSchedulerMaintenanceLoop(
+        runtime_factory=lambda: runtime,
+        registry_factory=_TaskSchedulerRegistry,
+        options=TaskSchedulerStartupReconciliationOptions(
+            installation_id="install-a",
+            executable_path=TASK_SCHEDULER_EXECUTABLE,
+            schedule_page_limit=1,
+            max_schedule_pages=1,
+            max_claims=1,
+            orphan_task_page_limit=1,
+            claim_token_prefix="maint-a",
+        ),
+        interval_ms=1,
+        max_interval_ms=4,
+        output=lines.append,
+        pipe_name="pipe-a",
+    )
+
+    loop.start()
+    _wait_until(lambda: len(runtime.task_scheduler_calls) >= 2)
+    loop.stop()
+
+    events = [json.loads(line) for line in lines]
+    assert [call["after_orphan_task_name"] for call in runtime.task_scheduler_calls[:2]] == [
         None,
         "schedule-a",
     ]
@@ -508,6 +552,8 @@ def test_engine_host_parser_accepts_bounded_task_scheduler_startup_pump(
             "2",
             "--task-scheduler-max-claims",
             "7",
+            "--task-scheduler-orphan-task-page-limit",
+            "9",
             "--task-scheduler-claim-ttl-ms",
             "12000",
             "--task-scheduler-claim-token-prefix",
@@ -525,6 +571,7 @@ def test_engine_host_parser_accepts_bounded_task_scheduler_startup_pump(
     assert args.task_scheduler_schedule_page_limit == 5
     assert args.task_scheduler_max_schedule_pages == 2
     assert args.task_scheduler_max_claims == 7
+    assert args.task_scheduler_orphan_task_page_limit == 9
     assert args.task_scheduler_claim_ttl_ms == 12000
     assert args.task_scheduler_claim_token_prefix == "startup-a"
     assert args.task_scheduler_reconciliation_interval_ms == 300
@@ -960,16 +1007,20 @@ class _TaskSchedulerRuntime(_FakeRuntime):
         claim_token_prefix: str | None = None,
         claim_ttl_ms: int = 30_000,
         after_schedule_id: str | None = None,
+        orphan_task_page_limit: int = 100,
+        after_orphan_task_name: str | None = None,
     ) -> TaskSchedulerResourcePumpReport:
         self.task_scheduler_calls.append(
             {
                 "after_schedule_id": after_schedule_id,
+                "after_orphan_task_name": after_orphan_task_name,
                 "claim_token_prefix": claim_token_prefix,
                 "claim_ttl_ms": claim_ttl_ms,
                 "executable_path": executable_path,
                 "installation_id": installation_id,
                 "max_claims": max_claims,
                 "max_schedule_pages": max_schedule_pages,
+                "orphan_task_page_limit": orphan_task_page_limit,
                 "registry": registry,
                 "schedule_page_limit": schedule_page_limit,
             }
@@ -983,12 +1034,41 @@ class _TaskSchedulerRegistry:
     def __init__(self, *observed: ObservedTaskSchedulerDefinition) -> None:
         self.observed = {definition.task_path: definition for definition in observed}
         self.applied: list[object] = []
+        self.deleted: tuple[str, ...] = ()
 
     def load_task(self, task_path: str) -> ObservedTaskSchedulerDefinition | None:
         return self.observed.get(task_path)
 
+    def list_tasks(
+        self,
+        folder_path: str,
+        *,
+        limit: int,
+        after_task_name: str | None = None,
+    ) -> tuple[ObservedTaskSchedulerDefinition, ...]:
+        folder_prefix = folder_path.rstrip("\\") + "\\"
+        tasks = sorted(
+            (
+                definition
+                for definition in self.observed.values()
+                if definition.task_path.startswith(folder_prefix)
+            ),
+            key=lambda definition: definition.task_path.rsplit("\\", 1)[-1],
+        )
+        if after_task_name is not None:
+            tasks = [
+                definition
+                for definition in tasks
+                if definition.task_path.rsplit("\\", 1)[-1] > after_task_name
+            ]
+        return tuple(tasks[:limit])
+
     def apply_task_definition(self, definition: object) -> None:
         self.applied.append(definition)
+
+    def delete_task(self, task_path: str) -> None:
+        self.deleted = (*self.deleted, task_path)
+        self.observed.pop(task_path, None)
 
 
 def _task_scheduler_pump_report(
@@ -996,6 +1076,8 @@ def _task_scheduler_pump_report(
     resources_reconciled: int = 0,
     stage_completed: bool = True,
     stage_next_cursor: str | None = None,
+    orphan_tasks_scanned: int = 0,
+    orphan_next_cursor: str | None = None,
 ) -> TaskSchedulerResourcePumpReport:
     return TaskSchedulerResourcePumpReport(
         schedule_pages_attempted=1,
@@ -1012,6 +1094,8 @@ def _task_scheduler_pump_report(
         claim_idle=True,
         stage_findings=(),
         claim_findings=(),
+        orphan_tasks_scanned=orphan_tasks_scanned,
+        orphan_next_cursor=orphan_next_cursor,
     )
 
 

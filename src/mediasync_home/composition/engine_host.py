@@ -180,9 +180,11 @@ class TaskSchedulerStartupReconciliationOptions:
     schedule_page_limit: int = 100
     max_schedule_pages: int = 10
     max_claims: int = 100
+    orphan_task_page_limit: int = 100
     claim_ttl_ms: int = 30_000
     claim_token_prefix: str | None = None
     after_schedule_id: str | None = None
+    after_orphan_task_name: str | None = None
 
 
 @dataclass
@@ -270,6 +272,8 @@ class EngineHostRuntime:
         claim_token_prefix: str | None = None,
         claim_ttl_ms: int = 30_000,
         after_schedule_id: str | None = None,
+        orphan_task_page_limit: int = 100,
+        after_orphan_task_name: str | None = None,
     ) -> TaskSchedulerResourcePumpReport:
         if (
             self.service.schedule_store is None
@@ -288,6 +292,8 @@ class EngineHostRuntime:
                 max_schedule_pages=max_schedule_pages,
                 max_claims=max_claims,
                 after_schedule_id=after_schedule_id,
+                orphan_task_page_limit=orphan_task_page_limit,
+                after_orphan_task_name=after_orphan_task_name,
             ),
             schedules=self.service.schedule_store,
             registry=registry,
@@ -577,6 +583,7 @@ class TaskSchedulerMaintenanceLoop:
         runtime: EngineHostRuntime | None = None
         next_interval_ms = self._base_interval_ms
         after_schedule_id = self._options.after_schedule_id
+        after_orphan_task_name = self._options.after_orphan_task_name
         try:
             runtime = self._runtime_factory()
             registry = self._registry_factory()
@@ -592,6 +599,8 @@ class TaskSchedulerMaintenanceLoop:
                         claim_token_prefix=self._options.claim_token_prefix,
                         claim_ttl_ms=self._options.claim_ttl_ms,
                         after_schedule_id=after_schedule_id,
+                        orphan_task_page_limit=self._options.orphan_task_page_limit,
+                        after_orphan_task_name=after_orphan_task_name,
                     )
                 except Exception as exc:
                     next_interval_ms = self._backed_off_interval(next_interval_ms)
@@ -604,6 +613,9 @@ class TaskSchedulerMaintenanceLoop:
                     )
                     continue
                 after_schedule_id = report.stage_next_cursor or self._options.after_schedule_id
+                after_orphan_task_name = (
+                    report.orphan_next_cursor or self._options.after_orphan_task_name
+                )
                 next_interval_ms = self._next_interval_after_report(
                     current_interval_ms=next_interval_ms,
                     report=report,
@@ -633,7 +645,13 @@ class TaskSchedulerMaintenanceLoop:
         current_interval_ms: int,
         report: TaskSchedulerResourcePumpReport,
     ) -> int:
-        if report.stage_completed and report.resources_reconciled == 0:
+        if (
+            report.stage_completed
+            and report.resources_reconciled == 0
+            and report.orphan_tasks_deleted == 0
+            and report.orphan_tasks_blocked == 0
+            and report.orphan_next_cursor is None
+        ):
             return self._backed_off_interval(current_interval_ms)
         return self._base_interval_ms
 
@@ -722,6 +740,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=100,
         help="maximum pending Task Scheduler resources reconciled by the startup pump",
+    )
+    parser.add_argument(
+        "--task-scheduler-orphan-task-page-limit",
+        type=_positive_int,
+        default=100,
+        help="task page size for owned Task Scheduler orphan cleanup",
     )
     parser.add_argument(
         "--task-scheduler-claim-ttl-ms",
@@ -1110,9 +1134,11 @@ def reconcile_task_scheduler_resources_for_engine_host_startup(
         schedule_page_limit=options.schedule_page_limit,
         max_schedule_pages=options.max_schedule_pages,
         max_claims=options.max_claims,
+        orphan_task_page_limit=options.orphan_task_page_limit,
         claim_token_prefix=options.claim_token_prefix,
         claim_ttl_ms=options.claim_ttl_ms,
         after_schedule_id=options.after_schedule_id,
+        after_orphan_task_name=options.after_orphan_task_name,
     )
 
 
@@ -1435,6 +1461,7 @@ def _task_scheduler_startup_options(
         schedule_page_limit=int(args.task_scheduler_schedule_page_limit),
         max_schedule_pages=int(args.task_scheduler_max_schedule_pages),
         max_claims=int(args.task_scheduler_max_claims),
+        orphan_task_page_limit=int(args.task_scheduler_orphan_task_page_limit),
         claim_ttl_ms=int(args.task_scheduler_claim_ttl_ms),
         claim_token_prefix=args.task_scheduler_claim_token_prefix,
     )
@@ -1453,6 +1480,10 @@ def _task_scheduler_resource_pump_payload(
         "resources_completed": report.resources_completed,
         "resources_reconciled": report.resources_reconciled,
         "resources_staged": report.resources_staged,
+        "orphan_next_cursor": report.orphan_next_cursor,
+        "orphan_tasks_blocked": report.orphan_tasks_blocked,
+        "orphan_tasks_deleted": report.orphan_tasks_deleted,
+        "orphan_tasks_scanned": report.orphan_tasks_scanned,
         "schedule_pages_attempted": report.schedule_pages_attempted,
         "schedules_scanned": report.schedules_scanned,
         "stage_blocked": report.stage_blocked,
@@ -1468,6 +1499,18 @@ def _task_scheduler_resource_pump_payload(
                 "resource_id": finding.resource_id,
             }
             for finding in report.claim_findings
+        ],
+        "orphan_findings": [
+            {
+                "action": finding.action.value,
+                "blocked": finding.blocked,
+                "deleted": finding.deleted,
+                "reason": finding.reason,
+                "schedule_id": finding.schedule_id,
+                "task_name": finding.task_name,
+                "task_path": finding.task_path,
+            }
+            for finding in report.orphan_findings
         ],
         "stage_findings": [
             {

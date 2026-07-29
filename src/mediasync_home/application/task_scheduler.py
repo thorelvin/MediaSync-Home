@@ -27,6 +27,7 @@ TASK_SCHEDULER_HASH_PLACEHOLDER = "<TASK_DEFINITION_HASH>"
 TASK_SCHEDULER_SCHEMA_VERSION = 1
 MAX_TASK_SCHEDULER_RECONCILIATION_PUMP_PAGES = 100
 MAX_TASK_SCHEDULER_RECONCILIATION_PUMP_CLAIMS = 500
+MAX_TASK_SCHEDULER_ORPHAN_RECONCILIATION_LIMIT = 100
 
 
 class TaskSchedulerDefinitionViolation(ValueError):
@@ -40,6 +41,7 @@ class TaskSchedulerReconciliationAction(str, Enum):
     ENABLE_OWNED_TASK = "ENABLE_OWNED_TASK"
     DISABLE_OWNED_TASK = "DISABLE_OWNED_TASK"
     UPDATE_OWNED_DEFINITION = "UPDATE_OWNED_DEFINITION"
+    DELETE_OWNED_TASK = "DELETE_OWNED_TASK"
     BLOCK_ARGUMENT_DRIFT = "BLOCK_ARGUMENT_DRIFT"
     BLOCK_BINARY_DRIFT = "BLOCK_BINARY_DRIFT"
     BLOCK_INVALID_DESIRED_STATE = "BLOCK_INVALID_DESIRED_STATE"
@@ -137,6 +139,16 @@ class TaskSchedulerResourcePumpRequest:
     max_schedule_pages: int
     max_claims: int
     after_schedule_id: str | None = None
+    orphan_task_page_limit: int = MAX_TASK_SCHEDULER_ORPHAN_RECONCILIATION_LIMIT
+    after_orphan_task_name: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskSchedulerOrphanReconciliationRequest:
+    installation_id: str
+    executable_path: str
+    limit: int
+    after_task_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -185,6 +197,26 @@ class TaskSchedulerClaimedResourceReconciliation:
 
 
 @dataclass(frozen=True)
+class TaskSchedulerOrphanReconciliationFinding:
+    task_path: str
+    task_name: str
+    action: TaskSchedulerReconciliationAction
+    deleted: bool
+    blocked: bool
+    schedule_id: str | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskSchedulerOrphanReconciliationReport:
+    scanned: int
+    deleted: int
+    blocked: int
+    next_cursor: str | None
+    findings: tuple[TaskSchedulerOrphanReconciliationFinding, ...]
+
+
+@dataclass(frozen=True)
 class TaskSchedulerResourcePumpReport:
     schedule_pages_attempted: int
     schedules_scanned: int
@@ -200,12 +232,27 @@ class TaskSchedulerResourcePumpReport:
     claim_idle: bool
     stage_findings: tuple[TaskSchedulerDesiredResourceFinding, ...]
     claim_findings: tuple[TaskSchedulerClaimedResourceReconciliation, ...]
+    orphan_tasks_scanned: int = 0
+    orphan_tasks_deleted: int = 0
+    orphan_tasks_blocked: int = 0
+    orphan_next_cursor: str | None = None
+    orphan_findings: tuple[TaskSchedulerOrphanReconciliationFinding, ...] = ()
 
 
 class TaskSchedulerRegistryPort(Protocol):
     def load_task(self, task_path: str) -> ObservedTaskSchedulerDefinition | None: ...
 
+    def list_tasks(
+        self,
+        folder_path: str,
+        *,
+        limit: int,
+        after_task_name: str | None = None,
+    ) -> tuple[ObservedTaskSchedulerDefinition, ...]: ...
+
     def apply_task_definition(self, definition: TaskSchedulerDefinition) -> None: ...
+
+    def delete_task(self, task_path: str) -> None: ...
 
 
 def bind_same_user_task_scheduler_definition_hash(
@@ -615,6 +662,43 @@ def reconcile_next_pending_task_scheduler_resource(
     )
 
 
+def reconcile_task_scheduler_orphan_page(
+    request: TaskSchedulerOrphanReconciliationRequest,
+    *,
+    schedules: ScheduleStore,
+    registry: TaskSchedulerRegistryPort,
+) -> TaskSchedulerOrphanReconciliationReport:
+    _validate_task_scheduler_orphan_reconciliation_request(request)
+    page = registry.list_tasks(
+        _task_folder_path(request.installation_id),
+        limit=request.limit,
+        after_task_name=request.after_task_name,
+    )
+    findings: list[TaskSchedulerOrphanReconciliationFinding] = []
+    deleted = 0
+    blocked = 0
+    for observed in page:
+        finding = _reconcile_task_scheduler_orphan(
+            observed,
+            installation_id=request.installation_id,
+            executable_path=request.executable_path,
+            schedules=schedules,
+            registry=registry,
+        )
+        if finding.deleted:
+            deleted += 1
+        if finding.blocked:
+            blocked += 1
+        findings.append(finding)
+    return TaskSchedulerOrphanReconciliationReport(
+        scanned=len(page),
+        deleted=deleted,
+        blocked=blocked,
+        next_cursor=_task_name(page[-1].task_path) if len(page) == request.limit else None,
+        findings=tuple(findings),
+    )
+
+
 def reconcile_task_scheduler_resources_bounded(
     request: TaskSchedulerResourcePumpRequest,
     *,
@@ -673,6 +757,17 @@ def reconcile_task_scheduler_resources_bounded(
             break
         claim_findings.append(finding)
 
+    orphan_report = reconcile_task_scheduler_orphan_page(
+        TaskSchedulerOrphanReconciliationRequest(
+            installation_id=request.installation_id,
+            executable_path=request.executable_path,
+            limit=request.orphan_task_page_limit,
+            after_task_name=request.after_orphan_task_name,
+        ),
+        schedules=schedules,
+        registry=registry,
+    )
+
     return TaskSchedulerResourcePumpReport(
         schedule_pages_attempted=schedule_pages_attempted,
         schedules_scanned=schedules_scanned,
@@ -688,6 +783,11 @@ def reconcile_task_scheduler_resources_bounded(
         claim_idle=claim_idle,
         stage_findings=tuple(stage_findings),
         claim_findings=tuple(claim_findings),
+        orphan_tasks_scanned=orphan_report.scanned,
+        orphan_tasks_deleted=orphan_report.deleted,
+        orphan_tasks_blocked=orphan_report.blocked,
+        orphan_next_cursor=orphan_report.next_cursor,
+        orphan_findings=orphan_report.findings,
     )
 
 
@@ -793,6 +893,27 @@ def _validate_task_scheduler_resource_pump_request(
         claim_token=f"{request.claim_token_prefix}:0001",
         claim_ttl_ms=request.claim_ttl_ms,
     )
+    _validate_task_scheduler_orphan_reconciliation_request(
+        TaskSchedulerOrphanReconciliationRequest(
+            installation_id=request.installation_id,
+            executable_path=request.executable_path,
+            limit=request.orphan_task_page_limit,
+            after_task_name=request.after_orphan_task_name,
+        )
+    )
+
+
+def _validate_task_scheduler_orphan_reconciliation_request(
+    request: TaskSchedulerOrphanReconciliationRequest,
+) -> None:
+    _non_empty_text(request.installation_id, "TASK_SCHEDULER_INSTALLATION_ID_REQUIRED")
+    _normalized_executable_path(request.executable_path)
+    if not 1 <= request.limit <= MAX_TASK_SCHEDULER_ORPHAN_RECONCILIATION_LIMIT:
+        raise TaskSchedulerDefinitionViolation(
+            "TASK_SCHEDULER_ORPHAN_RECONCILIATION_LIMIT_OUT_OF_RANGE"
+        )
+    if request.after_task_name is not None:
+        _task_name_cursor(request.after_task_name)
 
 
 def _trigger_task_arguments(
@@ -821,6 +942,11 @@ def _trigger_task_arguments(
 def _task_path(installation_id: str, schedule_id: str) -> str:
     _non_empty_text(installation_id, "TASK_SCHEDULER_INSTALLATION_ID_REQUIRED")
     return f"\\MediaSync Home\\{installation_id}\\{schedule_id}"
+
+
+def _task_folder_path(installation_id: str) -> str:
+    _non_empty_text(installation_id, "TASK_SCHEDULER_INSTALLATION_ID_REQUIRED")
+    return f"\\MediaSync Home\\{installation_id}"
 
 
 def _task_path_or_none(installation_id: str, schedule_id: str) -> str | None:
@@ -857,6 +983,19 @@ def _non_empty_text(value: str, error_code: str) -> str:
     parsed = value.strip()
     if not parsed:
         raise TaskSchedulerDefinitionViolation(error_code)
+    return parsed
+
+
+def _task_name(task_path: str) -> str:
+    if not task_path.startswith("\\") or task_path == "\\" or "\\\\" in task_path:
+        raise TaskSchedulerDefinitionViolation("TASK_SCHEDULER_TASK_PATH_INVALID")
+    return _task_name_cursor(task_path.rsplit("\\", 1)[-1])
+
+
+def _task_name_cursor(value: str) -> str:
+    parsed = _non_empty_text(value, "TASK_SCHEDULER_TASK_NAME_REQUIRED")
+    if "\\" in parsed or parsed in {".", ".."}:
+        raise TaskSchedulerDefinitionViolation("TASK_SCHEDULER_TASK_NAME_INVALID")
     return parsed
 
 
@@ -898,3 +1037,75 @@ def _observed_payload(definition: ObservedTaskSchedulerDefinition) -> dict[str, 
 
 def _payload_without_enabled(payload: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in payload.items() if key != "enabled"}
+
+
+def _reconcile_task_scheduler_orphan(
+    observed: ObservedTaskSchedulerDefinition,
+    *,
+    installation_id: str,
+    executable_path: str,
+    schedules: ScheduleStore,
+    registry: TaskSchedulerRegistryPort,
+) -> TaskSchedulerOrphanReconciliationFinding:
+    expected_executable_path = _normalized_executable_path(executable_path)
+    task_name = _task_name(observed.task_path)
+    binding = parse_trigger_task_arguments(observed.arguments)
+    if binding is None:
+        return TaskSchedulerOrphanReconciliationFinding(
+            task_path=observed.task_path,
+            task_name=task_name,
+            action=TaskSchedulerReconciliationAction.BLOCK_ARGUMENT_DRIFT,
+            deleted=False,
+            blocked=True,
+            reason="TASK_SCHEDULER_ARGUMENTS_NOT_RECOGNIZED",
+        )
+    if binding.installation_id != installation_id:
+        return TaskSchedulerOrphanReconciliationFinding(
+            task_path=observed.task_path,
+            task_name=task_name,
+            action=TaskSchedulerReconciliationAction.BLOCK_UNKNOWN_TASK,
+            deleted=False,
+            blocked=True,
+            schedule_id=binding.schedule_id,
+            reason="TASK_SCHEDULER_ARGUMENT_OWNER_MISMATCH",
+        )
+    expected_path = _task_path(installation_id, binding.schedule_id)
+    if _windows_path_key(observed.task_path) != _windows_path_key(expected_path):
+        return TaskSchedulerOrphanReconciliationFinding(
+            task_path=observed.task_path,
+            task_name=task_name,
+            action=TaskSchedulerReconciliationAction.BLOCK_UNKNOWN_TASK,
+            deleted=False,
+            blocked=True,
+            schedule_id=binding.schedule_id,
+            reason="TASK_SCHEDULER_TASK_PATH_MISMATCH",
+        )
+    if _windows_path_key(observed.executable_path) != _windows_path_key(expected_executable_path):
+        return TaskSchedulerOrphanReconciliationFinding(
+            task_path=observed.task_path,
+            task_name=task_name,
+            action=TaskSchedulerReconciliationAction.BLOCK_BINARY_DRIFT,
+            deleted=False,
+            blocked=True,
+            schedule_id=binding.schedule_id,
+            reason="TASK_SCHEDULER_EXECUTABLE_DRIFT",
+        )
+    if schedules.load_schedule(binding.schedule_id) is not None:
+        return TaskSchedulerOrphanReconciliationFinding(
+            task_path=observed.task_path,
+            task_name=task_name,
+            action=TaskSchedulerReconciliationAction.IN_SYNC,
+            deleted=False,
+            blocked=False,
+            schedule_id=binding.schedule_id,
+        )
+    registry.delete_task(observed.task_path)
+    return TaskSchedulerOrphanReconciliationFinding(
+        task_path=observed.task_path,
+        task_name=task_name,
+        action=TaskSchedulerReconciliationAction.DELETE_OWNED_TASK,
+        deleted=True,
+        blocked=False,
+        schedule_id=binding.schedule_id,
+        reason="TASK_SCHEDULER_OWNED_TASK_ORPHANED",
+    )

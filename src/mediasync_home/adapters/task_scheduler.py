@@ -71,7 +71,17 @@ class TaskSchedulerGatewayTask:
 class TaskSchedulerGateway(Protocol):
     def load_task(self, task_path: str) -> TaskSchedulerGatewayTask | None: ...
 
+    def list_tasks(
+        self,
+        folder_path: str,
+        *,
+        limit: int,
+        after_task_name: str | None = None,
+    ) -> tuple[TaskSchedulerGatewayTask, ...]: ...
+
     def apply_task(self, task: TaskSchedulerGatewayTask) -> None: ...
+
+    def delete_task(self, task_path: str) -> None: ...
 
 
 class ComApartment(Protocol):
@@ -93,28 +103,29 @@ class WindowsTaskSchedulerRegistry:
         task = self._gateway.load_task(task_path)
         if task is None:
             return None
-        try:
-            arguments = parse_windows_argument_line(task.argument_line)
-        except WindowsCommandLineError:
-            arguments = (UNPARSEABLE_TASK_SCHEDULER_ARGUMENTS,)
-        return ObservedTaskSchedulerDefinition(
-            task_path=task.task_path,
-            executable_path=task.executable_path,
-            arguments=arguments,
-            enabled=task.enabled,
-            trigger_type=task.trigger_type,
-            configuration_json=task.configuration_json,
-            time_zone_id=task.time_zone_id,
-            task_logon_type=task.task_logon_type,
-            run_only_when_logged_on=task.run_only_when_logged_on,
-            requires_network=task.requires_network,
-            multiple_instances_policy=task.multiple_instances_policy,
-            execution_time_limit_seconds=task.execution_time_limit_seconds,
-            stop_on_execution_time_limit=task.stop_on_execution_time_limit,
+        return _observed_from_gateway_task(task)
+
+    def list_tasks(
+        self,
+        folder_path: str,
+        *,
+        limit: int,
+        after_task_name: str | None = None,
+    ) -> tuple[ObservedTaskSchedulerDefinition, ...]:
+        return tuple(
+            _observed_from_gateway_task(task)
+            for task in self._gateway.list_tasks(
+                folder_path,
+                limit=limit,
+                after_task_name=after_task_name,
+            )
         )
 
     def apply_task_definition(self, definition: TaskSchedulerDefinition) -> None:
         self._gateway.apply_task(_task_from_definition(definition))
+
+    def delete_task(self, task_path: str) -> None:
+        self._gateway.delete_task(task_path)
 
 
 class Pywin32TaskSchedulerGateway:
@@ -145,6 +156,45 @@ class Pywin32TaskSchedulerGateway:
             raise TaskSchedulerAdapterError("TASK_SCHEDULER_COM_LOAD_FAILED") from exc
         return _gateway_task_from_registered(task_path, folder_path, task_name, registered_task)
 
+    def list_tasks(
+        self,
+        folder_path: str,
+        *,
+        limit: int,
+        after_task_name: str | None = None,
+    ) -> tuple[TaskSchedulerGatewayTask, ...]:
+        _validate_folder_path(folder_path)
+        if limit < 1:
+            raise TaskSchedulerAdapterError("TASK_SCHEDULER_LIST_LIMIT_MUST_BE_POSITIVE")
+        if after_task_name is not None:
+            _validate_task_name(after_task_name)
+        try:
+            with self._com_apartment_factory():
+                folder = _call_method(self._service_factory(), "GetFolder", folder_path)
+                registered_tasks = _call_method(folder, "GetTasks", 0)
+        except TaskSchedulerAdapterError:
+            raise
+        except Exception as exc:
+            if _is_not_found_error(exc):
+                return ()
+            raise TaskSchedulerAdapterError("TASK_SCHEDULER_COM_LIST_FAILED") from exc
+        tasks: list[TaskSchedulerGatewayTask] = []
+        for index in range(1, _int_attr(registered_tasks, "Count") + 1):
+            registered_task = _call_method(registered_tasks, "Item", index)
+            task_name = _str_attr(registered_task, "Name")
+            tasks.append(
+                _gateway_task_from_registered(
+                    _join_task_path(folder_path, task_name),
+                    folder_path,
+                    task_name,
+                    registered_task,
+                )
+            )
+        tasks.sort(key=lambda task: task.task_name)
+        if after_task_name is not None:
+            tasks = [task for task in tasks if task.task_name > after_task_name]
+        return tuple(tasks[:limit])
+
     def apply_task(self, task: TaskSchedulerGatewayTask) -> None:
         try:
             with self._com_apartment_factory():
@@ -167,6 +217,19 @@ class Pywin32TaskSchedulerGateway:
             raise
         except Exception as exc:
             raise TaskSchedulerAdapterError("TASK_SCHEDULER_COM_APPLY_FAILED") from exc
+
+    def delete_task(self, task_path: str) -> None:
+        folder_path, task_name = _split_task_path(task_path)
+        try:
+            with self._com_apartment_factory():
+                folder = _call_method(self._service_factory(), "GetFolder", folder_path)
+                _call_method(folder, "DeleteTask", task_name, 0)
+        except TaskSchedulerAdapterError:
+            raise
+        except Exception as exc:
+            if _is_not_found_error(exc):
+                return
+            raise TaskSchedulerAdapterError("TASK_SCHEDULER_COM_DELETE_FAILED") from exc
 
 
 class _NullComApartment:
@@ -234,6 +297,28 @@ def _task_from_definition(definition: TaskSchedulerDefinition) -> TaskSchedulerG
     )
 
 
+def _observed_from_gateway_task(task: TaskSchedulerGatewayTask) -> ObservedTaskSchedulerDefinition:
+    try:
+        arguments = parse_windows_argument_line(task.argument_line)
+    except WindowsCommandLineError:
+        arguments = (UNPARSEABLE_TASK_SCHEDULER_ARGUMENTS,)
+    return ObservedTaskSchedulerDefinition(
+        task_path=task.task_path,
+        executable_path=task.executable_path,
+        arguments=arguments,
+        enabled=task.enabled,
+        trigger_type=task.trigger_type,
+        configuration_json=task.configuration_json,
+        time_zone_id=task.time_zone_id,
+        task_logon_type=task.task_logon_type,
+        run_only_when_logged_on=task.run_only_when_logged_on,
+        requires_network=task.requires_network,
+        multiple_instances_policy=task.multiple_instances_policy,
+        execution_time_limit_seconds=task.execution_time_limit_seconds,
+        stop_on_execution_time_limit=task.stop_on_execution_time_limit,
+    )
+
+
 def _validate_action_command_line_budget(definition: TaskSchedulerDefinition) -> None:
     try:
         build_windows_command_line((definition.executable_path, *definition.arguments))
@@ -242,14 +327,46 @@ def _validate_action_command_line_budget(definition: TaskSchedulerDefinition) ->
 
 
 def _split_task_path(task_path: str) -> tuple[str, str]:
-    if not task_path.startswith("\\") or task_path == "\\" or "\\\\" in task_path:
-        raise TaskSchedulerAdapterError("TASK_SCHEDULER_TASK_PATH_INVALID")
+    _validate_task_path(task_path)
     parts = tuple(part for part in task_path.split("\\") if part)
-    if not parts or any(part in {".", ".."} or part.strip() != part for part in parts):
-        raise TaskSchedulerAdapterError("TASK_SCHEDULER_TASK_PATH_INVALID")
     task_name = parts[-1]
     folder_path = "\\" if len(parts) == 1 else "\\" + "\\".join(parts[:-1])
     return folder_path, task_name
+
+
+def _join_task_path(folder_path: str, task_name: str) -> str:
+    _validate_folder_path(folder_path)
+    _validate_task_name(task_name)
+    if folder_path == "\\":
+        return f"\\{task_name}"
+    return f"{folder_path}\\{task_name}"
+
+
+def _validate_task_path(task_path: str) -> None:
+    if not task_path.startswith("\\") or task_path == "\\" or "\\\\" in task_path:
+        raise TaskSchedulerAdapterError("TASK_SCHEDULER_TASK_PATH_INVALID")
+    parts = tuple(part for part in task_path.split("\\") if part)
+    if not parts or any(not _is_valid_path_part(part) for part in parts):
+        raise TaskSchedulerAdapterError("TASK_SCHEDULER_TASK_PATH_INVALID")
+
+
+def _validate_folder_path(folder_path: str) -> None:
+    if not folder_path.startswith("\\") or "\\\\" in folder_path:
+        raise TaskSchedulerAdapterError("TASK_SCHEDULER_FOLDER_PATH_INVALID")
+    if folder_path == "\\":
+        return
+    parts = tuple(part for part in folder_path.split("\\") if part)
+    if not parts or any(not _is_valid_path_part(part) for part in parts):
+        raise TaskSchedulerAdapterError("TASK_SCHEDULER_FOLDER_PATH_INVALID")
+
+
+def _validate_task_name(task_name: str) -> None:
+    if not _is_valid_path_part(task_name) or "\\" in task_name:
+        raise TaskSchedulerAdapterError("TASK_SCHEDULER_TASK_NAME_INVALID")
+
+
+def _is_valid_path_part(value: str) -> bool:
+    return bool(value) and value.strip() == value and value not in {".", ".."}
 
 
 def _connect_pywin32_task_scheduler() -> object:

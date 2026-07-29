@@ -7248,6 +7248,7 @@ Regler:
 - Taskdefinisjonen er **desired state** i `schedules`; en reconciler sammenligner faktisk Task Scheduler-tilstand med `desired_definition_hash`.
 - Oppretting, oppdatering og sletting er idempotent og kan gjentas etter krasj.
 - Foreldreløse tasks identifiseres etter installasjons-ID og bruker-SID; de slettes ikke blindt hvis eierskap er tvetydig.
+- Orphan-sweepen lister bare installasjonens Task Scheduler-mappe og sletter først når task path, protokoll-argv, installasjons-ID og binær matcher, mens manglende schedule gjør tasken eid og foreldreløs.
 - En task som peker til annen binær eller ukjent argumentstruktur markeres som drift og krever eksplisitt reparasjon.
 
 ### 18.3 Triggerdeduplisering, claims og kø
