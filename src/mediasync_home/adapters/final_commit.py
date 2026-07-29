@@ -176,11 +176,6 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
         )
         staging_payload = _replace_staging_payload_path(self._staging_root, artifact)
         final_path = _replace_final_path(self._target_root, artifact.relative_path.value)
-        if not final_path.is_file() or final_path.is_symlink():
-            raise FinalCommitAdapterError(
-                "LOCAL_REPLACE_FINAL_COMMIT_TARGET_MISSING",
-                "Reload recovery state before retrying replacement.",
-            )
         version_payload, version_manifest = _version_object_paths(
             target_root=self._target_root,
             version_object_id=artifact.object_id,
@@ -207,17 +202,32 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
                 "LOCAL_REPLACE_FINAL_COMMIT_VERSION_PAYLOAD_MISMATCH",
                 "Enter recovery because the preserved old target no longer matches its manifest.",
             )
-        if _fingerprint_file(final_path) != expected_old:
-            raise FinalCommitAdapterError(
-                "LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE",
-                "Refresh analysis because the final target changed after old-target preservation.",
-            )
         if _hash_file(staging_payload) != artifact.content_hash:
             raise FinalCommitAdapterError(
                 "LOCAL_REPLACE_FINAL_COMMIT_STAGING_HASH_MISMATCH",
                 "Restage and verify the artifact before attempting replacement.",
             )
-        _replace_with_verified_payload(
+        if final_path.is_symlink() or (final_path.exists() and not final_path.is_file()):
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_TARGET_TYPE_CHANGED_AFTER_PRESERVE",
+                "Enter recovery because the final target path is no longer a regular file or absent.",
+            )
+        if final_path.is_file():
+            if _fingerprint_file(final_path) != expected_old:
+                raise FinalCommitAdapterError(
+                    "LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE",
+                    "Refresh analysis because the final target changed after old-target preservation.",
+                )
+            _replace_with_verified_payload(
+                staging_payload=staging_payload,
+                final_path=final_path,
+                content_hash=artifact.content_hash,
+            )
+            return CommitReceipt(
+                operation_id=artifact.object_id,
+                final_relative_path=artifact.relative_path,
+            )
+        _insert_replacement_payload_without_overwrite(
             staging_payload=staging_payload,
             final_path=final_path,
             content_hash=artifact.content_hash,
@@ -226,6 +236,36 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
             operation_id=artifact.object_id,
             final_relative_path=artifact.relative_path,
         )
+
+
+def _insert_replacement_payload_without_overwrite(
+    *,
+    staging_payload: Path,
+    final_path: Path,
+    content_hash: str,
+) -> None:
+    temp_path = final_path.parent / f".{final_path.name}.{uuid4().hex}.mediasync-replace-missing.tmp"
+    try:
+        _copy_file_durable(source=staging_payload, destination=temp_path)
+        if _hash_file(temp_path) != content_hash:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_TEMP_HASH_MISMATCH",
+                "Restage and verify the artifact before attempting replacement.",
+            )
+        try:
+            os.link(temp_path, final_path)
+        except FileExistsError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_TARGET_REAPPEARED",
+                "Reload recovery state because the final target reappeared during replacement.",
+            ) from exc
+        except OSError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_REPLACE_FINAL_COMMIT_NO_OVERWRITE_UNSUPPORTED",
+                "Use an endpoint profile with proven same-volume no-overwrite insert support.",
+            ) from exc
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 class LocalResolvingFinalCommitAdapter(FinalCommitPort):

@@ -194,6 +194,32 @@ def test_local_versioned_replace_rejects_target_drift_after_old_target_preserved
     ).read_bytes() == b"old-image"
 
 
+def test_local_versioned_replace_completes_when_final_missing_after_old_target_preserved(
+    tmp_path: Path,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    final = fixture.target_root / "Photos" / "image.jpg"
+    final.write_bytes(b"old-image")
+    artifact = fixture.stage(object_id="operation-a", relative_path="Photos/image.jpg", payload=b"new-image")
+    operation = _replace_operation(fixture, expected_target_payload=b"old-image")
+    adapter = LocalVersionedReplaceFinalCommitAdapter(
+        target_root=fixture.target_root,
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    adapter.preserve_old_target(permit, operation)
+    final.unlink()
+
+    receipt = adapter.commit_verified_artifact(permit, artifact)
+
+    assert receipt.final_relative_path == artifact.relative_path
+    assert final.read_bytes() == b"new-image"
+    assert (
+        fixture.target_root / ".mediasync" / "objects" / "versions" / "operation-a.payload"
+    ).read_bytes() == b"old-image"
+
+
 def test_local_resolving_final_commit_inserts_without_lab_marker(tmp_path: Path) -> None:
     fixture = _commit_fixture(tmp_path)
     (fixture.target_root / ".mediasync_test_root").unlink()
