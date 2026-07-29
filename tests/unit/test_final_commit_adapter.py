@@ -276,6 +276,69 @@ def test_local_versioned_replace_restore_never_overwrites_changed_final(
     assert final.read_bytes() == b"edited-after-preserve"
 
 
+def test_local_versioned_replace_restores_quarantined_empty_directory_when_final_missing(
+    tmp_path: Path,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    final = fixture.target_root / "Photos" / "image.jpg"
+    final.mkdir()
+    operation = _directory_empty_operation(fixture)
+    adapter = LocalVersionedReplaceFinalCommitAdapter(
+        target_root=fixture.target_root,
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    preservation = adapter.preserve_old_target(permit, operation)
+    preserved_operation = replace(
+        operation,
+        phase=RecoveryOperationPhase.OLD_TARGET_PRESERVED,
+        quarantine_object_id=preservation.quarantine_object_id,
+    )
+
+    receipt = adapter.restore_old_target(permit, preserved_operation)
+
+    quarantine_payload = fixture.target_root / ".mediasync" / "objects" / "quarantine" / "operation-a.payload"
+    assert receipt.operation_id == "operation-a"
+    assert receipt.final_relative_path == RelativePath("Photos/image.jpg")
+    assert receipt.fingerprint_json == '{"entry_count":0,"kind":"DIRECTORY_EMPTY"}'
+    assert final.is_dir()
+    assert list(final.iterdir()) == []
+    assert quarantine_payload.is_dir()
+
+
+def test_local_versioned_replace_directory_restore_never_overwrites_changed_final(
+    tmp_path: Path,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    final = fixture.target_root / "Photos" / "image.jpg"
+    final.mkdir()
+    operation = _directory_empty_operation(fixture)
+    adapter = LocalVersionedReplaceFinalCommitAdapter(
+        target_root=fixture.target_root,
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    preservation = adapter.preserve_old_target(permit, operation)
+    preserved_operation = replace(
+        operation,
+        phase=RecoveryOperationPhase.OLD_TARGET_PRESERVED,
+        quarantine_object_id=preservation.quarantine_object_id,
+    )
+    final.mkdir()
+    (final / "child.txt").write_text("edited", encoding="utf-8")
+
+    with pytest.raises(FinalCommitAdapterError) as exc_info:
+        adapter.restore_old_target(permit, preserved_operation)
+
+    assert exc_info.value.validation_code == "LOCAL_DIRECTORY_QUARANTINE_RESTORE_TARGET_NOT_EMPTY"
+    assert (final / "child.txt").read_text(encoding="utf-8") == "edited"
+    assert (
+        fixture.target_root / ".mediasync" / "objects" / "quarantine" / "operation-a.payload"
+    ).is_dir()
+
+
 def test_local_resolving_final_commit_inserts_without_lab_marker(tmp_path: Path) -> None:
     fixture = _commit_fixture(tmp_path)
     (fixture.target_root / ".mediasync_test_root").unlink()

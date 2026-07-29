@@ -245,6 +245,8 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
                 "LOCAL_REPLACE_OLD_TARGET_RESTORE_REQUIRES_PRESERVED_PHASE",
                 "Restore old target bytes only after the old target has been preserved.",
             )
+        if operation.target_precondition_kind is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY:
+            return self._restore_empty_directory_target(operation)
         if operation.target_precondition_kind is not RecoveryTargetPreconditionKind.MATCH_FINGERPRINT:
             raise FinalCommitAdapterError(
                 "LOCAL_REPLACE_OLD_TARGET_RESTORE_REQUIRES_MATCH_FINGERPRINT_PRECONDITION",
@@ -306,6 +308,98 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
             final_path=final_path,
             expected_fingerprint=expected_old,
         )
+        return OldTargetRestoreReceipt(
+            operation_id=operation.operation_id,
+            final_relative_path=RelativePath(operation.final_relative_path),
+            fingerprint_json=fingerprint_json,
+        )
+
+    def _restore_empty_directory_target(
+        self,
+        operation: RecoveryOperation,
+    ) -> OldTargetRestoreReceipt:
+        if operation.quarantine_object_id is None or not operation.quarantine_object_id.strip():
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_RESTORE_REQUIRES_QUARANTINE_OBJECT",
+                "Recover or reconcile the quarantined empty directory before restore.",
+            )
+
+        quarantine_payload, quarantine_manifest = _quarantine_object_paths(
+            target_root=self._target_root,
+            quarantine_object_id=operation.quarantine_object_id,
+            create=False,
+        )
+        manifest = _load_quarantine_manifest(
+            manifest_path=quarantine_manifest,
+            expected_operation_id=operation.operation_id,
+            expected_quarantine_object_id=operation.quarantine_object_id,
+            expected_final_relative_path=operation.final_relative_path,
+        )
+        expected = _manifest_empty_directory_precondition(
+            manifest,
+            validation_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_MANIFEST_INVALID",
+            next_action="Reload recovery state before restoring the quarantined directory.",
+        )
+        if operation.expected_target_fingerprint_json is not None:
+            bound_expected = _expected_empty_directory_precondition(
+                operation.expected_target_fingerprint_json,
+                validation_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_EVIDENCE_MISMATCH",
+                next_action="Reload recovery state before restoring the quarantined directory.",
+            )
+            if bound_expected != expected:
+                raise FinalCommitAdapterError(
+                    "LOCAL_DIRECTORY_QUARANTINE_RESTORE_EVIDENCE_MISMATCH",
+                    "Reload recovery state before restoring the quarantined directory.",
+                )
+        if manifest.get("payload_name") != quarantine_payload.name:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_RESTORE_MANIFEST_MISMATCH",
+                "Reload recovery state before restoring the quarantined directory.",
+            )
+        if quarantine_payload.is_symlink() or not quarantine_payload.is_dir():
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_RESTORE_PAYLOAD_INVALID",
+                "Enter recovery because the quarantine object path is not an empty directory.",
+            )
+        _require_empty_directory(
+            quarantine_payload,
+            read_failed_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_PAYLOAD_READ_FAILED",
+            not_empty_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_PAYLOAD_NOT_EMPTY",
+            next_action="Enter recovery because the quarantine object contents changed.",
+        )
+
+        final_path = _directory_empty_final_path(self._target_root, operation.final_relative_path)
+        fingerprint_json = _canonical_json(expected)
+        if final_path.exists() or final_path.is_symlink():
+            if final_path.is_symlink() or not final_path.is_dir():
+                raise FinalCommitAdapterError(
+                    "LOCAL_DIRECTORY_QUARANTINE_RESTORE_TARGET_TYPE_CHANGED",
+                    "Inspect the final target path before restoring the empty directory.",
+                )
+            _require_empty_directory(
+                final_path,
+                read_failed_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_TARGET_READ_FAILED",
+                not_empty_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_TARGET_NOT_EMPTY",
+                next_action="Do not restore over an existing final directory with contents.",
+            )
+            return OldTargetRestoreReceipt(
+                operation_id=operation.operation_id,
+                final_relative_path=RelativePath(operation.final_relative_path),
+                fingerprint_json=fingerprint_json,
+            )
+
+        try:
+            final_path.mkdir()
+        except FileExistsError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_RESTORE_TARGET_REAPPEARED",
+                "Reload recovery state because the final target reappeared during restore.",
+            ) from exc
+        except OSError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_RESTORE_CREATE_FAILED",
+                "Enter recovery and inspect the final path before retrying directory restore.",
+            ) from exc
         return OldTargetRestoreReceipt(
             operation_id=operation.operation_id,
             final_relative_path=RelativePath(operation.final_relative_path),
@@ -1094,19 +1188,25 @@ def _validate_existing_quarantine_payload(*, payload_path: Path, final_path: Pat
         )
 
 
-def _require_empty_directory(path: Path) -> None:
+def _require_empty_directory(
+    path: Path,
+    *,
+    read_failed_code: str = "LOCAL_DIRECTORY_QUARANTINE_READ_FAILED",
+    not_empty_code: str = "LOCAL_DIRECTORY_QUARANTINE_TARGET_NOT_EMPTY",
+    next_action: str = "Refresh analysis because the directory contents cannot be proven empty.",
+) -> None:
     try:
         next(path.iterdir())
     except StopIteration:
         return
     except OSError as exc:
         raise FinalCommitAdapterError(
-            "LOCAL_DIRECTORY_QUARANTINE_READ_FAILED",
-            "Refresh analysis because the directory contents cannot be proven empty.",
+            read_failed_code,
+            next_action,
         ) from exc
     raise FinalCommitAdapterError(
-        "LOCAL_DIRECTORY_QUARANTINE_TARGET_NOT_EMPTY",
-        "Refresh analysis because the target directory is no longer empty.",
+        not_empty_code,
+        next_action,
     )
 
 
@@ -1154,6 +1254,56 @@ def _quarantine_manifest(
         "final_relative_path": _relative_path(operation.final_relative_path),
         "payload_name": payload_path.name,
         "fingerprint": fingerprint,
+    }
+
+
+def _load_quarantine_manifest(
+    *,
+    manifest_path: Path,
+    expected_operation_id: str,
+    expected_quarantine_object_id: str,
+    expected_final_relative_path: str,
+) -> dict[str, object]:
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_RESTORE_MANIFEST_MISSING",
+            "Recover or reconcile the quarantine manifest before restoring the directory.",
+        ) from exc
+    if not isinstance(manifest, dict) or manifest.get("object_role") != "EMPTY_DIRECTORY_QUARANTINE":
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_RESTORE_MANIFEST_INVALID",
+            "Enter recovery because the quarantine manifest is invalid.",
+        )
+    if (
+        manifest.get("operation_id") != expected_operation_id
+        or manifest.get("quarantine_object_id") != expected_quarantine_object_id
+        or manifest.get("final_relative_path") != _relative_path(expected_final_relative_path)
+    ):
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_RESTORE_MANIFEST_MISMATCH",
+            "Reload recovery state before restoring the quarantined directory.",
+        )
+    return manifest
+
+
+def _manifest_empty_directory_precondition(
+    manifest: dict[str, object],
+    *,
+    validation_code: str,
+    next_action: str,
+) -> dict[str, object]:
+    raw_fingerprint = manifest.get("fingerprint")
+    if not isinstance(raw_fingerprint, dict):
+        raise FinalCommitAdapterError(validation_code, next_action)
+    if raw_fingerprint.get("kind") != RecoveryTargetPreconditionKind.DIRECTORY_EMPTY.value:
+        raise FinalCommitAdapterError(validation_code, next_action)
+    if raw_fingerprint.get("entry_count") != 0:
+        raise FinalCommitAdapterError(validation_code, next_action)
+    return {
+        "entry_count": 0,
+        "kind": RecoveryTargetPreconditionKind.DIRECTORY_EMPTY.value,
     }
 
 

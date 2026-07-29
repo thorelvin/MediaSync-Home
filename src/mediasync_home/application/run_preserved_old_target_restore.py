@@ -78,21 +78,14 @@ def restore_next_run_target_preserved_old_target(
             validation_code="RUN_TARGET_PRESERVED_OLD_TARGET_RESTORE_PERMIT_MISMATCH",
             next_action="Reacquire the endpoint lease before restoring old target bytes.",
         )
-    if operation.target_precondition_kind is not RecoveryTargetPreconditionKind.MATCH_FINGERPRINT:
+    precondition_error = _validate_restorable_precondition(operation)
+    if precondition_error is not None:
         return _failed(
             permit=permit,
             operation=operation,
             receipt=None,
-            validation_code="RUN_TARGET_PRESERVED_OLD_TARGET_RESTORE_REQUIRES_MATCH_FINGERPRINT",
-            next_action="Restore old target bytes only for preserved versioned replacements.",
-        )
-    if operation.version_object_id is None and operation.quarantine_object_id is None:
-        return _failed(
-            permit=permit,
-            operation=operation,
-            receipt=None,
-            validation_code="RUN_TARGET_PRESERVED_OLD_TARGET_RESTORE_REQUIRES_PRESERVED_OBJECT",
-            next_action="Recover or reconcile the preserved old target object before restore.",
+            validation_code=precondition_error[0],
+            next_action=precondition_error[1],
         )
 
     try:
@@ -174,6 +167,27 @@ def _operation_matches_permit(*, operation: RecoveryOperation, permit: MutationP
         and operation.lease_id == permit.lease_id
         and operation.lease_resource_key == permit.resource_key
         and operation.fencing_token == permit.fencing_token
+    )
+
+
+def _validate_restorable_precondition(operation: RecoveryOperation) -> tuple[str, str] | None:
+    if operation.target_precondition_kind is RecoveryTargetPreconditionKind.MATCH_FINGERPRINT:
+        if operation.version_object_id is None or not operation.version_object_id.strip():
+            return (
+                "RUN_TARGET_PRESERVED_OLD_TARGET_RESTORE_REQUIRES_VERSION_OBJECT",
+                "Recover or reconcile the preserved old target version object before restore.",
+            )
+        return None
+    if operation.target_precondition_kind is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY:
+        if operation.quarantine_object_id is None or not operation.quarantine_object_id.strip():
+            return (
+                "RUN_TARGET_PRESERVED_OLD_TARGET_RESTORE_REQUIRES_QUARANTINE_OBJECT",
+                "Recover or reconcile the quarantined empty directory before restore.",
+            )
+        return None
+    return (
+        "RUN_TARGET_PRESERVED_OLD_TARGET_RESTORE_REQUIRES_RESTORABLE_PRECONDITION",
+        "Restore old targets only for preserved versioned replacements or quarantined empty directories.",
     )
 
 

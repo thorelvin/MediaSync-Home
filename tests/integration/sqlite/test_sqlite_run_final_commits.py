@@ -407,6 +407,84 @@ def test_sqlite_preserved_old_target_restore_records_cancelled_operation(
         connection.close()
 
 
+def test_sqlite_preserved_empty_directory_restore_records_cancelled_operation(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _register_resource_lease(connection)
+        recovery_operations = SqliteRecoveryOperationStore(connection)
+        intent_segments = SqliteRecoveryIntentSegmentStore(connection)
+        new_payload = b"new-image"
+        operation = _record_staging_verified_operation(
+            recovery_operations,
+            content_hash=_sha256(new_payload),
+            content_byte_count=len(new_payload),
+            target_precondition_kind=RecoveryTargetPreconditionKind.DIRECTORY_EMPTY,
+            expected_target_fingerprint_json=_empty_directory_fingerprint_json(),
+        )
+        target_root = tmp_path / "target"
+        staging_root = tmp_path / "staging"
+        _prepare_lab_target(target_root=target_root, staging_root=staging_root)
+        final = target_root / "Pictures" / "A.jpg"
+        final.mkdir()
+        (staging_root / "op-a.payload").write_bytes(new_payload)
+        lease = _lease(target_root / ".mediasync" / "locks" / "mutation.lock")
+        adapter = LocalVersionedReplaceFinalCommitAdapter(
+            target_root=target_root,
+            staging_root=staging_root,
+            permit_validator=lease,
+        )
+        intent = publish_run_target_recovery_intent_segment(
+            permit=lease.issue_mutation_permit(),
+            recovery_operations=recovery_operations,
+            intent_segments=intent_segments,
+            process_instance_id="host-a",
+        )
+        assert intent.published is True
+        preconditions = recovery_operations.record_operation_phase_transition(
+            run_id=operation.run_id,
+            operation_id=operation.operation_id,
+            expected_phase=RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
+            next_phase=RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
+            process_instance_id="host-a",
+        )
+        assert preconditions is not None
+        preservation = adapter.preserve_old_target(lease.issue_mutation_permit(), preconditions)
+        preserved = recovery_operations.record_operation_phase_transition(
+            run_id=preconditions.run_id,
+            operation_id=preconditions.operation_id,
+            expected_phase=RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
+            next_phase=RecoveryOperationPhase.OLD_TARGET_PRESERVED,
+            process_instance_id="host-a",
+            operation_metadata=RecoveryOperationMetadata(
+                quarantine_object_id=preservation.quarantine_object_id,
+            ),
+        )
+        assert preserved is not None
+        quarantine_payload = target_root / ".mediasync" / "objects" / "quarantine" / "op-a.payload"
+
+        outcome = restore_next_run_target_preserved_old_target(
+            permit=lease.issue_mutation_permit(),
+            recovery_operations=recovery_operations,
+            old_target_restore_port=adapter,
+            process_instance_id="host-a",
+        )
+
+        loaded = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+        assert outcome.restored is True
+        assert outcome.validation_codes == ()
+        assert loaded is not None
+        assert loaded.phase is RecoveryOperationPhase.CANCELLED
+        assert loaded.last_error_code == "RUN_TARGET_PRESERVED_OLD_TARGET_RESTORED"
+        assert final.is_dir()
+        assert list(final.iterdir()) == []
+        assert quarantine_payload.is_dir()
+        assert _event_phases(connection)[-1:] == ["CANCELLED"]
+    finally:
+        connection.close()
+
+
 def _prepared_recovery_connection(tmp_path: Path) -> sqlite3.Connection:
     database = tmp_path / "recovery.sqlite"
     connection = sqlite3.connect(database)
@@ -437,6 +515,7 @@ def _record_staging_verified_operation(
     content_byte_count: int = 5,
     target_precondition_kind: RecoveryTargetPreconditionKind = RecoveryTargetPreconditionKind.ABSENT,
     expected_target_payload: bytes | None = None,
+    expected_target_fingerprint_json: str | None = None,
 ) -> RecoveryOperation:
     operation = store.record_planned_operation(
         _operation(
@@ -444,6 +523,7 @@ def _record_staging_verified_operation(
             content_byte_count=content_byte_count,
             target_precondition_kind=target_precondition_kind,
             expected_target_payload=expected_target_payload,
+            expected_target_fingerprint_json=expected_target_fingerprint_json,
         ),
         process_instance_id="host-a",
     )
@@ -474,6 +554,7 @@ def _operation(
     content_byte_count: int = 5,
     target_precondition_kind: RecoveryTargetPreconditionKind = RecoveryTargetPreconditionKind.ABSENT,
     expected_target_payload: bytes | None = None,
+    expected_target_fingerprint_json: str | None = None,
 ) -> RecoveryOperation:
     return replace(
         planned_recovery_operation(
@@ -492,21 +573,34 @@ def _operation(
             target_precondition_kind=target_precondition_kind,
         ),
         staging_object_id="op-a",
-        expected_target_fingerprint_json=None
-        if expected_target_payload is None
-        else json.dumps(
-            {
-                "byte_count": len(expected_target_payload),
-                "content_hash": _sha256(expected_target_payload),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
+        expected_target_fingerprint_json=_target_fingerprint_json(
+            expected_target_payload=expected_target_payload,
+            expected_target_fingerprint_json=expected_target_fingerprint_json,
         ),
         expected_staging_fingerprint_json=json.dumps(
             {"byte_count": content_byte_count, "content_hash": content_hash},
             sort_keys=True,
             separators=(",", ":"),
         ),
+    )
+
+
+def _target_fingerprint_json(
+    *,
+    expected_target_payload: bytes | None,
+    expected_target_fingerprint_json: str | None,
+) -> str | None:
+    if expected_target_fingerprint_json is not None:
+        return expected_target_fingerprint_json
+    if expected_target_payload is None:
+        return None
+    return json.dumps(
+        {
+            "byte_count": len(expected_target_payload),
+            "content_hash": _sha256(expected_target_payload),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 
@@ -575,3 +669,14 @@ def _event_phases(connection: sqlite3.Connection) -> list[str]:
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _empty_directory_fingerprint_json() -> str:
+    return json.dumps(
+        {
+            "entry_count": 0,
+            "kind": "DIRECTORY_EMPTY",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
