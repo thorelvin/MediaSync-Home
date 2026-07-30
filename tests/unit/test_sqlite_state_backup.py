@@ -62,7 +62,7 @@ def _manifest_payload() -> dict[str, object]:
                 "size_bytes": 4096,
                 "sha256": "1" * 64,
                 "schema_version": 23,
-                "migration_count": 23,
+                "migration_count": 24,
                 "latest_migration_utc": "2026-07-30T12:00:00.000Z",
                 "page_count": 1,
                 "quick_check": "ok",

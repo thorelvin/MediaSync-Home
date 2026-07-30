@@ -792,6 +792,7 @@ def test_engine_host_runtime_without_state_root_preserves_non_persistent_service
         assert runtime.state_restore_recovery is None
         assert runtime.state_restore_startup_reconciliation is None
         assert runtime.state_compaction_recovery is None
+        assert runtime.installation_state is None
         assert runtime.startup_reconciliation is None
         assert runtime.catalog_connection is None
         assert runtime.recovery_connection is None
@@ -826,6 +827,11 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.state_layout.recovery.is_file()
         assert runtime.catalog_connection is not None
         assert runtime.recovery_connection is not None
+        assert runtime.installation_state is not None
+        assert runtime.installation_state.product_channel == "local-preview"
+        assert runtime.installation_state.catalog_schema_version == 24
+        assert runtime.installation_state.recovery_schema_version == 5
+        assert runtime.installation_state.ipc_protocol_major == 1
         assert runtime.service.job_draft_store is not None
         assert runtime.service.standard_backup_job_read_store is not None
         assert runtime.service.standard_backup_job_detail_store is not None
@@ -854,7 +860,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
             runtime.run_executor_recovery_object_cleanup_port
             is runtime.run_executor_final_commit_port
         )
-        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 23
+        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 24
         assert current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY) == 5
         assert runtime.startup_reconciliation is not None
         assert runtime.startup_reconciliation.reconciler_instance_id == "host-new"
@@ -1090,6 +1096,34 @@ def test_engine_host_runtime_backfills_endpoint_bindings_for_existing_job(
             ("SOURCE", 0, "REGISTRATION_PENDING"),
             ("TARGET", 1, "REGISTRATION_PENDING"),
         ]
+    finally:
+        restarted.close()
+
+
+def test_engine_host_runtime_reuses_stable_installation_identity(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=local_writable_status(ProcessRole.ENGINE_HOST),
+        state_root=state_root,
+    )
+    try:
+        assert runtime.installation_state is not None
+        installation_id = runtime.installation_state.installation_id
+        created_utc = runtime.installation_state.created_utc
+    finally:
+        runtime.close()
+
+    restarted = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=local_writable_status(ProcessRole.ENGINE_HOST),
+        state_root=state_root,
+    )
+    try:
+        assert restarted.installation_state is not None
+        assert restarted.installation_state.installation_id == installation_id
+        assert restarted.installation_state.created_utc == created_utc
+        assert restarted.installation_state.row_version == 1
     finally:
         restarted.close()
 

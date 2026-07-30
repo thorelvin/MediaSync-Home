@@ -142,6 +142,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_standard_backup_job_endpoint_bindings",
                 statements=CATALOG_STANDARD_BACKUP_JOB_ENDPOINT_BINDINGS,
             ),
+            SqliteMigration(
+                version=24,
+                name="catalog_installation_state",
+                statements=CATALOG_INSTALLATION_STATE,
+            ),
         ),
     )
 
@@ -1211,6 +1216,43 @@ CATALOG_STANDARD_BACKUP_JOB_ENDPOINT_BINDINGS = (
     """
     CREATE INDEX idx_standard_backup_job_endpoint_bindings_endpoint
         ON standard_backup_job_endpoint_bindings (endpoint_id, endpoint_revision_id)
+    """,
+)
+
+CATALOG_INSTALLATION_STATE = (
+    """
+    CREATE TABLE installation_state (
+        installation_id TEXT PRIMARY KEY,
+        singleton_guard INTEGER NOT NULL DEFAULT 1 UNIQUE CHECK (singleton_guard = 1),
+        product_channel TEXT NOT NULL CHECK (length(trim(product_channel)) > 0),
+        created_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        last_started_app_version TEXT NOT NULL CHECK (
+            length(trim(last_started_app_version)) > 0
+        ),
+        catalog_schema_version INTEGER NOT NULL CHECK (catalog_schema_version >= 1),
+        recovery_schema_version INTEGER NOT NULL CHECK (recovery_schema_version >= 1),
+        ipc_protocol_major INTEGER NOT NULL CHECK (ipc_protocol_major >= 1),
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1)
+    )
+    """,
+    """
+    CREATE TRIGGER trg_installation_state_identity_immutable
+    BEFORE UPDATE ON installation_state
+    WHEN
+        NEW.installation_id IS NOT OLD.installation_id
+        OR NEW.singleton_guard IS NOT OLD.singleton_guard
+        OR NEW.product_channel IS NOT OLD.product_channel
+        OR NEW.created_utc IS NOT OLD.created_utc
+    BEGIN
+        SELECT RAISE(ABORT, 'INSTALLATION_IDENTITY_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_installation_state_no_delete
+    BEFORE DELETE ON installation_state
+    BEGIN
+        SELECT RAISE(ABORT, 'INSTALLATION_STATE_DELETE_FORBIDDEN');
+    END
     """,
 )
 

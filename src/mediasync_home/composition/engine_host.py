@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
+from mediasync_home import __version__
 from mediasync_home.adapters.endpoint_leases import (
     EndpointRootResolver,
     LocalResolvingEndpointLeaseAuthority,
@@ -29,12 +30,14 @@ from mediasync_home.adapters.task_scheduler import (
 from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
 from mediasync_home.adapters.sqlite.command_receipts import SqliteCommandReceiptStore
 from mediasync_home.adapters.sqlite.connection_policy import (
+    SqliteStore,
     StateStoreLayout,
     apply_sqlite_connection_policy,
     build_state_store_layout,
     catalog_critical_writer_policy,
     recovery_writer_policy,
 )
+from mediasync_home.adapters.sqlite.installation_state import SqliteInstallationStateStore
 from mediasync_home.adapters.sqlite.endpoint_roots import SqliteEndpointRootResolver
 from mediasync_home.adapters.sqlite.external_resources import SqliteExternalResourceStateStore
 from mediasync_home.adapters.sqlite.job_catalog import SqliteStandardBackupJobCatalog
@@ -46,6 +49,7 @@ from mediasync_home.adapters.sqlite.lease_tokens import SqliteResourceLeaseStore
 from mediasync_home.adapters.sqlite.migrations import (
     apply_sqlite_migrations,
     catalog_migration_plan,
+    current_schema_version,
     recovery_migration_plan,
 )
 from mediasync_home.adapters.sqlite.outbox import SqliteOutboxStore
@@ -92,6 +96,7 @@ from mediasync_home.application.run_executor_cycle import (
 from mediasync_home.application.host_locator import LocalEngineHostPublication
 from mediasync_home.application.job_creation import StandardBackupJobIds
 from mediasync_home.application.job_endpoints import EndpointIds
+from mediasync_home.application.installation_state import InstallationState
 from mediasync_home.application.run_operation_planning import (
     RunTargetOperationPlanningOutcome,
     plan_run_target_recovery_operations,
@@ -147,6 +152,7 @@ from mediasync_home.composition._role_runner import Emit, run_role
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.domain.capabilities import MutationPermit
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy
+from mediasync_home.ipc.protocol import PROTOCOL_VERSION
 from mediasync_home.ipc.server import EngineHostIpcService
 
 
@@ -187,6 +193,11 @@ class UuidEndpointIdFactory:
             endpoint_id=str(uuid4()),
             endpoint_revision_id=str(uuid4()),
         )
+
+
+class UuidInstallationIdFactory:
+    def new_installation_id(self) -> str:
+        return str(uuid4())
 
 
 class RetainedRunTargetPermitValidator:
@@ -241,6 +252,7 @@ class TaskSchedulerStartupReconciliationOptions:
 @dataclass
 class EngineHostRuntime:
     service: EngineHostIpcService
+    installation_state: InstallationState | None = None
     state_layout: StateStoreLayout | None = None
     state_restore_recovery: SqliteStateRestoreEpochRecoveryReport | None = None
     state_restore_startup_reconciliation: SqliteStateRestoreStartupReconciliationReport | None = None
@@ -1265,8 +1277,26 @@ def build_engine_host_runtime(
             recovery_connection,
             recovery_writer_policy(layout.recovery),
         )
-        apply_sqlite_migrations(catalog_connection, catalog_migration_plan())
-        apply_sqlite_migrations(recovery_connection, recovery_migration_plan())
+        catalog_plan = catalog_migration_plan()
+        recovery_plan = recovery_migration_plan()
+        apply_sqlite_migrations(catalog_connection, catalog_plan)
+        apply_sqlite_migrations(recovery_connection, recovery_plan)
+        installation_state = SqliteInstallationStateStore(
+            catalog_connection,
+            id_factory=UuidInstallationIdFactory(),
+        ).load_or_create(
+            product_channel="local-preview",
+            app_version=__version__,
+            catalog_schema_version=current_schema_version(
+                catalog_connection,
+                SqliteStore.CATALOG,
+            ),
+            recovery_schema_version=current_schema_version(
+                recovery_connection,
+                SqliteStore.RECOVERY,
+            ),
+            ipc_protocol_major=PROTOCOL_VERSION,
+        )
         command_receipts = SqliteCommandReceiptStore(catalog_connection)
         outbox = SqliteOutboxStore(catalog_connection)
         job_drafts = SqliteJobDraftStore(catalog_connection)
@@ -1357,6 +1387,7 @@ def build_engine_host_runtime(
         raise
     runtime = EngineHostRuntime(
         service=service,
+        installation_state=installation_state,
         state_layout=layout,
         state_restore_recovery=state_restore_recovery,
         state_restore_startup_reconciliation=state_restore_startup_reconciliation,
