@@ -21,10 +21,15 @@ from mediasync_home.adapters.sqlite.migrations import (
 from mediasync_home.adapters.sqlite.state_backup import (
     BACKUP_SET_INTENT_FILENAME,
     BACKUP_SET_MANIFEST_FILENAME,
+    STATE_RESTORE_COMMITTED_FILENAME,
+    STATE_RESTORE_EPOCHS_DIR_NAME,
+    STATE_RESTORE_INTENT_FILENAME,
     SqliteStateBackupViolation,
+    apply_sqlite_state_restore_plan,
     create_sqlite_state_backup_set,
     load_sqlite_state_backup_manifest,
     plan_sqlite_state_restore,
+    restore_sqlite_state_backup_set,
     verify_sqlite_state_backup_set,
 )
 
@@ -153,6 +158,94 @@ def test_sqlite_state_restore_plan_blocks_same_timestamp_extra_target_intent(
         plan_sqlite_state_restore(tmp_path / "state-backups" / "set-a", layout)
 
 
+def test_sqlite_state_restore_swap_restores_verified_pair_and_preserves_rollback(
+    tmp_path: Path,
+) -> None:
+    layout = build_state_store_layout(tmp_path / "state")
+    _initialize_state_stores(layout)
+    create_sqlite_state_backup_set(
+        layout,
+        tmp_path / "state-backups",
+        backup_set_id="set-a",
+        created_utc="2026-07-30T12:00:00Z",
+    )
+    backup_versions = _read_user_versions(layout)
+    _set_user_version(layout.catalog, 77)
+    _set_user_version(layout.recovery, 88)
+    assert _read_user_versions(layout) == (77, 88)
+    plan = plan_sqlite_state_restore(tmp_path / "state-backups" / "set-a", layout)
+    _sqlite_sidecar_path(layout.recovery, "wal").write_bytes(b"stale-wal")
+    _sqlite_sidecar_path(layout.recovery, "shm").write_bytes(b"stale-shm")
+    assert _sqlite_sidecar_path(layout.recovery, "wal").is_file()
+
+    receipt = apply_sqlite_state_restore_plan(
+        plan,
+        restore_epoch_id="restore-a",
+        started_utc="2026-07-30T12:05:00Z",
+    )
+
+    epoch_dir = layout.root / STATE_RESTORE_EPOCHS_DIR_NAME / "restore-a"
+    assert receipt.backup_set_id == "set-a"
+    assert receipt.intent_path == epoch_dir / STATE_RESTORE_INTENT_FILENAME
+    assert receipt.committed_path == epoch_dir / STATE_RESTORE_COMMITTED_FILENAME
+    assert receipt.intent_path.is_file()
+    assert receipt.committed_path.is_file()
+    assert _read_user_versions(layout) == backup_versions
+    assert [entry.store.value for entry in receipt.restored_files] == ["catalog", "recovery"]
+    assert all(entry.rollback_path is not None for entry in receipt.restored_files)
+    assert [entry.target_path for entry in receipt.restored_files] == [
+        layout.catalog,
+        layout.recovery,
+    ]
+    assert not _sqlite_sidecar_path(layout.recovery, "wal").exists()
+    assert not _sqlite_sidecar_path(layout.recovery, "shm").exists()
+    assert (
+        layout.recovery.with_name(".recovery.sqlite.restore-a.restore-rollback")
+    ).is_file()
+    assert (
+        layout.recovery.with_name(".recovery.sqlite-wal.restore-a.restore-rollback")
+    ).is_file()
+
+
+def test_sqlite_state_restore_swap_rolls_back_when_second_store_publish_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = build_state_store_layout(tmp_path / "state")
+    _initialize_state_stores(layout)
+    create_sqlite_state_backup_set(
+        layout,
+        tmp_path / "state-backups",
+        backup_set_id="set-a",
+        created_utc="2026-07-30T12:00:00Z",
+    )
+    _set_user_version(layout.catalog, 77)
+    _set_user_version(layout.recovery, 88)
+    original_replace = Path.replace
+
+    def flaky_replace(self: Path, target: str | Path) -> Path:
+        target_path = Path(target)
+        if self.name.startswith(".recovery.sqlite.restore-b.restore-new") and (
+            target_path == layout.recovery
+        ):
+            raise OSError("simulated restore swap failure")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+
+    with pytest.raises(SqliteStateBackupViolation, match="STATE_RESTORE_SWAP_FAILED"):
+        restore_sqlite_state_backup_set(
+            tmp_path / "state-backups" / "set-a",
+            layout,
+            restore_epoch_id="restore-b",
+            started_utc="2026-07-30T12:05:00Z",
+        )
+
+    assert _read_user_versions(layout) == (77, 88)
+    assert layout.catalog.with_name(".catalog.sqlite.restore-b.restore-rollback").exists() is False
+    assert layout.recovery.with_name(".recovery.sqlite.restore-b.restore-rollback").exists() is False
+
+
 def test_sqlite_state_backup_set_rejects_mixed_store_file_from_another_epoch(
     tmp_path: Path,
 ) -> None:
@@ -194,6 +287,27 @@ def _initialize_state_stores(layout) -> None:
     with sqlite3.connect(layout.recovery) as connection:
         apply_sqlite_connection_policy(connection, recovery_writer_policy(layout.recovery))
         apply_sqlite_migrations(connection, recovery_migration_plan())
+
+
+def _set_user_version(database_path: Path, value: int) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute(f"PRAGMA user_version = {value}")
+
+
+def _read_user_versions(layout: StateStoreLayout) -> tuple[int, int]:
+    return (_read_user_version(layout.catalog), _read_user_version(layout.recovery))
+
+
+def _read_user_version(database_path: Path) -> int:
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute("PRAGMA user_version").fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _sqlite_sidecar_path(database_path: Path, suffix: str) -> Path:
+    return Path(f"{database_path}-{suffix}")
 
 
 def _insert_active_recovery_intent_segment(
