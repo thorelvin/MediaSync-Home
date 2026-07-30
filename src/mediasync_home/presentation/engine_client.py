@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol
 
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.job_creation import JobCreationCommandName
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
-from mediasync_home.ipc.protocol import IpcResponse
+from mediasync_home.ipc.protocol import IpcReason, IpcResponse
 
 
 class StatusIpcClient(Protocol):
@@ -113,7 +114,7 @@ class EngineClient:
         return self._ipc_client.connect()
 
     def get_status(self) -> IpcResponse:
-        return self._ipc_client.query_status()
+        return self._request_with_handshake_retry(self._ipc_client.query_status)
 
     def get_backup_overview(
         self,
@@ -122,14 +123,18 @@ class EngineClient:
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
-        return self._ipc_client.query_backup_overview(
-            draft_id=draft_id,
-            limit=limit,
-            offset=offset,
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_backup_overview(
+                draft_id=draft_id,
+                limit=limit,
+                offset=offset,
+            )
         )
 
     def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
-        return self._ipc_client.query_backup_job_detail(job_id=job_id)
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_backup_job_detail(job_id=job_id)
+        )
 
     def get_activity_overview(
         self,
@@ -138,10 +143,12 @@ class EngineClient:
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
-        return self._ipc_client.query_activity_overview(
-            job_id=job_id,
-            limit=limit,
-            offset=offset,
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_activity_overview(
+                job_id=job_id,
+                limit=limit,
+                offset=offset,
+            )
         )
 
     def get_plan_operations(
@@ -151,10 +158,12 @@ class EngineClient:
         limit: int | None = None,
         after: dict[str, object] | None = None,
     ) -> IpcResponse:
-        return self._ipc_client.query_plan_operations(
-            plan_id=plan_id,
-            limit=limit,
-            after=after,
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_plan_operations(
+                plan_id=plan_id,
+                limit=limit,
+                after=after,
+            )
         )
 
     def get_plan_endpoints(
@@ -164,10 +173,12 @@ class EngineClient:
         limit: int | None = None,
         after: dict[str, object] | None = None,
     ) -> IpcResponse:
-        return self._ipc_client.query_plan_endpoints(
-            plan_id=plan_id,
-            limit=limit,
-            after=after,
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_plan_endpoints(
+                plan_id=plan_id,
+                limit=limit,
+                after=after,
+            )
         )
 
     def get_snapshot_entries(
@@ -177,10 +188,12 @@ class EngineClient:
         limit: int | None = None,
         after: dict[str, object] | None = None,
     ) -> IpcResponse:
-        return self._ipc_client.query_snapshot_entries(
-            snapshot_id=snapshot_id,
-            limit=limit,
-            after=after,
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_snapshot_entries(
+                snapshot_id=snapshot_id,
+                limit=limit,
+                after=after,
+            )
         )
 
     def get_snapshot_coverage(
@@ -191,11 +204,13 @@ class EngineClient:
         after: dict[str, object] | None = None,
         coverage_states: tuple[str, ...] = (),
     ) -> IpcResponse:
-        return self._ipc_client.query_snapshot_coverage(
-            snapshot_id=snapshot_id,
-            limit=limit,
-            after=after,
-            coverage_states=coverage_states,
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_snapshot_coverage(
+                snapshot_id=snapshot_id,
+                limit=limit,
+                after=after,
+                coverage_states=coverage_states,
+            )
         )
 
     def get_snapshot_issues(
@@ -206,11 +221,13 @@ class EngineClient:
         after: dict[str, object] | None = None,
         blocking_only: bool = False,
     ) -> IpcResponse:
-        return self._ipc_client.query_snapshot_issues(
-            snapshot_id=snapshot_id,
-            limit=limit,
-            after=after,
-            blocking_only=blocking_only,
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_snapshot_issues(
+                snapshot_id=snapshot_id,
+                limit=limit,
+                after=after,
+                blocking_only=blocking_only,
+            )
         )
 
     def get_cataloged_files(
@@ -221,11 +238,13 @@ class EngineClient:
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
-        return self._ipc_client.query_cataloged_files(
-            run_id=run_id,
-            target_endpoint_id=target_endpoint_id,
-            limit=limit,
-            offset=offset,
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_cataloged_files(
+                run_id=run_id,
+                target_endpoint_id=target_endpoint_id,
+                limit=limit,
+                offset=offset,
+            )
         )
 
     def create_standard_backup_job(
@@ -236,13 +255,28 @@ class EngineClient:
         idempotency_key: str,
     ) -> IpcResponse:
         payload = _create_standard_backup_job_payload(draft)
-        return self._ipc_client.submit_command(
-            JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
-            request_id=request_id,
-            idempotency_key=idempotency_key,
-            payload=payload,
-            payload_hash=canonical_command_payload_hash(payload),
+        payload_hash = canonical_command_payload_hash(payload)
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.submit_command(
+                JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                payload_hash=payload_hash,
+            )
         )
+
+    def _request_with_handshake_retry(
+        self,
+        request: Callable[[], IpcResponse],
+    ) -> IpcResponse:
+        response = request()
+        if response.reason is not IpcReason.HANDSHAKE_REQUIRED:
+            return response
+        handshake = self._ipc_client.connect()
+        if handshake.reason is not None:
+            return handshake
+        return request()
 
 
 def _create_standard_backup_job_payload(

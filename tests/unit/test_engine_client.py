@@ -5,7 +5,7 @@ from typing import Any
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.job_creation import JobCreationCommandName
 from mediasync_home.application.job_drafts import DraftTarget, StandardBackupJobDraft
-from mediasync_home.ipc.protocol import IpcResponse
+from mediasync_home.ipc.protocol import IpcReason, IpcResponse
 from mediasync_home.presentation.engine_client import EngineClient
 
 
@@ -34,6 +34,31 @@ def test_engine_client_submits_reviewed_standard_backup_draft() -> None:
     assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
 
 
+def test_engine_client_reconnects_once_when_host_loses_handshake_state() -> None:
+    ipc_client = _RestartedHostIpcClient()
+    client = EngineClient(ipc_client)  # type: ignore[arg-type]
+
+    response = client.get_status()
+
+    assert response.reason is None
+    assert response.payload == {"ready": True}
+    assert ipc_client.status_calls == 2
+    assert ipc_client.connect_calls == 1
+
+
+def test_engine_client_returns_failed_reconnect_without_replaying_request() -> None:
+    ipc_client = _RestartedHostIpcClient(
+        handshake=IpcResponse.rejected(IpcReason.CLIENT_IDENTITY_MISMATCH)
+    )
+    client = EngineClient(ipc_client)  # type: ignore[arg-type]
+
+    response = client.get_status()
+
+    assert response.reason is IpcReason.CLIENT_IDENTITY_MISMATCH
+    assert ipc_client.status_calls == 1
+    assert ipc_client.connect_calls == 1
+
+
 class _RecordingIpcClient:
     def __init__(self) -> None:
         self.command_name: str | None = None
@@ -53,3 +78,20 @@ class _RecordingIpcClient:
         self.payload = kwargs.get("payload")
         self.payload_hash = kwargs.get("payload_hash")
         return IpcResponse.accepted({"created": True})
+
+
+class _RestartedHostIpcClient:
+    def __init__(self, *, handshake: IpcResponse | None = None) -> None:
+        self.handshake = handshake or IpcResponse.accepted({"connected": True})
+        self.status_calls = 0
+        self.connect_calls = 0
+
+    def connect(self) -> IpcResponse:
+        self.connect_calls += 1
+        return self.handshake
+
+    def query_status(self) -> IpcResponse:
+        self.status_calls += 1
+        if self.status_calls == 1:
+            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        return IpcResponse.accepted({"ready": True})
