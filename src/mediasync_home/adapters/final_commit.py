@@ -1021,6 +1021,13 @@ def _reject_symlink_in_path(
             reparse_next_action=next_action,
             allow_missing_suffix=allow_missing_suffix,
         )
+        DEFAULT_REPARSE_GUARD.require_resolved_under_root(
+            root=root,
+            path=root.joinpath(*relative_parts),
+            strict=not allow_missing_suffix,
+            escape_code="LOCAL_FINAL_COMMIT_PATH_ESCAPES_ROOT",
+            escape_next_action="Resolve the final path through a validated endpoint root.",
+        )
     except ReparseGuardError as exc:
         raise FinalCommitAdapterError(exc.validation_code, exc.next_action) from exc
 

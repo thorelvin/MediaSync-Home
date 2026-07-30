@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from mediasync_home.adapters.reparse_guard import (
+    FileIdentityEvidence,
     LocalReparseGuard,
     ReparseGuardError,
     ReparseInspection,
@@ -66,6 +68,79 @@ def test_reparse_guard_allows_clean_missing_suffix_for_control_paths(tmp_path: P
     assert evidence.checked_path == root / ".mediasync"
 
 
+def test_reparse_guard_records_existing_path_identity_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    parent = root / "Pictures"
+    parent.mkdir(parents=True)
+    guard = LocalReparseGuard()
+
+    evidence = guard.reject_reparse_chain(
+        root=root,
+        relative_parts=("Pictures",),
+        missing_code="CHAIN_MISSING",
+        missing_next_action="refresh",
+        reparse_code="CHAIN_REPARSE",
+        reparse_next_action="revalidate",
+    )
+
+    assert evidence.inspected_paths == (root, parent)
+    assert len(evidence.inspected_identities) == 2
+    assert all(identity.value for identity in evidence.inspected_identities)
+    expected_kind = (
+        "WIN32_HANDLE_VOLUME_FILE_ID" if os.name == "nt" else "POSIX_LSTAT_DEVICE_INODE"
+    )
+    assert {identity.kind for identity in evidence.inspected_identities} == {expected_kind}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="handle final-path proof is Windows-specific")
+def test_reparse_guard_rejects_handle_final_path_outside_root(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    parent = root / "Pictures"
+    parent.mkdir(parents=True)
+    guard = LocalReparseGuard(
+        probe=_FinalPathProbe(
+            {
+                root: "\\\\?\\C:\\endpoint-root",
+                parent: "\\\\?\\C:\\other-root\\Pictures",
+            }
+        )
+    )
+
+    with pytest.raises(ReparseGuardError) as exc_info:
+        guard.require_resolved_under_root(
+            root=root,
+            path=parent,
+            strict=True,
+            escape_code="PATH_ESCAPED",
+            escape_next_action="refresh endpoint",
+        )
+
+    assert exc_info.value.validation_code == "PATH_ESCAPED"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="handle final-path proof is Windows-specific")
+def test_reparse_guard_accepts_handle_final_path_under_root(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    parent = root / "Pictures"
+    parent.mkdir(parents=True)
+    guard = LocalReparseGuard(
+        probe=_FinalPathProbe(
+            {
+                root: "\\\\?\\C:\\endpoint-root",
+                parent: "\\\\?\\C:\\endpoint-root\\Pictures",
+            }
+        )
+    )
+
+    guard.require_resolved_under_root(
+        root=root,
+        path=parent,
+        strict=True,
+        escape_code="PATH_ESCAPED",
+        escape_next_action="refresh endpoint",
+    )
+
+
 class _OverlayProbe:
     def __init__(self, *, reparse_paths: set[Path]) -> None:
         self._reparse_paths = {path.resolve(strict=False) for path in reparse_paths}
@@ -76,4 +151,26 @@ class _OverlayProbe:
             path=path,
             exists=path.exists() or path.is_symlink(),
             is_reparse_point=resolved in self._reparse_paths,
+        )
+
+
+class _FinalPathProbe:
+    def __init__(self, final_paths: dict[Path, str]) -> None:
+        self._final_paths = {
+            path.resolve(strict=False): final_path for path, final_path in final_paths.items()
+        }
+
+    def inspect_path(self, path: Path) -> ReparseInspection:
+        resolved = path.resolve(strict=False)
+        final_path = self._final_paths.get(resolved)
+        return ReparseInspection(
+            path=path,
+            exists=final_path is not None,
+            is_reparse_point=False,
+            identity=(
+                None
+                if final_path is None
+                else FileIdentityEvidence(kind="WIN32_HANDLE_VOLUME_FILE_ID", value=final_path)
+            ),
+            final_path=final_path,
         )

@@ -112,6 +112,26 @@ def test_lab_final_commit_rejects_reparse_staging_root_before_final_tree(
     assert not (fixture.target_root / "Photos" / "image.jpg").exists()
 
 
+def test_lab_final_commit_rejects_guard_reported_final_path_escape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    permit = fixture.lease.issue_mutation_permit()
+    artifact = fixture.stage(object_id="object-a", relative_path="Photos/image.jpg", payload=b"image")
+    monkeypatch.setattr(
+        final_commit_module,
+        "DEFAULT_REPARSE_GUARD",
+        _EscapingFinalPathGuard(),
+    )
+
+    with pytest.raises(FinalCommitAdapterError) as exc_info:
+        fixture.adapter.commit_verified_artifact(permit, artifact)
+
+    assert exc_info.value.validation_code == "LOCAL_FINAL_COMMIT_PATH_ESCAPES_ROOT"
+    assert not (fixture.target_root / "Photos" / "image.jpg").exists()
+
+
 @pytest.mark.parametrize(
     "relative_path",
     [
@@ -778,3 +798,40 @@ class _RejectingRootGuard:
         escape_next_action: str,
     ) -> None:
         raise AssertionError("commit should reject the staging root before escape checks")
+
+
+class _EscapingFinalPathGuard:
+    def resolve_existing_root(
+        self,
+        root: Path,
+        *,
+        missing_code: str,
+        missing_next_action: str,
+        reparse_code: str,
+        reparse_next_action: str,
+    ) -> Path:
+        return root
+
+    def reject_reparse_chain(
+        self,
+        *,
+        root: Path,
+        relative_parts: tuple[str, ...],
+        missing_code: str,
+        missing_next_action: str,
+        reparse_code: str,
+        reparse_next_action: str,
+        allow_missing_suffix: bool = False,
+    ) -> object:
+        return object()
+
+    def require_resolved_under_root(
+        self,
+        *,
+        root: Path,
+        path: Path,
+        strict: bool,
+        escape_code: str,
+        escape_next_action: str,
+    ) -> None:
+        raise ReparseGuardError(escape_code, escape_next_action)
