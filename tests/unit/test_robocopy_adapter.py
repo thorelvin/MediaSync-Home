@@ -718,6 +718,67 @@ def test_robocopy_staging_transfer_blocks_extra_inbox_content_despite_nonfatal_e
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
+def test_robocopy_staging_transfer_clears_empty_inbox_after_manifest_mismatch(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_file = source_root / "Pictures" / "A.jpg"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"image-bytes")
+    target_root.mkdir()
+    supervisor = _FakeRobocopySupervisor(exit_code=1, copy_manifest_files=False)
+    adapter = RobocopyStagingTransferAdapter(
+        root_resolver=_RootResolver(source_root=source_root, target_root=target_root),
+        staging_root=tmp_path / "staging",
+        robocopy_work_root=tmp_path / "work",
+        process_supervisor=supervisor,
+        executable_resolver=_FakeExecutableResolver(_resolved_executable(tmp_path)),
+    )
+
+    with pytest.raises(LocalFileStagingError) as exc_info:
+        adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+
+    assert exc_info.value.validation_code == "STAGING_MANIFEST_MISMATCH"
+    assert not (tmp_path / "work" / "inbox" / "object-a").exists()
+
+    supervisor.copy_manifest_files = True
+    evidence = adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+
+    assert evidence.transfer_state == "ROBOCOPY_EXIT_1_COPIED_TRANSFERRED_TO_STAGING"
+    assert (tmp_path / "staging" / "object-a.payload").read_bytes() == b"image-bytes"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
+def test_robocopy_staging_transfer_preserves_type_mismatch_after_manifest_mismatch(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_file = source_root / "Pictures" / "A.jpg"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"image-bytes")
+    target_root.mkdir()
+    adapter = RobocopyStagingTransferAdapter(
+        root_resolver=_RootResolver(source_root=source_root, target_root=target_root),
+        staging_root=tmp_path / "staging",
+        robocopy_work_root=tmp_path / "work",
+        process_supervisor=_FakeRobocopySupervisor(
+            exit_code=1,
+            expected_entry_kind="directory",
+        ),
+        executable_resolver=_FakeExecutableResolver(_resolved_executable(tmp_path)),
+    )
+
+    with pytest.raises(LocalFileStagingError) as exc_info:
+        adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+
+    assert exc_info.value.validation_code == "STAGING_MANIFEST_MISMATCH"
+    assert (tmp_path / "work" / "inbox" / "object-a" / "A.jpg").is_dir()
+    assert not (tmp_path / "staging" / "object-a.payload").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
 def test_robocopy_staging_transfer_rejects_changed_source_bytes(tmp_path: Path) -> None:
     source_root = tmp_path / "source"
     target_root = tmp_path / "target"
@@ -779,10 +840,14 @@ class _FakeRobocopySupervisor:
         *,
         exit_code: int | None,
         copied_payload: bytes | None = None,
+        copy_manifest_files: bool = True,
+        expected_entry_kind: str = "file",
         extra_inbox_files: dict[str, bytes] | None = None,
     ) -> None:
         self.exit_code = exit_code
         self.copied_payload = copied_payload
+        self.copy_manifest_files = copy_manifest_files
+        self.expected_entry_kind = expected_entry_kind
         self.extra_inbox_files = extra_inbox_files or {}
         self.launch_plans: list[object] = []
         self.process: _FakeRobocopyProcess | None = None
@@ -795,10 +860,13 @@ class _FakeRobocopySupervisor:
         staging_inbox = Path(arguments[1])
         file_name = str(arguments[2])
         if self.exit_code is not None:
-            payload = self.copied_payload
-            if payload is None:
-                payload = (source_parent / file_name).read_bytes()
-            (staging_inbox / file_name).write_bytes(payload)
+            if self.expected_entry_kind == "directory":
+                (staging_inbox / file_name).mkdir()
+            elif self.copy_manifest_files:
+                payload = self.copied_payload
+                if payload is None:
+                    payload = (source_parent / file_name).read_bytes()
+                (staging_inbox / file_name).write_bytes(payload)
             for extra_name, extra_payload in self.extra_inbox_files.items():
                 (staging_inbox / extra_name).write_bytes(extra_payload)
         self.process = _FakeRobocopyProcess(exit_code=self.exit_code)
