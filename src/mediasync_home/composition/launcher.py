@@ -25,6 +25,7 @@ from mediasync_home.application.host_locator import (
     LocalEngineHostPublication,
 )
 from mediasync_home.domain.process_roles import ProcessRole
+from mediasync_home.ipc.protocol import IpcReason, IpcStatus
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -425,29 +426,57 @@ def _try_adopt_existing_local_preview_host(
         return None
 
     gui_response = _parse_json_object(gui_completed.stdout)
-    if (
-        gui_completed.returncode != 0
-        or gui_response is None
-        or gui_response.get("status") != "ACCEPTED"
-    ):
-        return None
+    if gui_completed.returncode == 0 and _response_status_is(gui_response, IpcStatus.ACCEPTED):
+        return LocalPreviewStatusResult(
+            pipe_name=launch.pipe_name,
+            engine_host_returncode=None,
+            engine_host_events=(),
+            engine_host_stderr="",
+            gui_returncode=gui_completed.returncode,
+            gui_response=gui_response,
+            gui_stderr=gui_completed.stderr,
+            host_locator=None
+            if launch.host_descriptor is None
+            else launch.host_descriptor.to_payload(),
+            host_locator_publication=publication.to_payload(),
+            adoption_attempted=True,
+            adopted_existing_host=True,
+            stale_host_locator_publication_cleared=False,
+        )
+    if _is_live_adoption_rejection(gui_response):
+        return LocalPreviewStatusResult(
+            pipe_name=launch.pipe_name,
+            engine_host_returncode=None,
+            engine_host_events=(),
+            engine_host_stderr="",
+            gui_returncode=gui_completed.returncode,
+            gui_response=gui_response,
+            gui_stderr=gui_completed.stderr,
+            host_locator=None
+            if launch.host_descriptor is None
+            else launch.host_descriptor.to_payload(),
+            host_locator_publication=publication.to_payload(),
+            adoption_attempted=True,
+            adopted_existing_host=False,
+            stale_host_locator_publication_cleared=False,
+        )
 
-    return LocalPreviewStatusResult(
-        pipe_name=launch.pipe_name,
-        engine_host_returncode=None,
-        engine_host_events=(),
-        engine_host_stderr="",
-        gui_returncode=gui_completed.returncode,
-        gui_response=gui_response,
-        gui_stderr=gui_completed.stderr,
-        host_locator=None
-        if launch.host_descriptor is None
-        else launch.host_descriptor.to_payload(),
-        host_locator_publication=publication.to_payload(),
-        adoption_attempted=True,
-        adopted_existing_host=True,
-        stale_host_locator_publication_cleared=False,
-    )
+    return None
+
+
+def _response_status_is(
+    response: dict[str, object] | None,
+    status: IpcStatus,
+) -> bool:
+    return response is not None and response.get("status") == status.value
+
+
+def _is_live_adoption_rejection(response: dict[str, object] | None) -> bool:
+    if not _response_status_is(response, IpcStatus.REJECTED):
+        return False
+    assert response is not None
+    reason = response.get("reason")
+    return isinstance(reason, str) and reason != IpcReason.ENGINE_HOST_UNAVAILABLE.value
 
 
 def _clear_stale_host_publication(

@@ -23,6 +23,7 @@ from mediasync_home.composition.launcher import (
     run_local_preview_status,
 )
 from mediasync_home.domain.process_roles import ProcessRole
+from mediasync_home.ipc.protocol import IpcReason, IpcStatus
 
 
 def test_local_preview_host_run_uses_long_running_published_descriptor(tmp_path: Path) -> None:
@@ -346,6 +347,50 @@ def test_local_preview_status_adopts_live_published_host_without_starting_host(
     assert result.host_locator_publication == publication.to_payload()
 
 
+def test_local_preview_status_preserves_publication_on_identity_rejected_adoption(
+    tmp_path: Path,
+) -> None:
+    descriptor = build_local_engine_host_descriptor(
+        installation_id="preview-a",
+        user_scope_hash="b" * 64,
+        state_root=tmp_path / "state",
+    )
+    publication = build_local_engine_host_publication(
+        installation_id=descriptor.installation_id,
+        pipe_name=descriptor.pipe_name,
+        mutex_name=descriptor.mutex_name,
+        state_root=tmp_path / "state",
+        process_id=4321,
+    )
+    publish_local_engine_host_publication(publication)
+    launch = build_local_preview_status_launch(
+        host_descriptor=descriptor,
+        environment={"PYTHONUTF8": "1"},
+    )
+    supervisor = _RejectedIdentityPreviewSupervisor()
+
+    result = run_local_preview_status(
+        launch,
+        supervisor=supervisor,
+        timeout_seconds=10.0,
+        existing_publication=publication,
+    )
+
+    assert supervisor.started_plan is None
+    assert supervisor.ran_plan is launch.gui_status
+    assert result.accepted is False
+    assert result.adoption_attempted is True
+    assert result.adopted_existing_host is False
+    assert result.stale_host_locator_publication_cleared is False
+    assert result.engine_host_returncode is None
+    assert result.engine_host_events == ()
+    assert result.gui_returncode == 2
+    assert result.gui_response is not None
+    assert result.gui_response["reason"] == IpcReason.CLIENT_IDENTITY_MISMATCH.value
+    assert result.host_locator_publication == publication.to_payload()
+    assert load_local_engine_host_publication(tmp_path / "state") == publication
+
+
 def test_local_preview_status_falls_back_to_new_host_when_publication_is_stale(
     tmp_path: Path,
 ) -> None:
@@ -446,11 +491,34 @@ class _StaleThenSuccessfulPreviewSupervisor:
         if len(self.ran_plans) == 1:
             return CompletedRoleProcess(
                 returncode=2,
-                stdout='{"payload":{},"reason":"INVALID_FRAME","status":"REJECTED"}',
+                stdout='{"payload":{},"reason":"ENGINE_HOST_UNAVAILABLE","status":"REJECTED"}',
                 stderr="",
             )
         return CompletedRoleProcess(
             returncode=0,
             stdout='{"payload":{"host_status":{"role":"engine-host"}},"reason":null,"status":"ACCEPTED"}',
+            stderr="",
+        )
+
+
+class _RejectedIdentityPreviewSupervisor:
+    def __init__(self) -> None:
+        self.started_plan = None
+        self.ran_plan = None
+
+    def start(self, plan: object) -> "_CompletedHostProcess":
+        self.started_plan = plan
+        raise AssertionError("identity-rejected adoption must not start a replacement host")
+
+    def run(self, plan: object, *, timeout_seconds: float) -> CompletedRoleProcess:
+        del timeout_seconds
+        self.ran_plan = plan
+        return CompletedRoleProcess(
+            returncode=2,
+            stdout=(
+                '{"payload":{"verified_user_sid_hash":"other-user"},'
+                f'"reason":"{IpcReason.CLIENT_IDENTITY_MISMATCH.value}",'
+                f'"status":"{IpcStatus.REJECTED.value}"}}'
+            ),
             stderr="",
         )
