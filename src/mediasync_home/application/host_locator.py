@@ -4,6 +4,7 @@ import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -14,6 +15,7 @@ LOCAL_PREVIEW_PIPE_PREFIX = "MediaSyncHome-0B"
 LOCAL_PREVIEW_PIPE_PATTERN = re.compile(r"^MediaSyncHome-0B-([0-9a-f]{24})$")
 LOCAL_PREVIEW_MUTEX_PATTERN = re.compile(r"^Local\\MediaSyncHome-0B-([0-9a-f]{24})$")
 LOCAL_ENGINE_HOST_PUBLICATION_FILENAME = "engine-host.locator.json"
+HOST_LOCATOR_HEARTBEAT_FUTURE_TOLERANCE_SECONDS = 5.0
 
 
 class HostLocatorViolation(ValueError):
@@ -49,12 +51,13 @@ class LocalEngineHostPublication:
     mutex_name: str
     state_root: Path
     process_id: int
+    heartbeat_utc: str | None = None
     scope: str = LOCAL_PREVIEW_SCOPE
     status: str = "STARTING"
     schema_version: int = 1
 
     def to_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "installation_id": self.installation_id,
             "locator_key": self.locator_key,
             "mutex_name": self.mutex_name,
@@ -65,6 +68,9 @@ class LocalEngineHostPublication:
             "state_root": str(self.state_root),
             "status": self.status,
         }
+        if self.heartbeat_utc is not None:
+            payload["heartbeat_utc"] = self.heartbeat_utc
+        return payload
 
 
 def build_local_engine_host_descriptor(
@@ -98,6 +104,7 @@ def build_local_engine_host_publication(
     mutex_name: str,
     state_root: Path,
     process_id: int,
+    heartbeat_utc: str | None = None,
 ) -> LocalEngineHostPublication:
     normalized_installation_id = _normalize_installation_id(installation_id)
     _validate_state_root(state_root)
@@ -113,6 +120,7 @@ def build_local_engine_host_publication(
         mutex_name=mutex_name,
         state_root=state_root,
         process_id=normalized_process_id,
+        heartbeat_utc=_normalize_optional_utc_timestamp(heartbeat_utc),
     )
 
 
@@ -132,6 +140,7 @@ def local_engine_host_publication_from_payload(
         mutex_name=_require_string(payload.get("mutex_name"), "MUTEX_NAME"),
         state_root=Path(_require_string(payload.get("state_root"), "STATE_ROOT")),
         process_id=_normalize_process_id(payload.get("process_id")),
+        heartbeat_utc=_normalize_optional_utc_timestamp(payload.get("heartbeat_utc")),
     )
     if payload.get("locator_key") != publication.locator_key:
         raise HostLocatorViolation("HOST_LOCATOR_PUBLICATION_LOCATOR_KEY_MISMATCH")
@@ -151,6 +160,36 @@ def local_engine_host_publication_matches_descriptor(
         and publication.state_root == descriptor.state_root
         and publication.scope == descriptor.scope
     )
+
+
+def format_host_locator_heartbeat_utc(value: datetime) -> str:
+    return _format_utc_timestamp(_normalize_aware_datetime(value, "HEARTBEAT_UTC"))
+
+
+def parse_host_locator_heartbeat_utc(value: str) -> datetime:
+    return _parse_utc_timestamp(value, "HEARTBEAT_UTC")
+
+
+def local_engine_host_publication_heartbeat_is_stale(
+    publication: LocalEngineHostPublication,
+    *,
+    now_utc: datetime,
+    max_age_seconds: float,
+    future_tolerance_seconds: float = HOST_LOCATOR_HEARTBEAT_FUTURE_TOLERANCE_SECONDS,
+) -> bool:
+    if publication.heartbeat_utc is None:
+        return False
+    if max_age_seconds <= 0:
+        raise HostLocatorViolation("HOST_LOCATOR_HEARTBEAT_MAX_AGE_INVALID")
+    if future_tolerance_seconds < 0:
+        raise HostLocatorViolation("HOST_LOCATOR_HEARTBEAT_FUTURE_TOLERANCE_INVALID")
+
+    now = _normalize_aware_datetime(now_utc, "HEARTBEAT_NOW_UTC")
+    heartbeat = parse_host_locator_heartbeat_utc(publication.heartbeat_utc)
+    age = now - heartbeat
+    if age < -timedelta(seconds=future_tolerance_seconds):
+        return True
+    return age > timedelta(seconds=max_age_seconds)
 
 
 def validate_installation_id(installation_id: str) -> None:
@@ -188,6 +227,35 @@ def _require_string(value: object, field_name: str) -> str:
     if not isinstance(value, str) or not value:
         raise HostLocatorViolation(f"HOST_LOCATOR_PUBLICATION_INVALID_{field_name}")
     return value
+
+
+def _normalize_optional_utc_timestamp(value: object) -> str | None:
+    if value is None:
+        return None
+    return _format_utc_timestamp(_parse_utc_timestamp(value, "HEARTBEAT_UTC"))
+
+
+def _parse_utc_timestamp(value: object, field_name: str) -> datetime:
+    raw = _require_string(value, field_name)
+    parseable = f"{raw[:-1]}+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(parseable)
+    except ValueError as exc:
+        raise HostLocatorViolation(f"HOST_LOCATOR_PUBLICATION_INVALID_{field_name}") from exc
+    return _normalize_aware_datetime(parsed, field_name)
+
+
+def _normalize_aware_datetime(value: datetime, field_name: str) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise HostLocatorViolation(f"HOST_LOCATOR_PUBLICATION_INVALID_{field_name}")
+    return value.astimezone(timezone.utc)
+
+
+def _format_utc_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00",
+        "Z",
+    )
 
 
 def _locator_key_from_pipe_name(pipe_name: str) -> str:

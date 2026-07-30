@@ -12,6 +12,7 @@ import pytest
 
 from mediasync_home.adapters import local_host_locator as local_host_locator_module
 from mediasync_home.adapters.local_host_locator import (
+    clear_stale_local_engine_host_publication,
     load_local_engine_host_publication,
     publish_local_engine_host_publication,
 )
@@ -41,6 +42,7 @@ from mediasync_home.application.trigger_occurrences import TriggerKind
 from mediasync_home.composition import engine_host as engine_host_module
 from mediasync_home.composition.engine_host import (
     ExecutorMaintenanceLoop,
+    HostLocatorHeartbeatLoop,
     TaskSchedulerMaintenanceLoop,
     TaskSchedulerStartupReconciliationOptions,
     build_engine_host_runtime,
@@ -384,6 +386,31 @@ def test_task_scheduler_maintenance_loop_reports_sanitized_runtime_failure() -> 
             "pipe_name": "pipe-a",
         }
     ]
+
+
+def test_host_locator_heartbeat_loop_tracks_refreshed_publication_for_cleanup(
+    tmp_path: Path,
+) -> None:
+    publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name=HOST_LOCATOR_PIPE,
+        mutex_name=HOST_LOCATOR_MUTEX,
+        state_root=tmp_path / "state",
+        process_id=1111,
+        heartbeat_utc="2026-07-30T10:11:55.000Z",
+    )
+    publish_local_engine_host_publication(publication)
+    loop = HostLocatorHeartbeatLoop(
+        publication=publication,
+        heartbeat_clock=lambda: "2026-07-30T10:12:00.000Z",
+    )
+
+    assert loop.tick() is True
+    assert loop.publication.heartbeat_utc == "2026-07-30T10:12:00.000Z"
+    assert load_local_engine_host_publication(tmp_path / "state") == loop.publication
+    assert clear_stale_local_engine_host_publication(publication) is False
+    assert clear_stale_local_engine_host_publication(loop.publication) is True
+    assert load_local_engine_host_publication(tmp_path / "state") is None
 
 
 def test_long_running_pipe_loop_stops_cleanly_when_interrupted() -> None:

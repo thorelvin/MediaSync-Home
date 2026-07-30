@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -16,12 +17,15 @@ from mediasync_home.adapters.local_host_locator import (
     load_local_engine_host_publication,
     local_engine_host_publication_path,
     publish_local_engine_host_publication,
+    refresh_local_engine_host_publication,
 )
 from mediasync_home.application.host_locator import (
     LOCAL_ENGINE_HOST_PUBLICATION_FILENAME,
     HostLocatorViolation,
     build_local_engine_host_descriptor,
     build_local_engine_host_publication,
+    format_host_locator_heartbeat_utc,
+    local_engine_host_publication_heartbeat_is_stale,
     local_engine_host_publication_matches_descriptor,
     local_engine_host_publication_from_payload,
     validate_local_preview_pipe_name,
@@ -153,6 +157,96 @@ def test_local_engine_host_publication_payload_binds_pipe_mutex_and_process(
         "status": "STARTING",
     }
     assert local_engine_host_publication_from_payload(publication.to_payload()) == publication
+
+
+def test_local_engine_host_publication_payload_accepts_optional_heartbeat(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=state_root,
+        process_id=4321,
+        heartbeat_utc="2026-07-30T10:11:12.345+00:00",
+    )
+
+    assert publication.heartbeat_utc == "2026-07-30T10:11:12.345Z"
+    assert publication.to_payload()["heartbeat_utc"] == "2026-07-30T10:11:12.345Z"
+    assert local_engine_host_publication_from_payload(publication.to_payload()) == publication
+
+
+def test_local_engine_host_publication_rejects_invalid_heartbeat_payload(
+    tmp_path: Path,
+) -> None:
+    publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=tmp_path / "state",
+        process_id=4321,
+    )
+    payload = publication.to_payload()
+    payload["heartbeat_utc"] = "not-a-timestamp"
+
+    with pytest.raises(HostLocatorViolation, match="INVALID_HEARTBEAT_UTC"):
+        local_engine_host_publication_from_payload(payload)
+
+
+def test_local_engine_host_publication_heartbeat_freshness_is_bounded(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 30, 10, 12, 0, tzinfo=timezone.utc)
+    fresh_publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=tmp_path / "state",
+        process_id=4321,
+        heartbeat_utc=format_host_locator_heartbeat_utc(now - timedelta(seconds=20)),
+    )
+    stale_publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=tmp_path / "state",
+        process_id=4321,
+        heartbeat_utc=format_host_locator_heartbeat_utc(now - timedelta(seconds=31)),
+    )
+    future_publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=tmp_path / "state",
+        process_id=4321,
+        heartbeat_utc=format_host_locator_heartbeat_utc(now + timedelta(seconds=6)),
+    )
+
+    assert (
+        local_engine_host_publication_heartbeat_is_stale(
+            fresh_publication,
+            now_utc=now,
+            max_age_seconds=30,
+        )
+        is False
+    )
+    assert (
+        local_engine_host_publication_heartbeat_is_stale(
+            stale_publication,
+            now_utc=now,
+            max_age_seconds=30,
+        )
+        is True
+    )
+    assert (
+        local_engine_host_publication_heartbeat_is_stale(
+            future_publication,
+            now_utc=now,
+            max_age_seconds=30,
+        )
+        is True
+    )
 
 
 def test_local_engine_host_publication_matches_only_same_descriptor(
@@ -348,6 +442,70 @@ def test_load_matching_live_publication_clears_dead_matching_publication(
     assert load_local_engine_host_publication(tmp_path / "state") is None
 
 
+def test_load_matching_live_publication_clears_stale_heartbeat(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 30, 10, 12, 0, tzinfo=timezone.utc)
+    descriptor = build_local_engine_host_descriptor(
+        installation_id="local-dev",
+        user_scope_hash=USER_HASH,
+        state_root=tmp_path / "state",
+    )
+    publication = build_local_engine_host_publication(
+        installation_id=descriptor.installation_id,
+        pipe_name=descriptor.pipe_name,
+        mutex_name=descriptor.mutex_name,
+        state_root=tmp_path / "state",
+        process_id=4321,
+        heartbeat_utc=format_host_locator_heartbeat_utc(now - timedelta(seconds=31)),
+    )
+    process_probe = _ProcessProbe(is_running=True)
+    publish_local_engine_host_publication(publication)
+
+    assert (
+        load_matching_live_local_engine_host_publication(
+            descriptor,
+            process_probe=process_probe,
+            now_utc=now,
+            max_heartbeat_age_seconds=30,
+        )
+        is None
+    )
+    assert process_probe.process_ids == [4321]
+    assert load_local_engine_host_publication(tmp_path / "state") is None
+
+
+def test_load_matching_live_publication_accepts_missing_heartbeat_for_compatibility(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 30, 10, 12, 0, tzinfo=timezone.utc)
+    descriptor = build_local_engine_host_descriptor(
+        installation_id="local-dev",
+        user_scope_hash=USER_HASH,
+        state_root=tmp_path / "state",
+    )
+    publication = build_local_engine_host_publication(
+        installation_id=descriptor.installation_id,
+        pipe_name=descriptor.pipe_name,
+        mutex_name=descriptor.mutex_name,
+        state_root=tmp_path / "state",
+        process_id=4321,
+    )
+    process_probe = _ProcessProbe(is_running=True)
+    publish_local_engine_host_publication(publication)
+
+    assert (
+        load_matching_live_local_engine_host_publication(
+            descriptor,
+            process_probe=process_probe,
+            now_utc=now,
+            max_heartbeat_age_seconds=30,
+        )
+        == publication
+    )
+    assert process_probe.process_ids == [4321]
+
+
 def test_load_matching_live_publication_keeps_mismatched_dead_publication(
     tmp_path: Path,
 ) -> None:
@@ -381,6 +539,57 @@ def test_load_matching_live_publication_keeps_mismatched_dead_publication(
     )
     assert process_probe.process_ids == []
     assert load_local_engine_host_publication(state_root) == publication
+
+
+def test_refresh_local_engine_host_publication_updates_matching_record(
+    tmp_path: Path,
+) -> None:
+    publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=tmp_path / "state",
+        process_id=4321,
+    )
+    publish_local_engine_host_publication(publication)
+
+    refreshed = refresh_local_engine_host_publication(
+        publication,
+        heartbeat_utc="2026-07-30T10:12:00.000Z",
+    )
+
+    assert refreshed is not None
+    assert refreshed.heartbeat_utc == "2026-07-30T10:12:00.000Z"
+    assert load_local_engine_host_publication(tmp_path / "state") == refreshed
+
+
+def test_refresh_local_engine_host_publication_preserves_replaced_record(
+    tmp_path: Path,
+) -> None:
+    publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=tmp_path / "state",
+        process_id=4321,
+    )
+    newer_publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=tmp_path / "state",
+        process_id=9999,
+    )
+    publish_local_engine_host_publication(newer_publication)
+
+    assert (
+        refresh_local_engine_host_publication(
+            publication,
+            heartbeat_utc="2026-07-30T10:12:00.000Z",
+        )
+        is None
+    )
+    assert load_local_engine_host_publication(tmp_path / "state") == newer_publication
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows process liveness probe requires Windows")

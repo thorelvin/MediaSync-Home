@@ -7,6 +7,7 @@ import sqlite3
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
@@ -122,6 +123,7 @@ from mediasync_home.ipc.server import EngineHostIpcService
 
 
 ROOT = Path(__file__).resolve().parents[3]
+HOST_LOCATOR_HEARTBEAT_INTERVAL_MS = 5_000
 
 
 class PipeServer(Protocol):
@@ -662,6 +664,64 @@ class TaskSchedulerMaintenanceLoop:
         return min(self._max_interval_ms, current_interval_ms * 2)
 
 
+class HostLocatorHeartbeatLoop:
+    def __init__(
+        self,
+        *,
+        publication: LocalEngineHostPublication,
+        interval_ms: int = HOST_LOCATOR_HEARTBEAT_INTERVAL_MS,
+        heartbeat_clock: Callable[[], str] | None = None,
+        refresh_publication: (
+            Callable[[LocalEngineHostPublication, str], LocalEngineHostPublication | None] | None
+        ) = None,
+    ) -> None:
+        if interval_ms < 1:
+            raise RuntimeError("HOST_LOCATOR_HEARTBEAT_INTERVAL_TOO_SMALL")
+        self._publication = publication
+        self._interval_ms = interval_ms
+        self._heartbeat_clock = heartbeat_clock or _host_locator_heartbeat_utc
+        self._refresh_publication = refresh_publication or _refresh_local_host_locator_publication
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def publication(self) -> LocalEngineHostPublication:
+        return self._publication
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("HOST_LOCATOR_HEARTBEAT_LOOP_ALREADY_STARTED")
+        self._thread = threading.Thread(
+            target=self._run,
+            name="MediaSyncHomeHostLocatorHeartbeat",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self, *, timeout_seconds: float = 5.0) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout_seconds)
+
+    def tick(self) -> bool:
+        refreshed = self._refresh_publication(
+            self._publication,
+            self._heartbeat_clock(),
+        )
+        if refreshed is None:
+            return False
+        self._publication = refreshed
+        return True
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self._interval_ms / 1000):
+            try:
+                if not self.tick():
+                    return
+            except Exception:
+                continue
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MediaSync Home Engine Host")
     parser.add_argument("--pipe-name", help="serve non-mutating IPC over this local named pipe")
@@ -833,6 +893,7 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
     host_locator_payload: dict[str, object] | None = None
     host_locator_path: Path | None = None
     runtime: EngineHostRuntime | None = None
+    host_locator_heartbeat_loop: HostLocatorHeartbeatLoop | None = None
     executor_maintenance_loop: ExecutorMaintenanceLoop | None = None
     task_scheduler_maintenance_loop: TaskSchedulerMaintenanceLoop | None = None
     task_scheduler_reconciliation: TaskSchedulerResourcePumpReport | None = None
@@ -926,6 +987,11 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                 output=output,
             )
             executor_maintenance_loop.start()
+        if host_locator_publication is not None:
+            host_locator_heartbeat_loop = HostLocatorHeartbeatLoop(
+                publication=host_locator_publication,
+            )
+            host_locator_heartbeat_loop.start()
         if args.task_scheduler_reconciliation_interval_ms is not None:
             task_scheduler_maintenance_loop = _build_task_scheduler_maintenance_loop(
                 args=args,
@@ -984,6 +1050,9 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
         )
         return 2
     finally:
+        if host_locator_heartbeat_loop is not None:
+            host_locator_heartbeat_loop.stop()
+            host_locator_publication = host_locator_heartbeat_loop.publication
         if host_locator_publication is not None:
             _clear_local_host_locator_publication(host_locator_publication)
         if task_scheduler_maintenance_loop is not None:
@@ -1665,9 +1734,28 @@ def _publish_local_host_locator(
         mutex_name=mutex_name,
         state_root=state_root,
         process_id=process_id,
+        heartbeat_utc=_host_locator_heartbeat_utc(),
     )
     path = publish_local_engine_host_publication(publication)
     return publication, path
+
+
+def _host_locator_heartbeat_utc() -> str:
+    from mediasync_home.application.host_locator import format_host_locator_heartbeat_utc
+
+    return format_host_locator_heartbeat_utc(datetime.now(timezone.utc))
+
+
+def _refresh_local_host_locator_publication(
+    publication: LocalEngineHostPublication,
+    heartbeat_utc: str,
+) -> LocalEngineHostPublication | None:
+    from mediasync_home.adapters.local_host_locator import refresh_local_engine_host_publication
+
+    return refresh_local_engine_host_publication(
+        publication,
+        heartbeat_utc=heartbeat_utc,
+    )
 
 
 def _clear_local_host_locator_publication(

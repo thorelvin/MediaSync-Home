@@ -3,9 +3,11 @@ from __future__ import annotations
 import ctypes
 import json
 import os
-from contextlib import suppress
 from collections.abc import Mapping
+from contextlib import suppress
 from ctypes import wintypes
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
@@ -16,6 +18,7 @@ from mediasync_home.application.host_locator import (
     LocalEngineHostDescriptor,
     LocalEngineHostPublication,
     build_local_engine_host_descriptor,
+    local_engine_host_publication_heartbeat_is_stale,
     local_engine_host_publication_matches_descriptor,
     local_engine_host_publication_from_payload,
     validate_installation_id,
@@ -26,6 +29,7 @@ from mediasync_home.adapters.reparse_guard import LocalReparseGuard, ReparseGuar
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 STILL_ACTIVE = 259
 ERROR_INVALID_PARAMETER = 87
+LOCAL_ENGINE_HOST_HEARTBEAT_MAX_AGE_SECONDS = 30.0
 
 
 class ProcessLivenessProbe(Protocol):
@@ -149,6 +153,8 @@ def load_matching_live_local_engine_host_publication(
     descriptor: LocalEngineHostDescriptor,
     *,
     process_probe: ProcessLivenessProbe | None = None,
+    now_utc: datetime | None = None,
+    max_heartbeat_age_seconds: float = LOCAL_ENGINE_HOST_HEARTBEAT_MAX_AGE_SECONDS,
 ) -> LocalEngineHostPublication | None:
     if descriptor.state_root is None:
         return None
@@ -162,7 +168,28 @@ def load_matching_live_local_engine_host_publication(
         with suppress(OSError):
             clear_stale_local_engine_host_publication(publication)
         return None
+    if local_engine_host_publication_heartbeat_is_stale(
+        publication,
+        now_utc=now_utc or datetime.now(timezone.utc),
+        max_age_seconds=max_heartbeat_age_seconds,
+    ):
+        with suppress(OSError):
+            clear_stale_local_engine_host_publication(publication)
+        return None
     return publication
+
+
+def refresh_local_engine_host_publication(
+    publication: LocalEngineHostPublication,
+    *,
+    heartbeat_utc: str,
+) -> LocalEngineHostPublication | None:
+    current = load_local_engine_host_publication(publication.state_root)
+    if current != publication:
+        return None
+    refreshed = replace(publication, heartbeat_utc=heartbeat_utc)
+    publish_local_engine_host_publication(refreshed)
+    return refreshed
 
 
 def clear_stale_local_engine_host_publication(

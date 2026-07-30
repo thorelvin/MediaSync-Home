@@ -299,7 +299,9 @@ def test_launcher_local_preview_status_uses_host_locator_when_pipe_omitted(
     assert payload["engine_host"]["returncode"] == 0
     assert host_events[0]["pipe_name"] == payload["pipe_name"]
     assert publication["process_id"] > 0
+    assert isinstance(publication["heartbeat_utc"], str)
     assert publication == {
+        "heartbeat_utc": publication["heartbeat_utc"],
         "installation_id": installation_id,
         "locator_key": payload["pipe_name"].removeprefix("MediaSyncHome-0B-"),
         "mutex_name": f"Local\\{payload['pipe_name']}",
