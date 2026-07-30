@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import cast
 
 from PySide6.QtCore import Qt
@@ -34,6 +34,7 @@ def build_main_window(
     *,
     initial_state: EngineStatusViewState | None = None,
     engine_client: EngineStatusProvider | None = None,
+    engine_client_factory: Callable[[], EngineStatusProvider | None] | None = None,
     theme_mode: ThemeMode = ThemeMode.SYSTEM,
     show_component_gallery: bool | None = None,
 ) -> MediaSyncWindow:
@@ -43,6 +44,7 @@ def build_main_window(
     return MediaSyncWindow(
         initial_state=state,
         engine_client=engine_client,
+        engine_client_factory=engine_client_factory,
         show_component_gallery=show_component_gallery,
     )
 
@@ -51,6 +53,7 @@ def run_gui(
     argv: Sequence[str] | None = None,
     *,
     engine_client: EngineStatusProvider | None = None,
+    engine_client_factory: Callable[[], EngineStatusProvider | None] | None = None,
     theme_mode: ThemeMode = ThemeMode.SYSTEM,
     show_component_gallery: bool | None = None,
 ) -> int:
@@ -59,6 +62,7 @@ def run_gui(
     window = MediaSyncWindow(
         initial_state=load_engine_status(engine_client),
         engine_client=engine_client,
+        engine_client_factory=engine_client_factory,
         show_component_gallery=show_component_gallery,
     )
     window.show()

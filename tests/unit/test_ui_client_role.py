@@ -465,10 +465,12 @@ def test_qt_shell_wires_host_locator_publication_to_engine_client(
         argv: list[str],
         *,
         engine_client: object | None = None,
+        engine_client_factory: object | None = None,
         theme_mode: FakeThemeMode = FakeThemeMode.SYSTEM,
     ) -> int:
         captured["argv"] = argv
         captured["engine_client"] = engine_client
+        captured["engine_client_factory"] = engine_client_factory
         captured["theme_mode"] = theme_mode
         return 0
 
@@ -508,6 +510,7 @@ def test_qt_shell_wires_host_locator_publication_to_engine_client(
     assert captured["argv"] == []
     assert captured["theme_mode"] is FakeThemeMode.LIGHT
     assert captured["engine_client"] is not None
+    assert callable(captured["engine_client_factory"])
     assert len(FakeWin32NamedPipeClient.instances) == 1
     client = FakeWin32NamedPipeClient.instances[0]
     assert client.pipe_name == "pipe-from-host-locator"

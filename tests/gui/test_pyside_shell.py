@@ -307,6 +307,33 @@ def test_main_window_refreshes_through_engine_client(qapp) -> None:
         window.deleteLater()
 
 
+def test_main_window_refresh_recovers_engine_client_from_factory(qapp) -> None:
+    provider = _FakeEngineClient()
+    factory_calls: list[str] = []
+
+    def engine_client_factory() -> _FakeEngineClient:
+        factory_calls.append("resolve")
+        return provider
+
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client_factory=engine_client_factory,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.refresh_engine_status()
+        chip = window.findChild(QLabel, "engineStatusChip")
+
+        assert factory_calls == ["resolve"]
+        assert provider.calls == ["connect", "get_status"]
+        assert chip is not None
+        assert chip.text() == "Tilkoblet: Klar"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -> None:
     provider = _FakeDashboardEngineClient()
     window = build_main_window(

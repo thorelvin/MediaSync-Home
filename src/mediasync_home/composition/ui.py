@@ -5,7 +5,7 @@ import json
 import os
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from mediasync_home.composition._role_runner import Emit, run_role
 from mediasync_home.domain.process_roles import ProcessRole
@@ -14,6 +14,9 @@ from mediasync_home.application.host_locator import (
     LocalEngineHostPublication,
 )
 from mediasync_home.ipc.protocol import IpcProtocolError, IpcReason, IpcResponse
+
+if TYPE_CHECKING:
+    from mediasync_home.presentation.view_models.engine_status import EngineStatusProvider
 
 
 class GuiIpcClient(Protocol):
@@ -360,16 +363,17 @@ def _parse_after_json(after_json: str | None) -> dict[str, object] | None:
 
 
 def _run_qt_shell(args: argparse.Namespace) -> int:
-    engine_client = None
-    pipe_name = _resolve_qt_shell_pipe_name(args)
-    if pipe_name is not None:
+    def engine_client_factory() -> EngineStatusProvider | None:
+        pipe_name = _resolve_qt_shell_pipe_name(args)
+        if pipe_name is None:
+            return None
         if os.name != "nt":
             raise RuntimeError("named-pipe GUI client mode is Windows-only")
 
         from mediasync_home.ipc.win32_named_pipe import Win32NamedPipeClient
         from mediasync_home.presentation.engine_client import EngineClient
 
-        engine_client = EngineClient(
+        return EngineClient(
             Win32NamedPipeClient(
                 pipe_name=pipe_name,
                 role=ProcessRole.GUI,
@@ -380,7 +384,12 @@ def _run_qt_shell(args: argparse.Namespace) -> int:
     from mediasync_home.presentation.app import run_gui
     from mediasync_home.presentation.theme.theme_manager import ThemeMode
 
-    return run_gui([], engine_client=engine_client, theme_mode=ThemeMode(args.theme))
+    return run_gui(
+        [],
+        engine_client=engine_client_factory(),
+        engine_client_factory=engine_client_factory,
+        theme_mode=ThemeMode(args.theme),
+    )
 
 
 def _resolve_qt_shell_pipe_name(args: argparse.Namespace) -> str | None:

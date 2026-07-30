@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Protocol, cast
@@ -184,10 +185,12 @@ class MediaSyncWindow(QMainWindow):
         *,
         initial_state: EngineStatusViewState,
         engine_client: EngineStatusProvider | None = None,
+        engine_client_factory: Callable[[], EngineStatusProvider | None] | None = None,
         show_component_gallery: bool | None = None,
     ) -> None:
         super().__init__()
         self._engine_client = engine_client
+        self._engine_client_factory = engine_client_factory
         self._icons = IconRegistry()
         self._connected = False
         self._setup_draft = BackupSetupDraft.empty()
@@ -313,6 +316,14 @@ class MediaSyncWindow(QMainWindow):
         return localize_display_value(self._selected_language_code, value)
 
     def refresh_engine_status(self) -> None:
+        if self._engine_client is None and self._engine_client_factory is not None:
+            try:
+                self._engine_client = self._engine_client_factory()
+            except Exception:
+                self.apply_engine_status(
+                    EngineStatusViewState.disconnected("Engine status is unavailable.")
+                )
+                return
         if self._engine_client is None:
             self.apply_engine_status(
                 EngineStatusViewState.disconnected(
