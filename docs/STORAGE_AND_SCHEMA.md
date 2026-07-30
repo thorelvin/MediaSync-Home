@@ -1523,7 +1523,7 @@ Lokal struktur:
     backup-set.manifest.json
 ```
 
-0B-implementasjonsnote: Den første konkrete grensen ligger i `adapters/sqlite/state_backup.py`. Den oppretter ett manifestert backup-sett for ADR-003-paret med SQLite Online Backup, per-store identity/schema/migration high-water, `quick_check`, `foreign_key_check`, size/SHA-256 og combined state-set hash, og verifiserer at catalog/recovery-medlemmene ikke er manglende, manipulerte eller blandet fra ulike epoker. Full quiesce/maintenance-lease-wiring, restore swap, compaction epoch og target-intent restoreblokkering er fortsatt senere arbeid.
+0B-implementasjonsnote: Den konkrete grensen ligger i `adapters/sqlite/state_backup.py`. Den oppretter ett manifestert backup-sett for ADR-003-paret med SQLite Online Backup, per-store identity/schema/migration high-water, `quick_check`, `foreign_key_check`, size/SHA-256, unresolved target-intent count/high-water og combined state-set hash, og verifiserer at catalog/recovery-medlemmene ikke er manglende, manipulerte eller blandet fra ulike epoker. `plan_sqlite_state_restore()` bygger nå en typed restore-plan bare etter full settverifisering og blokkerer automatisk restore når nåværende recoverydatabase har nyere unresolved target-intents enn backupen, også ved samme timestamp men høyere count. Full quiesce/maintenance-lease-wiring, restore swap, compaction epoch, endpoint-side intentmarkørlesing og post-swap startup-reconciliation er fortsatt senere arbeid.
 
 Bindende backup-protokoll:
 

@@ -51,7 +51,7 @@ def test_state_backup_manifest_rejects_unsafe_backup_set_id() -> None:
 
 def _manifest_payload() -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "backup_set_id": "set-a",
         "created_utc": "2026-07-30T12:00:00Z",
         "state_set_hash": "0" * 64,
@@ -67,6 +67,8 @@ def _manifest_payload() -> dict[str, object]:
                 "page_count": 1,
                 "quick_check": "ok",
                 "foreign_key_violations": 0,
+                "unresolved_target_intent_count": 0,
+                "target_intent_high_water_utc": None,
             },
             {
                 "store": "recovery",
@@ -79,6 +81,8 @@ def _manifest_payload() -> dict[str, object]:
                 "page_count": 1,
                 "quick_check": "ok",
                 "foreign_key_violations": 0,
+                "unresolved_target_intent_count": 1,
+                "target_intent_high_water_utc": "2026-07-30T12:00:00.000Z",
             },
         ],
     }

@@ -11,7 +11,7 @@ from typing import Any, cast
 from mediasync_home.adapters.sqlite.connection_policy import SqliteStore, StateStoreLayout
 
 
-STATE_BACKUP_SET_MANIFEST_SCHEMA_VERSION = 1
+STATE_BACKUP_SET_MANIFEST_SCHEMA_VERSION = 2
 STATE_BACKUP_SET_INTENT_SCHEMA_VERSION = 1
 STATE_BACKUP_SET_STORES = (SqliteStore.CATALOG, SqliteStore.RECOVERY)
 STATE_BACKUP_SET_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -35,6 +35,8 @@ class SqliteStateStoreBackup:
     page_count: int
     quick_check: str
     foreign_key_violations: int
+    unresolved_target_intent_count: int = 0
+    target_intent_high_water_utc: str | None = None
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -48,6 +50,8 @@ class SqliteStateStoreBackup:
             "page_count": self.page_count,
             "quick_check": self.quick_check,
             "foreign_key_violations": self.foreign_key_violations,
+            "unresolved_target_intent_count": self.unresolved_target_intent_count,
+            "target_intent_high_water_utc": self.target_intent_high_water_utc,
         }
 
 
@@ -66,6 +70,56 @@ class SqliteStateBackupManifest:
             "created_utc": self.created_utc,
             "state_set_hash": self.state_set_hash,
             "stores": [entry.to_payload() for entry in self.stores],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SqliteStateRestoreFile:
+    store: SqliteStore
+    backup_path: Path
+    target_path: Path
+    size_bytes: int
+    sha256: str
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "store": self.store.value,
+            "backup_path": str(self.backup_path),
+            "target_path": str(self.target_path),
+            "size_bytes": self.size_bytes,
+            "sha256": self.sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SqliteStateRestorePlan:
+    backup_set_id: str
+    state_set_hash: str
+    target_layout: StateStoreLayout
+    restore_files: tuple[SqliteStateRestoreFile, ...]
+    backup_unresolved_target_intent_count: int
+    backup_target_intent_high_water_utc: str | None
+    current_unresolved_target_intent_count: int
+    current_target_intent_high_water_utc: str | None
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "backup_set_id": self.backup_set_id,
+            "state_set_hash": self.state_set_hash,
+            "target_layout": {
+                "root": str(self.target_layout.root),
+                "catalog": str(self.target_layout.catalog),
+                "recovery": str(self.target_layout.recovery),
+            },
+            "restore_files": [entry.to_payload() for entry in self.restore_files],
+            "backup_unresolved_target_intent_count": (
+                self.backup_unresolved_target_intent_count
+            ),
+            "backup_target_intent_high_water_utc": self.backup_target_intent_high_water_utc,
+            "current_unresolved_target_intent_count": (
+                self.current_unresolved_target_intent_count
+            ),
+            "current_target_intent_high_water_utc": self.current_target_intent_high_water_utc,
         }
 
 
@@ -156,6 +210,51 @@ def verify_sqlite_state_backup_set(
     return verified
 
 
+def plan_sqlite_state_restore(
+    backup_dir: Path,
+    target_layout: StateStoreLayout,
+    *,
+    current_layout: StateStoreLayout | None = None,
+    manifest: SqliteStateBackupManifest | None = None,
+) -> SqliteStateRestorePlan:
+    _validate_state_store_layout(target_layout, field_name="STATE_RESTORE_TARGET")
+    if current_layout is not None:
+        _validate_state_store_layout(current_layout, field_name="STATE_RESTORE_CURRENT")
+    verified = verify_sqlite_state_backup_set(backup_dir, manifest=manifest)
+    backup_intent_count, backup_high_water = _target_intent_evidence_from_manifest(verified)
+    current_intent_count, current_high_water = _current_target_intent_evidence(
+        (current_layout or target_layout).recovery
+    )
+    if _has_newer_unresolved_target_intents(
+        backup_count=backup_intent_count,
+        backup_high_water=backup_high_water,
+        current_count=current_intent_count,
+        current_high_water=current_high_water,
+    ):
+        raise SqliteStateBackupViolation("STATE_RESTORE_BLOCKED_BY_NEWER_TARGET_INTENTS")
+
+    restore_files = tuple(
+        SqliteStateRestoreFile(
+            store=entry.store,
+            backup_path=backup_dir / entry.file_name,
+            target_path=_source_path(target_layout, entry.store),
+            size_bytes=entry.size_bytes,
+            sha256=entry.sha256,
+        )
+        for entry in verified.stores
+    )
+    return SqliteStateRestorePlan(
+        backup_set_id=verified.backup_set_id,
+        state_set_hash=verified.state_set_hash,
+        target_layout=target_layout,
+        restore_files=restore_files,
+        backup_unresolved_target_intent_count=backup_intent_count,
+        backup_target_intent_high_water_utc=backup_high_water,
+        current_unresolved_target_intent_count=current_intent_count,
+        current_target_intent_high_water_utc=current_high_water,
+    )
+
+
 def sqlite_state_backup_manifest_from_payload(payload: object) -> SqliteStateBackupManifest:
     if not isinstance(payload, dict):
         raise SqliteStateBackupViolation("STATE_BACKUP_MANIFEST_NOT_OBJECT")
@@ -201,6 +300,14 @@ def _store_backup_from_payload(payload: object) -> SqliteStateStoreBackup:
         page_count=_non_negative_int_field(payload, "page_count"),
         quick_check=_str_field(payload, "quick_check"),
         foreign_key_violations=_non_negative_int_field(payload, "foreign_key_violations"),
+        unresolved_target_intent_count=_non_negative_int_field(
+            payload,
+            "unresolved_target_intent_count",
+        ),
+        target_intent_high_water_utc=_optional_str_field(
+            payload,
+            "target_intent_high_water_utc",
+        ),
     )
 
 
@@ -243,6 +350,10 @@ def _inspect_backup_file(*, store: SqliteStore, backup_path: Path) -> SqliteStat
             if schema_row is None:
                 raise SqliteStateBackupViolation("STATE_BACKUP_SCHEMA_MIGRATIONS_MISSING")
             page_count = _required_int_scalar(connection, "PRAGMA page_count")
+            unresolved_count, target_intent_high_water = _target_intent_evidence(
+                connection,
+                store=store,
+            )
     except sqlite3.Error as exc:
         raise SqliteStateBackupViolation("STATE_BACKUP_SQLITE_EVIDENCE_UNREADABLE") from exc
 
@@ -257,6 +368,70 @@ def _inspect_backup_file(*, store: SqliteStore, backup_path: Path) -> SqliteStat
         page_count=page_count,
         quick_check=quick_check,
         foreign_key_violations=foreign_key_violations,
+        unresolved_target_intent_count=unresolved_count,
+        target_intent_high_water_utc=target_intent_high_water,
+    )
+
+
+def _target_intent_evidence(
+    connection: sqlite3.Connection,
+    *,
+    store: SqliteStore,
+) -> tuple[int, str | None]:
+    if store is not SqliteStore.RECOVERY:
+        return (0, None)
+    row = connection.execute(
+        """
+        SELECT count(*), max(updated_utc)
+        FROM recovery_intent_segments
+        WHERE state IN ('BUILDING', 'DURABLE')
+        """
+    ).fetchone()
+    if row is None:
+        raise SqliteStateBackupViolation("STATE_BACKUP_TARGET_INTENT_EVIDENCE_MISSING")
+    count = int(row[0])
+    high_water = None if row[1] is None else str(row[1])
+    return (count, high_water)
+
+
+def _current_target_intent_evidence(recovery_path: Path) -> tuple[int, str | None]:
+    if not recovery_path.exists():
+        return (0, None)
+    try:
+        with sqlite3.connect(f"file:{recovery_path.as_posix()}?mode=ro", uri=True) as connection:
+            identity = _optional_scalar(
+                connection,
+                "SELECT store FROM store_identity WHERE singleton = 1",
+            )
+            if identity != SqliteStore.RECOVERY.value:
+                raise SqliteStateBackupViolation("STATE_RESTORE_CURRENT_RECOVERY_MISMATCH")
+            return _target_intent_evidence(connection, store=SqliteStore.RECOVERY)
+    except sqlite3.Error as exc:
+        raise SqliteStateBackupViolation("STATE_RESTORE_CURRENT_RECOVERY_UNREADABLE") from exc
+
+
+def _target_intent_evidence_from_manifest(
+    manifest: SqliteStateBackupManifest,
+) -> tuple[int, str | None]:
+    for entry in manifest.stores:
+        if entry.store is SqliteStore.RECOVERY:
+            return (entry.unresolved_target_intent_count, entry.target_intent_high_water_utc)
+    raise SqliteStateBackupViolation("STATE_BACKUP_RECOVERY_STORE_MISSING")
+
+
+def _has_newer_unresolved_target_intents(
+    *,
+    backup_count: int,
+    backup_high_water: str | None,
+    current_count: int,
+    current_high_water: str | None,
+) -> bool:
+    if current_count == 0 or current_high_water is None:
+        return False
+    if backup_count == 0 or backup_high_water is None:
+        return True
+    return current_high_water > backup_high_water or (
+        current_high_water == backup_high_water and current_count > backup_count
     )
 
 
@@ -304,6 +479,14 @@ def _source_path(layout: StateStoreLayout, store: SqliteStore) -> Path:
     if store is SqliteStore.RECOVERY:
         return layout.recovery
     raise SqliteStateBackupViolation("STATE_BACKUP_STORE_UNSUPPORTED")
+
+
+def _validate_state_store_layout(layout: StateStoreLayout, *, field_name: str) -> None:
+    _validate_local_absolute_path(layout.root, f"{field_name}_ROOT")
+    _validate_local_absolute_path(layout.catalog, f"{field_name}_CATALOG")
+    _validate_local_absolute_path(layout.recovery, f"{field_name}_RECOVERY")
+    if layout.catalog == layout.recovery:
+        raise SqliteStateBackupViolation(f"{field_name}_STORES_MUST_BE_SEPARATE_FILES")
 
 
 def _backup_file_name(store: SqliteStore) -> str:
@@ -373,6 +556,15 @@ def _optional_scalar(connection: sqlite3.Connection, query: str) -> object | Non
 
 def _str_field(payload: dict[str, Any], field_name: str) -> str:
     value = payload.get(field_name)
+    if not isinstance(value, str) or not value:
+        raise SqliteStateBackupViolation(f"STATE_BACKUP_{field_name.upper()}_INVALID")
+    return value
+
+
+def _optional_str_field(payload: dict[str, Any], field_name: str) -> str | None:
+    value = payload.get(field_name)
+    if value is None:
+        return None
     if not isinstance(value, str) or not value:
         raise SqliteStateBackupViolation(f"STATE_BACKUP_{field_name.upper()}_INVALID")
     return value
