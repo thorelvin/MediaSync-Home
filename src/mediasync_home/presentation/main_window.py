@@ -10,6 +10,7 @@ from uuid import uuid4
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -634,8 +635,22 @@ class MediaSyncWindow(QMainWindow):
         self._refresh_activity_overview()
 
     def _choose_directory(self, title: str) -> str | None:
-        selected = QFileDialog.getExistingDirectory(self, title)
-        return selected or None
+        dialog = self._build_directory_picker(title)
+        if dialog.exec() is not QDialog.DialogCode.Accepted:
+            return None
+        selected = dialog.selectedFiles()
+        return selected[0] if selected else None
+
+    def _build_directory_picker(self, title: str) -> QFileDialog:
+        dialog = QFileDialog(self)
+        dialog.setObjectName("directoryPickerDialog")
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+        dialog.setWindowTitle(title)
+        dialog.setDirectory(str(Path.home()))
+        dialog.setFileMode(QFileDialog.FileMode.Directory)
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptOpen)
+        return dialog
 
     def _apply_local_setup_draft(self, step: BackupSetupStep) -> None:
         self._setup_state = build_standard_backup_setup_state(

@@ -7,7 +7,15 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QLabel, QListWidget, QPushButton, QStackedWidget, QToolButton, QWidget  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QFileDialog,
+    QLabel,
+    QListWidget,
+    QPushButton,
+    QStackedWidget,
+    QToolButton,
+    QWidget,
+)
 
 from mediasync_home.application.runtime_status import startup_status  # noqa: E402
 from mediasync_home.application.job_drafts import StandardBackupJobDraft  # noqa: E402
@@ -251,6 +259,24 @@ def test_setup_primary_button_collects_local_preview_draft(qapp) -> None:
         qapp.processEvents()
 
         assert chip.text() == "Frakoblet: Venter"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_directory_picker_is_parented_and_uses_visible_qt_dialog(qapp) -> None:
+    window = build_main_window(initial_state=_ready_state(), theme_mode=ThemeMode.LIGHT)
+
+    try:
+        dialog = window._build_directory_picker("Choose source folder")
+
+        assert dialog.parent() is window
+        assert dialog.objectName() == "directoryPickerDialog"
+        assert dialog.windowTitle() == "Choose source folder"
+        assert dialog.fileMode() is QFileDialog.FileMode.Directory
+        assert dialog.acceptMode() is QFileDialog.AcceptMode.AcceptOpen
+        assert dialog.testOption(QFileDialog.Option.DontUseNativeDialog) is True
+        assert dialog.testOption(QFileDialog.Option.ShowDirsOnly) is True
     finally:
         window.close()
         window.deleteLater()

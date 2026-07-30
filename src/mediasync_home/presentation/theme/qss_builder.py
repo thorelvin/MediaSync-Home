@@ -213,6 +213,19 @@ QPushButton#createBackupButton {{
     padding: 0 {tokens.space_4}px;
 }}
 
+QPushButton#createBackupButton:hover {{
+    border: {tokens.border_focus}px solid {tokens.focus};
+}}
+
+QPushButton#createBackupButton:pressed {{
+    border-color: {tokens.focus};
+    background: {tokens.focus};
+}}
+
+QPushButton#createBackupButton:focus {{
+    border: {tokens.border_focus}px solid {tokens.focus};
+}}
+
 QPushButton#createBackupButton:disabled {{
     border-color: {tokens.border};
     background: {tokens.surface_alt};
