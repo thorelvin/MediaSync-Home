@@ -31,6 +31,7 @@ from mediasync_home.adapters.windows_argv import build_windows_command_line
 from mediasync_home.application.process_supervision import (
     ChildContainmentPolicy,
     HandleInheritancePolicy,
+    ProcessLaunchViolation,
 )
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
@@ -575,6 +576,34 @@ def test_robocopy_staging_transfer_times_out_and_terminates_child(tmp_path: Path
     assert supervisor.process is not None
     assert supervisor.process.terminated_exit_code == 98
     assert supervisor.process.closed is True
+    assert not (tmp_path / "work" / "inbox" / "object-a").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
+def test_robocopy_staging_transfer_clears_inbox_after_containment_failure(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_file = source_root / "Pictures" / "A.jpg"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"image-bytes")
+    target_root.mkdir()
+    supervisor = _RejectingRobocopySupervisor()
+    adapter = RobocopyStagingTransferAdapter(
+        root_resolver=_RootResolver(source_root=source_root, target_root=target_root),
+        staging_root=tmp_path / "staging",
+        robocopy_work_root=tmp_path / "work",
+        process_supervisor=supervisor,
+        executable_resolver=_FakeExecutableResolver(_resolved_executable(tmp_path)),
+    )
+
+    with pytest.raises(LocalFileStagingError) as exc_info:
+        adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+
+    assert exc_info.value.validation_code == "ROBOCOPY_PROCESS_CONTAINMENT_FAILED"
+    assert supervisor.launch_plans
+    assert not (tmp_path / "work" / "inbox" / "object-a").exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
@@ -585,11 +614,12 @@ def test_robocopy_staging_transfer_rejects_fatal_exit_code(tmp_path: Path) -> No
     source_file.parent.mkdir(parents=True)
     source_file.write_bytes(b"image-bytes")
     target_root.mkdir()
+    supervisor = _FakeRobocopySupervisor(exit_code=8)
     adapter = RobocopyStagingTransferAdapter(
         root_resolver=_RootResolver(source_root=source_root, target_root=target_root),
         staging_root=tmp_path / "staging",
         robocopy_work_root=tmp_path / "work",
-        process_supervisor=_FakeRobocopySupervisor(exit_code=8),
+        process_supervisor=supervisor,
         executable_resolver=_FakeExecutableResolver(_resolved_executable(tmp_path)),
     )
 
@@ -597,6 +627,13 @@ def test_robocopy_staging_transfer_rejects_fatal_exit_code(tmp_path: Path) -> No
         adapter.transfer_to_staging(_operation(source_file.read_bytes()))
 
     assert exc_info.value.validation_code == "ROBOCOPY_TRANSFER_FAILED"
+    assert not (tmp_path / "work" / "inbox" / "object-a").exists()
+
+    supervisor.exit_code = 1
+    evidence = adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+
+    assert evidence.transfer_state == "ROBOCOPY_EXIT_1_COPIED_TRANSFERRED_TO_STAGING"
+    assert (tmp_path / "staging" / "object-a.payload").read_bytes() == b"image-bytes"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
@@ -677,6 +714,7 @@ def test_robocopy_staging_transfer_blocks_extra_inbox_content_despite_nonfatal_e
 
     assert exc_info.value.validation_code == "STAGING_MANIFEST_MISMATCH"
     assert not (tmp_path / "staging" / "object-a.payload").exists()
+    assert (tmp_path / "work" / "inbox" / "object-a" / "unexpected.tmp").read_bytes() == b"extra"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
@@ -699,6 +737,7 @@ def test_robocopy_staging_transfer_rejects_changed_source_bytes(tmp_path: Path) 
         adapter.transfer_to_staging(_operation(source_file.read_bytes()))
 
     assert exc_info.value.validation_code == "ROBOCOPY_STAGING_SOURCE_CHANGED"
+    assert not (tmp_path / "work" / "inbox" / "object-a").exists()
 
 
 class _FakeSystemExecutableApi:
@@ -723,6 +762,15 @@ class _FakeExecutableResolver:
     def resolve(self, requested_name: str) -> ResolvedSystemExecutable:
         assert requested_name == "Robocopy.exe"
         return self._resolved
+
+
+class _RejectingRobocopySupervisor:
+    def __init__(self) -> None:
+        self.launch_plans: list[object] = []
+
+    def start(self, plan: object) -> "_FakeRobocopyProcess":
+        self.launch_plans.append(plan)
+        raise ProcessLaunchViolation("CHILD_PROCESS_CONTAINMENT_FAILED")
 
 
 class _FakeRobocopySupervisor:

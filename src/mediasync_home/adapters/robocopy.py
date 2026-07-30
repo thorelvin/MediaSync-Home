@@ -51,6 +51,14 @@ ROBOCOPY_MANIFEST_SCHEMA_VERSION = 1
 ROBOCOPY_CONSERVATIVE_COMMAND_LINE_LIMIT = 24_000
 ROBOCOPY_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_DISCARD_ROBOCOPY_INBOX_ERROR_CODES = frozenset(
+    (
+        "ROBOCOPY_PROCESS_CONTAINMENT_FAILED",
+        "ROBOCOPY_STAGING_SOURCE_CHANGED",
+        "ROBOCOPY_TRANSFER_FAILED",
+        "ROBOCOPY_TRANSFER_TIMED_OUT",
+    )
+)
 
 
 class RobocopyConfigurationError(RuntimeError):
@@ -239,6 +247,7 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
         inbox.mkdir(parents=True)
         log_path = self._robocopy_log_path(operation)
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest: RobocopyBatchManifest | None = None
 
         try:
             manifest = build_robocopy_batch_manifest(
@@ -276,7 +285,12 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
                     "Retry the transfer after reviewing the Robocopy batch log.",
                 )
             publish_robocopy_batch_inbox(manifest)
+        except LocalFileStagingError as exc:
+            if exc.validation_code in _DISCARD_ROBOCOPY_INBOX_ERROR_CODES:
+                discard_robocopy_batch_inbox(inbox=inbox, manifest=manifest)
+            raise
         except (RobocopyConfigurationError, WindowsCommandLineError) as exc:
+            discard_robocopy_batch_inbox(inbox=inbox, manifest=manifest)
             raise LocalFileStagingError(
                 "ROBOCOPY_TRANSFER_CONFIGURATION_INVALID",
                 "Fix the Robocopy executable/profile configuration before retrying.",
@@ -847,6 +861,45 @@ def publish_robocopy_batch_inbox(manifest: RobocopyBatchManifest) -> None:
         copied_path.unlink()
     with suppress(OSError):
         manifest.staging_inbox.rmdir()
+
+
+def discard_robocopy_batch_inbox(
+    *,
+    inbox: Path,
+    manifest: RobocopyBatchManifest | None,
+) -> bool:
+    try:
+        actual_entries = tuple(inbox.iterdir())
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+    if manifest is None:
+        if actual_entries:
+            return False
+    else:
+        expected_names = {entry.source_file_name for entry in manifest.entries}
+        actual_names = {path.name for path in actual_entries}
+        if not actual_names.issubset(expected_names):
+            return False
+        if any(not path.is_file() or path.is_symlink() for path in actual_entries):
+            return False
+
+    for path in actual_entries:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+    try:
+        inbox.rmdir()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _robocopy_manifest_payload(
