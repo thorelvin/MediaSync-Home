@@ -8,8 +8,10 @@ from typing import Protocol, cast
 from uuid import uuid4
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
+    QBoxLayout,
     QDialog,
     QFileDialog,
     QFrame,
@@ -21,6 +23,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpacerItem,
     QStackedWidget,
@@ -212,6 +215,10 @@ class MediaSyncWindow(QMainWindow):
         self._selected_navigation_index = 0
         self._workspace_heading: QLabel | None = None
         self._workspace_stack: QStackedWidget | None = None
+        self._dashboard_detail_layout: QBoxLayout | None = None
+        self._setup_stepper_layout: QGridLayout | None = None
+        self._compact_dashboard_layout: bool | None = None
+        self._stacked_dashboard_details: bool | None = None
         self._setup_title_label: QLabel | None = None
         self._setup_subtitle_label: QLabel | None = None
         self._setup_source_label: QLabel | None = None
@@ -280,7 +287,7 @@ class MediaSyncWindow(QMainWindow):
 
         self._engine_detail = QLabel()
         self._engine_detail.setObjectName("engineDetailLabel")
-        self._engine_detail.setWordWrap(True)
+        _configure_responsive_label(self._engine_detail)
 
         self._engine_scope = QLabel()
         self._engine_scope.setObjectName("engineScopeLabel")
@@ -309,6 +316,11 @@ class MediaSyncWindow(QMainWindow):
 
         self._build_layout()
         self.apply_engine_status(initial_state)
+        self._update_responsive_dashboard_layout()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_responsive_dashboard_layout()
 
     def _texts(self) -> ShellText:
         return shell_text(self._selected_language_code)
@@ -834,6 +846,8 @@ class MediaSyncWindow(QMainWindow):
         nav = QListWidget()
         nav.setObjectName("navigationRail")
         nav.setFixedWidth(184)
+        nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        nav.setTextElideMode(Qt.TextElideMode.ElideRight)
         for icon_name, label in (
             ("dashboard", texts.dashboard),
             ("activity", texts.jobs),
@@ -862,7 +876,7 @@ class MediaSyncWindow(QMainWindow):
 
         stack = QStackedWidget()
         stack.setObjectName("workspaceStack")
-        stack.addWidget(self._build_dashboard_page())
+        stack.addWidget(_scrollable_page(self._build_dashboard_page(), "dashboardScrollArea"))
         stack.addWidget(self._build_placeholder_page("Jobs", "Saved backup jobs will appear here."))
         stack.addWidget(self._build_placeholder_page("History", "Completed and blocked runs will appear here."))
         stack.addWidget(
@@ -870,7 +884,6 @@ class MediaSyncWindow(QMainWindow):
         )
         self._workspace_stack = stack
         layout.addWidget(stack, 1)
-        layout.addStretch(1)
         return workspace
 
     def _select_navigation_row(self, row: int) -> None:
@@ -921,11 +934,12 @@ class MediaSyncWindow(QMainWindow):
     def _build_dashboard_detail_row(self) -> QWidget:
         row = QWidget()
         row.setObjectName("dashboardDetailRow")
-        layout = QHBoxLayout(row)
+        layout = QBoxLayout(QBoxLayout.Direction.LeftToRight, row)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(16)
         layout.addWidget(self._build_backup_job_detail_panel(self._job_detail_state), 1)
         layout.addWidget(self._build_engine_panel(), 1)
+        self._dashboard_detail_layout = layout
         return row
 
     def _build_backup_setup_panel(self, state: StandardBackupSetupViewState) -> QFrame:
@@ -942,20 +956,22 @@ class MediaSyncWindow(QMainWindow):
         self._setup_title_label = title
         subtitle = QLabel(texts.setup_subtitle)
         subtitle.setObjectName("mutedLabel")
-        subtitle.setWordWrap(True)
+        _configure_responsive_label(subtitle)
         self._setup_subtitle_label = subtitle
         layout.addWidget(title, 0, 0, 1, 3)
         layout.addWidget(subtitle, 1, 0, 1, 3)
 
         stepper = QWidget()
         stepper.setObjectName("backupSetupStepper")
-        stepper_layout = QHBoxLayout(stepper)
+        stepper_layout = QGridLayout(stepper)
         stepper_layout.setContentsMargins(0, 4, 0, 4)
         stepper_layout.setSpacing(8)
         for index, step in enumerate(state.steps):
             label = _step_label(step, texts.setup_steps[index])
             self._setup_step_labels.append(label)
-            stepper_layout.addWidget(label)
+            stepper_layout.addWidget(label, 0, index)
+            stepper_layout.setColumnStretch(index, 1)
+        self._setup_stepper_layout = stepper_layout
         layout.addWidget(stepper, 2, 0, 1, 3)
 
         self._setup_source_label, self._setup_source_value = _add_labeled_text_value(
@@ -1008,6 +1024,7 @@ class MediaSyncWindow(QMainWindow):
 
         title = QLabel(self._display(state.title))
         title.setObjectName("jobDetailTitle")
+        _configure_responsive_label(title)
         self._job_detail_title = title
         layout.addWidget(title, 0, 0, 1, 3)
 
@@ -1049,7 +1066,7 @@ class MediaSyncWindow(QMainWindow):
         for index in range(3):
             row = QLabel(self._display(target_lines[index]) if index < len(target_lines) else "")
             row.setObjectName("jobDetailTargetRow")
-            row.setWordWrap(True)
+            _configure_responsive_label(row, selectable=True)
             row.setVisible(index < len(target_lines))
             self._job_detail_target_rows.append(row)
             layout.addWidget(row, 5 + index, 1, 1, 2)
@@ -1090,7 +1107,13 @@ class MediaSyncWindow(QMainWindow):
         activity = QFrame()
         activity.setObjectName("activityBar")
         activity.setFixedWidth(248)
-        layout = QVBoxLayout(activity)
+        outer_layout = QVBoxLayout(activity)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        content = QWidget()
+        content.setObjectName("activityContent")
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(20, 24, 20, 24)
         layout.setSpacing(12)
 
@@ -1099,6 +1122,7 @@ class MediaSyncWindow(QMainWindow):
         self._activity_title_label = title
         empty = QLabel(texts.no_active_runs)
         empty.setObjectName("activityEmptyLabel")
+        _configure_responsive_label(empty)
         self._activity_empty_label = empty
         layout.addWidget(title)
         layout.addWidget(empty)
@@ -1115,6 +1139,16 @@ class MediaSyncWindow(QMainWindow):
         if self._show_component_gallery:
             layout.addWidget(self._build_component_gallery())
         layout.addStretch(1)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("activityScrollArea")
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setWidget(content)
+        outer_layout.addWidget(scroll)
         return activity
 
     def _add_activity_status(
@@ -1124,6 +1158,7 @@ class MediaSyncWindow(QMainWindow):
     ) -> None:
         heading = QLabel(self._display(state.title))
         heading.setObjectName("activityStatusTitle")
+        _configure_responsive_label(heading)
         self._activity_status_title = heading
         layout.addWidget(heading)
         self._activity_dimension_rows = []
@@ -1136,7 +1171,7 @@ class MediaSyncWindow(QMainWindow):
         ):
             row = QLabel(f"{label}: {self._display(value)}")
             row.setObjectName("activityDimensionLabel")
-            row.setWordWrap(True)
+            _configure_responsive_label(row)
             self._activity_dimension_rows.append(row)
             layout.addWidget(row)
 
@@ -1147,10 +1182,11 @@ class MediaSyncWindow(QMainWindow):
     ) -> None:
         title = QLabel(self._display(state.title))
         title.setObjectName("planPreviewTitle")
+        _configure_responsive_label(title)
         self._plan_preview_title = title
         summary = QLabel(self._display(state.summary_label))
         summary.setObjectName("planPreviewSummary")
-        summary.setWordWrap(True)
+        _configure_responsive_label(summary)
         self._plan_preview_summary = summary
         layout.addWidget(title)
         layout.addWidget(summary)
@@ -1161,7 +1197,7 @@ class MediaSyncWindow(QMainWindow):
         for index in range(3):
             row = QLabel(self._display(lines[index]) if index < len(lines) else "")
             row.setObjectName("planPreviewRow")
-            row.setWordWrap(True)
+            _configure_responsive_label(row)
             row.setVisible(index < len(lines))
             self._plan_preview_rows.append(row)
             layout.addWidget(row)
@@ -1173,10 +1209,11 @@ class MediaSyncWindow(QMainWindow):
     ) -> None:
         title = QLabel(self._display(state.title))
         title.setObjectName("planEndpointTitle")
+        _configure_responsive_label(title)
         self._plan_endpoint_title = title
         summary = QLabel(self._display(state.summary_label))
         summary.setObjectName("planEndpointSummary")
-        summary.setWordWrap(True)
+        _configure_responsive_label(summary)
         self._plan_endpoint_summary = summary
         layout.addWidget(title)
         layout.addWidget(summary)
@@ -1187,7 +1224,7 @@ class MediaSyncWindow(QMainWindow):
         for index in range(4):
             row = QLabel(self._display(lines[index]) if index < len(lines) else "")
             row.setObjectName("planEndpointRow")
-            row.setWordWrap(True)
+            _configure_responsive_label(row)
             row.setVisible(index < len(lines))
             self._plan_endpoint_rows.append(row)
             layout.addWidget(row)
@@ -1199,10 +1236,11 @@ class MediaSyncWindow(QMainWindow):
     ) -> None:
         title = QLabel(self._display(state.title))
         title.setObjectName("snapshotHealthTitle")
+        _configure_responsive_label(title)
         self._snapshot_health_title = title
         summary = QLabel(self._display(state.summary_label))
         summary.setObjectName("snapshotHealthSummary")
-        summary.setWordWrap(True)
+        _configure_responsive_label(summary)
         self._snapshot_health_summary = summary
         layout.addWidget(title)
         layout.addWidget(summary)
@@ -1213,7 +1251,7 @@ class MediaSyncWindow(QMainWindow):
         for index in range(3):
             row = QLabel(self._display(lines[index]) if index < len(lines) else "")
             row.setObjectName("snapshotHealthRow")
-            row.setWordWrap(True)
+            _configure_responsive_label(row)
             row.setVisible(index < len(lines))
             self._snapshot_health_rows.append(row)
             layout.addWidget(row)
@@ -1225,10 +1263,11 @@ class MediaSyncWindow(QMainWindow):
     ) -> None:
         title = QLabel(self._display(state.title))
         title.setObjectName("catalogedFilesTitle")
+        _configure_responsive_label(title)
         self._cataloged_files_title = title
         summary = QLabel(self._display(state.summary_label))
         summary.setObjectName("catalogedFilesSummary")
-        summary.setWordWrap(True)
+        _configure_responsive_label(summary)
         self._cataloged_files_summary = summary
         layout.addWidget(title)
         layout.addWidget(summary)
@@ -1239,7 +1278,7 @@ class MediaSyncWindow(QMainWindow):
         for index in range(3):
             row = QLabel(self._display(lines[index]) if index < len(lines) else "")
             row.setObjectName("catalogedFilesRow")
-            row.setWordWrap(True)
+            _configure_responsive_label(row)
             row.setVisible(index < len(lines))
             self._cataloged_files_rows.append(row)
             layout.addWidget(row)
@@ -1281,6 +1320,37 @@ class MediaSyncWindow(QMainWindow):
         self._selected_language_code = normalized
         self._apply_selected_language()
         self._apply_localized_text()
+
+    def _update_responsive_dashboard_layout(self) -> None:
+        compact_steps = self.width() < 1040
+        stacked_details = self.width() < 1360
+        if (
+            compact_steps == self._compact_dashboard_layout
+            and stacked_details == self._stacked_dashboard_details
+        ):
+            return
+        self._compact_dashboard_layout = compact_steps
+        self._stacked_dashboard_details = stacked_details
+        if self._dashboard_detail_layout is not None:
+            self._dashboard_detail_layout.setDirection(
+                QBoxLayout.Direction.TopToBottom
+                if stacked_details
+                else QBoxLayout.Direction.LeftToRight
+            )
+        if self._setup_stepper_layout is not None:
+            columns = 2 if compact_steps else 4
+            for index, label in enumerate(self._setup_step_labels):
+                self._setup_stepper_layout.removeWidget(label)
+                self._setup_stepper_layout.addWidget(
+                    label,
+                    index // columns,
+                    index % columns,
+                )
+            for column in range(4):
+                self._setup_stepper_layout.setColumnStretch(
+                    column,
+                    1 if column < columns else 0,
+                )
 
     def _apply_selected_language(self) -> None:
         for code, label in self._language_options:
@@ -1345,7 +1415,7 @@ class MediaSyncWindow(QMainWindow):
 def _add_key_value(layout: QGridLayout, row: int, label_text: str, value: QLabel) -> QLabel:
     label = QLabel(label_text)
     label.setObjectName("mutedLabel")
-    value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    _configure_responsive_label(value, selectable=True)
     layout.addWidget(label, row, 0)
     layout.addWidget(value, row, 1, 1, 2)
     return label
@@ -1362,7 +1432,6 @@ def _add_labeled_text_value(
     value_text: str,
 ) -> tuple[QLabel, QLabel]:
     value = QLabel(value_text)
-    value.setWordWrap(True)
     label = _add_key_value(layout, row, label_text, value)
     return label, value
 
@@ -1372,8 +1441,30 @@ def _step_label(step: BackupSetupStepViewState, title: str) -> QLabel:
     label.setObjectName("setupStepLabel")
     state = "current" if step.current else "complete" if step.complete else "upcoming"
     label.setProperty("stepState", state)
-    label.setWordWrap(True)
+    _configure_responsive_label(label)
     return label
+
+
+def _scrollable_page(widget: QWidget, object_name: str) -> QScrollArea:
+    scroll = QScrollArea()
+    scroll.setObjectName(object_name)
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setWidgetResizable(True)
+    scroll.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    widget.setMinimumWidth(0)
+    widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+    scroll.setWidget(widget)
+    return scroll
+
+
+def _configure_responsive_label(label: QLabel, *, selectable: bool = False) -> None:
+    label.setWordWrap(True)
+    label.setMinimumWidth(0)
+    label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+    if selectable:
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
 
 def _refresh_style(widget: QWidget) -> None:

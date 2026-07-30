@@ -8,10 +8,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import (  # noqa: E402
+    QBoxLayout,
     QFileDialog,
     QLabel,
     QListWidget,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QStackedWidget,
     QToolButton,
     QWidget,
@@ -259,6 +262,61 @@ def test_setup_primary_button_collects_local_preview_draft(qapp) -> None:
         qapp.processEvents()
 
         assert chip.text() == "Frakoblet: Venter"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_target_selection_reflows_without_horizontal_clipping(qapp) -> None:
+    window = build_main_window(initial_state=_ready_state(), theme_mode=ThemeMode.DARK)
+
+    try:
+        window.resize(900, 560)
+        choices = [
+            "C:/Users/Example/Documents/A very long source folder name/"
+            "containing important family photos and documents",
+            "E:/MediaSync Backups/Primary external drive/"
+            "A very long target folder name for the complete home backup",
+        ]
+        window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
+        create_backup = window.findChild(QPushButton, "createBackupButton")
+        dashboard_scroll = window.findChild(QScrollArea, "dashboardScrollArea")
+        activity_scroll = window.findChild(QScrollArea, "activityScrollArea")
+
+        assert create_backup is not None
+        assert dashboard_scroll is not None
+        assert activity_scroll is not None
+        create_backup.click()
+        qapp.processEvents()
+        create_backup.click()
+        window.show()
+        qapp.processEvents()
+
+        assert window._dashboard_detail_layout is not None
+        assert window._dashboard_detail_layout.direction() is QBoxLayout.Direction.TopToBottom
+        assert window._setup_stepper_layout is not None
+        assert [
+            window._setup_stepper_layout.getItemPosition(
+                window._setup_stepper_layout.indexOf(label)
+            )[:2]
+            for label in window._setup_step_labels
+        ] == [(0, 0), (0, 1), (1, 0), (1, 1)]
+        assert dashboard_scroll.horizontalScrollBar().maximum() == 0
+        assert activity_scroll.horizontalScrollBar().maximum() == 0
+        assert dashboard_scroll.verticalScrollBar().maximum() > 0
+        assert activity_scroll.verticalScrollBar().maximum() > 0
+        for object_name in (
+            "setupSourceValue",
+            "setupTargetValue",
+            "jobDetailTitle",
+            "jobDetailSourceValue",
+            "jobDetailTargetRow",
+        ):
+            label = window.findChild(QLabel, object_name)
+            assert label is not None
+            assert label.wordWrap() is True
+            assert label.minimumWidth() == 0
+            assert label.sizePolicy().horizontalPolicy() is QSizePolicy.Policy.Ignored
     finally:
         window.close()
         window.deleteLater()

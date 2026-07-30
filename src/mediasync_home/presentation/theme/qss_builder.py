@@ -156,6 +156,22 @@ QFrame#activityBar {{
     border-left: {tokens.border_hairline}px solid {tokens.border};
 }}
 
+QScrollArea#dashboardScrollArea,
+QScrollArea#activityScrollArea,
+QWidget#activityContent {{
+    background: transparent;
+    border: none;
+}}
+
+QScrollArea#dashboardScrollArea > QWidget > QWidget {{
+    background: {tokens.window_background};
+}}
+
+QScrollArea#activityScrollArea > QWidget > QWidget,
+QWidget#activityContent {{
+    background: {tokens.surface};
+}}
+
 QPushButton#refreshEngineButton {{
     min-width: 32px;
     max-width: 32px;
