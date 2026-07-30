@@ -28,9 +28,10 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 22
+        assert current_schema_version(connection, plan.store) == 23
         assert _table_names(connection) >= {
             "endpoint_heads",
+            "endpoint_root_claims",
             "job_heads",
             "file_entries",
             "directory_coverage",
@@ -40,6 +41,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "operation_dependencies",
             "standard_backup_job_drafts",
             "standard_backup_job_revision_details",
+            "standard_backup_job_endpoint_bindings",
             "command_receipts",
             "command_dedup_tombstones",
             "plan_seal_details",
@@ -56,7 +58,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 22
+        assert _row_count(connection, "schema_migrations") == 23
         assert _foreign_key(
             connection,
             "endpoint_heads",
@@ -84,6 +86,20 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "job_revisions",
             ("job_id", "job_revision_id"),
             ("job_id", "id"),
+        )
+        assert _foreign_key(
+            connection,
+            "standard_backup_job_endpoint_bindings",
+            "job_revisions",
+            ("job_id", "job_revision_id"),
+            ("job_id", "id"),
+        )
+        assert _foreign_key(
+            connection,
+            "standard_backup_job_endpoint_bindings",
+            "endpoint_revisions",
+            ("endpoint_id", "endpoint_revision_id"),
+            ("endpoint_id", "id"),
         )
         assert _foreign_key(
             connection,
@@ -206,6 +222,11 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             connection,
             "external_resource_state",
             ("resource_type", "state", "resource_id"),
+        ) is False
+        assert _index_is_unique(
+            connection,
+            "standard_backup_job_endpoint_bindings",
+            ("endpoint_id", "endpoint_revision_id"),
         ) is False
         assert _index_is_unique(
             connection,

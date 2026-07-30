@@ -39,6 +39,10 @@ from mediasync_home.application.job_creation import (
     parse_create_standard_backup_job_command,
 )
 from mediasync_home.application.job_drafts import JobDraftStore
+from mediasync_home.application.job_endpoints import (
+    StandardBackupJobEndpointRegistrar,
+    StandardBackupJobEndpointSet,
+)
 from mediasync_home.application.job_read_models import (
     BackupJobDetailQueryError,
     BackupOverviewQueryError,
@@ -126,6 +130,7 @@ class EngineHostIpcService:
     standard_backup_job_catalog: StandardBackupJobCatalog | None = None
     standard_backup_job_read_store: StandardBackupJobReadModelStore | None = None
     standard_backup_job_detail_store: StandardBackupJobDetailReadModelStore | None = None
+    standard_backup_job_endpoint_registrar: StandardBackupJobEndpointRegistrar | None = None
     run_activity_read_store: RunActivityReadModelStore | None = None
     plan_operation_read_store: PlanOperationReadModelStore | None = None
     plan_endpoint_read_store: PlanEndpointReadModelStore | None = None
@@ -929,6 +934,13 @@ class EngineHostIpcService:
             self._add_receipt_payload(payload, envelope.idempotency_key)
             return IpcResponse.rejected(IpcReason.COMMAND_PRECONDITION_FAILED, payload)
 
+        endpoint_set = None
+        if self.standard_backup_job_endpoint_registrar is not None:
+            endpoint_set = (
+                self.standard_backup_job_endpoint_registrar.register_standard_backup_job_endpoints(
+                    outcome.job
+                )
+            )
         receipt = transition_command_receipt(
             receipt,
             CommandReceiptState.EFFECT_PREPARED,
@@ -948,6 +960,7 @@ class EngineHostIpcService:
             mutations_enabled=True,
             recognized=True,
             outcome=outcome,
+            endpoint_set=endpoint_set,
         )
         self._add_receipt_payload(payload, envelope.idempotency_key)
         return IpcResponse.accepted(payload)
@@ -987,6 +1000,14 @@ class EngineHostIpcService:
         job = self.standard_backup_job_catalog.load_standard_backup_job_by_idempotency_key(
             envelope.idempotency_key
         )
+        endpoint_set = None
+        if job is not None and self.standard_backup_job_endpoint_registrar is not None:
+            endpoint_set = (
+                self.standard_backup_job_endpoint_registrar.load_standard_backup_job_endpoint_set(
+                    job_id=job.job_id,
+                    job_revision_id=job.job_revision_id,
+                )
+            )
         payload = _create_standard_backup_job_response_payload(
             envelope=envelope,
             draft_id=command.draft_id,
@@ -994,6 +1015,7 @@ class EngineHostIpcService:
             recognized=True,
             outcome=None,
             job=job,
+            endpoint_set=endpoint_set,
         )
         payload["created"] = False
         payload["idempotent_replay"] = True
@@ -1114,6 +1136,7 @@ def _create_standard_backup_job_response_payload(
     recognized: bool,
     outcome: JobCreationOutcome | None,
     job: SealedStandardBackupJob | None = None,
+    endpoint_set: StandardBackupJobEndpointSet | None = None,
 ) -> dict[str, Any]:
     result = {
         "command_name": envelope.command_name,
@@ -1132,6 +1155,8 @@ def _create_standard_backup_job_response_payload(
             "job_revision_id": job.job_revision_id,
             "filter_set_id": job.filter_set_id,
         }
+    if endpoint_set is not None:
+        result["endpoint_bindings"] = endpoint_set.to_dict()
     return result
 
 

@@ -179,16 +179,53 @@ def test_gui_creates_durable_backup_job_through_local_writable_pipe(
                 ON receipts.result_entity_id = details.job_id
             """
         ).fetchone()
+        endpoint_rows = connection.execute(
+            """
+            SELECT
+                bindings.role,
+                bindings.ordinal,
+                revisions.root_uri,
+                bindings.registration_state
+            FROM standard_backup_job_endpoint_bindings AS bindings
+            INNER JOIN endpoint_revisions AS revisions
+                ON revisions.endpoint_id = bindings.endpoint_id
+                AND revisions.id = bindings.endpoint_revision_id
+            ORDER BY bindings.ordinal
+            """
+        ).fetchall()
+        endpoint_count = connection.execute("SELECT count(*) FROM endpoints").fetchone()
+        root_claim_count = connection.execute(
+            "SELECT count(*) FROM endpoint_root_claims"
+        ).fetchone()
 
     assert stderr == ""
     assert gui_response["status"] == "ACCEPTED"
     assert gui_response["payload"]["created"] is True
+    endpoint_bindings = gui_response["payload"]["endpoint_bindings"]
+    assert endpoint_bindings["source"]["registration_state"] == "REGISTRATION_PENDING"
+    assert endpoint_bindings["targets"][0]["registration_state"] == "REGISTRATION_PENDING"
     assert host_events[0]["host_status"]["mutations_enabled"] is True
     assert host_events[-1]["served_requests"] == 2
     assert persisted is not None
     assert persisted[0] == str(source_root)
     assert json.loads(persisted[1])[0]["path_label"] == str(target_root)
     assert persisted[2] == "SUCCEEDED"
+    assert endpoint_rows == [
+        (
+            "SOURCE",
+            0,
+            endpoint_bindings["source"]["root_uri"],
+            "REGISTRATION_PENDING",
+        ),
+        (
+            "TARGET",
+            1,
+            endpoint_bindings["targets"][0]["root_uri"],
+            "REGISTRATION_PENDING",
+        ),
+    ]
+    assert endpoint_count == (2,)
+    assert root_claim_count == (2,)
 
 
 def test_gui_can_disconnect_and_reconnect_without_stopping_engine_host() -> None:

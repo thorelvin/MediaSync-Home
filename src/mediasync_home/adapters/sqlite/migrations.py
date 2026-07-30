@@ -137,6 +137,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_endpoint_revision_identity",
                 statements=CATALOG_ENDPOINT_REVISION_IDENTITY,
             ),
+            SqliteMigration(
+                version=23,
+                name="catalog_standard_backup_job_endpoint_bindings",
+                statements=CATALOG_STANDARD_BACKUP_JOB_ENDPOINT_BINDINGS,
+            ),
         ),
     )
 
@@ -1159,6 +1164,53 @@ CATALOG_ENDPOINT_REVISION_IDENTITY = (
         ADD COLUMN control_marker_checksum TEXT CHECK (
             control_marker_checksum IS NULL OR length(control_marker_checksum) = 64
         )
+    """,
+)
+
+CATALOG_STANDARD_BACKUP_JOB_ENDPOINT_BINDINGS = (
+    """
+    CREATE TABLE endpoint_root_claims (
+        canonical_root_key TEXT PRIMARY KEY,
+        endpoint_id TEXT NOT NULL UNIQUE,
+        created_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        FOREIGN KEY (endpoint_id)
+            REFERENCES endpoints (id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TABLE standard_backup_job_endpoint_bindings (
+        job_id TEXT NOT NULL,
+        job_revision_id TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('SOURCE', 'TARGET')),
+        ordinal INTEGER NOT NULL CHECK (
+            (role = 'SOURCE' AND ordinal = 0)
+            OR (role = 'TARGET' AND ordinal >= 1)
+        ),
+        endpoint_id TEXT NOT NULL,
+        endpoint_revision_id TEXT NOT NULL,
+        registration_state TEXT NOT NULL CHECK (
+            registration_state IN (
+                'REGISTRATION_PENDING',
+                'READ_ONLY_READY',
+                'WRITABLE_READY',
+                'BLOCKED'
+            )
+        ),
+        created_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        PRIMARY KEY (job_id, job_revision_id, role, ordinal),
+        UNIQUE (job_id, job_revision_id, endpoint_id),
+        FOREIGN KEY (job_id, job_revision_id)
+            REFERENCES job_revisions (job_id, id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (endpoint_id, endpoint_revision_id)
+            REFERENCES endpoint_revisions (endpoint_id, id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_standard_backup_job_endpoint_bindings_endpoint
+        ON standard_backup_job_endpoint_bindings (endpoint_id, endpoint_revision_id)
     """,
 )
 

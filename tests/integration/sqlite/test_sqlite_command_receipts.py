@@ -27,6 +27,7 @@ from mediasync_home.application.command_receipts import (
     CommandReceiptStartupReconciliationRequest,
     transition_command_receipt,
 )
+from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.job_creation import (
     JobCreationCommandName,
     StandardBackupJobIdFactory,
@@ -520,13 +521,14 @@ def test_sqlite_enabled_ipc_command_rolls_back_effect_when_outbox_enqueue_fails(
         )
         ipc_client.connect()
 
+        command_payload = _inline_draft_command_payload()
         with pytest.raises(SqliteOutboxStoreError, match="OUTBOX_INJECTED_FAILURE"):
             ipc_client.submit_command(
                 JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
                 request_id="44444444-4444-4444-8444-444444444444",
                 idempotency_key="66666666-6666-4666-8666-666666666666",
-                payload=_inline_draft_command_payload(),
-                payload_hash="98cdbb1f712331be51355f90ab8c193c5c6f681d33d5c052cd38fe94820f3d02",
+                payload=command_payload,
+                payload_hash=canonical_command_payload_hash(command_payload),
             )
 
         assert drafts.load_standard_backup_draft("draft-a") is None

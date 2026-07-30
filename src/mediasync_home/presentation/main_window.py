@@ -616,10 +616,13 @@ class MediaSyncWindow(QMainWindow):
             )
             return
 
+        success_detail = "Backup job was created and saved."
+        if isinstance(response.payload.get("endpoint_bindings"), dict):
+            success_detail = "Backup job was saved. Endpoint safety setup is pending."
         self.apply_engine_status(
             replace(
                 self._engine_status_state,
-                detail="Backup job was created and saved.",
+                detail=success_detail,
                 status_kind="ready",
             )
         )

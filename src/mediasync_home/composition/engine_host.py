@@ -39,6 +39,9 @@ from mediasync_home.adapters.sqlite.endpoint_roots import SqliteEndpointRootReso
 from mediasync_home.adapters.sqlite.external_resources import SqliteExternalResourceStateStore
 from mediasync_home.adapters.sqlite.job_catalog import SqliteStandardBackupJobCatalog
 from mediasync_home.adapters.sqlite.job_draft_store import SqliteJobDraftStore
+from mediasync_home.adapters.sqlite.job_endpoints import (
+    SqliteStandardBackupJobEndpointRegistrar,
+)
 from mediasync_home.adapters.sqlite.lease_tokens import SqliteResourceLeaseStore
 from mediasync_home.adapters.sqlite.migrations import (
     apply_sqlite_migrations,
@@ -88,6 +91,7 @@ from mediasync_home.application.run_executor_cycle import (
 )
 from mediasync_home.application.host_locator import LocalEngineHostPublication
 from mediasync_home.application.job_creation import StandardBackupJobIds
+from mediasync_home.application.job_endpoints import EndpointIds
 from mediasync_home.application.run_operation_planning import (
     RunTargetOperationPlanningOutcome,
     plan_run_target_recovery_operations,
@@ -174,6 +178,14 @@ class UuidStandardBackupJobIdFactory:
             job_id=f"job-{token}",
             job_revision_id=f"job-revision-{token}",
             filter_set_id=f"filter-set-{token}",
+        )
+
+
+class UuidEndpointIdFactory:
+    def new_endpoint_ids(self) -> EndpointIds:
+        return EndpointIds(
+            endpoint_id=str(uuid4()),
+            endpoint_revision_id=str(uuid4()),
         )
 
 
@@ -1259,6 +1271,12 @@ def build_engine_host_runtime(
         outbox = SqliteOutboxStore(catalog_connection)
         job_drafts = SqliteJobDraftStore(catalog_connection)
         standard_backup_jobs = SqliteStandardBackupJobCatalog(catalog_connection)
+        standard_backup_job_endpoints = SqliteStandardBackupJobEndpointRegistrar(
+            catalog_connection,
+            id_factory=UuidEndpointIdFactory(),
+        )
+        for existing_job in standard_backup_jobs.list_active_standard_backup_jobs():
+            standard_backup_job_endpoints.register_standard_backup_job_endpoints(existing_job)
         snapshots = SqliteSnapshotEntryStore(catalog_connection)
         plans = SqlitePlanStore(catalog_connection)
         runs = SqliteRunStore(catalog_connection)
@@ -1314,6 +1332,7 @@ def build_engine_host_runtime(
             standard_backup_job_catalog=standard_backup_jobs,
             standard_backup_job_read_store=standard_backup_jobs,
             standard_backup_job_detail_store=standard_backup_jobs,
+            standard_backup_job_endpoint_registrar=standard_backup_job_endpoints,
             standard_backup_job_id_factory=UuidStandardBackupJobIdFactory(),
             snapshot_entry_read_store=snapshots,
             snapshot_coverage_read_store=snapshots,

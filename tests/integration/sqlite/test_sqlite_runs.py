@@ -18,6 +18,7 @@ from mediasync_home.adapters.sqlite.runs import SqliteRunStore, SqliteRunStoreEr
 from mediasync_home.adapters.sqlite.schedules import SqliteScheduleStore
 from mediasync_home.adapters.sqlite.transactions import SqliteImmediateTransactionRunner
 from mediasync_home.adapters.sqlite.trigger_occurrences import SqliteTriggerOccurrenceStore
+from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.command_receipts import CommandReceipt
 from mediasync_home.application.plans import (
     PlanEndpoint,
@@ -925,12 +926,16 @@ def test_sqlite_enabled_start_run_ipc_persists_run_and_success_receipt(tmp_path:
         )
         ipc_client.connect()
 
+        command_payload = {
+            "plan_id": plan.plan_id,
+            "plan_checksum": plan.plan_checksum,
+        }
         response = ipc_client.submit_command(
             RunCommandName.START_RUN.value,
             request_id="44444444-4444-4444-8444-444444444444",
             idempotency_key="66666666-6666-4666-8666-666666666666",
-            payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
-            payload_hash="98cdbb1f712331be51355f90ab8c193c5c6f681d33d5c052cd38fe94820f3d02",
+            payload=command_payload,
+            payload_hash=canonical_command_payload_hash(command_payload),
         )
 
         loaded_run = run_store.load_started_run("run-a")

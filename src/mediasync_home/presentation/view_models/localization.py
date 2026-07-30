@@ -254,6 +254,9 @@ _EN_TO_NB.update(
         "Local preview settings will appear here.": "Lokale forhåndsvisningsinnstillinger vises her.",
         "Blocking issue": "Blokkerende problem",
         "Backup job was created and saved.": "Backupjobben ble opprettet og lagret.",
+        "Backup job was saved. Endpoint safety setup is pending.": (
+            "Backupjobben ble lagret. Sikkerhetsoppsett for endepunkter venter."
+        ),
         "Connected Engine Host does not support backup creation.": (
             "Tilkoblet Engine Host stÃ¸tter ikke oppretting av backup."
         ),

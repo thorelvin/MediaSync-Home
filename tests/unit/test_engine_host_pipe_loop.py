@@ -829,6 +829,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.service.job_draft_store is not None
         assert runtime.service.standard_backup_job_read_store is not None
         assert runtime.service.standard_backup_job_detail_store is not None
+        assert runtime.service.standard_backup_job_endpoint_registrar is not None
         assert runtime.service.snapshot_entry_read_store is not None
         assert runtime.service.snapshot_coverage_read_store is not None
         assert runtime.service.snapshot_issue_read_store is not None
@@ -853,7 +854,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
             runtime.run_executor_recovery_object_cleanup_port
             is runtime.run_executor_final_commit_port
         )
-        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 22
+        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 23
         assert current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY) == 5
         assert runtime.startup_reconciliation is not None
         assert runtime.startup_reconciliation.reconciler_instance_id == "host-new"
@@ -994,10 +995,103 @@ def test_local_writable_runtime_creates_job_from_inline_gui_draft(tmp_path: Path
 
         assert response.status is IpcStatus.ACCEPTED
         assert response.payload["created"] is True
+        endpoint_bindings = response.payload["endpoint_bindings"]
+        assert endpoint_bindings["source"]["root_uri"] == "file:///C:/Users/Ada/Pictures"
+        assert endpoint_bindings["source"]["registration_state"] == "REGISTRATION_PENDING"
+        assert endpoint_bindings["targets"][0]["root_uri"] == "file:///E:/Backup"
+        assert endpoint_bindings["targets"][0]["registration_state"] == "REGISTRATION_PENDING"
         assert overview.payload["backup_overview"]["draft"]["source_name"] == "Pictures"
         assert overview.payload["backup_overview"]["jobs"][0]["source_name"] == "Pictures"
+        assert runtime.catalog_connection is not None
+        endpoint_count = runtime.catalog_connection.execute(
+            "SELECT count(*) FROM endpoints"
+        ).fetchone()
+        binding_count = runtime.catalog_connection.execute(
+            "SELECT count(*) FROM standard_backup_job_endpoint_bindings"
+        ).fetchone()
+        assert endpoint_count == (2,)
+        assert binding_count == (2,)
     finally:
         runtime.close()
+
+
+def test_engine_host_runtime_backfills_endpoint_bindings_for_existing_job(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=local_writable_status(ProcessRole.ENGINE_HOST),
+        state_root=state_root,
+    )
+    payload: dict[str, object] = {
+        "draft_id": "draft-backfill",
+        "draft": {
+            "draft_id": "draft-backfill",
+            "schema_version": 1,
+            "source_name": "Pictures",
+            "source_path_label": "C:/Users/Ada/Pictures",
+            "targets": [
+                {
+                    "name": "USB 1",
+                    "path_label": "E:/Backup",
+                    "independent_device_id": None,
+                }
+            ],
+        },
+    }
+    try:
+        ipc_client = InProcessIpcClient(
+            service=runtime.service,
+            identity=_identity(),
+            role=ProcessRole.GUI,
+            client_instance_id="55555555-5555-4555-8555-555555555556",
+        )
+        assert ipc_client.connect().status is IpcStatus.ACCEPTED
+        response = ipc_client.submit_command(
+            JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+            request_id="44444444-4444-4444-8444-444444444445",
+            idempotency_key="66666666-6666-4666-8666-666666666667",
+            payload=payload,
+            payload_hash=canonical_command_payload_hash(payload),
+        )
+        assert response.status is IpcStatus.ACCEPTED
+    finally:
+        runtime.close()
+
+    with sqlite3.connect(state_root / "catalog.sqlite") as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("DELETE FROM standard_backup_job_endpoint_bindings")
+        connection.execute("DELETE FROM endpoint_root_claims")
+        connection.execute("DELETE FROM endpoint_heads")
+        connection.execute("DELETE FROM endpoint_revisions")
+        connection.execute("DELETE FROM endpoints")
+        connection.commit()
+
+    restarted = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=local_writable_status(ProcessRole.ENGINE_HOST),
+        state_root=state_root,
+    )
+    try:
+        assert restarted.catalog_connection is not None
+        endpoint_count = restarted.catalog_connection.execute(
+            "SELECT count(*) FROM endpoints"
+        ).fetchone()
+        binding_states = restarted.catalog_connection.execute(
+            """
+            SELECT role, ordinal, registration_state
+            FROM standard_backup_job_endpoint_bindings
+            ORDER BY ordinal
+            """
+        ).fetchall()
+        assert endpoint_count == (2,)
+        assert binding_states == [
+            ("SOURCE", 0, "REGISTRATION_PENDING"),
+            ("TARGET", 1, "REGISTRATION_PENDING"),
+        ]
+    finally:
+        restarted.close()
 
 
 def test_engine_host_runtime_recovers_restore_epochs_before_sqlite_open(
