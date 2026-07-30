@@ -7,6 +7,8 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import QTimer, Qt  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QBoxLayout,
     QFileDialog,
@@ -136,6 +138,8 @@ def test_language_selector_updates_selected_flag(qapp) -> None:
     window = build_main_window(initial_state=_ready_state(), theme_mode=ThemeMode.LIGHT)
 
     try:
+        window.show()
+        qapp.processEvents()
         language = window.findChild(QToolButton, "languageSelectorButton")
         nav = window.findChild(QListWidget, "navigationRail")
         refresh = window.findChild(QPushButton, "refreshEngineButton")
@@ -148,6 +152,12 @@ def test_language_selector_updates_selected_flag(qapp) -> None:
 
         assert language is not None
         assert language.menu() is not None
+        menu_opened: list[bool] = []
+        language.menu().aboutToShow.connect(lambda: menu_opened.append(True))
+        QTimer.singleShot(0, language.menu().close)
+        QTest.mouseClick(language, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert menu_opened == [True]
         language.menu().actions()[1].trigger()
 
         assert language.text() == ""
@@ -191,6 +201,8 @@ def test_navigation_rail_switches_workspace_pages(qapp) -> None:
     window = build_main_window(initial_state=_ready_state(), theme_mode=ThemeMode.LIGHT)
 
     try:
+        window.show()
+        qapp.processEvents()
         nav = window.findChild(QListWidget, "navigationRail")
         heading = window.findChild(QLabel, "workspaceHeading")
         stack = window.findChild(QStackedWidget, "workspaceStack")
@@ -200,13 +212,21 @@ def test_navigation_rail_switches_workspace_pages(qapp) -> None:
         assert stack is not None
         assert stack.currentIndex() == 0
 
-        nav.setCurrentRow(1)
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(1)).center(),
+        )
         qapp.processEvents()
 
         assert stack.currentIndex() == 1
         assert heading.text() == "Jobber"
 
-        nav.setCurrentRow(3)
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(3)).center(),
+        )
         qapp.processEvents()
 
         assert stack.currentIndex() == 3
@@ -220,6 +240,8 @@ def test_setup_primary_button_collects_local_preview_draft(qapp) -> None:
     window = build_main_window(initial_state=_ready_state(), theme_mode=ThemeMode.LIGHT)
 
     try:
+        window.show()
+        qapp.processEvents()
         choices = ["C:/Users/Ada/Pictures", "E:/MediaSyncBackup"]
         window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
 
@@ -238,27 +260,27 @@ def test_setup_primary_button_collects_local_preview_draft(qapp) -> None:
         assert detail_source is not None
         assert chip is not None
 
-        create_backup.click()
+        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
         qapp.processEvents()
 
         assert source.text() == "C:/Users/Ada/Pictures"
         assert target.text() == "Ingen mål valgt"
         assert detail_title.text() == "Pictures"
 
-        create_backup.click()
+        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
         qapp.processEvents()
 
         assert target.text() == "1 mål: MediaSyncBackup"
         assert detail_source.text() == "C:/Users/Ada/Pictures"
         assert detail_targets[0].text() == "MediaSyncBackup: E:/MediaSyncBackup"
 
-        create_backup.click()
+        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
         qapp.processEvents()
 
         assert create_backup.text() == "Opprett og kontroller endringer"
         assert create_backup.isEnabled() is True
 
-        create_backup.click()
+        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
         qapp.processEvents()
 
         assert chip.text() == "Frakoblet: Venter"
@@ -272,6 +294,8 @@ def test_target_selection_reflows_without_horizontal_clipping(qapp) -> None:
 
     try:
         window.resize(900, 560)
+        window.show()
+        qapp.processEvents()
         choices = [
             "C:/Users/Example/Documents/A very long source folder name/"
             "containing important family photos and documents",
@@ -286,10 +310,9 @@ def test_target_selection_reflows_without_horizontal_clipping(qapp) -> None:
         assert create_backup is not None
         assert dashboard_scroll is not None
         assert activity_scroll is not None
-        create_backup.click()
+        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
         qapp.processEvents()
-        create_backup.click()
-        window.show()
+        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
         qapp.processEvents()
 
         assert window._dashboard_detail_layout is not None
@@ -305,6 +328,9 @@ def test_target_selection_reflows_without_horizontal_clipping(qapp) -> None:
         assert activity_scroll.horizontalScrollBar().maximum() == 0
         assert dashboard_scroll.verticalScrollBar().maximum() > 0
         assert activity_scroll.verticalScrollBar().maximum() > 0
+        dashboard_page = dashboard_scroll.widget()
+        assert dashboard_page is not None
+        assert dashboard_page.height() >= dashboard_page.minimumSizeHint().height()
         for object_name in (
             "setupSourceValue",
             "setupTargetValue",
@@ -317,6 +343,8 @@ def test_target_selection_reflows_without_horizontal_clipping(qapp) -> None:
             assert label.wordWrap() is True
             assert label.minimumWidth() == 0
             assert label.sizePolicy().horizontalPolicy() is QSizePolicy.Policy.Ignored
+            assert label.width() > 0
+            assert label.height() >= label.heightForWidth(label.width())
     finally:
         window.close()
         window.deleteLater()
@@ -349,6 +377,8 @@ def test_setup_primary_button_persists_reviewed_draft_through_engine(qapp) -> No
     )
 
     try:
+        window.show()
+        qapp.processEvents()
         choices = ["C:/Users/Ada/Pictures", "E:/MediaSyncBackup"]
         window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
         create_backup = window.findChild(QPushButton, "createBackupButton")
@@ -357,7 +387,7 @@ def test_setup_primary_button_persists_reviewed_draft_through_engine(qapp) -> No
         assert create_backup is not None
         assert engine_detail is not None
         for _ in range(4):
-            create_backup.click()
+            QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
             qapp.processEvents()
 
         assert provider.calls == ["connect", "create_standard_backup_job"]
@@ -380,7 +410,12 @@ def test_main_window_refreshes_through_engine_client(qapp) -> None:
     )
 
     try:
-        window.refresh_engine_status()
+        window.show()
+        qapp.processEvents()
+        refresh = window.findChild(QPushButton, "refreshEngineButton")
+        assert refresh is not None
+        QTest.mouseClick(refresh, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
         chip = window.findChild(QLabel, "engineStatusChip")
 
         assert provider.calls == ["connect", "get_status"]

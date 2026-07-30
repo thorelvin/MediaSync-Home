@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -215,6 +216,8 @@ class MediaSyncWindow(QMainWindow):
         self._selected_navigation_index = 0
         self._workspace_heading: QLabel | None = None
         self._workspace_stack: QStackedWidget | None = None
+        self._dashboard_page: QWidget | None = None
+        self._dashboard_scroll_area: QScrollArea | None = None
         self._dashboard_detail_layout: QBoxLayout | None = None
         self._setup_stepper_layout: QGridLayout | None = None
         self._compact_dashboard_layout: bool | None = None
@@ -508,6 +511,7 @@ class MediaSyncWindow(QMainWindow):
             self._setup_primary_button.setText(self._display(state.primary_action_label))
             self._setup_primary_button.setEnabled(self._setup_primary_enabled(state))
             self._setup_primary_button.setToolTip(self._setup_primary_tooltip(state))
+        self._refresh_dashboard_geometry()
 
     def _setup_primary_enabled(self, state: StandardBackupSetupViewState) -> bool:
         if state.current_step is BackupSetupStep.REVIEW:
@@ -712,6 +716,7 @@ class MediaSyncWindow(QMainWindow):
             else:
                 row.setText("")
                 row.setVisible(False)
+        self._refresh_dashboard_geometry()
 
     def _apply_job_status_state(self, state: BackupJobStatusViewState) -> None:
         if self._activity_status_title is not None:
@@ -876,7 +881,11 @@ class MediaSyncWindow(QMainWindow):
 
         stack = QStackedWidget()
         stack.setObjectName("workspaceStack")
-        stack.addWidget(_scrollable_page(self._build_dashboard_page(), "dashboardScrollArea"))
+        dashboard_page = self._build_dashboard_page()
+        dashboard_scroll = _scrollable_page(dashboard_page, "dashboardScrollArea")
+        self._dashboard_page = dashboard_page
+        self._dashboard_scroll_area = dashboard_scroll
+        stack.addWidget(dashboard_scroll)
         stack.addWidget(self._build_placeholder_page("Jobs", "Saved backup jobs will appear here."))
         stack.addWidget(self._build_placeholder_page("History", "Completed and blocked runs will appear here."))
         stack.addWidget(
@@ -910,6 +919,10 @@ class MediaSyncWindow(QMainWindow):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(16)
+        layout.setSizeConstraints(
+            QLayout.SizeConstraint.SetNoConstraint,
+            QLayout.SizeConstraint.SetMinAndMaxSize,
+        )
         layout.addWidget(self._build_backup_setup_panel(self._setup_state))
         layout.addWidget(self._build_dashboard_detail_row())
         layout.addStretch(1)
@@ -1116,6 +1129,10 @@ class MediaSyncWindow(QMainWindow):
         layout = QVBoxLayout(content)
         layout.setContentsMargins(20, 24, 20, 24)
         layout.setSpacing(12)
+        layout.setSizeConstraints(
+            QLayout.SizeConstraint.SetNoConstraint,
+            QLayout.SizeConstraint.SetMinAndMaxSize,
+        )
 
         title = QLabel(texts.activity)
         title.setObjectName("sectionTitle")
@@ -1351,6 +1368,20 @@ class MediaSyncWindow(QMainWindow):
                     column,
                     1 if column < columns else 0,
                 )
+        self._refresh_dashboard_geometry()
+
+    def _refresh_dashboard_geometry(self) -> None:
+        page = self._dashboard_page
+        if page is None:
+            return
+        layout = page.layout()
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
+        page.updateGeometry()
+        if self._dashboard_scroll_area is not None:
+            self._dashboard_scroll_area.updateGeometry()
+            self._dashboard_scroll_area.viewport().updateGeometry()
 
     def _apply_selected_language(self) -> None:
         for code, label in self._language_options:
