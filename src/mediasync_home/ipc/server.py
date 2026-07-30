@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from math import ceil
 from secrets import compare_digest
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
@@ -128,11 +131,65 @@ from mediasync_home.ipc.protocol import (
 )
 
 
+@dataclass(frozen=True)
+class IpcResourceLimits:
+    max_accepted_clients: int = 32
+    accepted_client_idle_seconds: float = 300.0
+    max_global_frames_per_window: int = 240
+    max_client_frames_per_window: int = 120
+    frame_window_seconds: float = 1.0
+    max_outstanding_requests: int = 1
+    max_subscriptions: int = 0
+
+    def __post_init__(self) -> None:
+        integer_limits = (
+            self.max_accepted_clients,
+            self.max_global_frames_per_window,
+            self.max_client_frames_per_window,
+        )
+        if any(limit < 1 for limit in integer_limits):
+            raise ValueError("IPC count limits must be positive")
+        if self.accepted_client_idle_seconds <= 0:
+            raise ValueError("accepted_client_idle_seconds must be positive")
+        if self.frame_window_seconds <= 0:
+            raise ValueError("frame_window_seconds must be positive")
+        if self.max_client_frames_per_window > self.max_global_frames_per_window:
+            raise ValueError("per-client frame limit cannot exceed the global frame limit")
+        if self.max_outstanding_requests != 1:
+            raise ValueError("the synchronous named-pipe transport permits one outstanding request")
+        if self.max_subscriptions != 0:
+            raise ValueError("IPC subscriptions are unavailable in the current protocol")
+
+    def to_payload(self) -> dict[str, int]:
+        return {
+            "max_accepted_clients": self.max_accepted_clients,
+            "accepted_client_idle_ms": int(self.accepted_client_idle_seconds * 1000),
+            "max_global_frames_per_window": self.max_global_frames_per_window,
+            "max_client_frames_per_window": self.max_client_frames_per_window,
+            "frame_window_ms": int(self.frame_window_seconds * 1000),
+            "max_outstanding_requests": self.max_outstanding_requests,
+            "max_subscriptions": self.max_subscriptions,
+        }
+
+
+@dataclass
+class _AcceptedClient:
+    identity: VerifiedClientIdentity
+    last_seen_monotonic: float
+    frame_times: deque[float] = field(default_factory=deque)
+
+
 @dataclass
 class EngineHostIpcService:
     authorization: ClientAuthorizationPolicy
     status: RuntimeStatus = field(default_factory=lambda: startup_status(ProcessRole.ENGINE_HOST))
     installation_id: str = "local-dev"
+    resource_limits: IpcResourceLimits = field(default_factory=IpcResourceLimits)
+    monotonic_clock: Callable[[], float] = field(
+        default=monotonic,
+        repr=False,
+        compare=False,
+    )
     job_draft_store: JobDraftStore | None = None
     standard_backup_job_catalog: StandardBackupJobCatalog | None = None
     standard_backup_job_read_store: StandardBackupJobReadModelStore | None = None
@@ -162,13 +219,18 @@ class EngineHostIpcService:
     command_effect_transaction: CommandEffectTransaction | None = None
     state_restore_executor: StateRestoreCommandExecutor | None = None
     outbox_store: OutboxStore | None = None
-    _accepted_clients: dict[str, VerifiedClientIdentity] = field(default_factory=dict)
+    _accepted_clients: dict[str, _AcceptedClient] = field(default_factory=dict)
+    _global_frame_times: deque[float] = field(default_factory=deque)
 
     def handshake(
         self,
         payload: dict[str, Any],
         identity: VerifiedClientIdentity,
     ) -> IpcResponse:
+        now = self.monotonic_clock()
+        rate_limit_response = self._admit_global_frame(now)
+        if rate_limit_response is not None:
+            return rate_limit_response
         try:
             request = HandshakeRequest.from_dict(payload)
         except (IpcProtocolError, TypeError, ValueError):
@@ -181,18 +243,37 @@ class EngineHostIpcService:
         if reject_reason is not None:
             return IpcResponse.rejected(reject_reason)
 
-        self._accepted_clients[request.client_instance_id] = identity
+        self._expire_idle_clients(now)
+        accepted_client = self._accepted_clients.get(request.client_instance_id)
+        if accepted_client is None:
+            if len(self._accepted_clients) >= self.resource_limits.max_accepted_clients:
+                return self._client_capacity_response(now)
+            accepted_client = _AcceptedClient(
+                identity=identity,
+                last_seen_monotonic=now,
+            )
+            self._accepted_clients[request.client_instance_id] = accepted_client
+        else:
+            rate_limit_response = self._admit_client_frame(accepted_client, now)
+            if rate_limit_response is not None:
+                return rate_limit_response
+            accepted_client.identity = identity
+            accepted_client.last_seen_monotonic = now
+        if not accepted_client.frame_times:
+            accepted_client.frame_times.append(now)
         return IpcResponse.accepted(
             {
                 "server_nonce": str(uuid4()),
                 "verified_user_sid_hash": identity.user_sid_hash,
                 "host_status": self.status.to_dict(),
+                "resource_limits": self.resource_limits.to_payload(),
             }
         )
 
     def query_status(self, client_instance_id: str) -> IpcResponse:
-        if client_instance_id not in self._accepted_clients:
-            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
         return IpcResponse.accepted({"host_status": self.status.to_dict()})
 
     def query_backup_overview(
@@ -203,8 +284,9 @@ class EngineHostIpcService:
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
-        if client_instance_id not in self._accepted_clients:
-            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
         try:
             overview = query_backup_overview(
                 job_read_store=self.standard_backup_job_read_store,
@@ -223,8 +305,9 @@ class EngineHostIpcService:
         *,
         job_id: str,
     ) -> IpcResponse:
-        if client_instance_id not in self._accepted_clients:
-            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
         try:
             detail = query_backup_job_detail(
                 job_detail_store=self.standard_backup_job_detail_store,
@@ -242,8 +325,9 @@ class EngineHostIpcService:
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
-        if client_instance_id not in self._accepted_clients:
-            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
         try:
             overview = query_activity_overview(
                 run_read_store=self.run_activity_read_store,
@@ -263,8 +347,9 @@ class EngineHostIpcService:
         limit: int | None = None,
         after: dict[str, object] | None = None,
     ) -> IpcResponse:
-        if client_instance_id not in self._accepted_clients:
-            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
         try:
             page = query_plan_operations(
                 plan_read_store=self.plan_operation_read_store,
@@ -284,8 +369,9 @@ class EngineHostIpcService:
         limit: int | None = None,
         after: dict[str, object] | None = None,
     ) -> IpcResponse:
-        if client_instance_id not in self._accepted_clients:
-            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
         try:
             page = query_plan_endpoints(
                 plan_read_store=self.plan_endpoint_read_store,
@@ -305,8 +391,9 @@ class EngineHostIpcService:
         limit: int | None = None,
         after: dict[str, object] | None = None,
     ) -> IpcResponse:
-        if client_instance_id not in self._accepted_clients:
-            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
         try:
             page = query_snapshot_entries(
                 snapshot_read_store=self.snapshot_entry_read_store,
@@ -327,8 +414,9 @@ class EngineHostIpcService:
         after: dict[str, object] | None = None,
         coverage_states: tuple[str, ...] = (),
     ) -> IpcResponse:
-        if client_instance_id not in self._accepted_clients:
-            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
         try:
             page = query_snapshot_coverage(
                 snapshot_coverage_store=self.snapshot_coverage_read_store,
@@ -350,8 +438,9 @@ class EngineHostIpcService:
         after: dict[str, object] | None = None,
         blocking_only: bool = False,
     ) -> IpcResponse:
-        if client_instance_id not in self._accepted_clients:
-            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
         try:
             page = query_snapshot_issues(
                 snapshot_issue_store=self.snapshot_issue_read_store,
@@ -373,8 +462,9 @@ class EngineHostIpcService:
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
-        if client_instance_id not in self._accepted_clients:
-            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
         try:
             page = query_cataloged_files(
                 cataloged_file_read_store=self.cataloged_file_read_store,
@@ -389,11 +479,16 @@ class EngineHostIpcService:
 
     def submit_command(self, client_instance_id: str, command_name: str) -> IpcResponse:
         del command_name
-        if client_instance_id not in self._accepted_clients:
-            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
         return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED)
 
     def submit_command_envelope(self, payload: dict[str, Any]) -> IpcResponse:
+        now = self.monotonic_clock()
+        rate_limit_response = self._admit_global_frame(now)
+        if rate_limit_response is not None:
+            return rate_limit_response
         try:
             command = IpcCommandEnvelope.from_dict(payload)
         except (IpcProtocolError, TypeError, ValueError):
@@ -402,9 +497,14 @@ class EngineHostIpcService:
             return IpcResponse.rejected(IpcReason.PROTOCOL_MISMATCH)
         if command.schema_version != SCHEMA_VERSION:
             return IpcResponse.rejected(IpcReason.SCHEMA_MISMATCH)
-        identity = self._accepted_clients.get(command.client_instance_id)
-        if identity is None:
+        self._expire_idle_clients(now)
+        accepted_client = self._accepted_clients.get(command.client_instance_id)
+        if accepted_client is None:
             return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        rate_limit_response = self._admit_client_frame(accepted_client, now)
+        if rate_limit_response is not None:
+            return rate_limit_response
+        identity = accepted_client.identity
         try:
             actual_payload_hash = canonical_command_payload_hash(command.payload)
         except (TypeError, ValueError):
@@ -431,6 +531,120 @@ class EngineHostIpcService:
         return IpcResponse.rejected(
             IpcReason.MUTATING_COMMANDS_DISABLED,
             response_payload,
+        )
+
+    def _authorize_client_request(self, client_instance_id: str) -> IpcResponse | None:
+        now = self.monotonic_clock()
+        rate_limit_response = self._admit_global_frame(now)
+        if rate_limit_response is not None:
+            return rate_limit_response
+        self._expire_idle_clients(now)
+        accepted_client = self._accepted_clients.get(client_instance_id)
+        if accepted_client is None:
+            return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        return self._admit_client_frame(accepted_client, now)
+
+    def _admit_global_frame(self, now: float) -> IpcResponse | None:
+        self._discard_expired_frame_times(self._global_frame_times, now)
+        if len(self._global_frame_times) >= self.resource_limits.max_global_frames_per_window:
+            return self._rate_limit_response(
+                scope="GLOBAL_FRAMES",
+                limit=self.resource_limits.max_global_frames_per_window,
+                retry_after_seconds=self._retry_after_seconds(
+                    self._global_frame_times,
+                    now,
+                ),
+            )
+        self._global_frame_times.append(now)
+        return None
+
+    def _admit_client_frame(
+        self,
+        accepted_client: _AcceptedClient,
+        now: float,
+    ) -> IpcResponse | None:
+        self._discard_expired_frame_times(accepted_client.frame_times, now)
+        if (
+            len(accepted_client.frame_times)
+            >= self.resource_limits.max_client_frames_per_window
+        ):
+            return self._rate_limit_response(
+                scope="CLIENT_FRAMES",
+                limit=self.resource_limits.max_client_frames_per_window,
+                retry_after_seconds=self._retry_after_seconds(
+                    accepted_client.frame_times,
+                    now,
+                ),
+            )
+        accepted_client.frame_times.append(now)
+        accepted_client.last_seen_monotonic = now
+        return None
+
+    def _discard_expired_frame_times(
+        self,
+        frame_times: deque[float],
+        now: float,
+    ) -> None:
+        cutoff = now - self.resource_limits.frame_window_seconds
+        while frame_times and frame_times[0] <= cutoff:
+            frame_times.popleft()
+
+    def _retry_after_seconds(
+        self,
+        frame_times: deque[float],
+        now: float,
+    ) -> float:
+        if not frame_times:
+            return 0.0
+        return max(
+            0.0,
+            frame_times[0] + self.resource_limits.frame_window_seconds - now,
+        )
+
+    def _expire_idle_clients(self, now: float) -> None:
+        cutoff = now - self.resource_limits.accepted_client_idle_seconds
+        expired_ids = [
+            client_instance_id
+            for client_instance_id, accepted_client in self._accepted_clients.items()
+            if accepted_client.last_seen_monotonic <= cutoff
+        ]
+        for client_instance_id in expired_ids:
+            del self._accepted_clients[client_instance_id]
+
+    def _client_capacity_response(self, now: float) -> IpcResponse:
+        oldest_last_seen = min(
+            accepted_client.last_seen_monotonic
+            for accepted_client in self._accepted_clients.values()
+        )
+        retry_after_seconds = max(
+            0.0,
+            oldest_last_seen + self.resource_limits.accepted_client_idle_seconds - now,
+        )
+        return self._rate_limit_response(
+            scope="ACCEPTED_CLIENTS",
+            limit=self.resource_limits.max_accepted_clients,
+            retry_after_seconds=retry_after_seconds,
+        )
+
+    def _rate_limit_response(
+        self,
+        *,
+        scope: str,
+        limit: int,
+        retry_after_seconds: float,
+    ) -> IpcResponse:
+        return IpcResponse.rejected(
+            IpcReason.IPC_RATE_LIMITED,
+            {
+                "limit_scope": scope,
+                "limit": limit,
+                "window_ms": (
+                    int(self.resource_limits.frame_window_seconds * 1000)
+                    if scope != "ACCEPTED_CLIENTS"
+                    else int(self.resource_limits.accepted_client_idle_seconds * 1000)
+                ),
+                "retry_after_ms": max(1, ceil(retry_after_seconds * 1000)),
+            },
         )
 
     def _handle_restore_state_from_backup_set(

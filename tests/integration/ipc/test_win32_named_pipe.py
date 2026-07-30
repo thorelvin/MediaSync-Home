@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import os
+import struct
 import threading
 from collections.abc import Callable
+from typing import TypeVar
 from uuid import uuid4
 
 import pytest
 
 from mediasync_home.domain.process_roles import ProcessRole
-from mediasync_home.ipc.protocol import PROTOCOL_VERSION, SCHEMA_VERSION, IpcReason, IpcStatus
-from mediasync_home.ipc.server import EngineHostIpcService
+from mediasync_home.ipc.protocol import (
+    MAX_FRAME_BYTES,
+    MAX_QUERY_RESPONSE_BYTES,
+    PROTOCOL_VERSION,
+    SCHEMA_VERSION,
+    IpcReason,
+    IpcStatus,
+)
+from mediasync_home.ipc.server import EngineHostIpcService, IpcResourceLimits
 
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="Win32 named-pipe adapter is Windows-only")
@@ -19,7 +28,15 @@ if os.name == "nt":
     from mediasync_home.ipc import win32_named_pipe
 
 
-def _server_and_client(role: ProcessRole = ProcessRole.GUI):
+_T = TypeVar("_T")
+
+
+def _server_and_client(
+    role: ProcessRole = ProcessRole.GUI,
+) -> tuple[
+    win32_named_pipe.Win32NamedPipeServer,
+    win32_named_pipe.Win32NamedPipeClient,
+]:
     service = EngineHostIpcService(win32_named_pipe.current_user_policy())
     pipe_name = win32_named_pipe.make_pipe_name(
         installation_id="integration-test",
@@ -30,12 +47,15 @@ def _server_and_client(role: ProcessRole = ProcessRole.GUI):
     return server, client
 
 
-def _roundtrip(server: object, action: Callable[[], object]) -> object:
+def _roundtrip(
+    server: win32_named_pipe.Win32NamedPipeServer,
+    action: Callable[[], _T],
+) -> _T:
     errors: list[BaseException] = []
 
     def serve() -> None:
         try:
-            server.serve_once()  # type: ignore[attr-defined]
+            server.serve_once()
         except BaseException as exc:  # pragma: no cover - re-raised in test thread
             errors.append(exc)
 
@@ -245,6 +265,64 @@ def test_named_pipe_mutating_commands_are_disabled_after_handshake() -> None:
     assert handshake.status is IpcStatus.ACCEPTED
     assert command.status is IpcStatus.REJECTED
     assert command.reason is IpcReason.MUTATING_COMMANDS_DISABLED
+
+
+def test_named_pipe_serializes_structured_client_capacity_rejection() -> None:
+    service = EngineHostIpcService(
+        win32_named_pipe.current_user_policy(),
+        resource_limits=IpcResourceLimits(
+            max_accepted_clients=1,
+            max_global_frames_per_window=20,
+            max_client_frames_per_window=10,
+        ),
+    )
+    pipe_name = win32_named_pipe.make_pipe_name(
+        installation_id="integration-test",
+        suffix=uuid4().hex,
+    )
+    server = win32_named_pipe.Win32NamedPipeServer(pipe_name=pipe_name, service=service)
+    first = win32_named_pipe.Win32NamedPipeClient(pipe_name=pipe_name)
+    second = win32_named_pipe.Win32NamedPipeClient(pipe_name=pipe_name)
+
+    assert _roundtrip(server, first.connect).status is IpcStatus.ACCEPTED
+
+    rejection = _roundtrip(server, second.connect)
+
+    assert rejection.status is IpcStatus.REJECTED
+    assert rejection.reason is IpcReason.IPC_RATE_LIMITED
+    assert rejection.payload["limit_scope"] == "ACCEPTED_CLIENTS"
+    assert rejection.payload["limit"] == 1
+    assert rejection.payload["retry_after_ms"] > 0
+
+
+def test_named_pipe_rejects_oversized_declared_frame_before_reading_body() -> None:
+    server, client = _server_and_client()
+    errors: list[BaseException] = []
+
+    def serve() -> None:
+        try:
+            server.serve_once()
+        except BaseException as exc:  # pragma: no cover - re-raised in test thread
+            errors.append(exc)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    handle = client._open()
+    try:
+        win32_named_pipe._write_all(handle, struct.pack("<I", MAX_FRAME_BYTES + 1))
+        payload = win32_named_pipe._read_message(
+            handle,
+            limit=MAX_QUERY_RESPONSE_BYTES,
+        )
+    finally:
+        win32_named_pipe._close_handle(handle)
+    thread.join(timeout=5)
+
+    assert not thread.is_alive(), "named-pipe server waited for an oversized frame body"
+    if errors:
+        raise errors[0]
+    assert payload["status"] == IpcStatus.REJECTED.value
+    assert payload["reason"] == IpcReason.INVALID_FRAME.value
 
 
 def test_named_pipe_creation_uses_remote_client_rejection_flag() -> None:

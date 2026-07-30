@@ -13,6 +13,8 @@ from uuid import uuid4
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
 from mediasync_home.ipc.protocol import (
+    MAX_FRAME_BYTES,
+    MAX_QUERY_RESPONSE_BYTES,
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
     HandshakeRequest,
@@ -330,14 +332,25 @@ def _write_all(handle: HANDLE, payload: bytes) -> None:
         offset += written.value
 
 
-def _read_message(handle: HANDLE) -> dict[str, Any]:
+def _read_message(
+    handle: HANDLE,
+    *,
+    limit: int = MAX_FRAME_BYTES,
+) -> dict[str, Any]:
     header = _read_exact(handle, 4)
     (length,) = struct.unpack("<I", header)
-    return decode_frame(_read_exact(handle, length))
+    if length > limit:
+        raise IpcProtocolError(f"frame exceeds limit: {length} > {limit}")
+    return decode_frame(_read_exact(handle, length), limit=limit)
 
 
-def _write_message(handle: HANDLE, message: dict[str, Any]) -> None:
-    payload = encode_frame(message)
+def _write_message(
+    handle: HANDLE,
+    message: dict[str, Any],
+    *,
+    limit: int = MAX_FRAME_BYTES,
+) -> None:
+    payload = encode_frame(message, limit=limit)
     _write_all(handle, struct.pack("<I", len(payload)) + payload)
 
 
@@ -376,7 +389,18 @@ class Win32NamedPipeServer:
                 response = self._dispatch(request, identity)
             except (IpcProtocolError, KeyError, TypeError, ValueError):
                 response = IpcResponse.rejected(IpcReason.INVALID_FRAME)
-            _write_message(pipe, response.to_dict())
+            try:
+                _write_message(
+                    pipe,
+                    response.to_dict(),
+                    limit=MAX_QUERY_RESPONSE_BYTES,
+                )
+            except IpcProtocolError:
+                _write_message(
+                    pipe,
+                    IpcResponse.rejected(IpcReason.INVALID_FRAME).to_dict(),
+                    limit=MAX_QUERY_RESPONSE_BYTES,
+                )
         finally:
             if pipe:
                 kernel32.FlushFileBuffers(pipe)
@@ -692,7 +716,7 @@ class Win32NamedPipeClient:
         handle = self._open()
         try:
             _write_message(handle, request)
-            payload = _read_message(handle)
+            payload = _read_message(handle, limit=MAX_QUERY_RESPONSE_BYTES)
         finally:
             _close_handle(handle)
         status = payload.get("status")
