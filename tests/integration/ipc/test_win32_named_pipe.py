@@ -314,6 +314,7 @@ def test_named_pipe_rejects_oversized_declared_frame_before_reading_body() -> No
             handle,
             limit=MAX_QUERY_RESPONSE_BYTES,
         )
+        win32_named_pipe._write_all(handle, win32_named_pipe.RESPONSE_ACK)
     finally:
         win32_named_pipe._close_handle(handle)
     thread.join(timeout=5)
@@ -323,6 +324,115 @@ def test_named_pipe_rejects_oversized_declared_frame_before_reading_body() -> No
         raise errors[0]
     assert payload["status"] == IpcStatus.REJECTED.value
     assert payload["reason"] == IpcReason.INVALID_FRAME.value
+
+
+def test_named_pipe_disconnects_client_that_stalls_before_frame_header() -> None:
+    service = EngineHostIpcService(win32_named_pipe.current_user_policy())
+    pipe_name = win32_named_pipe.make_pipe_name(
+        installation_id="integration-test",
+        suffix=uuid4().hex,
+    )
+    server = win32_named_pipe.Win32NamedPipeServer(
+        pipe_name=pipe_name,
+        service=service,
+        request_timeout_ms=50,
+        response_timeout_ms=50,
+        ack_timeout_ms=50,
+    )
+    client = win32_named_pipe.Win32NamedPipeClient(pipe_name=pipe_name)
+    errors: list[BaseException] = []
+
+    def serve() -> None:
+        try:
+            server.serve_once()
+        except BaseException as exc:  # pragma: no cover - re-raised in test thread
+            errors.append(exc)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    handle = client._open()
+    try:
+        thread.join(timeout=2)
+    finally:
+        win32_named_pipe._close_handle(handle)
+
+    assert not thread.is_alive(), "stalled client pinned the named-pipe server"
+    if errors:
+        raise errors[0]
+
+
+def test_named_pipe_does_not_wait_indefinitely_for_response_acknowledgment() -> None:
+    service = EngineHostIpcService(win32_named_pipe.current_user_policy())
+    pipe_name = win32_named_pipe.make_pipe_name(
+        installation_id="integration-test",
+        suffix=uuid4().hex,
+    )
+    server = win32_named_pipe.Win32NamedPipeServer(
+        pipe_name=pipe_name,
+        service=service,
+        request_timeout_ms=100,
+        response_timeout_ms=100,
+        ack_timeout_ms=50,
+    )
+    client = win32_named_pipe.Win32NamedPipeClient(pipe_name=pipe_name)
+    errors: list[BaseException] = []
+
+    def serve() -> None:
+        try:
+            server.serve_once()
+        except BaseException as exc:  # pragma: no cover - re-raised in test thread
+            errors.append(exc)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    handle = client._open()
+    try:
+        win32_named_pipe._write_message(
+            handle,
+            {
+                "message_type": "QUERY_STATUS",
+                "client_instance_id": client.client_instance_id,
+            },
+        )
+        response = win32_named_pipe._read_message(
+            handle,
+            limit=MAX_QUERY_RESPONSE_BYTES,
+        )
+        thread.join(timeout=2)
+    finally:
+        win32_named_pipe._close_handle(handle)
+
+    assert response["reason"] == IpcReason.HANDSHAKE_REQUIRED.value
+    assert not thread.is_alive(), "missing response acknowledgment pinned the pipe server"
+    if errors:
+        raise errors[0]
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("request_timeout_ms", 0),
+        ("response_timeout_ms", 0),
+        ("ack_timeout_ms", 0),
+    ],
+)
+def test_named_pipe_server_requires_positive_io_deadlines(
+    field_name: str,
+    value: int,
+) -> None:
+    values = {
+        "request_timeout_ms": 100,
+        "response_timeout_ms": 100,
+        "ack_timeout_ms": 100,
+    }
+    values[field_name] = value
+
+    with pytest.raises(ValueError):
+        win32_named_pipe.Win32NamedPipeServer(
+            pipe_name="unused",
+            service=EngineHostIpcService(win32_named_pipe.current_user_policy()),
+            **values,
+        )
 
 
 def test_named_pipe_creation_uses_remote_client_rejection_flag() -> None:

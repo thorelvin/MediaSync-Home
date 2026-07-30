@@ -7,6 +7,7 @@ import struct
 import time
 from ctypes import wintypes
 from dataclasses import dataclass, field
+from math import ceil
 from typing import Any
 from uuid import uuid4
 
@@ -45,6 +46,12 @@ LPCWSTR = wintypes.LPCWSTR
 
 INVALID_HANDLE_VALUE = HANDLE(-1).value
 ERROR_FILE_NOT_FOUND = 2
+ERROR_BROKEN_PIPE = 109
+ERROR_OPERATION_ABORTED = 995
+ERROR_IO_PENDING = 997
+ERROR_NOT_FOUND = 1168
+ERROR_NO_DATA = 232
+ERROR_PIPE_NOT_CONNECTED = 233
 ERROR_PIPE_BUSY = 231
 ERROR_PIPE_CONNECTED = 535
 
@@ -60,8 +67,16 @@ PIPE_MODE = PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS
 GENERIC_READ = 0x80000000
 GENERIC_WRITE = 0x40000000
 OPEN_EXISTING = 3
+FILE_FLAG_OVERLAPPED = 0x40000000
 SECURITY_DESCRIPTOR_REVISION = 1
 DEFAULT_BUFFER_SIZE = 65_536
+DEFAULT_REQUEST_TIMEOUT_MS = 5_000
+DEFAULT_RESPONSE_TIMEOUT_MS = 5_000
+DEFAULT_ACK_TIMEOUT_MS = 1_000
+RESPONSE_ACK = b"\x06"
+WAIT_OBJECT_0 = 0
+WAIT_TIMEOUT = 258
+INFINITE = 0xFFFFFFFF
 
 
 class Win32PipeError(OSError):
@@ -84,6 +99,16 @@ class TokenUser(ctypes.Structure):
     _fields_ = [("User", SidAndAttributes)]
 
 
+class Overlapped(ctypes.Structure):
+    _fields_ = [
+        ("Internal", ctypes.c_size_t),
+        ("InternalHigh", ctypes.c_size_t),
+        ("Offset", DWORD),
+        ("OffsetHigh", DWORD),
+        ("hEvent", HANDLE),
+    ]
+
+
 def _configure_signatures() -> None:
     kernel32.GetCurrentProcess.restype = HANDLE
     kernel32.GetCurrentThread.restype = HANDLE
@@ -102,18 +127,43 @@ def _configure_signatures() -> None:
         ctypes.POINTER(SecurityAttributes),
     ]
     kernel32.CreateNamedPipeW.restype = HANDLE
-    kernel32.ConnectNamedPipe.argtypes = [HANDLE, LPVOID]
+    kernel32.ConnectNamedPipe.argtypes = [HANDLE, ctypes.POINTER(Overlapped)]
     kernel32.ConnectNamedPipe.restype = BOOL
     kernel32.DisconnectNamedPipe.argtypes = [HANDLE]
-    kernel32.FlushFileBuffers.argtypes = [HANDLE]
+    kernel32.DisconnectNamedPipe.restype = BOOL
     kernel32.CreateFileW.argtypes = [LPCWSTR, DWORD, DWORD, LPVOID, DWORD, DWORD, HANDLE]
     kernel32.CreateFileW.restype = HANDLE
-    kernel32.ReadFile.argtypes = [HANDLE, LPVOID, DWORD, ctypes.POINTER(DWORD), LPVOID]
+    kernel32.ReadFile.argtypes = [
+        HANDLE,
+        LPVOID,
+        DWORD,
+        ctypes.POINTER(DWORD),
+        ctypes.POINTER(Overlapped),
+    ]
     kernel32.ReadFile.restype = BOOL
-    kernel32.WriteFile.argtypes = [HANDLE, LPVOID, DWORD, ctypes.POINTER(DWORD), LPVOID]
+    kernel32.WriteFile.argtypes = [
+        HANDLE,
+        LPVOID,
+        DWORD,
+        ctypes.POINTER(DWORD),
+        ctypes.POINTER(Overlapped),
+    ]
     kernel32.WriteFile.restype = BOOL
     kernel32.WaitNamedPipeW.argtypes = [LPCWSTR, DWORD]
     kernel32.WaitNamedPipeW.restype = BOOL
+    kernel32.CreateEventW.argtypes = [LPVOID, BOOL, BOOL, LPCWSTR]
+    kernel32.CreateEventW.restype = HANDLE
+    kernel32.WaitForSingleObject.argtypes = [HANDLE, DWORD]
+    kernel32.WaitForSingleObject.restype = DWORD
+    kernel32.CancelIoEx.argtypes = [HANDLE, ctypes.POINTER(Overlapped)]
+    kernel32.CancelIoEx.restype = BOOL
+    kernel32.GetOverlappedResult.argtypes = [
+        HANDLE,
+        ctypes.POINTER(Overlapped),
+        ctypes.POINTER(DWORD),
+        BOOL,
+    ]
+    kernel32.GetOverlappedResult.restype = BOOL
 
     advapi32.OpenProcessToken.argtypes = [HANDLE, DWORD, ctypes.POINTER(HANDLE)]
     advapi32.OpenProcessToken.restype = BOOL
@@ -305,43 +355,217 @@ class _SecurityDescriptor:
             self.descriptor = LPVOID()
 
 
-def _read_exact(handle: HANDLE, size: int) -> bytes:
+def _new_overlapped() -> tuple[HANDLE, Overlapped]:
+    event = _checked_handle(
+        kernel32.CreateEventW(None, True, False, None),
+        "CreateEventW",
+    )
+    operation = Overlapped()
+    operation.hEvent = event
+    return event, operation
+
+
+def _remaining_timeout_ms(deadline: float, operation_name: str) -> int:
+    remaining_seconds = deadline - time.monotonic()
+    if remaining_seconds <= 0:
+        raise TimeoutError(f"{operation_name} timed out")
+    return max(1, ceil(remaining_seconds * 1000))
+
+
+def _complete_overlapped(
+    handle: HANDLE,
+    operation: Overlapped,
+    *,
+    timeout_ms: int,
+    operation_name: str,
+) -> int:
+    wait_result = kernel32.WaitForSingleObject(operation.hEvent, timeout_ms)
+    if wait_result == WAIT_TIMEOUT:
+        cancelled = kernel32.CancelIoEx(handle, ctypes.byref(operation))
+        if not cancelled:
+            code = ctypes.get_last_error()
+            if code != ERROR_NOT_FOUND:
+                raise Win32PipeError(
+                    code,
+                    f"CancelIoEx({operation_name}): {ctypes.FormatError(code)}",
+                )
+        else:
+            kernel32.WaitForSingleObject(operation.hEvent, INFINITE)
+        transferred = DWORD(0)
+        if kernel32.GetOverlappedResult(
+            handle,
+            ctypes.byref(operation),
+            ctypes.byref(transferred),
+            False,
+        ):
+            if not cancelled:
+                return int(transferred.value)
+        else:
+            code = ctypes.get_last_error()
+            if code not in {ERROR_OPERATION_ABORTED, ERROR_BROKEN_PIPE, ERROR_NO_DATA}:
+                raise Win32PipeError(
+                    code,
+                    f"GetOverlappedResult({operation_name}): {ctypes.FormatError(code)}",
+                )
+        raise TimeoutError(f"{operation_name} timed out")
+    if wait_result != WAIT_OBJECT_0:
+        raise Win32PipeError(
+            int(wait_result),
+            f"WaitForSingleObject({operation_name}) returned {wait_result}",
+        )
+
+    transferred = DWORD(0)
+    if not kernel32.GetOverlappedResult(
+        handle,
+        ctypes.byref(operation),
+        ctypes.byref(transferred),
+        False,
+    ):
+        _raise_last_error(f"GetOverlappedResult({operation_name})")
+    return int(transferred.value)
+
+
+def _read_chunk(
+    handle: HANDLE,
+    size: int,
+    *,
+    timeout_ms: int,
+    operation_name: str,
+) -> bytes:
+    buffer = ctypes.create_string_buffer(size)
+    immediate_bytes = DWORD(0)
+    event, operation = _new_overlapped()
+    try:
+        if not kernel32.ReadFile(
+            handle,
+            buffer,
+            size,
+            ctypes.byref(immediate_bytes),
+            ctypes.byref(operation),
+        ):
+            code = ctypes.get_last_error()
+            if code != ERROR_IO_PENDING:
+                raise Win32PipeError(
+                    code,
+                    f"ReadFile({operation_name}): {ctypes.FormatError(code)}",
+                )
+        transferred = _complete_overlapped(
+            handle,
+            operation,
+            timeout_ms=timeout_ms,
+            operation_name=operation_name,
+        )
+        if transferred == 0:
+            raise ConnectionError(f"pipe closed during {operation_name}")
+        return buffer.raw[:transferred]
+    finally:
+        _close_handle(event)
+
+
+def _read_exact(
+    handle: HANDLE,
+    size: int,
+    *,
+    timeout_ms: int = DEFAULT_REQUEST_TIMEOUT_MS,
+    operation_name: str = "pipe read",
+) -> bytes:
     chunks: list[bytes] = []
     remaining = size
+    deadline = time.monotonic() + timeout_ms / 1000
     while remaining:
         chunk_size = min(remaining, DEFAULT_BUFFER_SIZE)
-        buffer = ctypes.create_string_buffer(chunk_size)
-        read = DWORD(0)
-        if not kernel32.ReadFile(handle, buffer, chunk_size, ctypes.byref(read), None):
-            _raise_last_error("ReadFile")
-        if read.value == 0:
-            raise ConnectionError("pipe closed while reading frame")
-        chunks.append(buffer.raw[: read.value])
-        remaining -= read.value
+        chunk = _read_chunk(
+            handle,
+            chunk_size,
+            timeout_ms=_remaining_timeout_ms(deadline, operation_name),
+            operation_name=operation_name,
+        )
+        chunks.append(chunk)
+        remaining -= len(chunk)
     return b"".join(chunks)
 
 
-def _write_all(handle: HANDLE, payload: bytes) -> None:
+def _write_chunk(
+    handle: HANDLE,
+    payload: bytes,
+    *,
+    timeout_ms: int,
+    operation_name: str,
+) -> int:
+    immediate_bytes = DWORD(0)
+    buffer = ctypes.create_string_buffer(payload)
+    event, operation = _new_overlapped()
+    try:
+        if not kernel32.WriteFile(
+            handle,
+            buffer,
+            len(payload),
+            ctypes.byref(immediate_bytes),
+            ctypes.byref(operation),
+        ):
+            code = ctypes.get_last_error()
+            if code != ERROR_IO_PENDING:
+                raise Win32PipeError(
+                    code,
+                    f"WriteFile({operation_name}): {ctypes.FormatError(code)}",
+                )
+        transferred = _complete_overlapped(
+            handle,
+            operation,
+            timeout_ms=timeout_ms,
+            operation_name=operation_name,
+        )
+        if transferred == 0:
+            raise ConnectionError(f"pipe closed during {operation_name}")
+        return transferred
+    finally:
+        _close_handle(event)
+
+
+def _write_all(
+    handle: HANDLE,
+    payload: bytes,
+    *,
+    timeout_ms: int = DEFAULT_RESPONSE_TIMEOUT_MS,
+    operation_name: str = "pipe write",
+) -> None:
     offset = 0
+    deadline = time.monotonic() + timeout_ms / 1000
     while offset < len(payload):
         chunk = payload[offset : offset + DEFAULT_BUFFER_SIZE]
-        written = DWORD(0)
-        buffer = ctypes.create_string_buffer(chunk)
-        if not kernel32.WriteFile(handle, buffer, len(chunk), ctypes.byref(written), None):
-            _raise_last_error("WriteFile")
-        offset += written.value
+        offset += _write_chunk(
+            handle,
+            chunk,
+            timeout_ms=_remaining_timeout_ms(deadline, operation_name),
+            operation_name=operation_name,
+        )
 
 
 def _read_message(
     handle: HANDLE,
     *,
     limit: int = MAX_FRAME_BYTES,
+    timeout_ms: int = DEFAULT_REQUEST_TIMEOUT_MS,
 ) -> dict[str, Any]:
-    header = _read_exact(handle, 4)
+    deadline = time.monotonic() + timeout_ms / 1000
+    header = _read_exact(
+        handle,
+        4,
+        timeout_ms=_remaining_timeout_ms(deadline, "pipe frame header read"),
+        operation_name="pipe frame header read",
+    )
     (length,) = struct.unpack("<I", header)
     if length > limit:
         raise IpcProtocolError(f"frame exceeds limit: {length} > {limit}")
-    return decode_frame(_read_exact(handle, length), limit=limit)
+    return decode_frame(
+        _read_exact(
+            handle,
+            length,
+            timeout_ms=_remaining_timeout_ms(deadline, "pipe frame body read"),
+            operation_name="pipe frame body read",
+        ),
+        limit=limit,
+    )
 
 
 def _write_message(
@@ -349,9 +573,46 @@ def _write_message(
     message: dict[str, Any],
     *,
     limit: int = MAX_FRAME_BYTES,
+    timeout_ms: int = DEFAULT_RESPONSE_TIMEOUT_MS,
 ) -> None:
     payload = encode_frame(message, limit=limit)
-    _write_all(handle, struct.pack("<I", len(payload)) + payload)
+    _write_all(
+        handle,
+        struct.pack("<I", len(payload)) + payload,
+        timeout_ms=timeout_ms,
+        operation_name="pipe frame write",
+    )
+
+
+def _connect_overlapped(handle: HANDLE) -> None:
+    event, operation = _new_overlapped()
+    try:
+        if kernel32.ConnectNamedPipe(handle, ctypes.byref(operation)):
+            return
+        code = ctypes.get_last_error()
+        if code == ERROR_PIPE_CONNECTED:
+            return
+        if code != ERROR_IO_PENDING:
+            raise Win32PipeError(
+                code,
+                f"ConnectNamedPipe: {ctypes.FormatError(code)}",
+            )
+        _complete_overlapped(
+            handle,
+            operation,
+            timeout_ms=INFINITE,
+            operation_name="pipe client connection",
+        )
+    finally:
+        _close_handle(event)
+
+
+def _is_client_disconnect_error(exc: Win32PipeError) -> bool:
+    return exc.errno in {
+        ERROR_BROKEN_PIPE,
+        ERROR_NO_DATA,
+        ERROR_PIPE_NOT_CONNECTED,
+    }
 
 
 @dataclass
@@ -360,6 +621,17 @@ class Win32NamedPipeServer:
     service: EngineHostIpcService = field(
         default_factory=lambda: EngineHostIpcService(current_user_policy())
     )
+    request_timeout_ms: int = DEFAULT_REQUEST_TIMEOUT_MS
+    response_timeout_ms: int = DEFAULT_RESPONSE_TIMEOUT_MS
+    ack_timeout_ms: int = DEFAULT_ACK_TIMEOUT_MS
+
+    def __post_init__(self) -> None:
+        if self.request_timeout_ms < 1:
+            raise ValueError("request_timeout_ms must be positive")
+        if self.response_timeout_ms < 1:
+            raise ValueError("response_timeout_ms must be positive")
+        if self.ack_timeout_ms < 1:
+            raise ValueError("ack_timeout_ms must be positive")
 
     def serve_once(self) -> None:
         security = _SecurityDescriptor.for_current_user()
@@ -368,7 +640,7 @@ class Win32NamedPipeServer:
             pipe = _checked_handle(
                 kernel32.CreateNamedPipeW(
                     _pipe_path(self.pipe_name),
-                    PIPE_ACCESS_DUPLEX,
+                    PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
                     PIPE_MODE,
                     1,
                     DEFAULT_BUFFER_SIZE,
@@ -378,32 +650,59 @@ class Win32NamedPipeServer:
                 ),
                 "CreateNamedPipeW",
             )
-            ok = kernel32.ConnectNamedPipe(pipe, None)
-            if not ok:
-                code = ctypes.get_last_error()
-                if code != ERROR_PIPE_CONNECTED:
-                    raise Win32PipeError(code, f"ConnectNamedPipe: {ctypes.FormatError(code)}")
+            _connect_overlapped(pipe)
             try:
-                request = _read_message(pipe)
+                request = _read_message(
+                    pipe,
+                    timeout_ms=self.request_timeout_ms,
+                )
                 identity = _client_identity_from_pipe(pipe)
                 response = self._dispatch(request, identity)
             except (IpcProtocolError, KeyError, TypeError, ValueError):
                 response = IpcResponse.rejected(IpcReason.INVALID_FRAME)
+            except (ConnectionError, TimeoutError):
+                return
+            except Win32PipeError as exc:
+                if _is_client_disconnect_error(exc):
+                    return
+                raise
             try:
                 _write_message(
                     pipe,
                     response.to_dict(),
                     limit=MAX_QUERY_RESPONSE_BYTES,
+                    timeout_ms=self.response_timeout_ms,
                 )
             except IpcProtocolError:
                 _write_message(
                     pipe,
                     IpcResponse.rejected(IpcReason.INVALID_FRAME).to_dict(),
                     limit=MAX_QUERY_RESPONSE_BYTES,
+                    timeout_ms=self.response_timeout_ms,
                 )
+            except (ConnectionError, TimeoutError):
+                return
+            except Win32PipeError as exc:
+                if _is_client_disconnect_error(exc):
+                    return
+                raise
+            try:
+                acknowledgment = _read_exact(
+                    pipe,
+                    len(RESPONSE_ACK),
+                    timeout_ms=self.ack_timeout_ms,
+                    operation_name="pipe response acknowledgment read",
+                )
+                if acknowledgment != RESPONSE_ACK:
+                    return
+            except (ConnectionError, TimeoutError):
+                return
+            except Win32PipeError as exc:
+                if _is_client_disconnect_error(exc):
+                    return
+                raise
         finally:
             if pipe:
-                kernel32.FlushFileBuffers(pipe)
                 kernel32.DisconnectNamedPipe(pipe)
                 _close_handle(pipe)
             security.close()
@@ -715,8 +1014,22 @@ class Win32NamedPipeClient:
     def _roundtrip(self, request: dict[str, Any]) -> IpcResponse:
         handle = self._open()
         try:
-            _write_message(handle, request)
-            payload = _read_message(handle, limit=MAX_QUERY_RESPONSE_BYTES)
+            _write_message(
+                handle,
+                request,
+                timeout_ms=self.timeout_ms,
+            )
+            payload = _read_message(
+                handle,
+                limit=MAX_QUERY_RESPONSE_BYTES,
+                timeout_ms=self.timeout_ms,
+            )
+            _write_all(
+                handle,
+                RESPONSE_ACK,
+                timeout_ms=self.timeout_ms,
+                operation_name="pipe response acknowledgment write",
+            )
         finally:
             _close_handle(handle)
         status = payload.get("status")
@@ -740,7 +1053,7 @@ class Win32NamedPipeClient:
                 0,
                 None,
                 OPEN_EXISTING,
-                0,
+                FILE_FLAG_OVERLAPPED,
                 None,
             )
             value = _handle_value(handle)
