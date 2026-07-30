@@ -4,10 +4,11 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 from mediasync_home.adapters.sqlite.connection_policy import (
     SqliteStore,
@@ -459,6 +460,104 @@ class SqliteStateRestoreMaintenanceAdmission:
             "incomplete_compaction_epoch_count": self.incomplete_compaction_epoch_count,
             "retained_run_target_lease_count": self.retained_run_target_lease_count,
             "blockers": [entry.to_payload() for entry in self.blockers],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SqliteStateMaintenanceRetentionPolicy:
+    keep_latest_backup_sets: int = 1
+    keep_latest_restore_epochs: int = 10
+    keep_latest_compaction_epochs: int = 10
+    retain_backup_sets_created_on_or_after_utc: str | None = None
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "keep_latest_backup_sets": self.keep_latest_backup_sets,
+            "keep_latest_restore_epochs": self.keep_latest_restore_epochs,
+            "keep_latest_compaction_epochs": self.keep_latest_compaction_epochs,
+            "retain_backup_sets_created_on_or_after_utc": (
+                self.retain_backup_sets_created_on_or_after_utc
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SqliteStateMaintenanceRetentionArtifact:
+    artifact_type: str
+    artifact_id: str
+    path: Path
+    created_utc: str
+    terminal_state: str
+    associated_paths: tuple[Path, ...] = ()
+    backup_set_id: str | None = None
+
+    def to_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "artifact_type": self.artifact_type,
+            "artifact_id": self.artifact_id,
+            "path": str(self.path),
+            "created_utc": self.created_utc,
+            "terminal_state": self.terminal_state,
+            "associated_paths": [str(path) for path in self.associated_paths],
+        }
+        if self.backup_set_id is not None:
+            payload["backup_set_id"] = self.backup_set_id
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class SqliteStateMaintenanceRetentionSkip:
+    artifact_type: str
+    artifact_id: str
+    path: Path
+    reason: str
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "artifact_type": self.artifact_type,
+            "artifact_id": self.artifact_id,
+            "path": str(self.path),
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SqliteStateMaintenanceRetentionPlan:
+    backup_root: Path
+    state_root: Path
+    policy: SqliteStateMaintenanceRetentionPolicy
+    delete_artifacts: tuple[SqliteStateMaintenanceRetentionArtifact, ...]
+    retained_artifacts: tuple[SqliteStateMaintenanceRetentionArtifact, ...]
+    skipped_artifacts: tuple[SqliteStateMaintenanceRetentionSkip, ...]
+    protected_backup_set_ids: tuple[str, ...] = ()
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "backup_root": str(self.backup_root),
+            "state_root": str(self.state_root),
+            "policy": self.policy.to_payload(),
+            "delete_artifacts": [
+                artifact.to_payload() for artifact in self.delete_artifacts
+            ],
+            "retained_artifacts": [
+                artifact.to_payload() for artifact in self.retained_artifacts
+            ],
+            "skipped_artifacts": [skip.to_payload() for skip in self.skipped_artifacts],
+            "protected_backup_set_ids": list(self.protected_backup_set_ids),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SqliteStateMaintenanceRetentionResult:
+    plan: SqliteStateMaintenanceRetentionPlan
+    deleted_artifacts: tuple[SqliteStateMaintenanceRetentionArtifact, ...]
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "plan": self.plan.to_payload(),
+            "deleted_artifacts": [
+                artifact.to_payload() for artifact in self.deleted_artifacts
+            ],
         }
 
 
@@ -1011,6 +1110,572 @@ def recover_incomplete_sqlite_state_compaction_epochs(
         committed_epoch_count=committed,
         previously_rolled_back_epoch_count=previously_rolled_back,
         recovered_epochs=tuple(recovered_epochs),
+    )
+
+
+def plan_sqlite_state_maintenance_retention(
+    layout: StateStoreLayout,
+    backup_root: Path,
+    *,
+    policy: SqliteStateMaintenanceRetentionPolicy | None = None,
+) -> SqliteStateMaintenanceRetentionPlan:
+    retention_policy = policy or SqliteStateMaintenanceRetentionPolicy()
+    _validate_retention_policy(retention_policy)
+    _validate_state_store_layout(layout, field_name="STATE_RETENTION")
+    _validate_local_absolute_path(backup_root, "STATE_RETENTION_BACKUP_ROOT")
+
+    backup_sets, backup_skips = _scan_backup_set_retention_artifacts(backup_root)
+    restore_epochs, restore_skips = _scan_restore_epoch_retention_artifacts(layout)
+    compaction_epochs, compaction_skips = _scan_compaction_epoch_retention_artifacts(
+        layout
+    )
+
+    retained_restore_epochs = _latest_retention_artifacts(
+        restore_epochs,
+        retention_policy.keep_latest_restore_epochs,
+    )
+    retained_compaction_epochs = _latest_retention_artifacts(
+        compaction_epochs,
+        retention_policy.keep_latest_compaction_epochs,
+    )
+    protected_backup_set_ids = tuple(
+        sorted(
+            artifact.backup_set_id
+            for artifact in retained_restore_epochs
+            if artifact.backup_set_id is not None
+        )
+    )
+    latest_backup_sets = _latest_retention_artifacts(
+        backup_sets,
+        retention_policy.keep_latest_backup_sets,
+    )
+    retained_backup_sets = tuple(
+        artifact
+        for artifact in backup_sets
+        if artifact.artifact_id in {entry.artifact_id for entry in latest_backup_sets}
+        or artifact.artifact_id in protected_backup_set_ids
+        or _retention_cutoff_protects_backup_set(artifact, retention_policy)
+    )
+    retained_backup_set_ids = {artifact.artifact_id for artifact in retained_backup_sets}
+    retained_restore_epoch_ids = {
+        artifact.artifact_id for artifact in retained_restore_epochs
+    }
+    retained_compaction_epoch_ids = {
+        artifact.artifact_id for artifact in retained_compaction_epochs
+    }
+
+    delete_artifacts = tuple(
+        artifact
+        for artifact in backup_sets
+        if artifact.artifact_id not in retained_backup_set_ids
+    ) + tuple(
+        artifact
+        for artifact in restore_epochs
+        if artifact.artifact_id not in retained_restore_epoch_ids
+    ) + tuple(
+        artifact
+        for artifact in compaction_epochs
+        if artifact.artifact_id not in retained_compaction_epoch_ids
+    )
+    retained_artifacts = (
+        retained_backup_sets + retained_restore_epochs + retained_compaction_epochs
+    )
+    return SqliteStateMaintenanceRetentionPlan(
+        backup_root=backup_root,
+        state_root=layout.root,
+        policy=retention_policy,
+        delete_artifacts=delete_artifacts,
+        retained_artifacts=retained_artifacts,
+        skipped_artifacts=backup_skips + restore_skips + compaction_skips,
+        protected_backup_set_ids=protected_backup_set_ids,
+    )
+
+
+def apply_sqlite_state_maintenance_retention(
+    layout: StateStoreLayout,
+    backup_root: Path,
+    *,
+    policy: SqliteStateMaintenanceRetentionPolicy | None = None,
+) -> SqliteStateMaintenanceRetentionResult:
+    plan = plan_sqlite_state_maintenance_retention(
+        layout,
+        backup_root,
+        policy=policy,
+    )
+    deleted_artifacts: list[SqliteStateMaintenanceRetentionArtifact] = []
+    for artifact in plan.delete_artifacts:
+        _delete_retention_artifact(
+            artifact,
+            backup_root=backup_root,
+            layout=layout,
+        )
+        deleted_artifacts.append(artifact)
+    return SqliteStateMaintenanceRetentionResult(
+        plan=plan,
+        deleted_artifacts=tuple(deleted_artifacts),
+    )
+
+
+def _validate_retention_policy(policy: SqliteStateMaintenanceRetentionPolicy) -> None:
+    if policy.keep_latest_backup_sets < 1:
+        raise SqliteStateBackupViolation("STATE_RETENTION_BACKUP_KEEP_COUNT_INVALID")
+    if policy.keep_latest_restore_epochs < 0:
+        raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_KEEP_COUNT_INVALID")
+    if policy.keep_latest_compaction_epochs < 0:
+        raise SqliteStateBackupViolation("STATE_RETENTION_COMPACTION_KEEP_COUNT_INVALID")
+    cutoff = policy.retain_backup_sets_created_on_or_after_utc
+    if cutoff is not None and not cutoff.strip():
+        raise SqliteStateBackupViolation("STATE_RETENTION_BACKUP_CUTOFF_INVALID")
+
+
+def _scan_backup_set_retention_artifacts(
+    backup_root: Path,
+) -> tuple[
+    tuple[SqliteStateMaintenanceRetentionArtifact, ...],
+    tuple[SqliteStateMaintenanceRetentionSkip, ...],
+]:
+    if not backup_root.exists():
+        return ((), ())
+    if not backup_root.is_dir():
+        raise SqliteStateBackupViolation("STATE_RETENTION_BACKUP_ROOT_NOT_DIRECTORY")
+
+    artifacts: list[SqliteStateMaintenanceRetentionArtifact] = []
+    skips: list[SqliteStateMaintenanceRetentionSkip] = []
+    for backup_dir in sorted(backup_root.iterdir(), key=lambda path: path.name):
+        if not backup_dir.is_dir() or backup_dir.is_symlink():
+            skips.append(
+                _retention_skip(
+                    "backup_set",
+                    backup_dir,
+                    "STATE_RETENTION_BACKUP_SET_NOT_DIRECTORY",
+                )
+            )
+            continue
+        try:
+            _validate_backup_set_id(backup_dir.name)
+            manifest = verify_sqlite_state_backup_set(backup_dir)
+            if manifest.backup_set_id != backup_dir.name:
+                raise SqliteStateBackupViolation("STATE_RETENTION_BACKUP_SET_ID_MISMATCH")
+        except SqliteStateBackupViolation as exc:
+            skips.append(_retention_skip("backup_set", backup_dir, str(exc)))
+            continue
+        artifacts.append(
+            SqliteStateMaintenanceRetentionArtifact(
+                artifact_type="backup_set",
+                artifact_id=manifest.backup_set_id,
+                path=backup_dir,
+                created_utc=manifest.created_utc,
+                terminal_state="MANIFESTED",
+            )
+        )
+    return (tuple(artifacts), tuple(skips))
+
+
+def _scan_restore_epoch_retention_artifacts(
+    layout: StateStoreLayout,
+) -> tuple[
+    tuple[SqliteStateMaintenanceRetentionArtifact, ...],
+    tuple[SqliteStateMaintenanceRetentionSkip, ...],
+]:
+    epochs_dir = layout.root / STATE_RESTORE_EPOCHS_DIR_NAME
+    if not epochs_dir.exists():
+        return ((), ())
+    if not epochs_dir.is_dir():
+        raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_EPOCHS_NOT_DIRECTORY")
+
+    artifacts: list[SqliteStateMaintenanceRetentionArtifact] = []
+    skips: list[SqliteStateMaintenanceRetentionSkip] = []
+    for epoch_dir in sorted(epochs_dir.iterdir(), key=lambda path: path.name):
+        if not epoch_dir.is_dir() or epoch_dir.is_symlink():
+            skips.append(
+                _retention_skip(
+                    "restore_epoch",
+                    epoch_dir,
+                    "STATE_RETENTION_RESTORE_EPOCH_NOT_DIRECTORY",
+                )
+            )
+            continue
+        try:
+            artifacts.append(_restore_epoch_retention_artifact(epoch_dir, layout))
+        except SqliteStateBackupViolation as exc:
+            skips.append(_retention_skip("restore_epoch", epoch_dir, str(exc)))
+    return (tuple(artifacts), tuple(skips))
+
+
+def _scan_compaction_epoch_retention_artifacts(
+    layout: StateStoreLayout,
+) -> tuple[
+    tuple[SqliteStateMaintenanceRetentionArtifact, ...],
+    tuple[SqliteStateMaintenanceRetentionSkip, ...],
+]:
+    epochs_dir = layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME
+    if not epochs_dir.exists():
+        return ((), ())
+    if not epochs_dir.is_dir():
+        raise SqliteStateBackupViolation("STATE_RETENTION_COMPACTION_EPOCHS_NOT_DIRECTORY")
+
+    artifacts: list[SqliteStateMaintenanceRetentionArtifact] = []
+    skips: list[SqliteStateMaintenanceRetentionSkip] = []
+    for epoch_dir in sorted(epochs_dir.iterdir(), key=lambda path: path.name):
+        if not epoch_dir.is_dir() or epoch_dir.is_symlink():
+            skips.append(
+                _retention_skip(
+                    "compaction_epoch",
+                    epoch_dir,
+                    "STATE_RETENTION_COMPACTION_EPOCH_NOT_DIRECTORY",
+                )
+            )
+            continue
+        try:
+            artifacts.append(_compaction_epoch_retention_artifact(epoch_dir, layout))
+        except SqliteStateBackupViolation as exc:
+            skips.append(_retention_skip("compaction_epoch", epoch_dir, str(exc)))
+    return (tuple(artifacts), tuple(skips))
+
+
+def _restore_epoch_retention_artifact(
+    epoch_dir: Path,
+    layout: StateStoreLayout,
+) -> SqliteStateMaintenanceRetentionArtifact:
+    restore_epoch_id = epoch_dir.name
+    _validate_restore_epoch_id(restore_epoch_id)
+    committed_path = epoch_dir / STATE_RESTORE_COMMITTED_FILENAME
+    rolled_back_path = epoch_dir / STATE_RESTORE_ROLLED_BACK_FILENAME
+    if committed_path.exists() and rolled_back_path.exists():
+        raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_EPOCH_TERMINAL_CONFLICT")
+    if committed_path.exists():
+        payload = _read_json_object(committed_path, "STATE_RETENTION_RESTORE_COMMITTED")
+        _validate_terminal_schema(
+            payload,
+            schema_version=STATE_RESTORE_EPOCH_SCHEMA_VERSION,
+            status="COMMITTED",
+        )
+        if _str_field(payload, "restore_epoch_id") != restore_epoch_id:
+            raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_EPOCH_ID_MISMATCH")
+        backup_set_id = _str_field(payload, "backup_set_id")
+        _validate_backup_set_id(backup_set_id)
+        _hex_field(payload, "state_set_hash")
+        started_utc = _str_field(payload, "started_utc")
+        return SqliteStateMaintenanceRetentionArtifact(
+            artifact_type="restore_epoch",
+            artifact_id=restore_epoch_id,
+            path=epoch_dir,
+            created_utc=started_utc,
+            terminal_state="COMMITTED",
+            associated_paths=_restore_epoch_committed_associated_paths(
+                payload,
+                layout,
+                restore_epoch_id,
+            ),
+            backup_set_id=backup_set_id,
+        )
+    if rolled_back_path.exists():
+        payload = _read_json_object(rolled_back_path, "STATE_RETENTION_RESTORE_ROLLED_BACK")
+        _validate_terminal_schema(
+            payload,
+            schema_version=STATE_RESTORE_EPOCH_SCHEMA_VERSION,
+            status="ROLLED_BACK",
+        )
+        if _str_field(payload, "restore_epoch_id") != restore_epoch_id:
+            raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_EPOCH_ID_MISMATCH")
+        backup_set_id = _str_field(payload, "backup_set_id")
+        _validate_backup_set_id(backup_set_id)
+        _hex_field(payload, "state_set_hash")
+        return SqliteStateMaintenanceRetentionArtifact(
+            artifact_type="restore_epoch",
+            artifact_id=restore_epoch_id,
+            path=epoch_dir,
+            created_utc=_str_field(payload, "recovered_utc"),
+            terminal_state="ROLLED_BACK",
+            backup_set_id=backup_set_id,
+        )
+    raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_EPOCH_INCOMPLETE")
+
+
+def _compaction_epoch_retention_artifact(
+    epoch_dir: Path,
+    layout: StateStoreLayout,
+) -> SqliteStateMaintenanceRetentionArtifact:
+    compaction_epoch_id = epoch_dir.name
+    _validate_compaction_epoch_id(compaction_epoch_id)
+    committed_path = epoch_dir / STATE_COMPACTION_COMMITTED_FILENAME
+    rolled_back_path = epoch_dir / STATE_COMPACTION_ROLLED_BACK_FILENAME
+    if committed_path.exists() and rolled_back_path.exists():
+        raise SqliteStateBackupViolation("STATE_RETENTION_COMPACTION_EPOCH_TERMINAL_CONFLICT")
+    if committed_path.exists():
+        payload = _read_json_object(
+            committed_path,
+            "STATE_RETENTION_COMPACTION_COMMITTED",
+        )
+        _validate_terminal_schema(
+            payload,
+            schema_version=STATE_COMPACTION_EPOCH_SCHEMA_VERSION,
+            status="COMMITTED",
+        )
+        if _str_field(payload, "compaction_epoch_id") != compaction_epoch_id:
+            raise SqliteStateBackupViolation("STATE_RETENTION_COMPACTION_EPOCH_ID_MISMATCH")
+        _hex_field(payload, "state_set_hash")
+        started_utc = _str_field(payload, "started_utc")
+        return SqliteStateMaintenanceRetentionArtifact(
+            artifact_type="compaction_epoch",
+            artifact_id=compaction_epoch_id,
+            path=epoch_dir,
+            created_utc=started_utc,
+            terminal_state="COMMITTED",
+            associated_paths=_compaction_epoch_committed_associated_paths(
+                payload,
+                layout,
+                compaction_epoch_id,
+            ),
+        )
+    if rolled_back_path.exists():
+        payload = _read_json_object(
+            rolled_back_path,
+            "STATE_RETENTION_COMPACTION_ROLLED_BACK",
+        )
+        _validate_terminal_schema(
+            payload,
+            schema_version=STATE_COMPACTION_EPOCH_SCHEMA_VERSION,
+            status="ROLLED_BACK",
+        )
+        if _str_field(payload, "compaction_epoch_id") != compaction_epoch_id:
+            raise SqliteStateBackupViolation("STATE_RETENTION_COMPACTION_EPOCH_ID_MISMATCH")
+        _hex_field(payload, "state_set_hash")
+        return SqliteStateMaintenanceRetentionArtifact(
+            artifact_type="compaction_epoch",
+            artifact_id=compaction_epoch_id,
+            path=epoch_dir,
+            created_utc=_str_field(payload, "recovered_utc"),
+            terminal_state="ROLLED_BACK",
+        )
+    raise SqliteStateBackupViolation("STATE_RETENTION_COMPACTION_EPOCH_INCOMPLETE")
+
+
+def _restore_epoch_committed_associated_paths(
+    payload: dict[str, Any],
+    layout: StateStoreLayout,
+    restore_epoch_id: str,
+) -> tuple[Path, ...]:
+    files_payload = payload.get("restored_files")
+    if not isinstance(files_payload, list):
+        raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_FILES_NOT_ARRAY")
+    stores: list[SqliteStore] = []
+    associated_paths: list[Path] = []
+    for entry in files_payload:
+        if not isinstance(entry, dict):
+            raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_FILE_NOT_OBJECT")
+        try:
+            store = SqliteStore(_str_field(entry, "store"))
+        except ValueError as exc:
+            raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_STORE_UNSUPPORTED") from exc
+        stores.append(store)
+        target_path = _path_field(entry, "target_path")
+        if target_path != _source_path(layout, store):
+            raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_TARGET_MISMATCH")
+        rollback_path = _optional_path_field(entry, "rollback_path")
+        if rollback_path is not None:
+            if rollback_path != _restore_rollback_path(target_path, restore_epoch_id):
+                raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_ROLLBACK_MISMATCH")
+            associated_paths.append(rollback_path)
+        associated_paths.extend(
+            _terminal_sidecar_rollback_paths(
+                entry,
+                target_path=target_path,
+                epoch_id=restore_epoch_id,
+                expected_rollback_path=_restore_rollback_path,
+                violation_prefix="STATE_RETENTION_RESTORE",
+            )
+        )
+    if tuple(stores) != STATE_BACKUP_SET_STORES:
+        raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_INCOMPLETE_STORE_SET")
+    return tuple(associated_paths)
+
+
+def _compaction_epoch_committed_associated_paths(
+    payload: dict[str, Any],
+    layout: StateStoreLayout,
+    compaction_epoch_id: str,
+) -> tuple[Path, ...]:
+    files_payload = payload.get("compacted_files")
+    if not isinstance(files_payload, list):
+        raise SqliteStateBackupViolation("STATE_RETENTION_COMPACTION_FILES_NOT_ARRAY")
+    stores: list[SqliteStore] = []
+    associated_paths: list[Path] = []
+    for entry in files_payload:
+        if not isinstance(entry, dict):
+            raise SqliteStateBackupViolation("STATE_RETENTION_COMPACTION_FILE_NOT_OBJECT")
+        try:
+            store = SqliteStore(_str_field(entry, "store"))
+        except ValueError as exc:
+            raise SqliteStateBackupViolation(
+                "STATE_RETENTION_COMPACTION_STORE_UNSUPPORTED"
+            ) from exc
+        stores.append(store)
+        target_path = _path_field(entry, "target_path")
+        if target_path != _source_path(layout, store):
+            raise SqliteStateBackupViolation("STATE_RETENTION_COMPACTION_TARGET_MISMATCH")
+        rollback_path = _optional_path_field(entry, "rollback_path")
+        if rollback_path is not None:
+            if rollback_path != _compaction_rollback_path(target_path, compaction_epoch_id):
+                raise SqliteStateBackupViolation(
+                    "STATE_RETENTION_COMPACTION_ROLLBACK_MISMATCH"
+                )
+            associated_paths.append(rollback_path)
+        associated_paths.extend(
+            _terminal_sidecar_rollback_paths(
+                entry,
+                target_path=target_path,
+                epoch_id=compaction_epoch_id,
+                expected_rollback_path=_compaction_rollback_path,
+                violation_prefix="STATE_RETENTION_COMPACTION",
+            )
+        )
+    if tuple(stores) != STATE_BACKUP_SET_STORES:
+        raise SqliteStateBackupViolation("STATE_RETENTION_COMPACTION_INCOMPLETE_STORE_SET")
+    return tuple(associated_paths)
+
+
+def _terminal_sidecar_rollback_paths(
+    payload: dict[str, Any],
+    *,
+    target_path: Path,
+    epoch_id: str,
+    expected_rollback_path: Callable[[Path, str], Path],
+    violation_prefix: str,
+) -> tuple[Path, ...]:
+    sidecar_payload = payload.get("sidecar_rollbacks")
+    if not isinstance(sidecar_payload, list):
+        raise SqliteStateBackupViolation(f"{violation_prefix}_SIDECARS_NOT_ARRAY")
+    associated_paths: list[Path] = []
+    for sidecar_entry in sidecar_payload:
+        if not isinstance(sidecar_entry, dict):
+            raise SqliteStateBackupViolation(f"{violation_prefix}_SIDECAR_NOT_OBJECT")
+        sidecar_path = _path_field(sidecar_entry, "path")
+        if sidecar_path not in _sqlite_sidecar_paths(target_path):
+            raise SqliteStateBackupViolation(f"{violation_prefix}_SIDECAR_PATH_MISMATCH")
+        rollback_path = _path_field(sidecar_entry, "rollback_path")
+        if rollback_path != expected_rollback_path(sidecar_path, epoch_id):
+            raise SqliteStateBackupViolation(
+                f"{violation_prefix}_SIDECAR_ROLLBACK_MISMATCH"
+            )
+        associated_paths.append(rollback_path)
+    return tuple(associated_paths)
+
+
+def _latest_retention_artifacts(
+    artifacts: tuple[SqliteStateMaintenanceRetentionArtifact, ...],
+    keep_count: int,
+) -> tuple[SqliteStateMaintenanceRetentionArtifact, ...]:
+    if keep_count == 0:
+        return ()
+    return tuple(
+        sorted(
+            artifacts,
+            key=lambda artifact: (artifact.created_utc, artifact.artifact_id),
+            reverse=True,
+        )[:keep_count]
+    )
+
+
+def _retention_cutoff_protects_backup_set(
+    artifact: SqliteStateMaintenanceRetentionArtifact,
+    policy: SqliteStateMaintenanceRetentionPolicy,
+) -> bool:
+    cutoff = policy.retain_backup_sets_created_on_or_after_utc
+    return cutoff is not None and artifact.created_utc >= cutoff
+
+
+def _delete_retention_artifact(
+    artifact: SqliteStateMaintenanceRetentionArtifact,
+    *,
+    backup_root: Path,
+    layout: StateStoreLayout,
+) -> None:
+    if artifact.artifact_type == "backup_set":
+        _delete_retention_directory(
+            artifact.path,
+            expected_parent=backup_root,
+            violation="STATE_RETENTION_BACKUP_SET_DELETE_PATH_INVALID",
+        )
+        return
+    if artifact.artifact_type == "restore_epoch":
+        expected_parent = layout.root / STATE_RESTORE_EPOCHS_DIR_NAME
+        associated_parent = layout.root
+        violation = "STATE_RETENTION_RESTORE_EPOCH_DELETE_PATH_INVALID"
+    elif artifact.artifact_type == "compaction_epoch":
+        expected_parent = layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME
+        associated_parent = layout.root
+        violation = "STATE_RETENTION_COMPACTION_EPOCH_DELETE_PATH_INVALID"
+    else:
+        raise SqliteStateBackupViolation("STATE_RETENTION_ARTIFACT_TYPE_UNSUPPORTED")
+
+    for associated_path in artifact.associated_paths:
+        _delete_retention_file(
+            associated_path,
+            expected_parent=associated_parent,
+            violation="STATE_RETENTION_ASSOCIATED_FILE_DELETE_PATH_INVALID",
+        )
+    _delete_retention_directory(
+        artifact.path,
+        expected_parent=expected_parent,
+        violation=violation,
+    )
+
+
+def _delete_retention_file(path: Path, *, expected_parent: Path, violation: str) -> None:
+    if path.parent != expected_parent:
+        raise SqliteStateBackupViolation(violation)
+    if not path.exists():
+        return
+    if path.is_symlink() or not path.is_file():
+        raise SqliteStateBackupViolation("STATE_RETENTION_ASSOCIATED_PATH_NOT_FILE")
+    path.unlink()
+
+
+def _delete_retention_directory(path: Path, *, expected_parent: Path, violation: str) -> None:
+    if path.parent != expected_parent:
+        raise SqliteStateBackupViolation(violation)
+    if not path.exists():
+        return
+    if path.is_symlink() or not path.is_dir():
+        raise SqliteStateBackupViolation("STATE_RETENTION_ARTIFACT_PATH_NOT_DIRECTORY")
+    shutil.rmtree(path)
+
+
+def _read_json_object(path: Path, code_prefix: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise SqliteStateBackupViolation(f"{code_prefix}_MISSING") from exc
+    except json.JSONDecodeError as exc:
+        raise SqliteStateBackupViolation(f"{code_prefix}_INVALID_JSON") from exc
+    if not isinstance(payload, dict):
+        raise SqliteStateBackupViolation(f"{code_prefix}_NOT_OBJECT")
+    return payload
+
+
+def _validate_terminal_schema(
+    payload: dict[str, Any],
+    *,
+    schema_version: int,
+    status: str,
+) -> None:
+    if _int_field(payload, "schema_version") != schema_version:
+        raise SqliteStateBackupViolation("STATE_RETENTION_TERMINAL_SCHEMA_UNSUPPORTED")
+    if _str_field(payload, "status") != status:
+        raise SqliteStateBackupViolation("STATE_RETENTION_TERMINAL_STATUS_UNSUPPORTED")
+
+
+def _retention_skip(
+    artifact_type: str,
+    path: Path,
+    reason: str,
+) -> SqliteStateMaintenanceRetentionSkip:
+    return SqliteStateMaintenanceRetentionSkip(
+        artifact_type=artifact_type,
+        artifact_id=path.name,
+        path=path,
+        reason=reason,
     )
 
 
@@ -2467,6 +3132,18 @@ def _optional_str_field(payload: dict[str, Any], field_name: str) -> str | None:
 
 def _path_field(payload: dict[str, Any], field_name: str) -> Path:
     value = _str_field(payload, field_name)
+    path = Path(value)
+    if not path.is_absolute():
+        raise SqliteStateBackupViolation(f"STATE_RESTORE_{field_name.upper()}_MUST_BE_ABSOLUTE")
+    return path
+
+
+def _optional_path_field(payload: dict[str, Any], field_name: str) -> Path | None:
+    value = payload.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise SqliteStateBackupViolation(f"STATE_RESTORE_{field_name.upper()}_INVALID")
     path = Path(value)
     if not path.is_absolute():
         raise SqliteStateBackupViolation(f"STATE_RESTORE_{field_name.upper()}_MUST_BE_ABSOLUTE")

@@ -30,11 +30,14 @@ from mediasync_home.adapters.sqlite.state_backup import (
     STATE_RESTORE_INTENT_FILENAME,
     STATE_RESTORE_ROLLED_BACK_FILENAME,
     SqliteStateBackupViolation,
+    SqliteStateMaintenanceRetentionPolicy,
     admit_sqlite_state_restore_maintenance,
+    apply_sqlite_state_maintenance_retention,
     apply_sqlite_state_restore_plan,
     compact_sqlite_state_stores,
     create_sqlite_state_backup_set,
     load_sqlite_state_backup_manifest,
+    plan_sqlite_state_maintenance_retention,
     plan_sqlite_state_restore,
     recover_incomplete_sqlite_state_compaction_epochs,
     recover_incomplete_sqlite_state_restore_epochs,
@@ -437,6 +440,185 @@ def test_sqlite_state_compaction_recovery_rolls_back_interrupted_epoch(
     assert not layout.recovery.with_name(".recovery.sqlite.compact-b.compaction-rollback").exists()
     assert not layout.recovery.with_name(".recovery.sqlite.compact-b.compaction-new.tmp").exists()
     assert _read_user_versions(layout) == (77, 88)
+
+
+def test_sqlite_state_maintenance_retention_deletes_only_unprotected_terminal_artifacts(
+    tmp_path: Path,
+) -> None:
+    layout = build_state_store_layout(tmp_path / "state")
+    backup_root = tmp_path / "state-backups"
+    _initialize_state_stores(layout)
+    create_sqlite_state_backup_set(
+        layout,
+        backup_root,
+        backup_set_id="set-a",
+        created_utc="2026-07-30T12:00:00Z",
+    )
+    _set_user_version(layout.catalog, 11)
+    _set_user_version(layout.recovery, 12)
+    create_sqlite_state_backup_set(
+        layout,
+        backup_root,
+        backup_set_id="set-b",
+        created_utc="2026-07-30T12:01:00Z",
+    )
+    _set_user_version(layout.catalog, 21)
+    _set_user_version(layout.recovery, 22)
+    restore_sqlite_state_backup_set(
+        backup_root / "set-a",
+        layout,
+        restore_epoch_id="restore-old",
+        started_utc="2026-07-30T12:02:00Z",
+    )
+    _set_user_version(layout.catalog, 31)
+    _set_user_version(layout.recovery, 32)
+    create_sqlite_state_backup_set(
+        layout,
+        backup_root,
+        backup_set_id="set-c",
+        created_utc="2026-07-30T12:03:00Z",
+    )
+    restore_sqlite_state_backup_set(
+        backup_root / "set-b",
+        layout,
+        restore_epoch_id="restore-new",
+        started_utc="2026-07-30T12:04:00Z",
+    )
+    compact_sqlite_state_stores(
+        layout,
+        compaction_epoch_id="compact-old",
+        started_utc="2026-07-30T12:05:00Z",
+    )
+    compact_sqlite_state_stores(
+        layout,
+        compaction_epoch_id="compact-new",
+        started_utc="2026-07-30T12:06:00Z",
+    )
+    old_restore_rollback = layout.catalog.with_name(
+        ".catalog.sqlite.restore-old.restore-rollback"
+    )
+    new_restore_rollback = layout.catalog.with_name(
+        ".catalog.sqlite.restore-new.restore-rollback"
+    )
+    old_compaction_rollback = layout.catalog.with_name(
+        ".catalog.sqlite.compact-old.compaction-rollback"
+    )
+    new_compaction_rollback = layout.catalog.with_name(
+        ".catalog.sqlite.compact-new.compaction-rollback"
+    )
+    assert old_restore_rollback.is_file()
+    assert new_restore_rollback.is_file()
+    assert old_compaction_rollback.is_file()
+    assert new_compaction_rollback.is_file()
+
+    result = apply_sqlite_state_maintenance_retention(
+        layout,
+        backup_root,
+        policy=SqliteStateMaintenanceRetentionPolicy(
+            keep_latest_backup_sets=1,
+            keep_latest_restore_epochs=1,
+            keep_latest_compaction_epochs=1,
+        ),
+    )
+
+    deleted = {
+        (artifact.artifact_type, artifact.artifact_id)
+        for artifact in result.deleted_artifacts
+    }
+    retained = {
+        (artifact.artifact_type, artifact.artifact_id)
+        for artifact in result.plan.retained_artifacts
+    }
+    assert deleted == {
+        ("backup_set", "set-a"),
+        ("restore_epoch", "restore-old"),
+        ("compaction_epoch", "compact-old"),
+    }
+    assert retained == {
+        ("backup_set", "set-b"),
+        ("backup_set", "set-c"),
+        ("restore_epoch", "restore-new"),
+        ("compaction_epoch", "compact-new"),
+    }
+    assert result.plan.protected_backup_set_ids == ("set-b",)
+    assert not (backup_root / "set-a").exists()
+    assert (backup_root / "set-b").is_dir()
+    assert (backup_root / "set-c").is_dir()
+    assert not (
+        layout.root / STATE_RESTORE_EPOCHS_DIR_NAME / "restore-old"
+    ).exists()
+    assert (layout.root / STATE_RESTORE_EPOCHS_DIR_NAME / "restore-new").is_dir()
+    assert not (
+        layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME / "compact-old"
+    ).exists()
+    assert (layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME / "compact-new").is_dir()
+    assert not old_restore_rollback.exists()
+    assert new_restore_rollback.is_file()
+    assert not old_compaction_rollback.exists()
+    assert new_compaction_rollback.is_file()
+
+
+def test_sqlite_state_maintenance_retention_skips_incomplete_and_malformed_artifacts(
+    tmp_path: Path,
+) -> None:
+    layout = build_state_store_layout(tmp_path / "state")
+    backup_root = tmp_path / "state-backups"
+    _initialize_state_stores(layout)
+    create_sqlite_state_backup_set(
+        layout,
+        backup_root,
+        backup_set_id="set-a",
+        created_utc="2026-07-30T12:00:00Z",
+    )
+    (backup_root / "bad-set").mkdir()
+    (layout.root / STATE_RESTORE_EPOCHS_DIR_NAME / "restore-pending").mkdir(
+        parents=True
+    )
+    (layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME / "compact-pending").mkdir(
+        parents=True
+    )
+
+    plan = plan_sqlite_state_maintenance_retention(
+        layout,
+        backup_root,
+        policy=SqliteStateMaintenanceRetentionPolicy(
+            keep_latest_backup_sets=1,
+            keep_latest_restore_epochs=0,
+            keep_latest_compaction_epochs=0,
+        ),
+    )
+
+    skipped = {
+        (artifact.artifact_type, artifact.artifact_id, artifact.reason)
+        for artifact in plan.skipped_artifacts
+    }
+    assert skipped == {
+        ("backup_set", "bad-set", "STATE_BACKUP_MANIFEST_MISSING"),
+        (
+            "restore_epoch",
+            "restore-pending",
+            "STATE_RETENTION_RESTORE_EPOCH_INCOMPLETE",
+        ),
+        (
+            "compaction_epoch",
+            "compact-pending",
+            "STATE_RETENTION_COMPACTION_EPOCH_INCOMPLETE",
+        ),
+    }
+
+    result = apply_sqlite_state_maintenance_retention(
+        layout,
+        backup_root,
+        policy=plan.policy,
+    )
+
+    assert result.deleted_artifacts == ()
+    assert (backup_root / "set-a").is_dir()
+    assert (backup_root / "bad-set").is_dir()
+    assert (layout.root / STATE_RESTORE_EPOCHS_DIR_NAME / "restore-pending").is_dir()
+    assert (
+        layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME / "compact-pending"
+    ).is_dir()
 
 
 def test_sqlite_state_restore_maintenance_admits_clean_state(

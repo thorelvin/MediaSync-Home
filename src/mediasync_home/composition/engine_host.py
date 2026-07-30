@@ -55,10 +55,13 @@ from mediasync_home.adapters.sqlite.snapshots import SqliteSnapshotEntryStore
 from mediasync_home.adapters.sqlite.state_backup import (
     SqliteStateCompactionEpochRecoveryReport,
     SqliteStateCompactionReceipt,
+    SqliteStateMaintenanceRetentionPolicy,
+    SqliteStateMaintenanceRetentionResult,
     SqliteStateRestoreEpochRecoveryReport,
     SqliteStateRestoreReceipt,
     SqliteStateRestoreMaintenanceAdmission,
     admit_sqlite_state_restore_maintenance,
+    apply_sqlite_state_maintenance_retention,
     compact_sqlite_state_stores,
     recover_incomplete_sqlite_state_compaction_epochs,
     recover_incomplete_sqlite_state_restore_epochs,
@@ -266,6 +269,23 @@ class EngineHostRuntime:
             target_layout,
             compaction_epoch_id=compaction_epoch_id,
             started_utc=started_utc,
+        )
+
+    def prune_state_maintenance_artifacts(
+        self,
+        backup_root: Path,
+        *,
+        policy: SqliteStateMaintenanceRetentionPolicy | None = None,
+    ) -> SqliteStateMaintenanceRetentionResult:
+        if self.state_layout is None:
+            raise RuntimeError("STATE_RETENTION_RUNTIME_NOT_CONFIGURED")
+        admission = self.admit_state_restore_maintenance()
+        if not admission.admitted:
+            raise EngineHostStateRetentionNotAdmitted(admission)
+        return apply_sqlite_state_maintenance_retention(
+            self.state_layout,
+            backup_root,
+            policy=policy,
         )
 
     def admit_state_restore_maintenance(self) -> SqliteStateRestoreMaintenanceAdmission:
@@ -533,6 +553,12 @@ class EngineHostStateRestoreNotAdmitted(RuntimeError):
 class EngineHostStateCompactionNotAdmitted(RuntimeError):
     def __init__(self, admission: SqliteStateRestoreMaintenanceAdmission) -> None:
         super().__init__("STATE_COMPACTION_MAINTENANCE_NOT_ADMITTED")
+        self.admission = admission
+
+
+class EngineHostStateRetentionNotAdmitted(RuntimeError):
+    def __init__(self, admission: SqliteStateRestoreMaintenanceAdmission) -> None:
+        super().__init__("STATE_RETENTION_MAINTENANCE_NOT_ADMITTED")
         self.admission = admission
 
 
