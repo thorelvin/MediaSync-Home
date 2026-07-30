@@ -24,11 +24,13 @@ from mediasync_home.adapters.sqlite.state_backup import (
     STATE_RESTORE_COMMITTED_FILENAME,
     STATE_RESTORE_EPOCHS_DIR_NAME,
     STATE_RESTORE_INTENT_FILENAME,
+    STATE_RESTORE_ROLLED_BACK_FILENAME,
     SqliteStateBackupViolation,
     apply_sqlite_state_restore_plan,
     create_sqlite_state_backup_set,
     load_sqlite_state_backup_manifest,
     plan_sqlite_state_restore,
+    recover_incomplete_sqlite_state_restore_epochs,
     restore_sqlite_state_backup_set,
     verify_sqlite_state_backup_set,
 )
@@ -244,6 +246,98 @@ def test_sqlite_state_restore_swap_rolls_back_when_second_store_publish_fails(
     assert _read_user_versions(layout) == (77, 88)
     assert layout.catalog.with_name(".catalog.sqlite.restore-b.restore-rollback").exists() is False
     assert layout.recovery.with_name(".recovery.sqlite.restore-b.restore-rollback").exists() is False
+
+
+def test_sqlite_state_restore_startup_recovery_rolls_back_interrupted_epoch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = build_state_store_layout(tmp_path / "state")
+    _initialize_state_stores(layout)
+    create_sqlite_state_backup_set(
+        layout,
+        tmp_path / "state-backups",
+        backup_set_id="set-a",
+        created_utc="2026-07-30T12:00:00Z",
+    )
+    _set_user_version(layout.catalog, 77)
+    _set_user_version(layout.recovery, 88)
+    plan = plan_sqlite_state_restore(tmp_path / "state-backups" / "set-a", layout)
+    original_replace = Path.replace
+
+    def interrupted_replace(self: Path, target: str | Path) -> Path:
+        target_path = Path(target)
+        if self.name.startswith(".recovery.sqlite.restore-c.restore-new") and (
+            target_path == layout.recovery
+        ):
+            raise KeyboardInterrupt("simulated host crash")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", interrupted_replace)
+    with pytest.raises(KeyboardInterrupt):
+        apply_sqlite_state_restore_plan(
+            plan,
+            restore_epoch_id="restore-c",
+            started_utc="2026-07-30T12:05:00Z",
+        )
+    monkeypatch.setattr(Path, "replace", original_replace)
+
+    epoch_dir = layout.root / STATE_RESTORE_EPOCHS_DIR_NAME / "restore-c"
+    assert (epoch_dir / STATE_RESTORE_INTENT_FILENAME).is_file()
+    assert not (epoch_dir / STATE_RESTORE_COMMITTED_FILENAME).exists()
+    assert layout.catalog.with_name(".catalog.sqlite.restore-c.restore-rollback").is_file()
+    assert layout.recovery.with_name(".recovery.sqlite.restore-c.restore-rollback").is_file()
+    assert layout.recovery.with_name(".recovery.sqlite.restore-c.restore-new.tmp").is_file()
+
+    report = recover_incomplete_sqlite_state_restore_epochs(
+        layout,
+        recovered_utc="2026-07-30T12:06:00Z",
+    )
+
+    assert report.scanned_epoch_count == 1
+    assert report.committed_epoch_count == 0
+    assert report.previously_rolled_back_epoch_count == 0
+    assert len(report.recovered_epochs) == 1
+    assert report.recovered_epochs[0].restore_epoch_id == "restore-c"
+    assert report.recovered_epochs[0].rolled_back_store_count == 2
+    assert report.recovered_epochs[0].removed_temp_file_count == 1
+    assert (epoch_dir / STATE_RESTORE_ROLLED_BACK_FILENAME).is_file()
+    assert not layout.catalog.with_name(".catalog.sqlite.restore-c.restore-rollback").exists()
+    assert not layout.recovery.with_name(".recovery.sqlite.restore-c.restore-rollback").exists()
+    assert not layout.recovery.with_name(".recovery.sqlite.restore-c.restore-new.tmp").exists()
+    assert _read_user_versions(layout) == (77, 88)
+
+
+def test_sqlite_state_restore_startup_recovery_ignores_committed_epoch(
+    tmp_path: Path,
+) -> None:
+    layout = build_state_store_layout(tmp_path / "state")
+    _initialize_state_stores(layout)
+    create_sqlite_state_backup_set(
+        layout,
+        tmp_path / "state-backups",
+        backup_set_id="set-a",
+        created_utc="2026-07-30T12:00:00Z",
+    )
+    backup_versions = _read_user_versions(layout)
+    _set_user_version(layout.catalog, 77)
+    _set_user_version(layout.recovery, 88)
+    restore_sqlite_state_backup_set(
+        tmp_path / "state-backups" / "set-a",
+        layout,
+        restore_epoch_id="restore-d",
+        started_utc="2026-07-30T12:05:00Z",
+    )
+
+    report = recover_incomplete_sqlite_state_restore_epochs(
+        layout,
+        recovered_utc="2026-07-30T12:06:00Z",
+    )
+
+    assert report.scanned_epoch_count == 1
+    assert report.committed_epoch_count == 1
+    assert report.recovered_epochs == ()
+    assert _read_user_versions(layout) == backup_versions
 
 
 def test_sqlite_state_backup_set_rejects_mixed_store_file_from_another_epoch(

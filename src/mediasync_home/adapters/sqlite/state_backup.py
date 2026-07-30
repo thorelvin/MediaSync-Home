@@ -22,6 +22,7 @@ BACKUP_SET_MANIFEST_FILENAME = "backup-set.manifest.json"
 STATE_RESTORE_EPOCHS_DIR_NAME = "state-restore-epochs"
 STATE_RESTORE_INTENT_FILENAME = "state-restore.intent.json"
 STATE_RESTORE_COMMITTED_FILENAME = "state-restore.committed.json"
+STATE_RESTORE_ROLLED_BACK_FILENAME = "state-restore.rolled-back.json"
 
 
 class SqliteStateBackupViolation(ValueError):
@@ -197,11 +198,65 @@ class SqliteStateRestoreReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class SqliteStateRestoreEpochRecovery:
+    restore_epoch_id: str
+    intent_path: Path
+    rolled_back_path: Path
+    rolled_back_store_count: int
+    removed_temp_file_count: int
+    restored_sidecar_count: int
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "restore_epoch_id": self.restore_epoch_id,
+            "intent_path": str(self.intent_path),
+            "rolled_back_path": str(self.rolled_back_path),
+            "rolled_back_store_count": self.rolled_back_store_count,
+            "removed_temp_file_count": self.removed_temp_file_count,
+            "restored_sidecar_count": self.restored_sidecar_count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SqliteStateRestoreEpochRecoveryReport:
+    scanned_epoch_count: int
+    committed_epoch_count: int
+    previously_rolled_back_epoch_count: int
+    recovered_epochs: tuple[SqliteStateRestoreEpochRecovery, ...]
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "scanned_epoch_count": self.scanned_epoch_count,
+            "committed_epoch_count": self.committed_epoch_count,
+            "previously_rolled_back_epoch_count": self.previously_rolled_back_epoch_count,
+            "recovered_epochs": [entry.to_payload() for entry in self.recovered_epochs],
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class _PreparedRestoreFile:
     restore_file: SqliteStateRestoreFile
     temp_path: Path
     rollback_path: Path
     sidecar_rollbacks: tuple[SqliteStateSidecarRollback, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _RestoreEpochIntentFile:
+    store: SqliteStore
+    target_path: Path
+    temp_path: Path
+    rollback_path: Path
+    sidecar_rollbacks: tuple[SqliteStateSidecarRollback, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _RestoreEpochIntent:
+    restore_epoch_id: str
+    backup_set_id: str
+    state_set_hash: str
+    intent_path: Path
+    restore_files: tuple[_RestoreEpochIntentFile, ...]
 
 
 def create_sqlite_state_backup_set(
@@ -422,6 +477,68 @@ def apply_sqlite_state_restore_plan(
         intent_path=intent_path,
         committed_path=committed_path,
         restored_files=tuple(restored_files),
+    )
+
+
+def recover_incomplete_sqlite_state_restore_epochs(
+    layout: StateStoreLayout,
+    *,
+    recovered_utc: str,
+) -> SqliteStateRestoreEpochRecoveryReport:
+    _validate_state_store_layout(layout, field_name="STATE_RESTORE_RECOVERY")
+    epochs_dir = layout.root / STATE_RESTORE_EPOCHS_DIR_NAME
+    if not epochs_dir.exists():
+        return SqliteStateRestoreEpochRecoveryReport(
+            scanned_epoch_count=0,
+            committed_epoch_count=0,
+            previously_rolled_back_epoch_count=0,
+            recovered_epochs=(),
+        )
+    if not epochs_dir.is_dir():
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCHS_PATH_NOT_DIRECTORY")
+
+    scanned = 0
+    committed = 0
+    previously_rolled_back = 0
+    recovered_epochs: list[SqliteStateRestoreEpochRecovery] = []
+    for epoch_dir in sorted(path for path in epochs_dir.iterdir() if path.is_dir()):
+        scanned += 1
+        committed_path = epoch_dir / STATE_RESTORE_COMMITTED_FILENAME
+        rolled_back_path = epoch_dir / STATE_RESTORE_ROLLED_BACK_FILENAME
+        if committed_path.exists():
+            committed += 1
+            continue
+        if rolled_back_path.exists():
+            previously_rolled_back += 1
+            continue
+        intent = _load_restore_epoch_intent(epoch_dir=epoch_dir, layout=layout)
+        rollback_counts = _rollback_incomplete_restore_epoch(intent)
+        _write_json_no_overwrite(
+            rolled_back_path,
+            _restore_rolled_back_payload(
+                intent=intent,
+                recovered_utc=recovered_utc,
+                rolled_back_store_count=rollback_counts[0],
+                removed_temp_file_count=rollback_counts[1],
+                restored_sidecar_count=rollback_counts[2],
+            ),
+        )
+        recovered_epochs.append(
+            SqliteStateRestoreEpochRecovery(
+                restore_epoch_id=intent.restore_epoch_id,
+                intent_path=intent.intent_path,
+                rolled_back_path=rolled_back_path,
+                rolled_back_store_count=rollback_counts[0],
+                removed_temp_file_count=rollback_counts[1],
+                restored_sidecar_count=rollback_counts[2],
+            )
+        )
+
+    return SqliteStateRestoreEpochRecoveryReport(
+        scanned_epoch_count=scanned,
+        committed_epoch_count=committed,
+        previously_rolled_back_epoch_count=previously_rolled_back,
+        recovered_epochs=tuple(recovered_epochs),
     )
 
 
@@ -726,6 +843,160 @@ def _rollback_restored_files(restored_files: tuple[SqliteStateRestoredFile, ...]
                 sidecar.rollback_path.replace(sidecar.path)
 
 
+def _load_restore_epoch_intent(
+    *,
+    epoch_dir: Path,
+    layout: StateStoreLayout,
+) -> _RestoreEpochIntent:
+    intent_path = epoch_dir / STATE_RESTORE_INTENT_FILENAME
+    try:
+        payload = json.loads(intent_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_INTENT_MISSING") from exc
+    except json.JSONDecodeError as exc:
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_INTENT_INVALID_JSON") from exc
+    return _restore_epoch_intent_from_payload(
+        payload,
+        intent_path=intent_path,
+        layout=layout,
+        expected_epoch_id=epoch_dir.name,
+    )
+
+
+def _restore_epoch_intent_from_payload(
+    payload: object,
+    *,
+    intent_path: Path,
+    layout: StateStoreLayout,
+    expected_epoch_id: str,
+) -> _RestoreEpochIntent:
+    if not isinstance(payload, dict):
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_INTENT_NOT_OBJECT")
+    schema_version = _int_field(payload, "schema_version")
+    if schema_version != STATE_RESTORE_EPOCH_SCHEMA_VERSION:
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_SCHEMA_UNSUPPORTED")
+    if _str_field(payload, "status") != "PREPARED":
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_STATUS_UNSUPPORTED")
+    restore_epoch_id = _str_field(payload, "restore_epoch_id")
+    _validate_restore_epoch_id(restore_epoch_id)
+    if restore_epoch_id != expected_epoch_id:
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_ID_MISMATCH")
+    backup_set_id = _str_field(payload, "backup_set_id")
+    _validate_backup_set_id(backup_set_id)
+    state_set_hash = _hex_field(payload, "state_set_hash")
+    restore_files_payload = payload.get("restore_files")
+    if not isinstance(restore_files_payload, list):
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_FILES_NOT_ARRAY")
+    restore_files = tuple(
+        _restore_epoch_intent_file_from_payload(
+            entry,
+            layout=layout,
+            restore_epoch_id=restore_epoch_id,
+        )
+        for entry in restore_files_payload
+    )
+    if tuple(entry.store for entry in restore_files) != STATE_BACKUP_SET_STORES:
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_INCOMPLETE_STORE_SET")
+    return _RestoreEpochIntent(
+        restore_epoch_id=restore_epoch_id,
+        backup_set_id=backup_set_id,
+        state_set_hash=state_set_hash,
+        intent_path=intent_path,
+        restore_files=restore_files,
+    )
+
+
+def _restore_epoch_intent_file_from_payload(
+    payload: object,
+    *,
+    layout: StateStoreLayout,
+    restore_epoch_id: str,
+) -> _RestoreEpochIntentFile:
+    if not isinstance(payload, dict):
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_FILE_NOT_OBJECT")
+    try:
+        store = SqliteStore(_str_field(payload, "store"))
+    except ValueError as exc:
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_STORE_UNSUPPORTED") from exc
+    target_path = _path_field(payload, "target_path")
+    expected_target_path = _source_path(layout, store)
+    if target_path != expected_target_path:
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_TARGET_PATH_MISMATCH")
+    temp_path = _path_field(payload, "temp_path")
+    if temp_path != _restore_temp_path(target_path, restore_epoch_id):
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_TEMP_PATH_MISMATCH")
+    rollback_path = _path_field(payload, "rollback_path")
+    if rollback_path != _restore_rollback_path(target_path, restore_epoch_id):
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_ROLLBACK_PATH_MISMATCH")
+    sidecar_payload = payload.get("sidecar_rollbacks")
+    if not isinstance(sidecar_payload, list):
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_SIDECARS_NOT_ARRAY")
+    sidecar_rollbacks = tuple(
+        _sidecar_rollback_from_payload(
+            entry,
+            target_path=target_path,
+            restore_epoch_id=restore_epoch_id,
+        )
+        for entry in sidecar_payload
+    )
+    return _RestoreEpochIntentFile(
+        store=store,
+        target_path=target_path,
+        temp_path=temp_path,
+        rollback_path=rollback_path,
+        sidecar_rollbacks=sidecar_rollbacks,
+    )
+
+
+def _sidecar_rollback_from_payload(
+    payload: object,
+    *,
+    target_path: Path,
+    restore_epoch_id: str,
+) -> SqliteStateSidecarRollback:
+    if not isinstance(payload, dict):
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_SIDECAR_NOT_OBJECT")
+    sidecar_path = _path_field(payload, "path")
+    if sidecar_path not in _sqlite_sidecar_paths(target_path):
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_SIDECAR_PATH_MISMATCH")
+    rollback_path = _path_field(payload, "rollback_path")
+    if rollback_path != _restore_rollback_path(sidecar_path, restore_epoch_id):
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_SIDECAR_ROLLBACK_MISMATCH")
+    return SqliteStateSidecarRollback(path=sidecar_path, rollback_path=rollback_path)
+
+
+def _rollback_incomplete_restore_epoch(intent: _RestoreEpochIntent) -> tuple[int, int, int]:
+    rolled_back_store_count = 0
+    removed_temp_file_count = 0
+    restored_sidecar_count = 0
+    for restore_file in reversed(intent.restore_files):
+        if restore_file.temp_path.exists():
+            if not restore_file.temp_path.is_file():
+                raise SqliteStateBackupViolation("STATE_RESTORE_TEMP_PATH_NOT_FILE")
+            restore_file.temp_path.unlink()
+            removed_temp_file_count += 1
+        if restore_file.rollback_path.exists():
+            if not restore_file.rollback_path.is_file():
+                raise SqliteStateBackupViolation("STATE_RESTORE_ROLLBACK_PATH_NOT_FILE")
+            if restore_file.target_path.exists():
+                if not restore_file.target_path.is_file():
+                    raise SqliteStateBackupViolation("STATE_RESTORE_TARGET_NOT_FILE")
+                restore_file.target_path.unlink()
+            restore_file.rollback_path.replace(restore_file.target_path)
+            rolled_back_store_count += 1
+        for sidecar in restore_file.sidecar_rollbacks:
+            if sidecar.rollback_path.exists():
+                if not sidecar.rollback_path.is_file():
+                    raise SqliteStateBackupViolation("STATE_RESTORE_SIDECAR_ROLLBACK_NOT_FILE")
+                if sidecar.path.exists():
+                    if not sidecar.path.is_file():
+                        raise SqliteStateBackupViolation("STATE_RESTORE_SIDECAR_PATH_NOT_FILE")
+                    sidecar.path.unlink()
+                sidecar.rollback_path.replace(sidecar.path)
+                restored_sidecar_count += 1
+    return (rolled_back_store_count, removed_temp_file_count, restored_sidecar_count)
+
+
 def _verify_restored_file(entry: SqliteStateRestoreFile, database_path: Path) -> None:
     inspected = _inspect_backup_file(store=entry.store, backup_path=database_path)
     expected = SqliteStateStoreBackup(
@@ -840,6 +1111,27 @@ def _restore_committed_payload(
         "backup_set_id": plan.backup_set_id,
         "state_set_hash": plan.state_set_hash,
         "restored_files": [entry.to_payload() for entry in restored_files],
+    }
+
+
+def _restore_rolled_back_payload(
+    *,
+    intent: _RestoreEpochIntent,
+    recovered_utc: str,
+    rolled_back_store_count: int,
+    removed_temp_file_count: int,
+    restored_sidecar_count: int,
+) -> dict[str, object]:
+    return {
+        "schema_version": STATE_RESTORE_EPOCH_SCHEMA_VERSION,
+        "status": "ROLLED_BACK",
+        "restore_epoch_id": intent.restore_epoch_id,
+        "recovered_utc": recovered_utc,
+        "backup_set_id": intent.backup_set_id,
+        "state_set_hash": intent.state_set_hash,
+        "rolled_back_store_count": rolled_back_store_count,
+        "removed_temp_file_count": removed_temp_file_count,
+        "restored_sidecar_count": restored_sidecar_count,
     }
 
 
@@ -984,6 +1276,14 @@ def _optional_str_field(payload: dict[str, Any], field_name: str) -> str | None:
     if not isinstance(value, str) or not value:
         raise SqliteStateBackupViolation(f"STATE_BACKUP_{field_name.upper()}_INVALID")
     return value
+
+
+def _path_field(payload: dict[str, Any], field_name: str) -> Path:
+    value = _str_field(payload, field_name)
+    path = Path(value)
+    if not path.is_absolute():
+        raise SqliteStateBackupViolation(f"STATE_RESTORE_{field_name.upper()}_MUST_BE_ABSOLUTE")
+    return path
 
 
 def _int_field(payload: dict[str, Any], field_name: str) -> int:

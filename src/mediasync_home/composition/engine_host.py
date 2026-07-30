@@ -52,6 +52,10 @@ from mediasync_home.adapters.sqlite.recovery_operations import SqliteRecoveryOpe
 from mediasync_home.adapters.sqlite.runs import SqliteRunStore
 from mediasync_home.adapters.sqlite.schedules import SqliteScheduleStore
 from mediasync_home.adapters.sqlite.snapshots import SqliteSnapshotEntryStore
+from mediasync_home.adapters.sqlite.state_backup import (
+    SqliteStateRestoreEpochRecoveryReport,
+    recover_incomplete_sqlite_state_restore_epochs,
+)
 from mediasync_home.adapters.sqlite.trigger_occurrences import SqliteTriggerOccurrenceStore
 from mediasync_home.application.run_executor import (
     HeldRunTargetLeaseRegistry,
@@ -196,6 +200,7 @@ class TaskSchedulerStartupReconciliationOptions:
 class EngineHostRuntime:
     service: EngineHostIpcService
     state_layout: StateStoreLayout | None = None
+    state_restore_recovery: SqliteStateRestoreEpochRecoveryReport | None = None
     startup_reconciliation: EngineHostStartupReconciliationReport | None = None
     reconciler_instance_id: str | None = None
     run_executor_queue_store: RunExecutorQueueStore | None = None
@@ -960,6 +965,9 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                     "startup_reconciliation": _startup_reconciliation_payload(
                         runtime.startup_reconciliation
                     ),
+                    "state_restore_recovery": _state_restore_recovery_payload(
+                        runtime.state_restore_recovery
+                    ),
                     "state_root": None
                     if runtime.state_layout is None
                     else str(runtime.state_layout.root),
@@ -1087,6 +1095,10 @@ def build_engine_host_runtime(
 
     layout = build_state_store_layout(state_root)
     layout.root.mkdir(parents=True, exist_ok=True)
+    state_restore_recovery = recover_incomplete_sqlite_state_restore_epochs(
+        layout,
+        recovered_utc=_utc_now(),
+    )
     catalog_connection = sqlite3.connect(layout.catalog)
     recovery_connection = sqlite3.connect(layout.recovery)
     try:
@@ -1182,6 +1194,7 @@ def build_engine_host_runtime(
     return EngineHostRuntime(
         service=service,
         state_layout=layout,
+        state_restore_recovery=state_restore_recovery,
         startup_reconciliation=startup_reconciliation,
         reconciler_instance_id=reconciler_instance_id,
         run_executor_queue_store=runs,
@@ -1547,6 +1560,14 @@ def _startup_reconciliation_payload(
     }
 
 
+def _state_restore_recovery_payload(
+    report: SqliteStateRestoreEpochRecoveryReport | None,
+) -> dict[str, object] | None:
+    if report is None:
+        return None
+    return report.to_payload()
+
+
 def _task_scheduler_startup_options(
     args: argparse.Namespace,
 ) -> TaskSchedulerStartupReconciliationOptions:
@@ -1744,6 +1765,10 @@ def _host_locator_heartbeat_utc() -> str:
     from mediasync_home.application.host_locator import format_host_locator_heartbeat_utc
 
     return format_host_locator_heartbeat_utc(datetime.now(timezone.utc))
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _refresh_local_host_locator_publication(

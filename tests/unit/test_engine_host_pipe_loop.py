@@ -19,6 +19,7 @@ from mediasync_home.adapters.local_host_locator import (
 from mediasync_home.adapters.robocopy import RobocopyStagingTransferAdapter
 from mediasync_home.adapters.sqlite.connection_policy import SqliteStore
 from mediasync_home.adapters.sqlite.migrations import current_schema_version
+from mediasync_home.adapters.sqlite.state_backup import SqliteStateRestoreEpochRecoveryReport
 from mediasync_home.application.external_resources import ExternalResourceState, ExternalResourceType
 from mediasync_home.application.host_locator import build_local_engine_host_publication
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
@@ -751,6 +752,7 @@ def test_engine_host_runtime_without_state_root_preserves_non_persistent_service
 
     try:
         assert runtime.state_layout is None
+        assert runtime.state_restore_recovery is None
         assert runtime.startup_reconciliation is None
         assert runtime.catalog_connection is None
         assert runtime.recovery_connection is None
@@ -772,6 +774,8 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
 
     try:
         assert runtime.state_layout is not None
+        assert runtime.state_restore_recovery is not None
+        assert runtime.state_restore_recovery.scanned_epoch_count == 0
         assert runtime.state_layout.catalog.is_file()
         assert runtime.state_layout.recovery.is_file()
         assert runtime.catalog_connection is not None
@@ -893,6 +897,50 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
             "REJECTED",
             IpcReason.MUTATING_COMMANDS_DISABLED.value,
         )
+    finally:
+        runtime.close()
+
+
+def test_engine_host_runtime_recovers_restore_epochs_before_sqlite_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[Path, str]] = []
+
+    def fake_restore_recovery(
+        layout: object,
+        *,
+        recovered_utc: str,
+    ) -> SqliteStateRestoreEpochRecoveryReport:
+        assert hasattr(layout, "catalog")
+        catalog = getattr(layout, "catalog")
+        assert isinstance(catalog, Path)
+        assert not catalog.exists()
+        calls.append((catalog, recovered_utc))
+        return SqliteStateRestoreEpochRecoveryReport(
+            scanned_epoch_count=0,
+            committed_epoch_count=0,
+            previously_rolled_back_epoch_count=0,
+            recovered_epochs=(),
+        )
+
+    monkeypatch.setattr(
+        engine_host_module,
+        "recover_incomplete_sqlite_state_restore_epochs",
+        fake_restore_recovery,
+    )
+
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=startup_status(ProcessRole.ENGINE_HOST),
+        state_root=tmp_path / "state",
+    )
+
+    try:
+        assert calls
+        assert calls[0][0] == tmp_path / "state" / "catalog.sqlite"
+        assert calls[0][1].endswith("Z")
+        assert runtime.state_restore_recovery is not None
     finally:
         runtime.close()
 
@@ -1096,6 +1144,7 @@ class _FakeLiveLease:
 class _FakeRuntime:
     service = object()
     state_layout = None
+    state_restore_recovery = None
     startup_reconciliation = None
 
     def __init__(self) -> None:
