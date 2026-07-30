@@ -5,7 +5,11 @@ import sqlite3
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from mediasync_home.adapters.endpoint_leases import EndpointLeaseUnavailable, EndpointRootResolver
+from mediasync_home.adapters.endpoint_leases import (
+    EndpointLeaseUnavailable,
+    EndpointRootDescriptor,
+    EndpointRootResolver,
+)
 
 
 class SqliteEndpointRootResolver(EndpointRootResolver):
@@ -19,6 +23,22 @@ class SqliteEndpointRootResolver(EndpointRootResolver):
         endpoint_id: str,
         endpoint_revision_id: str,
     ) -> Path | None:
+        descriptor = self.resolve_endpoint_root_descriptor(
+            resource_key=resource_key,
+            endpoint_id=endpoint_id,
+            endpoint_revision_id=endpoint_revision_id,
+        )
+        if descriptor is None:
+            return None
+        return descriptor.root
+
+    def resolve_endpoint_root_descriptor(
+        self,
+        *,
+        resource_key: str,
+        endpoint_id: str,
+        endpoint_revision_id: str,
+    ) -> EndpointRootDescriptor | None:
         if resource_key != f"endpoint:{endpoint_id}":
             raise EndpointLeaseUnavailable(
                 "ENDPOINT_LEASE_RESOURCE_MISMATCH",
@@ -26,7 +46,15 @@ class SqliteEndpointRootResolver(EndpointRootResolver):
             )
         row = self._connection.execute(
             """
-            SELECT root_uri
+            SELECT
+                root_uri,
+                control_area_id,
+                root_identity_hash_algorithm,
+                root_identity_hash,
+                owner_installation_id,
+                ownership_epoch,
+                control_marker_checksum_algorithm,
+                control_marker_checksum
             FROM endpoint_revisions
             WHERE endpoint_id = ?
                 AND id = ?
@@ -35,7 +63,16 @@ class SqliteEndpointRootResolver(EndpointRootResolver):
         ).fetchone()
         if row is None:
             return None
-        return _local_path_from_file_uri(str(row[0]))
+        return EndpointRootDescriptor(
+            root=_local_path_from_file_uri(str(row[0])),
+            control_area_id=_optional_str(row[1]),
+            root_identity_hash_algorithm=_optional_str(row[2]),
+            root_identity_hash=_optional_str(row[3]),
+            owner_installation_id=_optional_str(row[4]),
+            ownership_epoch=_optional_int(row[5]),
+            marker_checksum_algorithm=_optional_str(row[6]),
+            marker_checksum=_optional_str(row[7]),
+        )
 
 
 def _local_path_from_file_uri(root_uri: str) -> Path:
@@ -60,3 +97,28 @@ def _local_path_from_file_uri(root_uri: str) -> Path:
             "Refresh endpoint adoption so the endpoint root is stored as an absolute file URI.",
         )
     return path
+
+
+def _optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError as exc:
+            raise EndpointLeaseUnavailable(
+                "ENDPOINT_REVISION_IDENTITY_INVALID",
+                "Refresh endpoint adoption because the stored endpoint revision identity is invalid.",
+            ) from exc
+    raise EndpointLeaseUnavailable(
+        "ENDPOINT_REVISION_IDENTITY_INVALID",
+        "Refresh endpoint adoption because the stored endpoint revision identity is invalid.",
+    )

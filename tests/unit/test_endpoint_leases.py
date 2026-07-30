@@ -8,6 +8,7 @@ import pytest
 from mediasync_home.adapters import endpoint_leases
 from mediasync_home.adapters.endpoint_leases import (
     EndpointLeaseUnavailable,
+    EndpointRootDescriptor,
     FencingTokenAllocationError,
     LocalEndpointLeaseAuthority,
     LocalResolvingEndpointLeaseAuthority,
@@ -68,6 +69,50 @@ def test_local_resolving_endpoint_lease_authority_resolves_root_before_acquiring
     assert attempt.lease is not None
     assert attempt.lease.lock_path == root / ".mediasync" / "locks" / "mutation.lock"
     assert resolver.requests == [("endpoint:target-a", "target-a", "target-rev-a")]
+    assert opener.paths == [root / ".mediasync" / "locks" / "mutation.lock"]
+    assert token_store.requests == [("endpoint:target-a", 1)]
+
+
+def test_local_resolving_endpoint_lease_authority_validates_resolved_identity(
+    tmp_path: Path,
+) -> None:
+    root = _endpoint_root(
+        tmp_path,
+        control_area_id="control-a",
+        root_identity_hash_algorithm="BLAKE3-256",
+        root_identity_hash="a" * 64,
+        marker_checksum_algorithm="BLAKE3-256",
+        marker_checksum="b" * 64,
+    )
+    handle = _FakeHandle(root / ".mediasync" / "locks" / "mutation.lock")
+    opener = _FakeOpener(handle)
+    token_store = _FakeTokenStore(42)
+    resolver = _FakeRootDescriptorResolver(
+        {
+            "endpoint:target-a": EndpointRootDescriptor(
+                root=root,
+                control_area_id="control-a",
+                root_identity_hash_algorithm="BLAKE3-256",
+                root_identity_hash="a" * 64,
+                owner_installation_id="owner-a",
+                ownership_epoch=1,
+                marker_checksum_algorithm="BLAKE3-256",
+                marker_checksum="b" * 64,
+            )
+        }
+    )
+    authority = LocalResolvingEndpointLeaseAuthority(
+        root_resolver=resolver,
+        token_store=token_store,
+        lock_opener=opener,
+    )
+
+    attempt = authority.acquire_endpoint_lease(_request())
+
+    assert attempt.acquired is True
+    assert attempt.lease is not None
+    assert resolver.descriptor_requests == [("endpoint:target-a", "target-a", "target-rev-a")]
+    assert resolver.path_requests == []
     assert opener.paths == [root / ".mediasync" / "locks" / "mutation.lock"]
     assert token_store.requests == [("endpoint:target-a", 1)]
 
@@ -140,6 +185,37 @@ def test_local_endpoint_lease_authority_registers_durable_resource_lease(tmp_pat
 
     assert handle.closed is True
     assert resource_store.releases == [attempt.lease.lease_id]
+
+
+def test_local_endpoint_lease_authority_rejects_root_identity_mismatch(
+    tmp_path: Path,
+) -> None:
+    root = _endpoint_root(
+        tmp_path,
+        root_identity_hash_algorithm="BLAKE3-256",
+        root_identity_hash="b" * 64,
+    )
+    handle = _FakeHandle(root / ".mediasync" / "locks" / "mutation.lock")
+    token_store = _FakeTokenStore(42)
+    authority = LocalEndpointLeaseAuthority(
+        target_roots={"endpoint:target-a": root},
+        target_identities={
+            "endpoint:target-a": EndpointRootDescriptor(
+                root=root,
+                root_identity_hash_algorithm="BLAKE3-256",
+                root_identity_hash="a" * 64,
+            )
+        },
+        token_store=token_store,
+        lock_opener=_FakeOpener(handle),
+    )
+
+    attempt = authority.acquire_endpoint_lease(_request())
+
+    assert attempt.acquired is False
+    assert attempt.validation_codes == ("ENDPOINT_ROOT_IDENTITY_MISMATCH",)
+    assert token_store.requests == []
+    assert handle.closed is True
 
 
 def test_local_endpoint_lease_authority_reconciles_stale_durable_lease_after_lock_acquired(
@@ -493,6 +569,36 @@ class _FakeRootResolver:
         return self._roots.get(resource_key)
 
 
+class _FakeRootDescriptorResolver:
+    def __init__(self, descriptors: dict[str, EndpointRootDescriptor]) -> None:
+        self._descriptors = descriptors
+        self.descriptor_requests: list[tuple[str, str, str]] = []
+        self.path_requests: list[tuple[str, str, str]] = []
+
+    def resolve_endpoint_root_descriptor(
+        self,
+        *,
+        resource_key: str,
+        endpoint_id: str,
+        endpoint_revision_id: str,
+    ) -> EndpointRootDescriptor | None:
+        self.descriptor_requests.append((resource_key, endpoint_id, endpoint_revision_id))
+        return self._descriptors.get(resource_key)
+
+    def resolve_endpoint_root(
+        self,
+        *,
+        resource_key: str,
+        endpoint_id: str,
+        endpoint_revision_id: str,
+    ) -> Path | None:
+        self.path_requests.append((resource_key, endpoint_id, endpoint_revision_id))
+        descriptor = self._descriptors.get(resource_key)
+        if descriptor is None:
+            return None
+        return descriptor.root
+
+
 class _RejectingRootResolver:
     def resolve_endpoint_root(
         self,
@@ -671,6 +777,11 @@ def _endpoint_root(
     owner_installation_id: str = "owner-a",
     ownership_epoch: int = 1,
     endpoint_id: str = "target-a",
+    control_area_id: str | None = None,
+    root_identity_hash_algorithm: str | None = None,
+    root_identity_hash: str | None = None,
+    marker_checksum_algorithm: str | None = None,
+    marker_checksum: str | None = None,
 ) -> Path:
     root = tmp_path / "target"
     lock_dir = root / ".mediasync" / "locks"
@@ -680,6 +791,16 @@ def _endpoint_root(
         "owner_installation_id": owner_installation_id,
         "ownership_epoch": ownership_epoch,
     }
+    if control_area_id is not None:
+        marker["control_area_id"] = control_area_id
+    if root_identity_hash_algorithm is not None:
+        marker["root_identity_hash_algorithm"] = root_identity_hash_algorithm
+    if root_identity_hash is not None:
+        marker["root_identity_hash"] = root_identity_hash
+    if marker_checksum_algorithm is not None:
+        marker["marker_checksum_algorithm"] = marker_checksum_algorithm
+    if marker_checksum is not None:
+        marker["marker_checksum"] = marker_checksum
     (root / ".mediasync" / "endpoint.json").write_text(
         json.dumps(marker, sort_keys=True),
         encoding="utf-8",

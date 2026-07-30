@@ -132,6 +132,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_external_resource_state",
                 statements=CATALOG_EXTERNAL_RESOURCE_STATE,
             ),
+            SqliteMigration(
+                version=22,
+                name="catalog_endpoint_revision_identity",
+                statements=CATALOG_ENDPOINT_REVISION_IDENTITY,
+            ),
         ),
     )
 
@@ -1117,6 +1122,43 @@ CATALOG_EXTERNAL_RESOURCE_STATE = (
     """
     CREATE INDEX idx_external_resource_state_type_state_id
         ON external_resource_state (resource_type, state, resource_id)
+    """,
+)
+
+CATALOG_ENDPOINT_REVISION_IDENTITY = (
+    """
+    ALTER TABLE endpoint_revisions
+        ADD COLUMN control_area_id TEXT
+    """,
+    """
+    ALTER TABLE endpoint_revisions
+        ADD COLUMN root_identity_hash_algorithm TEXT
+    """,
+    """
+    ALTER TABLE endpoint_revisions
+        ADD COLUMN root_identity_hash TEXT CHECK (
+            root_identity_hash IS NULL OR length(root_identity_hash) = 64
+        )
+    """,
+    """
+    ALTER TABLE endpoint_revisions
+        ADD COLUMN owner_installation_id TEXT
+    """,
+    """
+    ALTER TABLE endpoint_revisions
+        ADD COLUMN ownership_epoch INTEGER CHECK (
+            ownership_epoch IS NULL OR ownership_epoch >= 1
+        )
+    """,
+    """
+    ALTER TABLE endpoint_revisions
+        ADD COLUMN control_marker_checksum_algorithm TEXT
+    """,
+    """
+    ALTER TABLE endpoint_revisions
+        ADD COLUMN control_marker_checksum TEXT CHECK (
+            control_marker_checksum IS NULL OR length(control_marker_checksum) = 64
+        )
     """,
 )
 

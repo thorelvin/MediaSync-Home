@@ -116,6 +116,7 @@ Uforanderlig observasjon/konfigurasjon av ett endepunkt.
 - `configured_path TEXT NOT NULL`
 - `canonical_path TEXT`
 - `canonical_root_key TEXT NOT NULL`
+- `root_identity_hash_algorithm TEXT`
 - `root_identity_hash TEXT NOT NULL`
 - `volume_guid TEXT`
 - `volume_serial TEXT`
@@ -130,6 +131,7 @@ Uforanderlig observasjon/konfigurasjon av ett endepunkt.
 - `owner_installation_id TEXT`
 - `ownership_epoch INTEGER`
 - `ownership_mode TEXT`
+- `control_marker_checksum_algorithm TEXT`
 - `control_marker_checksum TEXT`
 - `filesystem_name TEXT`
 - `default_case_mode TEXT NOT NULL` — endpoint-default; autoritativ katalogspesifikk state lagres i `directory_coverage`

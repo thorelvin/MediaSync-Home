@@ -102,6 +102,28 @@ class EndpointRootResolver(Protocol):
     ) -> Path | None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class EndpointRootDescriptor:
+    root: Path
+    control_area_id: str | None = None
+    root_identity_hash_algorithm: str | None = None
+    root_identity_hash: str | None = None
+    owner_installation_id: str | None = None
+    ownership_epoch: int | None = None
+    marker_checksum_algorithm: str | None = None
+    marker_checksum: str | None = None
+
+
+class EndpointRootDescriptorResolver(EndpointRootResolver, Protocol):
+    def resolve_endpoint_root_descriptor(
+        self,
+        *,
+        resource_key: str,
+        endpoint_id: str,
+        endpoint_revision_id: str,
+    ) -> EndpointRootDescriptor | None: ...
+
+
 @dataclass
 class LocalEndpointLease:
     lease_id: str
@@ -187,10 +209,26 @@ class LocalEndpointLeaseAuthority(EndpointLeaseAuthority):
         token_store: FencingTokenStore | None = None,
         resource_lease_store: ResourceLeaseStore | None = None,
         lock_opener: EndpointLockOpener | None = None,
+        target_identities: Mapping[str, EndpointRootDescriptor] | None = None,
     ) -> None:
         if token_store is None and resource_lease_store is None:
             raise ValueError("LocalEndpointLeaseAuthority requires a token or resource lease store")
         self._target_roots = {resource_key: Path(root) for resource_key, root in target_roots.items()}
+        self._target_identities = {
+            resource_key: EndpointRootDescriptor(
+                root=Path(descriptor.root),
+                control_area_id=descriptor.control_area_id,
+                root_identity_hash_algorithm=descriptor.root_identity_hash_algorithm,
+                root_identity_hash=descriptor.root_identity_hash,
+                owner_installation_id=descriptor.owner_installation_id,
+                ownership_epoch=descriptor.ownership_epoch,
+                marker_checksum_algorithm=descriptor.marker_checksum_algorithm,
+                marker_checksum=descriptor.marker_checksum,
+            )
+            for resource_key, descriptor in (target_identities or {}).items()
+        }
+        for resource_key, descriptor in self._target_identities.items():
+            self._target_roots[resource_key] = descriptor.root
         self._token_store = token_store
         self._resource_lease_store = resource_lease_store
         self._lock_opener = lock_opener or Win32EndpointLockOpener()
@@ -231,6 +269,7 @@ class LocalEndpointLeaseAuthority(EndpointLeaseAuthority):
         try:
             marker = _read_endpoint_marker(marker_path)
             owner_installation_id, ownership_epoch = _validate_marker(marker, request)
+            _validate_marker_identity(marker, self._target_identities.get(request.resource_key))
             if self._resource_lease_store is not None:
                 self._resource_lease_store.reconcile_stale_active_resource_lease_after_lock_acquired(
                     resource_key=request.resource_key,
@@ -328,24 +367,57 @@ class LocalResolvingEndpointLeaseAuthority(EndpointLeaseAuthority):
 
     def acquire_endpoint_lease(self, request: EndpointLeaseRequest) -> EndpointLeaseAttempt:
         try:
-            root = self._root_resolver.resolve_endpoint_root(
-                resource_key=request.resource_key,
-                endpoint_id=request.endpoint_id,
-                endpoint_revision_id=request.endpoint_revision_id,
-            )
+            descriptor = self._resolve_endpoint_root_descriptor(request)
         except EndpointLeaseUnavailable as exc:
             return _failed(exc.validation_code, exc.next_action)
-        if root is None:
+        if descriptor is None:
             return _failed(
                 "ENDPOINT_LEASE_RESOURCE_UNKNOWN",
                 "Register the target endpoint root before acquiring its mutation lock.",
             )
         return LocalEndpointLeaseAuthority(
-            target_roots={request.resource_key: root},
+            target_roots={request.resource_key: descriptor.root},
+            target_identities={request.resource_key: descriptor},
             token_store=self._token_store,
             resource_lease_store=self._resource_lease_store,
             lock_opener=self._lock_opener,
         ).acquire_endpoint_lease(request)
+
+    def _resolve_endpoint_root_descriptor(
+        self,
+        request: EndpointLeaseRequest,
+    ) -> EndpointRootDescriptor | None:
+        descriptor_resolver = getattr(self._root_resolver, "resolve_endpoint_root_descriptor", None)
+        if callable(descriptor_resolver):
+            resolver = cast(
+                EndpointRootDescriptorResolver,
+                self._root_resolver,
+            )
+            descriptor = resolver.resolve_endpoint_root_descriptor(
+                resource_key=request.resource_key,
+                endpoint_id=request.endpoint_id,
+                endpoint_revision_id=request.endpoint_revision_id,
+            )
+            if descriptor is None:
+                return None
+            return EndpointRootDescriptor(
+                root=Path(descriptor.root),
+                control_area_id=descriptor.control_area_id,
+                root_identity_hash_algorithm=descriptor.root_identity_hash_algorithm,
+                root_identity_hash=descriptor.root_identity_hash,
+                owner_installation_id=descriptor.owner_installation_id,
+                ownership_epoch=descriptor.ownership_epoch,
+                marker_checksum_algorithm=descriptor.marker_checksum_algorithm,
+                marker_checksum=descriptor.marker_checksum,
+            )
+        root = self._root_resolver.resolve_endpoint_root(
+            resource_key=request.resource_key,
+            endpoint_id=request.endpoint_id,
+            endpoint_revision_id=request.endpoint_revision_id,
+        )
+        if root is None:
+            return None
+        return EndpointRootDescriptor(root=Path(root))
 
 
 class Win32EndpointLockOpener(EndpointLockOpener):
@@ -526,6 +598,74 @@ def _validate_marker(
             "Refresh the sealed plan because endpoint ownership changed.",
         )
     return owner_installation_id, ownership_epoch
+
+
+def _validate_marker_identity(
+    marker: Mapping[str, object],
+    expected: EndpointRootDescriptor | None,
+) -> None:
+    if expected is None:
+        return
+    _validate_expected_marker_string(
+        marker,
+        "control_area_id",
+        expected.control_area_id,
+        "ENDPOINT_CONTROL_AREA_ID_MISMATCH",
+        "Refresh endpoint adoption because the control marker no longer matches the endpoint revision.",
+    )
+    _validate_expected_marker_string(
+        marker,
+        "root_identity_hash_algorithm",
+        expected.root_identity_hash_algorithm,
+        "ENDPOINT_ROOT_IDENTITY_ALGORITHM_MISMATCH",
+        "Refresh endpoint adoption because the root identity algorithm no longer matches the endpoint revision.",
+    )
+    _validate_expected_marker_string(
+        marker,
+        "root_identity_hash",
+        expected.root_identity_hash,
+        "ENDPOINT_ROOT_IDENTITY_MISMATCH",
+        "Stop mutation and refresh endpoint adoption because the endpoint root identity changed.",
+    )
+    _validate_expected_marker_string(
+        marker,
+        "owner_installation_id",
+        expected.owner_installation_id,
+        "ENDPOINT_REVISION_OWNER_MISMATCH",
+        "Stop mutation and refresh endpoint ownership because the endpoint revision owner is stale.",
+    )
+    if expected.ownership_epoch is not None and marker.get("ownership_epoch") != expected.ownership_epoch:
+        raise EndpointLeaseUnavailable(
+            "ENDPOINT_REVISION_OWNERSHIP_EPOCH_MISMATCH",
+            "Refresh the sealed plan because the endpoint revision ownership epoch is stale.",
+        )
+    _validate_expected_marker_string(
+        marker,
+        "marker_checksum_algorithm",
+        expected.marker_checksum_algorithm,
+        "ENDPOINT_MARKER_CHECKSUM_ALGORITHM_MISMATCH",
+        "Refresh endpoint adoption because the marker checksum algorithm no longer matches the endpoint revision.",
+    )
+    _validate_expected_marker_string(
+        marker,
+        "marker_checksum",
+        expected.marker_checksum,
+        "ENDPOINT_MARKER_CHECKSUM_MISMATCH",
+        "Refresh endpoint adoption because the endpoint marker checksum no longer matches the endpoint revision.",
+    )
+
+
+def _validate_expected_marker_string(
+    marker: Mapping[str, object],
+    key: str,
+    expected: str | None,
+    validation_code: str,
+    next_action: str,
+) -> None:
+    if expected is None:
+        return
+    if marker.get(key) != expected:
+        raise EndpointLeaseUnavailable(validation_code, next_action)
 
 
 def _failed(validation_code: str, next_action: str) -> EndpointLeaseAttempt:
