@@ -762,6 +762,7 @@ def test_engine_host_runtime_without_state_root_preserves_non_persistent_service
     try:
         assert runtime.state_layout is None
         assert runtime.state_restore_recovery is None
+        assert runtime.state_restore_startup_reconciliation is None
         assert runtime.state_compaction_recovery is None
         assert runtime.startup_reconciliation is None
         assert runtime.catalog_connection is None
@@ -788,6 +789,9 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.state_layout is not None
         assert runtime.state_restore_recovery is not None
         assert runtime.state_restore_recovery.scanned_epoch_count == 0
+        assert runtime.state_restore_startup_reconciliation is not None
+        assert runtime.state_restore_startup_reconciliation.scanned_epoch_count == 0
+        assert runtime.state_restore_startup_reconciliation.latest_committed_epoch is None
         assert runtime.state_compaction_recovery is not None
         assert runtime.state_compaction_recovery.scanned_epoch_count == 0
         assert runtime.state_layout.catalog.is_file()
@@ -1157,10 +1161,11 @@ def test_engine_host_runtime_state_restore_maintenance_blocks_retained_leases(
 def test_engine_host_runtime_restore_closes_sqlite_handles_and_swaps_state(
     tmp_path: Path,
 ) -> None:
+    state_root = tmp_path / "state"
     runtime = build_engine_host_runtime(
         authorization=_authorization(),
         service_status=startup_status(ProcessRole.ENGINE_HOST),
-        state_root=tmp_path / "state",
+        state_root=state_root,
         reconciler_instance_id="host-new",
     )
     try:
@@ -1188,6 +1193,34 @@ def test_engine_host_runtime_restore_closes_sqlite_handles_and_swaps_state(
         assert runtime.catalog_connection is None
         assert runtime.recovery_connection is None
         assert _read_sqlite_user_version(runtime.state_layout.catalog) == backup_catalog_version
+
+        restarted = build_engine_host_runtime(
+            authorization=_authorization(),
+            service_status=startup_status(ProcessRole.ENGINE_HOST),
+            state_root=state_root,
+            reconciler_instance_id="host-after-restore",
+        )
+        try:
+            assert restarted.state_restore_startup_reconciliation is not None
+            restore_report = restarted.state_restore_startup_reconciliation
+            assert restore_report.scanned_epoch_count == 1
+            assert restore_report.committed_epoch_count == 1
+            assert restore_report.previously_rolled_back_epoch_count == 0
+            assert restore_report.latest_committed_epoch is not None
+            assert restore_report.latest_committed_epoch.restore_epoch_id == (
+                "restore-runtime-a"
+            )
+            assert restore_report.latest_committed_epoch.backup_set_id == "set-a"
+            assert restore_report.latest_committed_epoch.state_set_hash == (
+                receipt.state_set_hash
+            )
+            assert restarted.startup_reconciliation is not None
+            assert (
+                restarted.startup_reconciliation.reconciler_instance_id
+                == "host-after-restore"
+            )
+        finally:
+            restarted.close()
     finally:
         runtime.close()
 
@@ -1559,6 +1592,7 @@ class _FakeRuntime:
     service = object()
     state_layout = None
     state_restore_recovery = None
+    state_restore_startup_reconciliation = None
     state_compaction_recovery = None
     startup_reconciliation = None
 

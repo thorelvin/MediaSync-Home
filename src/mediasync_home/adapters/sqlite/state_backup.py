@@ -269,6 +269,44 @@ class SqliteStateRestoreEpochRecoveryReport:
 
 
 @dataclass(frozen=True, slots=True)
+class SqliteStateCommittedRestoreEpoch:
+    restore_epoch_id: str
+    backup_set_id: str
+    state_set_hash: str
+    started_utc: str
+    committed_path: Path
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "restore_epoch_id": self.restore_epoch_id,
+            "backup_set_id": self.backup_set_id,
+            "state_set_hash": self.state_set_hash,
+            "started_utc": self.started_utc,
+            "committed_path": str(self.committed_path),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SqliteStateRestoreStartupReconciliationReport:
+    scanned_epoch_count: int
+    committed_epoch_count: int
+    previously_rolled_back_epoch_count: int
+    latest_committed_epoch: SqliteStateCommittedRestoreEpoch | None
+    committed_epochs: tuple[SqliteStateCommittedRestoreEpoch, ...]
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "scanned_epoch_count": self.scanned_epoch_count,
+            "committed_epoch_count": self.committed_epoch_count,
+            "previously_rolled_back_epoch_count": self.previously_rolled_back_epoch_count,
+            "latest_committed_epoch": None
+            if self.latest_committed_epoch is None
+            else self.latest_committed_epoch.to_payload(),
+            "committed_epochs": [entry.to_payload() for entry in self.committed_epochs],
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class SqliteStateCompactionFile:
     store: SqliteStore
     target_path: Path
@@ -1051,6 +1089,55 @@ def recover_incomplete_sqlite_state_restore_epochs(
     )
 
 
+def reconcile_committed_sqlite_state_restore_epochs(
+    layout: StateStoreLayout,
+) -> SqliteStateRestoreStartupReconciliationReport:
+    _validate_state_store_layout(layout, field_name="STATE_RESTORE_STARTUP")
+    epochs_dir = layout.root / STATE_RESTORE_EPOCHS_DIR_NAME
+    if not epochs_dir.exists():
+        return SqliteStateRestoreStartupReconciliationReport(
+            scanned_epoch_count=0,
+            committed_epoch_count=0,
+            previously_rolled_back_epoch_count=0,
+            latest_committed_epoch=None,
+            committed_epochs=(),
+        )
+    if not epochs_dir.is_dir():
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCHS_PATH_NOT_DIRECTORY")
+
+    scanned = 0
+    previously_rolled_back = 0
+    committed_epochs: list[SqliteStateCommittedRestoreEpoch] = []
+    for epoch_dir in sorted(path for path in epochs_dir.iterdir() if path.is_dir()):
+        scanned += 1
+        committed_path = epoch_dir / STATE_RESTORE_COMMITTED_FILENAME
+        rolled_back_path = epoch_dir / STATE_RESTORE_ROLLED_BACK_FILENAME
+        if committed_path.exists() and rolled_back_path.exists():
+            raise SqliteStateBackupViolation("STATE_RESTORE_STARTUP_TERMINAL_CONFLICT")
+        if committed_path.exists():
+            committed_epochs.append(_restore_startup_committed_epoch(epoch_dir, layout))
+            continue
+        if rolled_back_path.exists():
+            _validate_restore_startup_rolled_back_epoch(epoch_dir)
+            previously_rolled_back += 1
+            continue
+        raise SqliteStateBackupViolation("STATE_RESTORE_STARTUP_EPOCH_INCOMPLETE")
+
+    committed = tuple(
+        sorted(
+            committed_epochs,
+            key=lambda entry: (entry.started_utc, entry.restore_epoch_id),
+        )
+    )
+    return SqliteStateRestoreStartupReconciliationReport(
+        scanned_epoch_count=scanned,
+        committed_epoch_count=len(committed),
+        previously_rolled_back_epoch_count=previously_rolled_back,
+        latest_committed_epoch=None if not committed else committed[-1],
+        committed_epochs=committed,
+    )
+
+
 def recover_incomplete_sqlite_state_compaction_epochs(
     layout: StateStoreLayout,
     *,
@@ -1451,31 +1538,107 @@ def _compaction_epoch_retention_artifact(
     raise SqliteStateBackupViolation("STATE_RETENTION_COMPACTION_EPOCH_INCOMPLETE")
 
 
+def _restore_startup_committed_epoch(
+    epoch_dir: Path,
+    layout: StateStoreLayout,
+) -> SqliteStateCommittedRestoreEpoch:
+    restore_epoch_id = epoch_dir.name
+    _validate_restore_epoch_id(restore_epoch_id)
+    committed_path = epoch_dir / STATE_RESTORE_COMMITTED_FILENAME
+    payload = _read_json_object(committed_path, "STATE_RESTORE_STARTUP_COMMITTED")
+    _validate_restore_startup_terminal_schema(payload, status="COMMITTED")
+    payload_restore_epoch_id = _str_field(payload, "restore_epoch_id")
+    _validate_restore_epoch_id(payload_restore_epoch_id)
+    if payload_restore_epoch_id != restore_epoch_id:
+        raise SqliteStateBackupViolation("STATE_RESTORE_STARTUP_EPOCH_ID_MISMATCH")
+    backup_set_id = _str_field(payload, "backup_set_id")
+    _validate_backup_set_id(backup_set_id)
+    state_set_hash = _hex_field(payload, "state_set_hash")
+    started_utc = _str_field(payload, "started_utc")
+    _restore_epoch_committed_associated_paths_from_payload(
+        payload,
+        layout,
+        restore_epoch_id,
+        violation_prefix="STATE_RESTORE_STARTUP_COMMITTED",
+    )
+    return SqliteStateCommittedRestoreEpoch(
+        restore_epoch_id=restore_epoch_id,
+        backup_set_id=backup_set_id,
+        state_set_hash=state_set_hash,
+        started_utc=started_utc,
+        committed_path=committed_path,
+    )
+
+
+def _validate_restore_startup_rolled_back_epoch(epoch_dir: Path) -> None:
+    restore_epoch_id = epoch_dir.name
+    _validate_restore_epoch_id(restore_epoch_id)
+    payload = _read_json_object(
+        epoch_dir / STATE_RESTORE_ROLLED_BACK_FILENAME,
+        "STATE_RESTORE_STARTUP_ROLLED_BACK",
+    )
+    _validate_restore_startup_terminal_schema(payload, status="ROLLED_BACK")
+    payload_restore_epoch_id = _str_field(payload, "restore_epoch_id")
+    _validate_restore_epoch_id(payload_restore_epoch_id)
+    if payload_restore_epoch_id != restore_epoch_id:
+        raise SqliteStateBackupViolation("STATE_RESTORE_STARTUP_EPOCH_ID_MISMATCH")
+    backup_set_id = _str_field(payload, "backup_set_id")
+    _validate_backup_set_id(backup_set_id)
+    _hex_field(payload, "state_set_hash")
+    _str_field(payload, "recovered_utc")
+
+
+def _validate_restore_startup_terminal_schema(
+    payload: dict[str, Any],
+    *,
+    status: str,
+) -> None:
+    if _int_field(payload, "schema_version") != STATE_RESTORE_EPOCH_SCHEMA_VERSION:
+        raise SqliteStateBackupViolation("STATE_RESTORE_STARTUP_SCHEMA_UNSUPPORTED")
+    if _str_field(payload, "status") != status:
+        raise SqliteStateBackupViolation("STATE_RESTORE_STARTUP_STATUS_UNSUPPORTED")
+
+
 def _restore_epoch_committed_associated_paths(
     payload: dict[str, Any],
     layout: StateStoreLayout,
     restore_epoch_id: str,
 ) -> tuple[Path, ...]:
+    return _restore_epoch_committed_associated_paths_from_payload(
+        payload,
+        layout,
+        restore_epoch_id,
+        violation_prefix="STATE_RETENTION_RESTORE",
+    )
+
+
+def _restore_epoch_committed_associated_paths_from_payload(
+    payload: dict[str, Any],
+    layout: StateStoreLayout,
+    restore_epoch_id: str,
+    *,
+    violation_prefix: str,
+) -> tuple[Path, ...]:
     files_payload = payload.get("restored_files")
     if not isinstance(files_payload, list):
-        raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_FILES_NOT_ARRAY")
+        raise SqliteStateBackupViolation(f"{violation_prefix}_FILES_NOT_ARRAY")
     stores: list[SqliteStore] = []
     associated_paths: list[Path] = []
     for entry in files_payload:
         if not isinstance(entry, dict):
-            raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_FILE_NOT_OBJECT")
+            raise SqliteStateBackupViolation(f"{violation_prefix}_FILE_NOT_OBJECT")
         try:
             store = SqliteStore(_str_field(entry, "store"))
         except ValueError as exc:
-            raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_STORE_UNSUPPORTED") from exc
+            raise SqliteStateBackupViolation(f"{violation_prefix}_STORE_UNSUPPORTED") from exc
         stores.append(store)
         target_path = _path_field(entry, "target_path")
         if target_path != _source_path(layout, store):
-            raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_TARGET_MISMATCH")
+            raise SqliteStateBackupViolation(f"{violation_prefix}_TARGET_MISMATCH")
         rollback_path = _optional_path_field(entry, "rollback_path")
         if rollback_path is not None:
             if rollback_path != _restore_rollback_path(target_path, restore_epoch_id):
-                raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_ROLLBACK_MISMATCH")
+                raise SqliteStateBackupViolation(f"{violation_prefix}_ROLLBACK_MISMATCH")
             associated_paths.append(rollback_path)
         associated_paths.extend(
             _terminal_sidecar_rollback_paths(
@@ -1483,11 +1646,11 @@ def _restore_epoch_committed_associated_paths(
                 target_path=target_path,
                 epoch_id=restore_epoch_id,
                 expected_rollback_path=_restore_rollback_path,
-                violation_prefix="STATE_RETENTION_RESTORE",
+                violation_prefix=violation_prefix,
             )
         )
     if tuple(stores) != STATE_BACKUP_SET_STORES:
-        raise SqliteStateBackupViolation("STATE_RETENTION_RESTORE_INCOMPLETE_STORE_SET")
+        raise SqliteStateBackupViolation(f"{violation_prefix}_INCOMPLETE_STORE_SET")
     return tuple(associated_paths)
 
 

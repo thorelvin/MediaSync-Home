@@ -60,11 +60,13 @@ from mediasync_home.adapters.sqlite.state_backup import (
     SqliteStateRestoreEpochRecoveryReport,
     SqliteStateRestoreReceipt,
     SqliteStateRestoreMaintenanceAdmission,
+    SqliteStateRestoreStartupReconciliationReport,
     admit_sqlite_state_restore_maintenance,
     apply_sqlite_state_maintenance_retention,
     compact_sqlite_state_stores,
     recover_incomplete_sqlite_state_compaction_epochs,
     recover_incomplete_sqlite_state_restore_epochs,
+    reconcile_committed_sqlite_state_restore_epochs,
     restore_sqlite_state_backup_set,
 )
 from mediasync_home.adapters.sqlite.trigger_occurrences import SqliteTriggerOccurrenceStore
@@ -213,6 +215,7 @@ class EngineHostRuntime:
     service: EngineHostIpcService
     state_layout: StateStoreLayout | None = None
     state_restore_recovery: SqliteStateRestoreEpochRecoveryReport | None = None
+    state_restore_startup_reconciliation: SqliteStateRestoreStartupReconciliationReport | None = None
     state_compaction_recovery: SqliteStateCompactionEpochRecoveryReport | None = None
     startup_reconciliation: EngineHostStartupReconciliationReport | None = None
     reconciler_instance_id: str | None = None
@@ -1068,6 +1071,11 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                     "state_restore_recovery": _state_restore_recovery_payload(
                         runtime.state_restore_recovery
                     ),
+                    "state_restore_startup_reconciliation": (
+                        _state_restore_startup_reconciliation_payload(
+                            runtime.state_restore_startup_reconciliation
+                        )
+                    ),
                     "state_compaction_recovery": _state_compaction_recovery_payload(
                         runtime.state_compaction_recovery
                     ),
@@ -1206,6 +1214,9 @@ def build_engine_host_runtime(
         layout,
         recovered_utc=_utc_now(),
     )
+    state_restore_startup_reconciliation = reconcile_committed_sqlite_state_restore_epochs(
+        layout
+    )
     catalog_connection = sqlite3.connect(layout.catalog)
     recovery_connection = sqlite3.connect(layout.recovery)
     try:
@@ -1302,6 +1313,7 @@ def build_engine_host_runtime(
         service=service,
         state_layout=layout,
         state_restore_recovery=state_restore_recovery,
+        state_restore_startup_reconciliation=state_restore_startup_reconciliation,
         state_compaction_recovery=state_compaction_recovery,
         startup_reconciliation=startup_reconciliation,
         reconciler_instance_id=reconciler_instance_id,
@@ -1686,6 +1698,14 @@ def _startup_reconciliation_payload(
 
 def _state_restore_recovery_payload(
     report: SqliteStateRestoreEpochRecoveryReport | None,
+) -> dict[str, object] | None:
+    if report is None:
+        return None
+    return report.to_payload()
+
+
+def _state_restore_startup_reconciliation_payload(
+    report: SqliteStateRestoreStartupReconciliationReport | None,
 ) -> dict[str, object] | None:
     if report is None:
         return None

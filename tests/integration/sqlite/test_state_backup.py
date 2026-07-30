@@ -41,6 +41,7 @@ from mediasync_home.adapters.sqlite.state_backup import (
     plan_sqlite_state_restore,
     recover_incomplete_sqlite_state_compaction_epochs,
     recover_incomplete_sqlite_state_restore_epochs,
+    reconcile_committed_sqlite_state_restore_epochs,
     restore_sqlite_state_backup_set,
     verify_sqlite_state_backup_set,
 )
@@ -219,6 +220,41 @@ def test_sqlite_state_restore_swap_restores_verified_pair_and_preserves_rollback
     ).is_file()
 
 
+def test_sqlite_state_restore_startup_reconciliation_reports_committed_epoch(
+    tmp_path: Path,
+) -> None:
+    layout = build_state_store_layout(tmp_path / "state")
+    _initialize_state_stores(layout)
+    create_sqlite_state_backup_set(
+        layout,
+        tmp_path / "state-backups",
+        backup_set_id="set-a",
+        created_utc="2026-07-30T12:00:00Z",
+    )
+    plan = plan_sqlite_state_restore(tmp_path / "state-backups" / "set-a", layout)
+
+    receipt = apply_sqlite_state_restore_plan(
+        plan,
+        restore_epoch_id="restore-a",
+        started_utc="2026-07-30T12:05:00Z",
+    )
+
+    report = reconcile_committed_sqlite_state_restore_epochs(layout)
+
+    assert report.scanned_epoch_count == 1
+    assert report.committed_epoch_count == 1
+    assert report.previously_rolled_back_epoch_count == 0
+    assert len(report.committed_epochs) == 1
+    committed = report.committed_epochs[0]
+    assert report.latest_committed_epoch == committed
+    assert committed.restore_epoch_id == "restore-a"
+    assert committed.backup_set_id == "set-a"
+    assert committed.state_set_hash == receipt.state_set_hash
+    assert committed.started_utc == "2026-07-30T12:05:00Z"
+    assert committed.committed_path == receipt.committed_path
+    assert report.to_payload()["latest_committed_epoch"] == committed.to_payload()
+
+
 def test_sqlite_state_restore_swap_rolls_back_when_second_store_publish_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -316,6 +352,14 @@ def test_sqlite_state_restore_startup_recovery_rolls_back_interrupted_epoch(
     assert not layout.recovery.with_name(".recovery.sqlite.restore-c.restore-rollback").exists()
     assert not layout.recovery.with_name(".recovery.sqlite.restore-c.restore-new.tmp").exists()
     assert _read_user_versions(layout) == (77, 88)
+
+    startup_report = reconcile_committed_sqlite_state_restore_epochs(layout)
+
+    assert startup_report.scanned_epoch_count == 1
+    assert startup_report.committed_epoch_count == 0
+    assert startup_report.previously_rolled_back_epoch_count == 1
+    assert startup_report.latest_committed_epoch is None
+    assert startup_report.committed_epochs == ()
 
 
 def test_sqlite_state_restore_startup_recovery_ignores_committed_epoch(
