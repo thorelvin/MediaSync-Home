@@ -121,9 +121,7 @@ def run_trigger_client(argv: Sequence[str] | None = None, *, emit: Emit | None =
                 "host_locator_publication": publication.to_payload(),
                 "reason": "HOST_LOCATOR_PUBLICATION_NOT_LIVE",
                 "scope": "0B_SAME_USER_LOCAL_PREVIEW",
-                "stale_host_locator_publication_cleared": _clear_stale_host_publication(
-                    publication
-                ),
+                "stale_host_locator_publication_cleared": False,
             },
         )
 

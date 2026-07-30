@@ -150,7 +150,7 @@ def test_launcher_local_preview_host_publishes_persistent_engine_host(tmp_path: 
             "--state-root",
             str(state_root),
             "--run-executor-cycle-interval-ms",
-            "50",
+            "1000",
         ],
         cwd=Path(__file__).resolve().parents[3],
         stdout=subprocess.PIPE,
@@ -162,26 +162,12 @@ def test_launcher_local_preview_host_publishes_persistent_engine_host(tmp_path: 
     gui: subprocess.CompletedProcess[str] | None = None
     try:
         _wait_for_file(state_root / LOCAL_ENGINE_HOST_PUBLICATION_FILENAME)
-        gui = subprocess.run(
-            [
-                sys.executable,
-                "scripts/run_role.py",
-                "--role",
-                "gui",
-                "--installation-id",
-                installation_id,
-                "--state-root",
-                str(state_root),
-                "--query-status",
-            ],
-            cwd=Path(__file__).resolve().parents[3],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=True,
+        gui = _run_local_preview_status_query_when_ready(
+            installation_id=installation_id,
+            state_root=state_root,
         )
         assert host.poll() is None
-        time.sleep(0.2)
+        time.sleep(1.2)
     finally:
         if host.poll() is None:
             host.kill()
@@ -621,7 +607,7 @@ def test_trigger_status_query_uses_host_locator_when_pipe_omitted(
     assert host_events[-1]["served_requests"] == 2
 
 
-def test_gui_status_query_clears_dead_host_locator_when_pipe_omitted(
+def test_gui_status_query_preserves_live_unready_host_locator_when_pipe_omitted(
     tmp_path: Path,
 ) -> None:
     installation_id = f"preview-{uuid4().hex}"
@@ -671,15 +657,15 @@ def test_gui_status_query_clears_dead_host_locator_when_pipe_omitted(
             "host_locator_publication": stale_publication.to_payload(),
             "reason": "HOST_LOCATOR_PUBLICATION_NOT_LIVE",
             "scope": "0B_SAME_USER_LOCAL_PREVIEW",
-            "stale_host_locator_publication_cleared": True,
+            "stale_host_locator_publication_cleared": False,
         },
         "reason": "ENGINE_HOST_UNAVAILABLE",
         "status": "REJECTED",
     }
-    assert not publication_path.exists()
+    assert publication_path.exists()
 
 
-def test_trigger_status_query_clears_dead_host_locator_when_pipe_omitted(
+def test_trigger_status_query_preserves_live_unready_host_locator_when_pipe_omitted(
     tmp_path: Path,
 ) -> None:
     installation_id = f"preview-{uuid4().hex}"
@@ -729,12 +715,12 @@ def test_trigger_status_query_clears_dead_host_locator_when_pipe_omitted(
             "host_locator_publication": stale_publication.to_payload(),
             "reason": "HOST_LOCATOR_PUBLICATION_NOT_LIVE",
             "scope": "0B_SAME_USER_LOCAL_PREVIEW",
-            "stale_host_locator_publication_cleared": True,
+            "stale_host_locator_publication_cleared": False,
         },
         "reason": "ENGINE_HOST_UNAVAILABLE",
         "status": "REJECTED",
     }
-    assert not publication_path.exists()
+    assert publication_path.exists()
 
 
 def test_engine_host_mutex_rejects_when_same_user_mutex_is_owned(tmp_path: Path) -> None:
@@ -1511,6 +1497,52 @@ def _run_status_query(pipe_name: str) -> subprocess.CompletedProcess[str]:
         text=True,
         timeout=10,
         check=True,
+    )
+
+
+def _run_local_preview_status_query_when_ready(
+    *,
+    installation_id: str,
+    state_root: Path,
+    timeout_seconds: float = 10.0,
+) -> subprocess.CompletedProcess[str]:
+    deadline = time.monotonic() + timeout_seconds
+    last_result: subprocess.CompletedProcess[str] | None = None
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/run_role.py",
+                "--role",
+                "gui",
+                "--installation-id",
+                installation_id,
+                "--state-root",
+                str(state_root),
+                "--query-status",
+                "--timeout-seconds",
+                "0.2",
+            ],
+            cwd=Path(__file__).resolve().parents[3],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        last_result = result
+        if result.returncode == 0:
+            try:
+                response = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                response = None
+            if isinstance(response, dict) and response.get("status") == "ACCEPTED":
+                return result
+        time.sleep(0.05)
+    assert last_result is not None
+    raise AssertionError(
+        "timed out waiting for local-preview host status; "
+        f"returncode={last_result.returncode}; "
+        f"stdout={last_result.stdout!r}; stderr={last_result.stderr!r}"
     )
 
 

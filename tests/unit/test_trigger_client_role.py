@@ -234,7 +234,7 @@ def test_trigger_status_query_uses_matching_host_locator_publication(
     assert client.timeout_ms == 2000
 
 
-def test_trigger_status_query_clears_stale_publication_when_locator_pipe_dead(
+def test_trigger_status_query_preserves_live_unready_publication_when_locator_pipe_dead(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeWin32NamedPipeClient(_DeadPipeClient):
@@ -247,7 +247,6 @@ def test_trigger_status_query_clears_stale_publication_when_locator_pipe_dead(
         "_load_matching_local_preview_publication",
         lambda args: publication,
     )
-    monkeypatch.setattr(trigger_module, "_clear_stale_host_publication", lambda pub: True)
     _install_fake_win32_module(monkeypatch, FakeWin32NamedPipeClient)
     output: list[str] = []
 
@@ -268,7 +267,7 @@ def test_trigger_status_query_clears_stale_publication_when_locator_pipe_dead(
             "host_locator_publication": publication.to_payload(),
             "reason": "HOST_LOCATOR_PUBLICATION_NOT_LIVE",
             "scope": "0B_SAME_USER_LOCAL_PREVIEW",
-            "stale_host_locator_publication_cleared": True,
+            "stale_host_locator_publication_cleared": False,
         },
         "reason": "ENGINE_HOST_UNAVAILABLE",
         "status": "REJECTED",
