@@ -236,6 +236,7 @@ _EN_TO_NB.update(
         "Cataloged files": "Katalogf\u00f8rte filer",
         "Catalog read model is not available.": "Katalogvisningen er ikke tilgjengelig.",
         "High": "Høy",
+        "Latest run": "Siste kjøring",
         "Blocking issue": "Blokkerende problem",
         "Coverage warning": "Dekningsadvarsel",
         "No cataloged files.": "Ingen katalogf\u00f8rte filer.",

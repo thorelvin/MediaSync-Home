@@ -300,6 +300,28 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert activity_title.text() == "Latest run: run-a"
         assert activity_rows[0].text() == "Activity: Checking"
         assert activity_rows[1].text() == "Attention: Waiting"
+
+        language.menu().actions()[0].trigger()
+
+        assert target.text() == "1 mål: USB 1"
+        assert job_detail_targets.text() == "1 mål / 1 uavhengig enhet"
+        assert job_detail_defaults.text() == "Oppdater backup - Alle brukerfiler - Standard kontroll"
+        assert job_detail_revision.text() == "Revisjon: job-rev-a - Filter: filter-a"
+        assert plan_preview_summary.text() == "2 operasjoner fra plan-a."
+        assert plan_preview_rows[0].text() == "Lav: Opprett mappe: Photos"
+        assert plan_preview_rows[1].text() == "Lav: Kopier ny: Photos/2026/a.jpg - 2.0 KiB"
+        assert plan_endpoint_summary.text() == "2 endepunkter fra plan-a."
+        assert plan_endpoint_rows[0].text() == "Kildeendepunkt: source-a · snapshot source-snapshot-a"
+        assert plan_endpoint_rows[1].text() == "Målendepunkt 1: target-a · snapshot target-snapshot-a"
+        assert snapshot_health_summary.text() == "1 blokkerende problem i source-snapshot-a."
+        assert snapshot_health_rows[0].text() == "Blokkerende problem: Archive · UNREADABLE_DIRECTORY"
+        assert snapshot_health_rows[1].text() == "Dekningsadvarsel: Videos · VOLATILE"
+        assert cataloged_files_summary.text() == (
+            "1 katalogf\u00f8rt fil. Flere katalogf\u00f8rte filer finnes."
+        )
+        assert activity_title.text() == "Siste kjøring: run-a"
+        assert activity_rows[0].text() == "Aktivitet: Kontrollerer"
+        assert activity_rows[1].text() == "Oppmerksomhet: Venter"
     finally:
         window.close()
         window.deleteLater()

@@ -2750,6 +2750,8 @@ Unngå i normal visning:
 
 Tid og størrelse følger brukerens locale. GUI viser binære størrelser konsekvent som KiB, MiB, GiB og TiB, mens nettverkshastighet vises som MB/s med forklaring i tooltip. Relativ tid suppleres med absolutt dato/tid i tooltip eller detaljvisning.
 
+0B-implementasjonsnote: PySide-shellen har en flaggbasert språkvelger i handlingslinjen som viser valgt språk som flaggikon. Når den klikkes, åpnes en meny med støttede språk; valgt språk reappiserer synlige dashboard-, Engine Host-, jobbdeltalj-, planpreview-, snapshothelse-, katalog- og aktivitetslabels uten at presentasjonslaget åpner SQLite eller muterer Engine Host-state. Bidireksjonell 0B-dekning finnes for norsk/engelsk dashboard- og aktivitetsprefixer; full fremtidig strenginventar/lokaliseringsmatrise gjenstår.
+
 Stier vises med vennlig mål- eller disknavn først. Full rå sti skal være tilgjengelig, kunne kopieres og aldri være eneste identifikasjon av et mål.
 
 ### 8.19 Tastatur, fokus og snarveier
