@@ -122,7 +122,7 @@ REQUEST_ID_A = "44444444-4444-4444-8444-444444444444"
 REQUEST_ID_B = "77777777-7777-4777-8777-777777777777"
 IDEMPOTENCY_KEY_A = "66666666-6666-4666-8666-666666666666"
 PAYLOAD_HASH_A = "98cdbb1f712331be51355f90ab8c193c5c6f681d33d5c052cd38fe94820f3d02"
-PAYLOAD_HASH_B = "a" * 64
+PAYLOAD_HASH_B = "cbed2c1daab2fe4217ac17819f2f3aa86a7c8b0657d613e255a214724254de3b"
 TRIGGER_DELIVERY_ID = "11111111-1111-4111-8111-111111111111"
 
 
@@ -1908,7 +1908,9 @@ def test_start_run_command_is_recognized_but_rejected_when_mutations_disabled() 
         request_id=REQUEST_ID_A,
         idempotency_key=IDEMPOTENCY_KEY_A,
         payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
-        payload_hash=PAYLOAD_HASH_A,
+        payload_hash=payload_hash(
+            {"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum}
+        ),
     )
 
     assert response.status is IpcStatus.REJECTED
@@ -1937,7 +1939,9 @@ def test_enabled_start_run_persists_queued_run_and_succeeds_receipt() -> None:
         request_id=REQUEST_ID_A,
         idempotency_key=IDEMPOTENCY_KEY_A,
         payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
-        payload_hash=PAYLOAD_HASH_A,
+        payload_hash=payload_hash(
+            {"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum}
+        ),
     )
 
     receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
@@ -1984,14 +1988,18 @@ def test_enabled_start_run_replay_returns_existing_success_receipt() -> None:
         request_id=REQUEST_ID_A,
         idempotency_key=IDEMPOTENCY_KEY_A,
         payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
-        payload_hash=PAYLOAD_HASH_A,
+        payload_hash=payload_hash(
+            {"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum}
+        ),
     )
     second = ipc_client.submit_command(
         RunCommandName.START_RUN.value,
         request_id=REQUEST_ID_B,
         idempotency_key=IDEMPOTENCY_KEY_A,
         payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
-        payload_hash=PAYLOAD_HASH_A,
+        payload_hash=payload_hash(
+            {"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum}
+        ),
     )
 
     assert first.status is IpcStatus.ACCEPTED
@@ -2023,7 +2031,7 @@ def test_enabled_start_run_rejects_checksum_mismatch_before_effect() -> None:
         request_id=REQUEST_ID_A,
         idempotency_key=IDEMPOTENCY_KEY_A,
         payload={"plan_id": plan.plan_id, "plan_checksum": "a" * 64},
-        payload_hash=PAYLOAD_HASH_A,
+        payload_hash=payload_hash({"plan_id": plan.plan_id, "plan_checksum": "a" * 64}),
     )
 
     receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
@@ -2048,7 +2056,9 @@ def test_enabled_start_run_requires_dispatcher_dependencies() -> None:
         request_id=REQUEST_ID_A,
         idempotency_key=IDEMPOTENCY_KEY_A,
         payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
-        payload_hash=PAYLOAD_HASH_A,
+        payload_hash=payload_hash(
+            {"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum}
+        ),
     )
 
     assert response.status is IpcStatus.REJECTED
@@ -2102,7 +2112,7 @@ def test_command_receipt_conflict_rejects_same_key_with_different_payload_hash()
         JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
         request_id=REQUEST_ID_B,
         idempotency_key=IDEMPOTENCY_KEY_A,
-        payload={"draft_id": "draft-a"},
+        payload={"draft_id": "draft-b"},
         payload_hash=PAYLOAD_HASH_B,
     )
 
@@ -2111,6 +2121,26 @@ def test_command_receipt_conflict_rejects_same_key_with_different_payload_hash()
     assert response.payload["idempotency_key"] == IDEMPOTENCY_KEY_A
     assert response.payload["conflict"] == "COMMAND_IDEMPOTENCY_CONFLICT:payload_hash"
     assert len(receipts.receipts) == 1
+
+
+def test_command_rejects_declared_payload_hash_mismatch_before_receipt() -> None:
+    receipts = _InMemoryCommandReceiptStore()
+    service = _service()
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"draft_id": "draft-a"},
+        payload_hash=PAYLOAD_HASH_B,
+    )
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.INVALID_FRAME
+    assert receipts.receipts == {}
 
 
 def test_invalid_create_standard_backup_payload_does_not_record_receipt() -> None:

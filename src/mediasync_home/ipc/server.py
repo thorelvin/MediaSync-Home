@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from secrets import compare_digest
 from typing import Any
 from uuid import uuid4
 
@@ -23,6 +24,7 @@ from mediasync_home.application.command_receipts import (
     CommandReceiptStore,
     transition_command_receipt,
 )
+from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.external_resources import ExternalResourceStateStore
 from mediasync_home.application.job_creation import (
     CreateStandardBackupJobCommand,
@@ -385,6 +387,12 @@ class EngineHostIpcService:
         identity = self._accepted_clients.get(command.client_instance_id)
         if identity is None:
             return IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
+        try:
+            actual_payload_hash = canonical_command_payload_hash(command.payload)
+        except (TypeError, ValueError):
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        if not compare_digest(command.payload_hash, actual_payload_hash):
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         if command.command_name == JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value:
             return self._handle_create_standard_backup_job(command, identity)
         if command.command_name == RunCommandName.START_RUN.value:
