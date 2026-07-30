@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from mediasync_home.application.command_payloads import canonical_command_payload_hash
+from mediasync_home.application.job_creation import JobCreationCommandName
+from mediasync_home.application.job_drafts import StandardBackupJobDraft
 from mediasync_home.ipc.protocol import IpcResponse
 
 
@@ -87,6 +90,17 @@ class StatusIpcClient(Protocol):
         target_endpoint_id: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
+    ) -> IpcResponse:
+        pass
+
+    def submit_command(
+        self,
+        command_name: str,
+        *,
+        request_id: str | None = None,
+        idempotency_key: str | None = None,
+        payload: dict[str, object] | None = None,
+        payload_hash: str | None = None,
     ) -> IpcResponse:
         pass
 
@@ -213,3 +227,49 @@ class EngineClient:
             limit=limit,
             offset=offset,
         )
+
+    def create_standard_backup_job(
+        self,
+        *,
+        draft: StandardBackupJobDraft,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        payload = _create_standard_backup_job_payload(draft)
+        return self._ipc_client.submit_command(
+            JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+            payload=payload,
+            payload_hash=canonical_command_payload_hash(payload),
+        )
+
+
+def _create_standard_backup_job_payload(
+    draft: StandardBackupJobDraft,
+) -> dict[str, object]:
+    return {
+        "draft_id": draft.draft_id,
+        "draft": {
+            "draft_id": draft.draft_id,
+            "schema_version": draft.schema_version,
+            "source_name": draft.source_name,
+            "source_path_label": draft.source_path_label,
+            "targets": [
+                {
+                    "name": target.name,
+                    "path_label": target.path_label,
+                    "independent_device_id": target.independent_device_id,
+                }
+                for target in draft.targets
+            ],
+            "defaults": {
+                "behavior": draft.defaults.behavior.value,
+                "file_selection": draft.defaults.file_selection.value,
+                "verification": draft.defaults.verification.value,
+                "retention": draft.defaults.retention.value,
+                "extra_files": draft.defaults.extra_files.value,
+                "performance": draft.defaults.performance.value,
+            },
+        },
+    }

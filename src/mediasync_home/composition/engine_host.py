@@ -70,6 +70,7 @@ from mediasync_home.adapters.sqlite.state_backup import (
     restore_sqlite_state_backup_set,
 )
 from mediasync_home.adapters.sqlite.trigger_occurrences import SqliteTriggerOccurrenceStore
+from mediasync_home.adapters.sqlite.transactions import SqliteImmediateTransactionRunner
 from mediasync_home.application.run_executor import (
     HeldRunTargetLeaseRegistry,
     MAX_RUN_EXECUTOR_PUMP_STEPS,
@@ -86,6 +87,7 @@ from mediasync_home.application.run_executor_cycle import (
     execute_bounded_run_executor_cycle,
 )
 from mediasync_home.application.host_locator import LocalEngineHostPublication
+from mediasync_home.application.job_creation import StandardBackupJobIds
 from mediasync_home.application.run_operation_planning import (
     RunTargetOperationPlanningOutcome,
     plan_run_target_recovery_operations,
@@ -114,7 +116,11 @@ from mediasync_home.application.recovery_reconciliation import (
 )
 from mediasync_home.application.recovery_resume import RecoveryResumeStartupReport
 from mediasync_home.application.runs import EndpointLeaseAuthority, RunIds, RunTargetCompletionOutcome
-from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
+from mediasync_home.application.runtime_status import (
+    RuntimeStatus,
+    local_writable_status,
+    startup_status,
+)
 from mediasync_home.application.state_maintenance import RestoreStateFromBackupSetCommand
 from mediasync_home.application.startup_reconciliation import (
     EngineHostStartupReconciliationReport,
@@ -159,6 +165,16 @@ class UuidRunIdFactory:
     def new_run_ids(self) -> RunIds:
         token = uuid4().hex
         return RunIds(run_id=f"run-{token}", logical_run_group_id=f"run-group-{token}")
+
+
+class UuidStandardBackupJobIdFactory:
+    def new_standard_backup_job_ids(self) -> StandardBackupJobIds:
+        token = uuid4().hex
+        return StandardBackupJobIds(
+            job_id=f"job-{token}",
+            job_revision_id=f"job-revision-{token}",
+            filter_set_id=f"filter-set-{token}",
+        )
 
 
 class RetainedRunTargetPermitValidator:
@@ -869,6 +885,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="staging transfer backend used by the run executor",
     )
     parser.add_argument("--state-root", type=Path, help="optional local preview state root")
+    parser.add_argument(
+        "--enable-local-mutations",
+        action="store_true",
+        help="enable same-user mutations against the explicit local state root",
+    )
     parser.add_argument("--host-mutex-name", help="optional local Engine Host singleton mutex")
     parser.add_argument(
         "--publish-host-locator",
@@ -950,6 +971,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.enable_local_mutations and args.state_root is None:
+        raise RuntimeError("LOCAL_MUTATIONS_REQUIRE_STATE_ROOT")
     if args.reconcile_task_scheduler_resources and not args.pipe_name:
         raise RuntimeError("TASK_SCHEDULER_RECONCILIATION_REQUIRES_PIPE_MODE")
     if args.task_scheduler_reconciliation_interval_ms is not None and not args.pipe_name:
@@ -989,9 +1012,11 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
     from mediasync_home.ipc.win32_named_pipe import current_user_policy
 
     output = _thread_safe_emit(emit or print)
-    service_status = startup_status(
-        ProcessRole.ENGINE_HOST,
-        runtime_policy=current_process_runtime_policy(ROOT),
+    runtime_policy = current_process_runtime_policy(ROOT)
+    service_status = (
+        local_writable_status(ProcessRole.ENGINE_HOST, runtime_policy=runtime_policy)
+        if args.enable_local_mutations
+        else startup_status(ProcessRole.ENGINE_HOST, runtime_policy=runtime_policy)
     )
     authorization = current_user_policy()
     host_mutex = _acquire_host_mutex(args.host_mutex_name, output=output, pipe_name=args.pipe_name)
@@ -1289,6 +1314,7 @@ def build_engine_host_runtime(
             standard_backup_job_catalog=standard_backup_jobs,
             standard_backup_job_read_store=standard_backup_jobs,
             standard_backup_job_detail_store=standard_backup_jobs,
+            standard_backup_job_id_factory=UuidStandardBackupJobIdFactory(),
             snapshot_entry_read_store=snapshots,
             snapshot_coverage_read_store=snapshots,
             snapshot_issue_read_store=snapshots,
@@ -1303,6 +1329,7 @@ def build_engine_host_runtime(
             external_resource_state_store=external_resource_state,
             cataloged_file_read_store=catalog_handoffs,
             command_receipt_store=command_receipts,
+            command_effect_transaction=SqliteImmediateTransactionRunner(catalog_connection),
             outbox_store=outbox,
         )
     except Exception:

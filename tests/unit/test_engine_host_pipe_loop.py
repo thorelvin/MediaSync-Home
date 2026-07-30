@@ -26,7 +26,9 @@ from mediasync_home.adapters.sqlite.state_backup import (
     create_sqlite_state_backup_set,
 )
 from mediasync_home.application.external_resources import ExternalResourceState, ExternalResourceType
+from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.host_locator import build_local_engine_host_publication
+from mediasync_home.application.job_creation import JobCreationCommandName
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
 from mediasync_home.application.run_executor import RunExecutorPumpStopReason
 from mediasync_home.application.run_executor_cycle import (
@@ -34,7 +36,7 @@ from mediasync_home.application.run_executor_cycle import (
     RunExecutorCycleOutcome,
     RunExecutorCyclePumpOutcome,
 )
-from mediasync_home.application.runtime_status import startup_status
+from mediasync_home.application.runtime_status import local_writable_status, startup_status
 from mediasync_home.application.state_maintenance import StateMaintenanceCommandName
 from mediasync_home.application.schedules import ScheduleDefinition
 from mediasync_home.application.task_scheduler import (
@@ -149,6 +151,32 @@ def test_engine_host_parser_accepts_explicit_long_running_pipe_mode() -> None:
     assert args.run_executor_cycle_interval_ms == 50
     assert args.run_executor_cycle_max_interval_ms == 400
     assert args.run_executor_staging_backend == "robocopy"
+
+
+def test_engine_host_parser_accepts_explicit_local_writable_mode() -> None:
+    args = build_parser().parse_args(
+        [
+            "--pipe-name",
+            "pipe-a",
+            "--state-root",
+            "C:/MediaSyncState",
+            "--enable-local-mutations",
+        ]
+    )
+
+    assert args.enable_local_mutations is True
+    assert args.state_root == Path("C:/MediaSyncState")
+
+
+def test_engine_host_rejects_local_writable_mode_without_state_root() -> None:
+    with pytest.raises(RuntimeError, match="LOCAL_MUTATIONS_REQUIRE_STATE_ROOT"):
+        run_engine_host(
+            [
+                "--pipe-name",
+                "pipe-a",
+                "--enable-local-mutations",
+            ]
+        )
 
 
 def test_executor_maintenance_loop_runs_interval_cycle_and_closes_runtime() -> None:
@@ -811,6 +839,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.service.schedule_store is not None
         assert runtime.service.trigger_occurrence_store is not None
         assert runtime.service.external_resource_state_store is not None
+        assert runtime.service.command_effect_transaction is not None
         assert runtime.reconciler_instance_id == "host-new"
         assert runtime.run_executor_lease_authority is not None
         assert runtime.run_executor_catalog_handoff_store is not None
@@ -918,6 +947,55 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
             "REJECTED",
             IpcReason.MUTATING_COMMANDS_DISABLED.value,
         )
+    finally:
+        runtime.close()
+
+
+def test_local_writable_runtime_creates_job_from_inline_gui_draft(tmp_path: Path) -> None:
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=local_writable_status(ProcessRole.ENGINE_HOST),
+        state_root=tmp_path / "state",
+    )
+    payload: dict[str, object] = {
+        "draft_id": "draft-a",
+        "draft": {
+            "draft_id": "draft-a",
+            "schema_version": 1,
+            "source_name": "Pictures",
+            "source_path_label": "C:/Users/Ada/Pictures",
+            "targets": [
+                {
+                    "name": "USB 1",
+                    "path_label": "E:/Backup",
+                    "independent_device_id": None,
+                }
+            ],
+        },
+    }
+
+    try:
+        ipc_client = InProcessIpcClient(
+            service=runtime.service,
+            identity=_identity(),
+            role=ProcessRole.GUI,
+            client_instance_id="55555555-5555-4555-8555-555555555555",
+        )
+        assert ipc_client.connect().status is IpcStatus.ACCEPTED
+
+        response = ipc_client.submit_command(
+            JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+            request_id="44444444-4444-4444-8444-444444444444",
+            idempotency_key="66666666-6666-4666-8666-666666666666",
+            payload=payload,
+            payload_hash=canonical_command_payload_hash(payload),
+        )
+        overview = ipc_client.query_backup_overview(draft_id="draft-a")
+
+        assert response.status is IpcStatus.ACCEPTED
+        assert response.payload["created"] is True
+        assert overview.payload["backup_overview"]["draft"]["source_name"] == "Pictures"
+        assert overview.payload["backup_overview"]["jobs"][0]["source_name"] == "Pictures"
     finally:
         runtime.close()
 

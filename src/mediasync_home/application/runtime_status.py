@@ -43,3 +43,20 @@ def startup_status(
         scope="0B_NON_MUTATING_LOCAL_PREVIEW",
         runtime_policy=runtime_policy or RuntimePolicyStatus.not_evaluated(),
     )
+
+
+def local_writable_status(
+    role: ProcessRole,
+    *,
+    runtime_policy: RuntimePolicyStatus | None = None,
+) -> RuntimeStatus:
+    return RuntimeStatus(
+        application="MediaSync Home",
+        role=role,
+        ready=True,
+        mutations_enabled=True,
+        protocol_version=1,
+        schema_version=1,
+        scope="0B_LOCAL_MUTATION_PREVIEW",
+        runtime_policy=runtime_policy or RuntimePolicyStatus.not_evaluated(),
+    )

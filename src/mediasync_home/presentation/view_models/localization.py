@@ -253,6 +253,10 @@ _EN_TO_NB.update(
         ),
         "Local preview settings will appear here.": "Lokale forhåndsvisningsinnstillinger vises her.",
         "Blocking issue": "Blokkerende problem",
+        "Backup job was created and saved.": "Backupjobben ble opprettet og lagret.",
+        "Connected Engine Host does not support backup creation.": (
+            "Tilkoblet Engine Host stÃ¸tter ikke oppretting av backup."
+        ),
         "Coverage warning": "Dekningsadvarsel",
         "No cataloged files.": "Ingen katalogf\u00f8rte filer.",
         "No cataloged files to show.": "Ingen katalogf\u00f8rte filer \u00e5 vise.",

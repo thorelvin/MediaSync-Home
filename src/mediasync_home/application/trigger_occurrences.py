@@ -8,6 +8,8 @@ from enum import Enum
 from typing import Any, Protocol
 from uuid import UUID
 
+from mediasync_home.application.command_payloads import canonical_command_payload_hash
+
 
 HEX_256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -163,8 +165,7 @@ def build_enqueue_trigger_occurrence_payload(
 
 
 def payload_hash(payload: dict[str, object]) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return canonical_command_payload_hash(payload)
 
 
 def build_trigger_occurrence(

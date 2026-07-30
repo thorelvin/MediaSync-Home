@@ -19,6 +19,7 @@ APPROVED_LICENSES = {
     "BSD 2-Clause License",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "CC0-1.0 OR Apache-2.0",
     "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only",
     "MIT",
     "MPL-2.0",
@@ -26,6 +27,7 @@ APPROVED_LICENSES = {
 }
 NOTICE_REQUIRED_LICENSES = {
     "Apache-2.0 OR BSD-2-Clause",
+    "CC0-1.0 OR Apache-2.0",
     "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only",
     "MPL-2.0",
     "PSF-2.0",

@@ -17,6 +17,14 @@
       "version": "26.1.0"
     },
     {
+      "canonical_name": "blake3",
+      "license": "CC0-1.0 OR Apache-2.0",
+      "name": "blake3",
+      "notice_required": true,
+      "root_requirement": true,
+      "version": "1.0.9"
+    },
+    {
       "canonical_name": "click",
       "license": "BSD-3-Clause",
       "name": "click",
@@ -259,6 +267,7 @@
   ],
   "missing_roots": [],
   "notice_required": [
+    "blake3",
     "packaging",
     "pathspec",
     "pyside6",
@@ -284,6 +293,11 @@
       "name": "import-linter",
       "source": "requirements-dev.txt",
       "version": "2.13"
+    },
+    {
+      "name": "blake3",
+      "source": "requirements-dev.txt",
+      "version": "1.0.9"
     },
     {
       "name": "mypy",

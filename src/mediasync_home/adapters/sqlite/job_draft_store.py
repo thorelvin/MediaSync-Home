@@ -27,36 +27,43 @@ class SqliteJobDraftStore(JobDraftStore):
         self._connection = connection
 
     def save_standard_backup_draft(self, draft: StandardBackupJobDraft) -> None:
-        self._connection.execute(
-            """
-            INSERT INTO standard_backup_job_drafts (
-                draft_id,
-                schema_version,
-                source_name,
-                source_path_label,
-                defaults_json,
-                targets_json,
-                updated_utc
+        outer_transaction = self._connection.in_transaction
+        try:
+            self._connection.execute(
+                """
+                INSERT INTO standard_backup_job_drafts (
+                    draft_id,
+                    schema_version,
+                    source_name,
+                    source_path_label,
+                    defaults_json,
+                    targets_json,
+                    updated_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                ON CONFLICT(draft_id) DO UPDATE SET
+                    schema_version = excluded.schema_version,
+                    source_name = excluded.source_name,
+                    source_path_label = excluded.source_path_label,
+                    defaults_json = excluded.defaults_json,
+                    targets_json = excluded.targets_json,
+                    updated_utc = excluded.updated_utc
+                """,
+                (
+                    draft.draft_id,
+                    draft.schema_version,
+                    draft.source_name,
+                    draft.source_path_label,
+                    _serialize_defaults(draft.defaults),
+                    _serialize_targets(draft.targets),
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-            ON CONFLICT(draft_id) DO UPDATE SET
-                schema_version = excluded.schema_version,
-                source_name = excluded.source_name,
-                source_path_label = excluded.source_path_label,
-                defaults_json = excluded.defaults_json,
-                targets_json = excluded.targets_json,
-                updated_utc = excluded.updated_utc
-            """,
-            (
-                draft.draft_id,
-                draft.schema_version,
-                draft.source_name,
-                draft.source_path_label,
-                _serialize_defaults(draft.defaults),
-                _serialize_targets(draft.targets),
-            ),
-        )
-        self._connection.commit()
+            if not outer_transaction:
+                self._connection.commit()
+        except sqlite3.Error as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise SqliteJobDraftStoreError("DRAFT_PERSISTENCE_FAILED") from exc
 
     def load_standard_backup_draft(self, draft_id: str) -> StandardBackupJobDraft | None:
         row = self._connection.execute(

@@ -49,6 +49,7 @@ def test_local_preview_host_run_uses_long_running_published_descriptor(tmp_path:
         "--publish-host-locator",
         "--state-root",
         str(state_root.resolve()),
+        "--enable-local-mutations",
         "--run-executor-cycle-after-request",
     )
 
@@ -76,6 +77,7 @@ def test_local_preview_host_run_can_enable_task_scheduler_startup_pump(
         "--serve-forever",
         "--state-root",
         str(state_root.resolve()),
+        "--enable-local-mutations",
         "--run-executor-cycle-after-request",
         "--run-executor-cycle-interval-ms",
         "250",

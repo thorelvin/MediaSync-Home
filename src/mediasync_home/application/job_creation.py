@@ -5,10 +5,17 @@ from enum import Enum
 from typing import Any, Protocol
 
 from mediasync_home.application.job_drafts import (
+    BackupBehavior,
+    DraftValidationError,
     DraftTarget,
+    ExtraFilesPreset,
+    FileSelectionPreset,
     JobDraftStore,
+    PerformancePreset,
+    RetentionPreset,
     StandardBackupDefaults,
     StandardBackupJobDraft,
+    VerificationPreset,
     draft_path_labels_overlap,
 )
 
@@ -29,6 +36,7 @@ class CreateStandardBackupJobCommand:
     request_id: str
     idempotency_key: str
     draft_id: str
+    inline_draft: StandardBackupJobDraft | None = None
 
 
 @dataclass(frozen=True)
@@ -111,11 +119,92 @@ def parse_create_standard_backup_job_command(
     draft_id = payload.get("draft_id")
     if not isinstance(draft_id, str) or not draft_id.strip():
         raise JobCreationPayloadError("CREATE_STANDARD_BACKUP_JOB_REQUIRES_DRAFT_ID")
+    inline_draft = _parse_inline_standard_backup_draft(payload.get("draft"), draft_id=draft_id)
     return CreateStandardBackupJobCommand(
         request_id=request_id,
         idempotency_key=idempotency_key,
         draft_id=draft_id,
+        inline_draft=inline_draft,
     )
+
+
+def _parse_inline_standard_backup_draft(
+    payload: object,
+    *,
+    draft_id: str,
+) -> StandardBackupJobDraft | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise JobCreationPayloadError("CREATE_STANDARD_BACKUP_JOB_DRAFT_INVALID")
+    if payload.get("draft_id") != draft_id:
+        raise JobCreationPayloadError("CREATE_STANDARD_BACKUP_JOB_DRAFT_ID_MISMATCH")
+    if payload.get("schema_version", 1) != 1:
+        raise JobCreationPayloadError("CREATE_STANDARD_BACKUP_JOB_DRAFT_SCHEMA_UNSUPPORTED")
+
+    source_name = _required_payload_text(payload.get("source_name"), "SOURCE_REQUIRED")
+    source_path_label = _required_payload_text(
+        payload.get("source_path_label"),
+        "SOURCE_LABEL_REQUIRED",
+    )
+    targets = payload.get("targets")
+    if not isinstance(targets, list):
+        raise JobCreationPayloadError("CREATE_STANDARD_BACKUP_JOB_TARGETS_INVALID")
+
+    try:
+        draft = StandardBackupJobDraft(
+            draft_id=draft_id,
+            source_name=source_name,
+            source_path_label=source_path_label,
+            defaults=_parse_inline_defaults(payload.get("defaults")),
+        )
+        for target_payload in targets:
+            if not isinstance(target_payload, dict):
+                raise JobCreationPayloadError("CREATE_STANDARD_BACKUP_JOB_TARGET_INVALID")
+            independent_device_id = target_payload.get("independent_device_id")
+            if independent_device_id is not None:
+                independent_device_id = _required_payload_text(
+                    independent_device_id,
+                    "TARGET_DEVICE_ID_INVALID",
+                )
+            draft = draft.with_added_target(
+                name=_required_payload_text(
+                    target_payload.get("name"),
+                    "TARGET_NAME_REQUIRED",
+                ),
+                path_label=_required_payload_text(
+                    target_payload.get("path_label"),
+                    "TARGET_LABEL_REQUIRED",
+                ),
+                independent_device_id=independent_device_id,
+            )
+    except DraftValidationError as exc:
+        raise JobCreationPayloadError(str(exc)) from exc
+    return draft
+
+
+def _parse_inline_defaults(payload: object) -> StandardBackupDefaults:
+    if payload is None:
+        return StandardBackupDefaults()
+    if not isinstance(payload, dict):
+        raise JobCreationPayloadError("CREATE_STANDARD_BACKUP_JOB_DEFAULTS_INVALID")
+    try:
+        return StandardBackupDefaults(
+            behavior=BackupBehavior(str(payload["behavior"])),
+            file_selection=FileSelectionPreset(str(payload["file_selection"])),
+            verification=VerificationPreset(str(payload["verification"])),
+            retention=RetentionPreset(str(payload["retention"])),
+            extra_files=ExtraFilesPreset(str(payload["extra_files"])),
+            performance=PerformancePreset(str(payload["performance"])),
+        )
+    except (KeyError, ValueError) as exc:
+        raise JobCreationPayloadError("CREATE_STANDARD_BACKUP_JOB_DEFAULTS_INVALID") from exc
+
+
+def _required_payload_text(value: object, reason: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise JobCreationPayloadError(reason)
+    return value.strip()
 
 
 def evaluate_standard_backup_job_creation(

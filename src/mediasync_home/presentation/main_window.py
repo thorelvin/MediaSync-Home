@@ -4,6 +4,7 @@ import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Protocol, cast
+from uuid import uuid4
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
@@ -27,6 +28,10 @@ from PySide6.QtWidgets import (
 )
 
 from mediasync_home.presentation.theme.icon_registry import IconRegistry
+from mediasync_home.application.job_drafts import (
+    DraftTarget,
+    StandardBackupJobDraft,
+)
 from mediasync_home.presentation.view_models.backup_setup import (
     BackupOverviewViewState,
     BackupSetupDraft,
@@ -75,7 +80,7 @@ from mediasync_home.presentation.view_models.snapshot_health import (
     empty_snapshot_health_preview_state,
     snapshot_health_preview_from_responses,
 )
-from mediasync_home.ipc.protocol import IpcResponse
+from mediasync_home.ipc.protocol import IpcResponse, IpcStatus
 
 
 SNAPSHOT_HEALTH_COVERAGE_STATES = (
@@ -163,6 +168,16 @@ class CatalogedFilesProvider(Protocol):
     ) -> IpcResponse: ...
 
 
+class BackupJobCreationProvider(Protocol):
+    def create_standard_backup_job(
+        self,
+        *,
+        draft: StandardBackupJobDraft,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse: ...
+
+
 class MediaSyncWindow(QMainWindow):
     def __init__(
         self,
@@ -176,6 +191,9 @@ class MediaSyncWindow(QMainWindow):
         self._icons = IconRegistry()
         self._connected = False
         self._setup_draft = BackupSetupDraft.empty()
+        self._setup_draft_id: str | None = None
+        self._setup_request_id: str | None = None
+        self._setup_idempotency_key: str | None = None
         self._setup_state = build_standard_backup_setup_state(self._setup_draft)
         self._job_status_state = empty_backup_job_status_state()
         self._job_detail_state = empty_backup_job_detail_state()
@@ -527,15 +545,79 @@ class MediaSyncWindow(QMainWindow):
                         "Local preview draft is ready. Connect an Engine Host before creating durable backup changes."
                     )
                 )
-            else:
+            elif not hasattr(self._engine_client, "create_standard_backup_job"):
                 self.apply_engine_status(
                     replace(
                         self._engine_status_state,
-                        detail="Local preview draft is ready. Durable GUI backup creation is not enabled yet.",
+                        detail="Connected Engine Host does not support backup creation.",
                         status_kind="warning",
                     )
                 )
+            else:
+                self._create_standard_backup_job()
+                return
             self._apply_local_preview_job_detail()
+
+    def _create_standard_backup_job(self) -> None:
+        if self._engine_client is None:
+            return
+        source_name = self._setup_draft.source_name
+        source_path_label = self._setup_draft.source_path_label
+        if source_name is None or source_path_label is None:
+            return
+        if not self._connected:
+            handshake = self._engine_client.connect()
+            if handshake.reason is not None:
+                self.apply_engine_status(engine_status_from_response(handshake))
+                return
+            self._connected = True
+
+        self._setup_draft_id = self._setup_draft_id or str(uuid4())
+        self._setup_request_id = self._setup_request_id or str(uuid4())
+        self._setup_idempotency_key = self._setup_idempotency_key or str(uuid4())
+        draft = StandardBackupJobDraft(
+            draft_id=self._setup_draft_id,
+            source_name=source_name,
+            source_path_label=source_path_label,
+            targets=tuple(
+                DraftTarget(
+                    name=target.name,
+                    path_label=target.path_label,
+                    independent_device_id=target.independent_device_id,
+                )
+                for target in self._setup_draft.targets
+            ),
+        )
+        provider = cast(BackupJobCreationProvider, self._engine_client)
+        response = provider.create_standard_backup_job(
+            draft=draft,
+            request_id=self._setup_request_id,
+            idempotency_key=self._setup_idempotency_key,
+        )
+        if response.status is IpcStatus.REJECTED:
+            reason = response.reason.value if response.reason is not None else "UNKNOWN"
+            self.apply_engine_status(
+                replace(
+                    self._engine_status_state,
+                    detail=f"Backup creation failed: {reason}",
+                    status_kind="warning",
+                )
+            )
+            return
+
+        self.apply_engine_status(
+            replace(
+                self._engine_status_state,
+                detail="Backup job was created and saved.",
+                status_kind="ready",
+            )
+        )
+        self._setup_draft = BackupSetupDraft.empty()
+        self._setup_draft_id = None
+        self._setup_request_id = None
+        self._setup_idempotency_key = None
+        self._refresh_backup_overview()
+        self._refresh_activity_overview()
 
     def _choose_directory(self, title: str) -> str | None:
         selected = QFileDialog.getExistingDirectory(self, title)

@@ -490,7 +490,6 @@ def test_sqlite_enabled_ipc_command_rolls_back_effect_when_outbox_enqueue_fails(
         catalog = SqliteStandardBackupJobCatalog(connection)
         outbox = _FailingOutboxStore(connection)
         id_factory = FixedStandardBackupJobIdFactory()
-        drafts.save_standard_backup_draft(_complete_draft())
         service = EngineHostIpcService(
             ClientAuthorizationPolicy(
                 expected_user_sid_hash="same-user",
@@ -526,10 +525,11 @@ def test_sqlite_enabled_ipc_command_rolls_back_effect_when_outbox_enqueue_fails(
                 JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
                 request_id="44444444-4444-4444-8444-444444444444",
                 idempotency_key="66666666-6666-4666-8666-666666666666",
-                payload={"draft_id": "draft-a"},
+                payload=_inline_draft_command_payload(),
                 payload_hash="98cdbb1f712331be51355f90ab8c193c5c6f681d33d5c052cd38fe94820f3d02",
             )
 
+        assert drafts.load_standard_backup_draft("draft-a") is None
         assert receipts.load_command_receipt("66666666-6666-4666-8666-666666666666") is None
         assert catalog.load_standard_backup_job("job-a") is None
         assert _row_count(connection, "standard_backup_job_revision_details") == 0
@@ -626,6 +626,25 @@ def _complete_draft() -> StandardBackupJobDraft:
         .with_source(name="Pictures", path_label="C:/Users/Ada/Pictures")
         .with_added_target(name="USB 1", path_label="E:/Backup", independent_device_id="disk-a")
     )
+
+
+def _inline_draft_command_payload() -> dict[str, object]:
+    return {
+        "draft_id": "draft-a",
+        "draft": {
+            "draft_id": "draft-a",
+            "schema_version": 1,
+            "source_name": "Pictures",
+            "source_path_label": "C:/Users/Ada/Pictures",
+            "targets": [
+                {
+                    "name": "USB 1",
+                    "path_label": "E:/Backup",
+                    "independent_device_id": None,
+                }
+            ],
+        },
+    }
 
 
 def _row_count(connection: sqlite3.Connection, table: str) -> int:

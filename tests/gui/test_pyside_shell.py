@@ -10,6 +10,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QLabel, QListWidget, QPushButton, QStackedWidget, QToolButton, QWidget  # noqa: E402
 
 from mediasync_home.application.runtime_status import startup_status  # noqa: E402
+from mediasync_home.application.job_drafts import StandardBackupJobDraft  # noqa: E402
 from mediasync_home.domain.process_roles import ProcessRole  # noqa: E402
 from mediasync_home.ipc.protocol import IpcResponse  # noqa: E402
 from mediasync_home.presentation.app import build_main_window, ensure_qapplication  # noqa: E402
@@ -255,6 +256,37 @@ def test_setup_primary_button_collects_local_preview_draft(qapp) -> None:
         window.deleteLater()
 
 
+def test_setup_primary_button_persists_reviewed_draft_through_engine(qapp) -> None:
+    provider = _FakeBackupCreationEngineClient()
+    window = build_main_window(
+        initial_state=_ready_state(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        choices = ["C:/Users/Ada/Pictures", "E:/MediaSyncBackup"]
+        window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
+        create_backup = window.findChild(QPushButton, "createBackupButton")
+        engine_detail = window.findChild(QLabel, "engineDetailLabel")
+
+        assert create_backup is not None
+        assert engine_detail is not None
+        for _ in range(4):
+            create_backup.click()
+            qapp.processEvents()
+
+        assert provider.calls == ["connect", "create_standard_backup_job"]
+        assert provider.draft is not None
+        assert provider.draft.source_path_label == "C:/Users/Ada/Pictures"
+        assert provider.draft.targets[0].path_label == "E:/MediaSyncBackup"
+        assert provider.draft.can_create() is True
+        assert engine_detail.text() == "Backupjobben ble opprettet og lagret."
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_main_window_refreshes_through_engine_client(qapp) -> None:
     provider = _FakeEngineClient()
     window = build_main_window(
@@ -441,6 +473,34 @@ class _FakeEngineClient:
         self.calls.append("get_status")
         return IpcResponse.accepted(
             {"host_status": startup_status(ProcessRole.ENGINE_HOST).to_dict()}
+        )
+
+
+class _FakeBackupCreationEngineClient(_FakeEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.draft: StandardBackupJobDraft | None = None
+
+    def create_standard_backup_job(
+        self,
+        *,
+        draft: StandardBackupJobDraft,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        assert request_id
+        assert idempotency_key
+        self.calls.append("create_standard_backup_job")
+        self.draft = draft
+        return IpcResponse.accepted(
+            {
+                "created": True,
+                "job": {
+                    "job_id": "job-a",
+                    "job_revision_id": "job-rev-a",
+                    "filter_set_id": "filter-a",
+                },
+            }
         )
 
 

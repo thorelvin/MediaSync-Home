@@ -896,6 +896,8 @@ class EngineHostIpcService:
 
         receipt = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
         self.command_receipt_store.update_command_receipt(receipt)
+        if command.inline_draft is not None:
+            self.job_draft_store.save_standard_backup_draft(command.inline_draft)
         outcome = create_standard_backup_job_from_draft(
             command=command,
             drafts=self.job_draft_store,

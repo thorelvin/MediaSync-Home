@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import pytest
 
+from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.host_locator import (
     LOCAL_ENGINE_HOST_PUBLICATION_FILENAME,
     build_local_engine_host_publication,
@@ -85,6 +86,109 @@ def test_engine_host_and_gui_roles_complete_non_mutating_status_roundtrip() -> N
         "ENGINE_HOST_PIPE_STOPPED",
     ]
     assert host_events[-1]["served_requests"] == 2
+
+
+def test_gui_creates_durable_backup_job_through_local_writable_pipe(
+    tmp_path: Path,
+) -> None:
+    pipe_name = win32_named_pipe.make_pipe_name(
+        installation_id="role-job-create-test",
+        suffix=uuid4().hex,
+    )
+    state_root = tmp_path / "state"
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_root.mkdir()
+    target_root.mkdir()
+    draft_id = str(uuid4())
+    payload: dict[str, object] = {
+        "draft_id": draft_id,
+        "draft": {
+            "draft_id": draft_id,
+            "schema_version": 1,
+            "source_name": "Source",
+            "source_path_label": str(source_root),
+            "targets": [
+                {
+                    "name": "Target",
+                    "path_label": str(target_root),
+                    "independent_device_id": None,
+                }
+            ],
+        },
+    }
+    host = subprocess.Popen(
+        [
+            sys.executable,
+            "scripts/run_role.py",
+            "--role",
+            "engine-host",
+            "--pipe-name",
+            pipe_name,
+            "--serve-requests",
+            "2",
+            "--state-root",
+            str(state_root),
+            "--enable-local-mutations",
+        ],
+        cwd=Path(__file__).resolve().parents[3],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        gui = subprocess.run(
+            [
+                sys.executable,
+                "scripts/run_role.py",
+                "--role",
+                "gui",
+                "--pipe-name",
+                pipe_name,
+                "--submit-command",
+                "CREATE_STANDARD_BACKUP_JOB",
+                "--request-id",
+                str(uuid4()),
+                "--idempotency-key",
+                str(uuid4()),
+                "--payload-json",
+                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                "--payload-hash",
+                canonical_command_payload_hash(payload),
+            ],
+            cwd=Path(__file__).resolve().parents[3],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        stdout, stderr = host.communicate(timeout=10)
+    finally:
+        if host.poll() is None:
+            host.kill()
+            host.communicate(timeout=5)
+
+    gui_response = json.loads(gui.stdout)
+    host_events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+    with sqlite3.connect(state_root / "catalog.sqlite") as connection:
+        persisted = connection.execute(
+            """
+            SELECT details.source_path_label, details.targets_json, receipts.state
+            FROM standard_backup_job_revision_details AS details
+            INNER JOIN command_receipts AS receipts
+                ON receipts.result_entity_id = details.job_id
+            """
+        ).fetchone()
+
+    assert stderr == ""
+    assert gui_response["status"] == "ACCEPTED"
+    assert gui_response["payload"]["created"] is True
+    assert host_events[0]["host_status"]["mutations_enabled"] is True
+    assert host_events[-1]["served_requests"] == 2
+    assert persisted is not None
+    assert persisted[0] == str(source_root)
+    assert json.loads(persisted[1])[0]["path_label"] == str(target_root)
+    assert persisted[2] == "SUCCEEDED"
 
 
 def test_gui_can_disconnect_and_reconnect_without_stopping_engine_host() -> None:

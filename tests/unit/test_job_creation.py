@@ -81,6 +81,55 @@ def test_parse_create_standard_backup_job_command_requires_draft_id() -> None:
         )
 
 
+def test_parse_create_standard_backup_job_command_accepts_reviewed_inline_draft() -> None:
+    command = parse_create_standard_backup_job_command(
+        request_id="request-a",
+        idempotency_key="idempotency-a",
+        payload={
+            "draft_id": "draft-a",
+            "draft": {
+                "draft_id": "draft-a",
+                "schema_version": 1,
+                "source_name": "Pictures",
+                "source_path_label": "C:/Users/Ada/Pictures",
+                "targets": [
+                    {
+                        "name": "USB 1",
+                        "path_label": "E:/Backup",
+                        "independent_device_id": None,
+                    }
+                ],
+            },
+        },
+    )
+
+    assert command.inline_draft is not None
+    assert command.inline_draft.draft_id == "draft-a"
+    assert command.inline_draft.source_path_label == "C:/Users/Ada/Pictures"
+    assert command.inline_draft.targets[0].path_label == "E:/Backup"
+    assert command.inline_draft.can_create() is True
+
+
+def test_parse_create_standard_backup_job_command_rejects_inline_draft_id_mismatch() -> None:
+    with pytest.raises(
+        JobCreationPayloadError,
+        match="CREATE_STANDARD_BACKUP_JOB_DRAFT_ID_MISMATCH",
+    ):
+        parse_create_standard_backup_job_command(
+            request_id="request-a",
+            idempotency_key="idempotency-a",
+            payload={
+                "draft_id": "draft-a",
+                "draft": {
+                    "draft_id": "draft-b",
+                    "source_name": "Pictures",
+                    "source_path_label": "C:/Users/Ada/Pictures",
+                    "targets": [],
+                },
+            },
+        )
+
+
 def test_job_creation_readiness_reports_missing_draft() -> None:
     command = parse_create_standard_backup_job_command(
         request_id="request-a",
