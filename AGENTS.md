@@ -2,21 +2,23 @@
 
 ## Gjeldende arbeidsordre
 
-Utfør **Milepæl 0B — Repository, kontrakter, arkitekturporter og appramme**.
-Prosjekteieren åpnet 0B 2026-07-17 med eksplisitt redusert scope:
+Utfør **Milepæl 1 — Engine Host, IPC, immutable revisjoner og databaser**.
+Prosjekteieren ba 2026-07-30 eksplisitt om å gå videre og fortsette etter at
+0B-kvalitetsporten var evaluert. De tidligere scope-reduksjonene gjelder fortsatt:
 
 - lokal usignert preview er tillatt; ikke påstå signert release eller clean-VM-smoke;
 - writable targets er lokale i første omgang; ikke påstå writable SMB-sikkerhet;
 - oppstart er same-user/same-session først; ikke påstå full non-interactive Task Scheduler-automatisering.
 
-0B skal etablere repository-/kontraktgrunnlaget og minimal ikke-muterende app-/IPC-ramme.
-Ikke implementer produksjons-sync, produksjons-Robocopy, endelig migrasjon eller muterende
-filsystemflyt utenfor markerte labområder.
+Milepæl 1 skal ferdigstille den autoritative Engine Host-/IPC-/databasetilstanden,
+immutable revisjoner, command dedup, recovery-/outboxgrunnlag og defensive
+state-store-invarianter uten produksjons-sync. Ikke implementer produksjons-Robocopy
+eller muterende filsystemflyt utenfor markerte labområder.
 
 ## Les i denne rekkefølgen
 
 1. `docs/CODEX_START_PROMPT.md`.
-2. `docs/MILESTONES.md`, særlig §20.2.
+2. `docs/MILESTONES.md`, særlig §20.3.
 3. `docs/REPOSITORY_AND_CODE_QUALITY.md`, særlig §10 og §23.
 4. `docs/GOVERNANCE.md`, særlig §0.5.
 5. `docs/ARCHITECTURE.md`, særlig lagdeling, IPC og porter.
@@ -54,7 +56,7 @@ Utviklingsarbeid kan skrive til:
 - Task Scheduler-mappen `\MediaSyncHome-Spike\<run-id>` bare når arbeidspakken uttrykkelig krever det;
 - en dedikert lokal labrot med validert `.mediasync_test_root`-markør.
 
-SMB-lab, produksjons-NAS eller reelle brukerdata er ikke del av gjeldende 0B-scope.
+SMB-lab, produksjons-NAS eller reelle brukerdata er ikke del av gjeldende Milepæl 1-scope.
 Sync-, ownership-, recovery-, replace-, cleanup- og filsystemprober kan bare mutere
 labområder med korrekt markør, matching `run_id` og validert rotidentitet. Bruk aldri
 ekte Bilder-, Dokumenter-, Skrivebord-, diskrot- eller produksjons-NAS-data.
@@ -62,7 +64,7 @@ ekte Bilder-, Dokumenter-, Skrivebord-, diskrot- eller produksjons-NAS-data.
 ## Absolutte sikkerhetsinvarianter
 
 - Ingen `/MIR`, `/PURGE`, `/MOVE`, `/MOV`, `shell=True`, `pickle`, `eval`, `exec` eller dynamisk payloadkode.
-- Ingen endelig produktdatabase, syncmotor, produksjons-Robocopy eller muterende produksjonsflyt i 0B.
+- Ingen syncmotor, produksjons-Robocopy eller muterende produksjonsflyt i Milepæl 1.
 - Ett skrivbart målrotområde har én autorisert writer-installasjon per `ownership_epoch`; writable SMB er utsatt.
 - Ukjent `.mediasync`-innhold ekskluderes, adopteres, repareres eller ryddes aldri stille.
 - To lokale prosesser er ikke bevis for cross-machine SMB-eierskap.
@@ -85,14 +87,14 @@ Stopp hele arbeidspakken når:
 - resultatet ellers måtte fabrikeres eller overdrives;
 - arbeidspakkens kvalitetsport er evaluert.
 
-## Påkrevd leveranse fra 0B
+## Påkrevd leveranse fra Milepæl 1
 
-Oppdater minst de filene som faktisk endres av 0B-slicen. Første 0B-slice skal prioritere:
+Oppdater minst filene som faktisk endres av Milepæl 1-slicen. Prioriter:
 
-- oppdatert `AGENTS.md` og operativ prompt for 0B;
-- kontraktsvalidering for `schema/contracts-manifest.yaml`, JSON Schema-eksempler,
-  reason codes og state machines;
-- tester som beviser at ukjent/ulovlig kontraktsdrift feiler;
+- Engine Host-singleton, readiness og faste IPC-ressursgrenser;
+- global command-idempotens og monotone receipts med crash-/restartbevis;
+- faktiske catalog-/recoverymigrasjoner, immutable revisjoner og parent-scoped FKs;
+- defensive SQLite-policyer, state-backup/recovery og `SQLITE_FULL`-stopp;
 - status-/traceabilityoppdatering når konkret bevis foreligger.
 
 Ingen kontrakt skal settes til `frozen` før ADR-026 og alle styrende ADR-er er
@@ -100,7 +102,7 @@ eiergodkjent og valideringstestene dekker drift.
 
 ## Kontroller
 
-Kjør alle kontroller som faktisk finnes. Minimum for denne 0B-slicen:
+Kjør alle kontroller som faktisk finnes. Minimum for Milepæl 1:
 
 ```powershell
 python tools\validate_contracts.py
