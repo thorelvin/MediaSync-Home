@@ -29,7 +29,8 @@ QLabel#productTitle {{
     font-weight: 600;
 }}
 
-QLabel#sectionTitle {{
+QLabel#sectionTitle,
+QLabel#workspaceHeading {{
     font-size: {tokens.font_size_title}px;
     font-weight: 600;
 }}

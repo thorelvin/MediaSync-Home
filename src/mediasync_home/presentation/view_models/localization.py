@@ -235,8 +235,23 @@ _EN_TO_NB.update(
         "Engine status is unavailable.": "Motorstatus er utilgjengelig.",
         "Cataloged files": "Katalogf\u00f8rte filer",
         "Catalog read model is not available.": "Katalogvisningen er ikke tilgjengelig.",
+        "Choose a source folder.": "Velg en kildemappe.",
+        "Choose a target folder.": "Velg en målmappe.",
+        "Choose source folder": "Velg kildemappe",
+        "Choose target folder": "Velg målmappe",
+        "Completed and blocked runs will appear here.": (
+            "Fullførte og blokkerte kjøringer vises her."
+        ),
         "High": "Høy",
         "Latest run": "Siste kjøring",
+        "Local preview draft": "Lokalt forhåndsvisningsutkast",
+        "Local preview draft is ready. Durable GUI backup creation is not enabled yet.": (
+            "Lokalt forhåndsvisningsutkast er klart. Varig backupoppretting fra GUI er ikke aktivert ennå."
+        ),
+        "Local preview draft is ready. Connect an Engine Host before creating durable backup changes.": (
+            "Lokalt forhåndsvisningsutkast er klart. Koble til en Engine Host før varige backupendringer opprettes."
+        ),
+        "Local preview settings will appear here.": "Lokale forhåndsvisningsinnstillinger vises her.",
         "Blocking issue": "Blokkerende problem",
         "Coverage warning": "Dekningsadvarsel",
         "No cataloged files.": "Ingen katalogf\u00f8rte filer.",
@@ -259,6 +274,11 @@ _EN_TO_NB.update(
         "Plan read model is not available.": "Planvisningen er ikke tilgjengelig.",
         "Rejected": "Avvist",
         "Review": "Til vurdering",
+        "Review safe defaults.": "Kontroller trygge standardvalg.",
+        "Saved backup jobs will appear here.": "Lagrede backupjobber vises her.",
+        "Start a local Engine Host to refresh live status.": (
+            "Start en lokal Engine Host for å oppdatere live-status."
+        ),
     }
 )
 

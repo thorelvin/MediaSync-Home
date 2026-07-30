@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
+from pathlib import Path
 from typing import Protocol, cast
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -17,6 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSpacerItem,
+    QStackedWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -26,7 +30,9 @@ from mediasync_home.presentation.theme.icon_registry import IconRegistry
 from mediasync_home.presentation.view_models.backup_setup import (
     BackupOverviewViewState,
     BackupSetupDraft,
+    BackupSetupStep,
     BackupSetupStepViewState,
+    BackupTargetDraft,
     BackupJobDetailViewState,
     BackupJobStatusViewState,
     StandardBackupSetupViewState,
@@ -169,7 +175,8 @@ class MediaSyncWindow(QMainWindow):
         self._engine_client = engine_client
         self._icons = IconRegistry()
         self._connected = False
-        self._setup_state = build_standard_backup_setup_state(BackupSetupDraft.empty())
+        self._setup_draft = BackupSetupDraft.empty()
+        self._setup_state = build_standard_backup_setup_state(self._setup_draft)
         self._job_status_state = empty_backup_job_status_state()
         self._job_detail_state = empty_backup_job_detail_state()
         self._plan_preview_state = empty_plan_operation_preview_state()
@@ -178,8 +185,11 @@ class MediaSyncWindow(QMainWindow):
         self._cataloged_files_preview_state = empty_cataloged_files_preview_state()
         self._engine_status_state = initial_state
         self._subtitle_label: QLabel | None = None
+        self._navigation: QListWidget | None = None
         self._navigation_items: list[QListWidgetItem] = []
+        self._selected_navigation_index = 0
         self._workspace_heading: QLabel | None = None
+        self._workspace_stack: QStackedWidget | None = None
         self._setup_title_label: QLabel | None = None
         self._setup_subtitle_label: QLabel | None = None
         self._setup_source_label: QLabel | None = None
@@ -264,7 +274,6 @@ class MediaSyncWindow(QMainWindow):
         self._refresh_button.setIcon(self._icons.icon("refresh"))
         self._refresh_button.setIconSize(QSize(18, 18))
         self._refresh_button.setToolTip(self._texts().refresh_engine_status)
-        self._refresh_button.setEnabled(engine_client is not None)
         self._refresh_button.clicked.connect(self.refresh_engine_status)
 
         self._language_button = QToolButton()
@@ -287,6 +296,11 @@ class MediaSyncWindow(QMainWindow):
 
     def refresh_engine_status(self) -> None:
         if self._engine_client is None:
+            self.apply_engine_status(
+                EngineStatusViewState.disconnected(
+                    "Start a local Engine Host to refresh live status."
+                )
+            )
             return
         if not self._connected:
             handshake = self._engine_client.connect()
@@ -450,7 +464,111 @@ class MediaSyncWindow(QMainWindow):
             self._setup_retention_value.setText(self._display(state.defaults.retention_label))
         if self._setup_primary_button is not None:
             self._setup_primary_button.setText(self._display(state.primary_action_label))
-            self._setup_primary_button.setEnabled(state.can_create)
+            self._setup_primary_button.setEnabled(self._setup_primary_enabled(state))
+            self._setup_primary_button.setToolTip(self._setup_primary_tooltip(state))
+
+    def _setup_primary_enabled(self, state: StandardBackupSetupViewState) -> bool:
+        if state.current_step is BackupSetupStep.REVIEW:
+            return state.can_create
+        return True
+
+    def _setup_primary_tooltip(self, state: StandardBackupSetupViewState) -> str:
+        if state.current_step is BackupSetupStep.SOURCE:
+            return self._display("Choose a source folder.")
+        if state.current_step is BackupSetupStep.TARGETS:
+            return self._display("Choose a target folder.")
+        if state.current_step is BackupSetupStep.DEFAULTS:
+            return self._display("Review safe defaults.")
+        return self._texts().create_backup_tooltip
+
+    def _handle_setup_primary_action(self) -> None:
+        step = self._setup_state.current_step
+        if step is BackupSetupStep.SOURCE:
+            selected = self._choose_directory(self._display("Choose source folder"))
+            if selected is None:
+                return
+            self._setup_draft = BackupSetupDraft(
+                source_name=_display_name_for_path(selected),
+                source_path_label=selected,
+                targets=self._setup_draft.targets,
+            )
+            self._apply_local_setup_draft(BackupSetupStep.TARGETS)
+            self._apply_local_preview_job_detail()
+            return
+        if step is BackupSetupStep.TARGETS:
+            selected = self._choose_directory(self._display("Choose target folder"))
+            if selected is None:
+                return
+            targets = self._setup_draft.targets
+            if len(targets) < 3:
+                targets = (
+                    *targets,
+                    BackupTargetDraft(
+                        name=_display_name_for_path(selected),
+                        path_label=selected,
+                    ),
+                )
+            self._setup_draft = BackupSetupDraft(
+                source_name=self._setup_draft.source_name,
+                source_path_label=self._setup_draft.source_path_label,
+                targets=targets,
+            )
+            self._apply_local_setup_draft(BackupSetupStep.DEFAULTS)
+            self._apply_local_preview_job_detail()
+            return
+        if step is BackupSetupStep.DEFAULTS:
+            self._apply_local_setup_draft(BackupSetupStep.REVIEW)
+            self._apply_local_preview_job_detail()
+            return
+        if self._setup_state.can_create:
+            if self._engine_client is None:
+                self.apply_engine_status(
+                    EngineStatusViewState.disconnected(
+                        "Local preview draft is ready. Connect an Engine Host before creating durable backup changes."
+                    )
+                )
+            else:
+                self.apply_engine_status(
+                    replace(
+                        self._engine_status_state,
+                        detail="Local preview draft is ready. Durable GUI backup creation is not enabled yet.",
+                        status_kind="warning",
+                    )
+                )
+            self._apply_local_preview_job_detail()
+
+    def _choose_directory(self, title: str) -> str | None:
+        selected = QFileDialog.getExistingDirectory(self, title)
+        return selected or None
+
+    def _apply_local_setup_draft(self, step: BackupSetupStep) -> None:
+        self._setup_state = build_standard_backup_setup_state(
+            self._setup_draft,
+            current_step=step,
+        )
+        self._apply_backup_setup_state(self._setup_state)
+
+    def _apply_local_preview_job_detail(self) -> None:
+        if self._setup_draft.source_path_label is None:
+            self.apply_backup_job_detail(empty_backup_job_detail_state())
+            return
+        target_count = len(self._setup_draft.targets)
+        target_word = "target" if target_count == 1 else "targets"
+        self.apply_backup_job_detail(
+            BackupJobDetailViewState(
+                job_id=None,
+                title=self._setup_draft.source_name or "Local preview draft",
+                source_label=self._setup_draft.source_path_label,
+                revision_label="Local preview draft",
+                target_summary_label=f"{target_count} {target_word}",
+                defaults_summary_label="Update backup - All user files - Standard verification",
+                target_lines=tuple(
+                    f"{target.name}: {target.path_label}" for target in self._setup_draft.targets
+                ),
+                read_model_available=False,
+                found=False,
+            )
+        )
 
     def _apply_backup_job_detail_state(self, state: BackupJobDetailViewState) -> None:
         if self._job_detail_title is not None:
@@ -615,6 +733,8 @@ class MediaSyncWindow(QMainWindow):
             nav.addItem(item)
             self._navigation_items.append(item)
         nav.setCurrentRow(0)
+        nav.currentRowChanged.connect(self._select_navigation_row)
+        self._navigation = nav
         return nav
 
     def _build_workspace(self) -> QFrame:
@@ -625,13 +745,67 @@ class MediaSyncWindow(QMainWindow):
         layout.setSpacing(16)
 
         heading = QLabel(self._texts().dashboard)
-        heading.setObjectName("sectionTitle")
+        heading.setObjectName("workspaceHeading")
         self._workspace_heading = heading
         layout.addWidget(heading)
+
+        stack = QStackedWidget()
+        stack.setObjectName("workspaceStack")
+        stack.addWidget(self._build_dashboard_page())
+        stack.addWidget(self._build_placeholder_page("Jobs", "Saved backup jobs will appear here."))
+        stack.addWidget(self._build_placeholder_page("History", "Completed and blocked runs will appear here."))
+        stack.addWidget(
+            self._build_placeholder_page("Settings", "Local preview settings will appear here.")
+        )
+        self._workspace_stack = stack
+        layout.addWidget(stack, 1)
+        layout.addStretch(1)
+        return workspace
+
+    def _select_navigation_row(self, row: int) -> None:
+        if row < 0:
+            return
+        self._selected_navigation_index = min(row, 3)
+        if self._workspace_stack is not None:
+            self._workspace_stack.setCurrentIndex(self._selected_navigation_index)
+        if self._workspace_heading is not None:
+            self._workspace_heading.setText(self._current_navigation_label())
+
+    def _current_navigation_label(self) -> str:
+        labels = (
+            self._texts().dashboard,
+            self._texts().jobs,
+            self._texts().history,
+            self._texts().settings,
+        )
+        return labels[self._selected_navigation_index]
+
+    def _build_dashboard_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("dashboardPage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
         layout.addWidget(self._build_backup_setup_panel(self._setup_state))
         layout.addWidget(self._build_dashboard_detail_row())
         layout.addStretch(1)
-        return workspace
+        return page
+
+    def _build_placeholder_page(self, title: str, detail: str) -> QFrame:
+        page = QFrame()
+        page.setObjectName(f"{title.lower()}Page")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(8)
+        title_label = QLabel(self._display(title))
+        title_label.setObjectName("sectionTitle")
+        detail_label = QLabel(self._display(detail))
+        detail_label.setObjectName("mutedLabel")
+        detail_label.setWordWrap(True)
+        layout.addWidget(title_label)
+        layout.addWidget(detail_label)
+        layout.addStretch(1)
+        return page
 
     def _build_dashboard_detail_row(self) -> QWidget:
         row = QWidget()
@@ -704,8 +878,9 @@ class MediaSyncWindow(QMainWindow):
 
         primary = QPushButton(self._display(state.primary_action_label))
         primary.setObjectName("createBackupButton")
-        primary.setEnabled(state.can_create)
-        primary.setToolTip(texts.create_backup_tooltip)
+        primary.setEnabled(self._setup_primary_enabled(state))
+        primary.setToolTip(self._setup_primary_tooltip(state))
+        primary.clicked.connect(self._handle_setup_primary_action)
         self._setup_primary_button = primary
         layout.addWidget(primary, 7, 2)
         layout.setColumnStretch(1, 1)
@@ -1044,8 +1219,8 @@ class MediaSyncWindow(QMainWindow):
         ):
             if text_label is not None:
                 text_label.setText(text)
-        if self._setup_primary_button is not None:
-            self._setup_primary_button.setToolTip(texts.create_backup_tooltip)
+        if self._workspace_heading is not None:
+            self._workspace_heading.setText(self._current_navigation_label())
         self.apply_engine_status(self._engine_status_state)
         self._apply_backup_setup_state(self._setup_state)
         self._apply_backup_job_detail_state(self._job_detail_state)
@@ -1094,6 +1269,11 @@ def _refresh_style(widget: QWidget) -> None:
     widget.style().unpolish(widget)
     widget.style().polish(widget)
     widget.update()
+
+
+def _display_name_for_path(path: str) -> str:
+    parsed = Path(path)
+    return parsed.name or str(parsed)
 
 
 def _flag_icon(language_code: str) -> QIcon:

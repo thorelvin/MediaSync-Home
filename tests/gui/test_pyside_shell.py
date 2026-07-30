@@ -7,7 +7,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QLabel, QListWidget, QPushButton, QToolButton, QWidget  # noqa: E402
+from PySide6.QtWidgets import QLabel, QListWidget, QPushButton, QStackedWidget, QToolButton, QWidget  # noqa: E402
 
 from mediasync_home.application.runtime_status import startup_status  # noqa: E402
 from mediasync_home.domain.process_roles import ProcessRole  # noqa: E402
@@ -75,7 +75,7 @@ def test_main_window_displays_engine_status(qapp) -> None:
         assert chip.text() == "Tilkoblet: Klar"
         assert chip.property("statusKind") == "ready"
         assert refresh is not None
-        assert refresh.isEnabled() is False
+        assert refresh.isEnabled() is True
         assert refresh.toolTip() == "Oppdater motorstatus"
         assert language is not None
         assert language.text() == ""
@@ -105,7 +105,7 @@ def test_main_window_displays_engine_status(qapp) -> None:
         assert setup_steps[0].property("stepState") == "current"
         assert create_backup is not None
         assert create_backup.text() == "Fortsett"
-        assert create_backup.isEnabled() is False
+        assert create_backup.isEnabled() is True
         assert detail_panel is not None
         assert detail_title is not None
         assert detail_title.text() == "Ingen lagret backupjobb"
@@ -170,6 +170,86 @@ def test_language_selector_updates_selected_flag(qapp) -> None:
         assert plan_endpoint_title.text() == "Plan endpoints"
         assert snapshot_health_title is not None
         assert snapshot_health_title.text() == "Snapshot health"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_navigation_rail_switches_workspace_pages(qapp) -> None:
+    window = build_main_window(initial_state=_ready_state(), theme_mode=ThemeMode.LIGHT)
+
+    try:
+        nav = window.findChild(QListWidget, "navigationRail")
+        heading = window.findChild(QLabel, "workspaceHeading")
+        stack = window.findChild(QStackedWidget, "workspaceStack")
+
+        assert nav is not None
+        assert heading is not None
+        assert stack is not None
+        assert stack.currentIndex() == 0
+
+        nav.setCurrentRow(1)
+        qapp.processEvents()
+
+        assert stack.currentIndex() == 1
+        assert heading.text() == "Jobber"
+
+        nav.setCurrentRow(3)
+        qapp.processEvents()
+
+        assert stack.currentIndex() == 3
+        assert heading.text() == "Innstillinger"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_setup_primary_button_collects_local_preview_draft(qapp) -> None:
+    window = build_main_window(initial_state=_ready_state(), theme_mode=ThemeMode.LIGHT)
+
+    try:
+        choices = ["C:/Users/Ada/Pictures", "E:/MediaSyncBackup"]
+        window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
+
+        create_backup = window.findChild(QPushButton, "createBackupButton")
+        source = window.findChild(QLabel, "setupSourceValue")
+        target = window.findChild(QLabel, "setupTargetValue")
+        detail_title = window.findChild(QLabel, "jobDetailTitle")
+        detail_source = window.findChild(QLabel, "jobDetailSourceValue")
+        detail_targets = window.findChildren(QLabel, "jobDetailTargetRow")
+        chip = window.findChild(QLabel, "engineStatusChip")
+
+        assert create_backup is not None
+        assert source is not None
+        assert target is not None
+        assert detail_title is not None
+        assert detail_source is not None
+        assert chip is not None
+
+        create_backup.click()
+        qapp.processEvents()
+
+        assert source.text() == "C:/Users/Ada/Pictures"
+        assert target.text() == "Ingen mål valgt"
+        assert detail_title.text() == "Pictures"
+
+        create_backup.click()
+        qapp.processEvents()
+
+        assert target.text() == "1 mål: MediaSyncBackup"
+        assert detail_source.text() == "C:/Users/Ada/Pictures"
+        assert detail_targets[0].text() == "MediaSyncBackup: E:/MediaSyncBackup"
+
+        create_backup.click()
+        qapp.processEvents()
+
+        assert create_backup.text() == "Opprett og kontroller endringer"
+        assert create_backup.isEnabled() is True
+
+        create_backup.click()
+        qapp.processEvents()
+
+        assert chip.text() == "Frakoblet: Venter"
     finally:
         window.close()
         window.deleteLater()
