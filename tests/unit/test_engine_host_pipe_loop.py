@@ -20,6 +20,7 @@ from mediasync_home.adapters.robocopy import RobocopyStagingTransferAdapter
 from mediasync_home.adapters.sqlite.connection_policy import SqliteStore
 from mediasync_home.adapters.sqlite.migrations import current_schema_version
 from mediasync_home.adapters.sqlite.state_backup import (
+    SqliteStateCompactionEpochRecoveryReport,
     SqliteStateRestoreEpochRecoveryReport,
     create_sqlite_state_backup_set,
 )
@@ -45,6 +46,7 @@ from mediasync_home.application.task_scheduler import (
 from mediasync_home.application.trigger_occurrences import TriggerKind
 from mediasync_home.composition import engine_host as engine_host_module
 from mediasync_home.composition.engine_host import (
+    EngineHostStateCompactionNotAdmitted,
     EngineHostStateRestoreNotAdmitted,
     ExecutorMaintenanceLoop,
     HostLocatorHeartbeatLoop,
@@ -757,6 +759,7 @@ def test_engine_host_runtime_without_state_root_preserves_non_persistent_service
     try:
         assert runtime.state_layout is None
         assert runtime.state_restore_recovery is None
+        assert runtime.state_compaction_recovery is None
         assert runtime.startup_reconciliation is None
         assert runtime.catalog_connection is None
         assert runtime.recovery_connection is None
@@ -782,6 +785,8 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.state_layout is not None
         assert runtime.state_restore_recovery is not None
         assert runtime.state_restore_recovery.scanned_epoch_count == 0
+        assert runtime.state_compaction_recovery is not None
+        assert runtime.state_compaction_recovery.scanned_epoch_count == 0
         assert runtime.state_layout.catalog.is_file()
         assert runtime.state_layout.recovery.is_file()
         assert runtime.catalog_connection is not None
@@ -950,6 +955,50 @@ def test_engine_host_runtime_recovers_restore_epochs_before_sqlite_open(
         assert calls[0][0] == tmp_path / "state" / "catalog.sqlite"
         assert calls[0][1].endswith("Z")
         assert runtime.state_restore_recovery is not None
+    finally:
+        runtime.close()
+
+
+def test_engine_host_runtime_recovers_compaction_epochs_before_sqlite_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[Path, str]] = []
+
+    def fake_compaction_recovery(
+        layout: object,
+        *,
+        recovered_utc: str,
+    ) -> SqliteStateCompactionEpochRecoveryReport:
+        assert hasattr(layout, "catalog")
+        catalog = getattr(layout, "catalog")
+        assert isinstance(catalog, Path)
+        assert not catalog.exists()
+        calls.append((catalog, recovered_utc))
+        return SqliteStateCompactionEpochRecoveryReport(
+            scanned_epoch_count=0,
+            committed_epoch_count=0,
+            previously_rolled_back_epoch_count=0,
+            recovered_epochs=(),
+        )
+
+    monkeypatch.setattr(
+        engine_host_module,
+        "recover_incomplete_sqlite_state_compaction_epochs",
+        fake_compaction_recovery,
+    )
+
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=startup_status(ProcessRole.ENGINE_HOST),
+        state_root=tmp_path / "state",
+    )
+
+    try:
+        assert calls
+        assert calls[0][0] == tmp_path / "state" / "catalog.sqlite"
+        assert calls[0][1].endswith("Z")
+        assert runtime.state_compaction_recovery is not None
     finally:
         runtime.close()
 
@@ -1183,6 +1232,76 @@ def test_engine_host_runtime_restore_refuses_blocked_admission_without_closing_h
         runtime.close()
 
 
+def test_engine_host_runtime_compaction_closes_sqlite_handles_and_swaps_state(
+    tmp_path: Path,
+) -> None:
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=startup_status(ProcessRole.ENGINE_HOST),
+        state_root=tmp_path / "state",
+        reconciler_instance_id="host-new",
+    )
+    try:
+        assert runtime.state_layout is not None
+        assert runtime.catalog_connection is not None
+        assert runtime.recovery_connection is not None
+        runtime.catalog_connection.execute("PRAGMA user_version = 77")
+        runtime.catalog_connection.commit()
+        runtime.recovery_connection.execute("PRAGMA user_version = 88")
+        runtime.recovery_connection.commit()
+
+        receipt = runtime.compact_state_stores(
+            compaction_epoch_id="compact-runtime-a",
+            started_utc="2026-07-30T12:05:00Z",
+        )
+
+        assert receipt.compaction_epoch_id == "compact-runtime-a"
+        assert runtime.catalog_connection is None
+        assert runtime.recovery_connection is None
+        assert _read_sqlite_user_version(runtime.state_layout.catalog) == 77
+        assert _read_sqlite_user_version(runtime.state_layout.recovery) == 88
+        assert receipt.intent_path.is_file()
+        assert receipt.committed_path.is_file()
+    finally:
+        runtime.close()
+
+
+def test_engine_host_runtime_compaction_refuses_blocked_admission_without_closing_handles(
+    tmp_path: Path,
+) -> None:
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=startup_status(ProcessRole.ENGINE_HOST),
+        state_root=tmp_path / "state",
+        reconciler_instance_id="host-new",
+    )
+    try:
+        assert runtime.state_layout is not None
+        assert runtime.catalog_connection is not None
+        assert runtime.recovery_connection is not None
+        assert runtime.run_executor_lease_registry is not None
+        runtime.run_executor_lease_registry.retain_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-target-a",
+            lease=_FakeLiveLease(),
+        )
+
+        with pytest.raises(
+            EngineHostStateCompactionNotAdmitted,
+            match="STATE_COMPACTION_MAINTENANCE_NOT_ADMITTED",
+        ) as exc_info:
+            runtime.compact_state_stores(
+                compaction_epoch_id="compact-runtime-b",
+                started_utc="2026-07-30T12:05:00Z",
+            )
+
+        assert exc_info.value.admission.retained_run_target_lease_count == 1
+        assert runtime.catalog_connection is not None
+        assert runtime.recovery_connection is not None
+    finally:
+        runtime.close()
+
+
 def test_engine_host_runtime_releases_executor_leases_on_close(tmp_path: Path) -> None:
     runtime = build_engine_host_runtime(
         authorization=_authorization(),
@@ -1270,6 +1389,7 @@ class _FakeRuntime:
     service = object()
     state_layout = None
     state_restore_recovery = None
+    state_compaction_recovery = None
     startup_reconciliation = None
 
     def __init__(self) -> None:

@@ -29,6 +29,11 @@ STATE_RESTORE_EPOCHS_DIR_NAME = "state-restore-epochs"
 STATE_RESTORE_INTENT_FILENAME = "state-restore.intent.json"
 STATE_RESTORE_COMMITTED_FILENAME = "state-restore.committed.json"
 STATE_RESTORE_ROLLED_BACK_FILENAME = "state-restore.rolled-back.json"
+STATE_COMPACTION_EPOCH_SCHEMA_VERSION = 1
+STATE_COMPACTION_EPOCHS_DIR_NAME = "state-compaction-epochs"
+STATE_COMPACTION_INTENT_FILENAME = "state-compaction.intent.json"
+STATE_COMPACTION_COMMITTED_FILENAME = "state-compaction.committed.json"
+STATE_COMPACTION_ROLLED_BACK_FILENAME = "state-compaction.rolled-back.json"
 STATE_RESTORE_MAINTENANCE_TERMINAL_RUN_STATES = (
     "COMPLETED",
     "COMPLETED_WITH_WARNINGS",
@@ -263,6 +268,118 @@ class SqliteStateRestoreEpochRecoveryReport:
 
 
 @dataclass(frozen=True, slots=True)
+class SqliteStateCompactionFile:
+    store: SqliteStore
+    target_path: Path
+    temp_path: Path
+    rollback_path: Path
+    sidecar_rollbacks: tuple[SqliteStateSidecarRollback, ...]
+    size_bytes: int
+    sha256: str
+    schema_version: int
+    migration_count: int
+    latest_migration_utc: str | None
+    page_count: int
+    quick_check: str
+    foreign_key_violations: int
+    unresolved_target_intent_count: int = 0
+    target_intent_high_water_utc: str | None = None
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "store": self.store.value,
+            "target_path": str(self.target_path),
+            "temp_path": str(self.temp_path),
+            "rollback_path": str(self.rollback_path),
+            "sidecar_rollbacks": [sidecar.to_payload() for sidecar in self.sidecar_rollbacks],
+            "size_bytes": self.size_bytes,
+            "sha256": self.sha256,
+            "schema_version": self.schema_version,
+            "migration_count": self.migration_count,
+            "latest_migration_utc": self.latest_migration_utc,
+            "page_count": self.page_count,
+            "quick_check": self.quick_check,
+            "foreign_key_violations": self.foreign_key_violations,
+            "unresolved_target_intent_count": self.unresolved_target_intent_count,
+            "target_intent_high_water_utc": self.target_intent_high_water_utc,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SqliteStateCompactedFile:
+    store: SqliteStore
+    target_path: Path
+    rollback_path: Path | None
+    sidecar_rollbacks: tuple[SqliteStateSidecarRollback, ...]
+    size_bytes: int
+    sha256: str
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "store": self.store.value,
+            "target_path": str(self.target_path),
+            "rollback_path": None if self.rollback_path is None else str(self.rollback_path),
+            "sidecar_rollbacks": [sidecar.to_payload() for sidecar in self.sidecar_rollbacks],
+            "size_bytes": self.size_bytes,
+            "sha256": self.sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SqliteStateCompactionReceipt:
+    compaction_epoch_id: str
+    state_set_hash: str
+    intent_path: Path
+    committed_path: Path
+    compacted_files: tuple[SqliteStateCompactedFile, ...]
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "compaction_epoch_id": self.compaction_epoch_id,
+            "state_set_hash": self.state_set_hash,
+            "intent_path": str(self.intent_path),
+            "committed_path": str(self.committed_path),
+            "compacted_files": [entry.to_payload() for entry in self.compacted_files],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SqliteStateCompactionEpochRecovery:
+    compaction_epoch_id: str
+    intent_path: Path
+    rolled_back_path: Path
+    rolled_back_store_count: int
+    removed_temp_file_count: int
+    restored_sidecar_count: int
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "compaction_epoch_id": self.compaction_epoch_id,
+            "intent_path": str(self.intent_path),
+            "rolled_back_path": str(self.rolled_back_path),
+            "rolled_back_store_count": self.rolled_back_store_count,
+            "removed_temp_file_count": self.removed_temp_file_count,
+            "restored_sidecar_count": self.restored_sidecar_count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SqliteStateCompactionEpochRecoveryReport:
+    scanned_epoch_count: int
+    committed_epoch_count: int
+    previously_rolled_back_epoch_count: int
+    recovered_epochs: tuple[SqliteStateCompactionEpochRecovery, ...]
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "scanned_epoch_count": self.scanned_epoch_count,
+            "committed_epoch_count": self.committed_epoch_count,
+            "previously_rolled_back_epoch_count": self.previously_rolled_back_epoch_count,
+            "recovered_epochs": [entry.to_payload() for entry in self.recovered_epochs],
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class SqliteStateRestoreMaintenanceBlocker:
     code: str
     count: int
@@ -290,6 +407,7 @@ class SqliteStateRestoreMaintenanceAdmission:
     active_resource_lease_count: int
     unresolved_target_intent_segment_count: int
     incomplete_restore_epoch_count: int
+    incomplete_compaction_epoch_count: int
     retained_run_target_lease_count: int = 0
     blockers: tuple[SqliteStateRestoreMaintenanceBlocker, ...] = ()
 
@@ -313,6 +431,7 @@ class SqliteStateRestoreMaintenanceAdmission:
                 self.unresolved_target_intent_segment_count
             ),
             incomplete_restore_epoch_count=self.incomplete_restore_epoch_count,
+            incomplete_compaction_epoch_count=self.incomplete_compaction_epoch_count,
             retained_run_target_lease_count=retained_count,
             blockers=self.blockers
             + (
@@ -337,6 +456,7 @@ class SqliteStateRestoreMaintenanceAdmission:
                 self.unresolved_target_intent_segment_count
             ),
             "incomplete_restore_epoch_count": self.incomplete_restore_epoch_count,
+            "incomplete_compaction_epoch_count": self.incomplete_compaction_epoch_count,
             "retained_run_target_lease_count": self.retained_run_target_lease_count,
             "blockers": [entry.to_payload() for entry in self.blockers],
         }
@@ -345,6 +465,14 @@ class SqliteStateRestoreMaintenanceAdmission:
 @dataclass(frozen=True, slots=True)
 class _PreparedRestoreFile:
     restore_file: SqliteStateRestoreFile
+    temp_path: Path
+    rollback_path: Path
+    sidecar_rollbacks: tuple[SqliteStateSidecarRollback, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedCompactionFile:
+    compaction_file: SqliteStateCompactionFile
     temp_path: Path
     rollback_path: Path
     sidecar_rollbacks: tuple[SqliteStateSidecarRollback, ...]
@@ -366,6 +494,14 @@ class _RestoreEpochIntent:
     state_set_hash: str
     intent_path: Path
     restore_files: tuple[_RestoreEpochIntentFile, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _CompactionEpochIntent:
+    compaction_epoch_id: str
+    state_set_hash: str
+    intent_path: Path
+    compaction_files: tuple[SqliteStateCompactionFile, ...]
 
 
 def create_sqlite_state_backup_set(
@@ -584,6 +720,17 @@ def admit_sqlite_state_restore_maintenance(
                 detail=str(exc),
             )
         )
+    try:
+        incomplete_compaction_epoch_count = _incomplete_compaction_epoch_count(layout)
+    except SqliteStateBackupViolation as exc:
+        incomplete_compaction_epoch_count = 0
+        blockers.append(
+            SqliteStateRestoreMaintenanceBlocker(
+                code="STATE_RESTORE_MAINTENANCE_COMPACTION_EPOCHS_UNREADABLE",
+                count=1,
+                detail=str(exc),
+            )
+        )
 
     blockers.extend(
         _count_blockers(
@@ -594,6 +741,7 @@ def admit_sqlite_state_restore_maintenance(
             active_resource_lease_count=active_resource_lease_count,
             unresolved_target_intent_segment_count=unresolved_target_intent_segment_count,
             incomplete_restore_epoch_count=incomplete_restore_epoch_count,
+            incomplete_compaction_epoch_count=incomplete_compaction_epoch_count,
         )
     )
 
@@ -605,6 +753,7 @@ def admit_sqlite_state_restore_maintenance(
         active_resource_lease_count=active_resource_lease_count,
         unresolved_target_intent_segment_count=unresolved_target_intent_segment_count,
         incomplete_restore_epoch_count=incomplete_restore_epoch_count,
+        incomplete_compaction_epoch_count=incomplete_compaction_epoch_count,
         blockers=tuple(blockers),
     )
 
@@ -668,6 +817,79 @@ def apply_sqlite_state_restore_plan(
     )
 
 
+def compact_sqlite_state_stores(
+    layout: StateStoreLayout,
+    *,
+    compaction_epoch_id: str,
+    started_utc: str,
+) -> SqliteStateCompactionReceipt:
+    _validate_compaction_epoch_id(compaction_epoch_id)
+    _validate_state_store_layout(layout, field_name="STATE_COMPACTION")
+    admission = admit_sqlite_state_restore_maintenance(layout)
+    if not admission.admitted:
+        raise SqliteStateBackupViolation("STATE_COMPACTION_BLOCKED_BY_MAINTENANCE")
+
+    epoch_dir = _compaction_epoch_dir(layout, compaction_epoch_id)
+    if epoch_dir.exists():
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_ALREADY_EXISTS")
+
+    prepared_files = _prepare_compaction_files(
+        layout,
+        compaction_epoch_id=compaction_epoch_id,
+    )
+    epoch_dir.parent.mkdir(parents=True, exist_ok=True)
+    epoch_dir.mkdir()
+    state_set_hash = _state_compaction_set_hash(
+        compaction_epoch_id=compaction_epoch_id,
+        started_utc=started_utc,
+        compaction_files=tuple(entry.compaction_file for entry in prepared_files),
+    )
+    intent_path = epoch_dir / STATE_COMPACTION_INTENT_FILENAME
+    committed_path = epoch_dir / STATE_COMPACTION_COMMITTED_FILENAME
+    _write_json_no_overwrite(
+        intent_path,
+        _compaction_intent_payload(
+            compaction_epoch_id=compaction_epoch_id,
+            started_utc=started_utc,
+            state_set_hash=state_set_hash,
+            prepared_files=prepared_files,
+        ),
+    )
+
+    compacted_files: list[SqliteStateCompactedFile] = []
+    try:
+        for prepared in prepared_files:
+            compacted_files.append(_swap_prepared_compaction_file(prepared))
+        for prepared in prepared_files:
+            _verify_compacted_file(
+                prepared.compaction_file,
+                prepared.compaction_file.target_path,
+            )
+        _write_json_no_overwrite(
+            committed_path,
+            _compaction_committed_payload(
+                compaction_epoch_id=compaction_epoch_id,
+                started_utc=started_utc,
+                state_set_hash=state_set_hash,
+                compacted_files=tuple(compacted_files),
+            ),
+        )
+    except Exception as exc:
+        try:
+            _rollback_compacted_files(tuple(reversed(compacted_files)))
+        except Exception as rollback_exc:
+            raise SqliteStateBackupViolation("STATE_COMPACTION_ROLLBACK_FAILED") from rollback_exc
+        raise SqliteStateBackupViolation("STATE_COMPACTION_SWAP_FAILED") from exc
+
+    return SqliteStateCompactionReceipt(
+        compaction_epoch_id=compaction_epoch_id,
+        state_set_hash=state_set_hash,
+        intent_path=intent_path,
+        committed_path=committed_path,
+        compacted_files=tuple(compacted_files),
+    )
+
+
 def recover_incomplete_sqlite_state_restore_epochs(
     layout: StateStoreLayout,
     *,
@@ -723,6 +945,68 @@ def recover_incomplete_sqlite_state_restore_epochs(
         )
 
     return SqliteStateRestoreEpochRecoveryReport(
+        scanned_epoch_count=scanned,
+        committed_epoch_count=committed,
+        previously_rolled_back_epoch_count=previously_rolled_back,
+        recovered_epochs=tuple(recovered_epochs),
+    )
+
+
+def recover_incomplete_sqlite_state_compaction_epochs(
+    layout: StateStoreLayout,
+    *,
+    recovered_utc: str,
+) -> SqliteStateCompactionEpochRecoveryReport:
+    _validate_state_store_layout(layout, field_name="STATE_COMPACTION_RECOVERY")
+    epochs_dir = layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME
+    if not epochs_dir.exists():
+        return SqliteStateCompactionEpochRecoveryReport(
+            scanned_epoch_count=0,
+            committed_epoch_count=0,
+            previously_rolled_back_epoch_count=0,
+            recovered_epochs=(),
+        )
+    if not epochs_dir.is_dir():
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCHS_PATH_NOT_DIRECTORY")
+
+    scanned = 0
+    committed = 0
+    previously_rolled_back = 0
+    recovered_epochs: list[SqliteStateCompactionEpochRecovery] = []
+    for epoch_dir in sorted(path for path in epochs_dir.iterdir() if path.is_dir()):
+        scanned += 1
+        committed_path = epoch_dir / STATE_COMPACTION_COMMITTED_FILENAME
+        rolled_back_path = epoch_dir / STATE_COMPACTION_ROLLED_BACK_FILENAME
+        if committed_path.exists():
+            committed += 1
+            continue
+        if rolled_back_path.exists():
+            previously_rolled_back += 1
+            continue
+        intent = _load_compaction_epoch_intent(epoch_dir=epoch_dir, layout=layout)
+        rollback_counts = _rollback_incomplete_compaction_epoch(intent)
+        _write_json_no_overwrite(
+            rolled_back_path,
+            _compaction_rolled_back_payload(
+                intent=intent,
+                recovered_utc=recovered_utc,
+                rolled_back_store_count=rollback_counts[0],
+                removed_temp_file_count=rollback_counts[1],
+                restored_sidecar_count=rollback_counts[2],
+            ),
+        )
+        recovered_epochs.append(
+            SqliteStateCompactionEpochRecovery(
+                compaction_epoch_id=intent.compaction_epoch_id,
+                intent_path=intent.intent_path,
+                rolled_back_path=rolled_back_path,
+                rolled_back_store_count=rollback_counts[0],
+                removed_temp_file_count=rollback_counts[1],
+                restored_sidecar_count=rollback_counts[2],
+            )
+        )
+
+    return SqliteStateCompactionEpochRecoveryReport(
         scanned_epoch_count=scanned,
         committed_epoch_count=committed,
         previously_rolled_back_epoch_count=previously_rolled_back,
@@ -1010,6 +1294,24 @@ def _incomplete_restore_epoch_count(layout: StateStoreLayout) -> int:
     return count
 
 
+def _incomplete_compaction_epoch_count(layout: StateStoreLayout) -> int:
+    epochs_dir = layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME
+    if not epochs_dir.exists():
+        return 0
+    if not epochs_dir.is_dir():
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCHS_PATH_NOT_DIRECTORY")
+    count = 0
+    for epoch_dir in epochs_dir.iterdir():
+        if not epoch_dir.is_dir():
+            continue
+        if (epoch_dir / STATE_COMPACTION_COMMITTED_FILENAME).exists():
+            continue
+        if (epoch_dir / STATE_COMPACTION_ROLLED_BACK_FILENAME).exists():
+            continue
+        count += 1
+    return count
+
+
 def _count_blockers(
     *,
     active_run_count: int,
@@ -1019,6 +1321,7 @@ def _count_blockers(
     active_resource_lease_count: int,
     unresolved_target_intent_segment_count: int,
     incomplete_restore_epoch_count: int,
+    incomplete_compaction_epoch_count: int,
 ) -> tuple[SqliteStateRestoreMaintenanceBlocker, ...]:
     blockers: list[SqliteStateRestoreMaintenanceBlocker] = []
     _append_count_blocker(
@@ -1061,6 +1364,11 @@ def _count_blockers(
         blockers,
         code="STATE_RESTORE_MAINTENANCE_INCOMPLETE_RESTORE_EPOCHS",
         count=incomplete_restore_epoch_count,
+    )
+    _append_count_blocker(
+        blockers,
+        code="STATE_RESTORE_MAINTENANCE_INCOMPLETE_COMPACTION_EPOCHS",
+        count=incomplete_compaction_epoch_count,
     )
     return tuple(blockers)
 
@@ -1262,6 +1570,312 @@ def _rollback_restored_files(restored_files: tuple[SqliteStateRestoredFile, ...]
                 sidecar.rollback_path.replace(sidecar.path)
 
 
+def _prepare_compaction_files(
+    layout: StateStoreLayout,
+    *,
+    compaction_epoch_id: str,
+) -> tuple[_PreparedCompactionFile, ...]:
+    prepared_files: list[_PreparedCompactionFile] = []
+    temp_paths: list[Path] = []
+    try:
+        for store in STATE_BACKUP_SET_STORES:
+            target_path = _source_path(layout, store)
+            if not target_path.is_file():
+                raise SqliteStateBackupViolation("STATE_COMPACTION_SOURCE_MISSING")
+            temp_path = _compaction_temp_path(target_path, compaction_epoch_id)
+            rollback_path = _compaction_rollback_path(target_path, compaction_epoch_id)
+            _require_absent(temp_path, "STATE_COMPACTION_TEMP_FILE_ALREADY_EXISTS")
+            _require_absent(rollback_path, "STATE_COMPACTION_ROLLBACK_FILE_ALREADY_EXISTS")
+            sidecar_rollbacks = tuple(
+                SqliteStateSidecarRollback(
+                    path=sidecar_path,
+                    rollback_path=_compaction_rollback_path(
+                        sidecar_path,
+                        compaction_epoch_id,
+                    ),
+                )
+                for sidecar_path in _sqlite_sidecar_paths(target_path)
+                if sidecar_path.exists()
+            )
+            for sidecar in sidecar_rollbacks:
+                if not sidecar.path.is_file():
+                    raise SqliteStateBackupViolation("STATE_COMPACTION_TARGET_SIDECAR_NOT_FILE")
+                _require_absent(
+                    sidecar.rollback_path,
+                    "STATE_COMPACTION_SIDECAR_ROLLBACK_ALREADY_EXISTS",
+                )
+            _vacuum_sqlite_database_into(source_path=target_path, output_path=temp_path)
+            temp_paths.append(temp_path)
+            inspected = _inspect_backup_file(store=store, backup_path=temp_path)
+            compaction_file = SqliteStateCompactionFile(
+                store=store,
+                target_path=target_path,
+                temp_path=temp_path,
+                rollback_path=rollback_path,
+                sidecar_rollbacks=sidecar_rollbacks,
+                size_bytes=inspected.size_bytes,
+                sha256=inspected.sha256,
+                schema_version=inspected.schema_version,
+                migration_count=inspected.migration_count,
+                latest_migration_utc=inspected.latest_migration_utc,
+                page_count=inspected.page_count,
+                quick_check=inspected.quick_check,
+                foreign_key_violations=inspected.foreign_key_violations,
+                unresolved_target_intent_count=inspected.unresolved_target_intent_count,
+                target_intent_high_water_utc=inspected.target_intent_high_water_utc,
+            )
+            _verify_compacted_file(compaction_file, temp_path)
+            prepared_files.append(
+                _PreparedCompactionFile(
+                    compaction_file=compaction_file,
+                    temp_path=temp_path,
+                    rollback_path=rollback_path,
+                    sidecar_rollbacks=sidecar_rollbacks,
+                )
+            )
+    except Exception:
+        for temp_path in temp_paths:
+            temp_path.unlink(missing_ok=True)
+        raise
+    return tuple(prepared_files)
+
+
+def _swap_prepared_compaction_file(
+    prepared: _PreparedCompactionFile,
+) -> SqliteStateCompactedFile:
+    target_path = prepared.compaction_file.target_path
+    main_moved = False
+    moved_sidecars: list[SqliteStateSidecarRollback] = []
+    try:
+        if target_path.exists():
+            if not target_path.is_file():
+                raise SqliteStateBackupViolation("STATE_COMPACTION_TARGET_NOT_FILE")
+            target_path.replace(prepared.rollback_path)
+            main_moved = True
+        for sidecar in prepared.sidecar_rollbacks:
+            if sidecar.path.exists():
+                sidecar.path.replace(sidecar.rollback_path)
+                moved_sidecars.append(sidecar)
+        prepared.temp_path.replace(target_path)
+    except Exception:
+        _rollback_prepared_compaction_file(
+            prepared,
+            main_moved=main_moved,
+            moved_sidecars=tuple(reversed(moved_sidecars)),
+        )
+        raise
+    return SqliteStateCompactedFile(
+        store=prepared.compaction_file.store,
+        target_path=target_path,
+        rollback_path=prepared.rollback_path if main_moved else None,
+        sidecar_rollbacks=tuple(moved_sidecars),
+        size_bytes=prepared.compaction_file.size_bytes,
+        sha256=prepared.compaction_file.sha256,
+    )
+
+
+def _rollback_prepared_compaction_file(
+    prepared: _PreparedCompactionFile,
+    *,
+    main_moved: bool,
+    moved_sidecars: tuple[SqliteStateSidecarRollback, ...],
+) -> None:
+    target_path = prepared.compaction_file.target_path
+    if target_path.exists() and target_path.is_file():
+        target_path.unlink()
+    if main_moved and prepared.rollback_path.exists():
+        prepared.rollback_path.replace(target_path)
+    for sidecar in moved_sidecars:
+        if sidecar.path.exists() and sidecar.path.is_file():
+            sidecar.path.unlink()
+        if sidecar.rollback_path.exists():
+            sidecar.rollback_path.replace(sidecar.path)
+
+
+def _rollback_compacted_files(compacted_files: tuple[SqliteStateCompactedFile, ...]) -> None:
+    for compacted in compacted_files:
+        if compacted.target_path.exists() and compacted.target_path.is_file():
+            compacted.target_path.unlink()
+        if compacted.rollback_path is not None and compacted.rollback_path.exists():
+            compacted.rollback_path.replace(compacted.target_path)
+        for sidecar in compacted.sidecar_rollbacks:
+            if sidecar.path.exists() and sidecar.path.is_file():
+                sidecar.path.unlink()
+            if sidecar.rollback_path.exists():
+                sidecar.rollback_path.replace(sidecar.path)
+
+
+def _load_compaction_epoch_intent(
+    *,
+    epoch_dir: Path,
+    layout: StateStoreLayout,
+) -> _CompactionEpochIntent:
+    intent_path = epoch_dir / STATE_COMPACTION_INTENT_FILENAME
+    try:
+        payload = json.loads(intent_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_INTENT_MISSING") from exc
+    except json.JSONDecodeError as exc:
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_INTENT_INVALID_JSON") from exc
+    return _compaction_epoch_intent_from_payload(
+        payload,
+        intent_path=intent_path,
+        layout=layout,
+        expected_epoch_id=epoch_dir.name,
+    )
+
+
+def _compaction_epoch_intent_from_payload(
+    payload: object,
+    *,
+    intent_path: Path,
+    layout: StateStoreLayout,
+    expected_epoch_id: str,
+) -> _CompactionEpochIntent:
+    if not isinstance(payload, dict):
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_INTENT_NOT_OBJECT")
+    schema_version = _int_field(payload, "schema_version")
+    if schema_version != STATE_COMPACTION_EPOCH_SCHEMA_VERSION:
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_SCHEMA_UNSUPPORTED")
+    if _str_field(payload, "status") != "PREPARED":
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_STATUS_UNSUPPORTED")
+    compaction_epoch_id = _str_field(payload, "compaction_epoch_id")
+    _validate_compaction_epoch_id(compaction_epoch_id)
+    if compaction_epoch_id != expected_epoch_id:
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_ID_MISMATCH")
+    state_set_hash = _hex_field(payload, "state_set_hash")
+    files_payload = payload.get("compaction_files")
+    if not isinstance(files_payload, list):
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_FILES_NOT_ARRAY")
+    compaction_files = tuple(
+        _compaction_epoch_file_from_payload(
+            entry,
+            layout=layout,
+            compaction_epoch_id=compaction_epoch_id,
+        )
+        for entry in files_payload
+    )
+    if tuple(entry.store for entry in compaction_files) != STATE_BACKUP_SET_STORES:
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_INCOMPLETE_STORE_SET")
+    return _CompactionEpochIntent(
+        compaction_epoch_id=compaction_epoch_id,
+        state_set_hash=state_set_hash,
+        intent_path=intent_path,
+        compaction_files=compaction_files,
+    )
+
+
+def _compaction_epoch_file_from_payload(
+    payload: object,
+    *,
+    layout: StateStoreLayout,
+    compaction_epoch_id: str,
+) -> SqliteStateCompactionFile:
+    if not isinstance(payload, dict):
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_FILE_NOT_OBJECT")
+    try:
+        store = SqliteStore(_str_field(payload, "store"))
+    except ValueError as exc:
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_STORE_UNSUPPORTED") from exc
+    target_path = _path_field(payload, "target_path")
+    expected_target_path = _source_path(layout, store)
+    if target_path != expected_target_path:
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_TARGET_PATH_MISMATCH")
+    temp_path = _path_field(payload, "temp_path")
+    if temp_path != _compaction_temp_path(target_path, compaction_epoch_id):
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_TEMP_PATH_MISMATCH")
+    rollback_path = _path_field(payload, "rollback_path")
+    if rollback_path != _compaction_rollback_path(target_path, compaction_epoch_id):
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_ROLLBACK_PATH_MISMATCH")
+    sidecar_payload = payload.get("sidecar_rollbacks")
+    if not isinstance(sidecar_payload, list):
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_SIDECARS_NOT_ARRAY")
+    sidecar_rollbacks = tuple(
+        _compaction_sidecar_rollback_from_payload(
+            entry,
+            target_path=target_path,
+            compaction_epoch_id=compaction_epoch_id,
+        )
+        for entry in sidecar_payload
+    )
+    return SqliteStateCompactionFile(
+        store=store,
+        target_path=target_path,
+        temp_path=temp_path,
+        rollback_path=rollback_path,
+        sidecar_rollbacks=sidecar_rollbacks,
+        size_bytes=_non_negative_int_field(payload, "size_bytes"),
+        sha256=_hex_field(payload, "sha256"),
+        schema_version=_non_negative_int_field(payload, "schema_version"),
+        migration_count=_non_negative_int_field(payload, "migration_count"),
+        latest_migration_utc=_optional_str_field(payload, "latest_migration_utc"),
+        page_count=_non_negative_int_field(payload, "page_count"),
+        quick_check=_str_field(payload, "quick_check"),
+        foreign_key_violations=_non_negative_int_field(payload, "foreign_key_violations"),
+        unresolved_target_intent_count=_non_negative_int_field(
+            payload,
+            "unresolved_target_intent_count",
+        ),
+        target_intent_high_water_utc=_optional_str_field(
+            payload,
+            "target_intent_high_water_utc",
+        ),
+    )
+
+
+def _compaction_sidecar_rollback_from_payload(
+    payload: object,
+    *,
+    target_path: Path,
+    compaction_epoch_id: str,
+) -> SqliteStateSidecarRollback:
+    if not isinstance(payload, dict):
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_SIDECAR_NOT_OBJECT")
+    sidecar_path = _path_field(payload, "path")
+    if sidecar_path not in _sqlite_sidecar_paths(target_path):
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_SIDECAR_PATH_MISMATCH")
+    rollback_path = _path_field(payload, "rollback_path")
+    if rollback_path != _compaction_rollback_path(sidecar_path, compaction_epoch_id):
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_SIDECAR_ROLLBACK_MISMATCH")
+    return SqliteStateSidecarRollback(path=sidecar_path, rollback_path=rollback_path)
+
+
+def _rollback_incomplete_compaction_epoch(
+    intent: _CompactionEpochIntent,
+) -> tuple[int, int, int]:
+    rolled_back_store_count = 0
+    removed_temp_file_count = 0
+    restored_sidecar_count = 0
+    for compaction_file in reversed(intent.compaction_files):
+        if compaction_file.temp_path.exists():
+            if not compaction_file.temp_path.is_file():
+                raise SqliteStateBackupViolation("STATE_COMPACTION_TEMP_PATH_NOT_FILE")
+            compaction_file.temp_path.unlink()
+            removed_temp_file_count += 1
+        if compaction_file.rollback_path.exists():
+            if not compaction_file.rollback_path.is_file():
+                raise SqliteStateBackupViolation("STATE_COMPACTION_ROLLBACK_PATH_NOT_FILE")
+            if compaction_file.target_path.exists():
+                if not compaction_file.target_path.is_file():
+                    raise SqliteStateBackupViolation("STATE_COMPACTION_TARGET_NOT_FILE")
+                compaction_file.target_path.unlink()
+            compaction_file.rollback_path.replace(compaction_file.target_path)
+            rolled_back_store_count += 1
+        for sidecar in compaction_file.sidecar_rollbacks:
+            if sidecar.rollback_path.exists():
+                if not sidecar.rollback_path.is_file():
+                    raise SqliteStateBackupViolation(
+                        "STATE_COMPACTION_SIDECAR_ROLLBACK_NOT_FILE"
+                    )
+                if sidecar.path.exists():
+                    if not sidecar.path.is_file():
+                        raise SqliteStateBackupViolation("STATE_COMPACTION_SIDECAR_PATH_NOT_FILE")
+                    sidecar.path.unlink()
+                sidecar.rollback_path.replace(sidecar.path)
+                restored_sidecar_count += 1
+    return (rolled_back_store_count, removed_temp_file_count, restored_sidecar_count)
+
+
 def _load_restore_epoch_intent(
     *,
     epoch_dir: Path,
@@ -1436,6 +2050,26 @@ def _verify_restored_file(entry: SqliteStateRestoreFile, database_path: Path) ->
         raise SqliteStateBackupViolation("STATE_RESTORE_SQLITE_EVIDENCE_MISMATCH")
 
 
+def _verify_compacted_file(entry: SqliteStateCompactionFile, database_path: Path) -> None:
+    inspected = _inspect_backup_file(store=entry.store, backup_path=database_path)
+    expected = SqliteStateStoreBackup(
+        store=entry.store,
+        file_name=database_path.name,
+        size_bytes=entry.size_bytes,
+        sha256=entry.sha256,
+        schema_version=entry.schema_version,
+        migration_count=entry.migration_count,
+        latest_migration_utc=entry.latest_migration_utc,
+        page_count=entry.page_count,
+        quick_check=entry.quick_check,
+        foreign_key_violations=entry.foreign_key_violations,
+        unresolved_target_intent_count=entry.unresolved_target_intent_count,
+        target_intent_high_water_utc=entry.target_intent_high_water_utc,
+    )
+    if inspected != expected:
+        raise SqliteStateBackupViolation("STATE_COMPACTION_SQLITE_EVIDENCE_MISMATCH")
+
+
 def _copy_file_no_overwrite(*, source: Path, destination: Path) -> None:
     if not source.is_file():
         raise SqliteStateBackupViolation("STATE_RESTORE_BACKUP_FILE_MISSING")
@@ -1453,8 +2087,32 @@ def _copy_file_no_overwrite(*, source: Path, destination: Path) -> None:
         raise SqliteStateBackupViolation("STATE_RESTORE_TEMP_COPY_FAILED") from exc
 
 
+def _vacuum_sqlite_database_into(*, source_path: Path, output_path: Path) -> None:
+    if output_path.exists():
+        raise SqliteStateBackupViolation("STATE_COMPACTION_TEMP_FILE_ALREADY_EXISTS")
+    try:
+        with sqlite3.connect(f"file:{source_path.as_posix()}?mode=ro", uri=True) as connection:
+            connection.execute("VACUUM INTO ?", (str(output_path),))
+        _fsync_file(output_path)
+    except sqlite3.Error as exc:
+        output_path.unlink(missing_ok=True)
+        raise SqliteStateBackupViolation("STATE_COMPACTION_VACUUM_FAILED") from exc
+    except OSError as exc:
+        output_path.unlink(missing_ok=True)
+        raise SqliteStateBackupViolation("STATE_COMPACTION_TEMP_SYNC_FAILED") from exc
+
+
+def _fsync_file(path: Path) -> None:
+    with path.open("r+b") as handle:
+        os.fsync(handle.fileno())
+
+
 def _restore_epoch_dir(layout: StateStoreLayout, restore_epoch_id: str) -> Path:
     return layout.root / STATE_RESTORE_EPOCHS_DIR_NAME / restore_epoch_id
+
+
+def _compaction_epoch_dir(layout: StateStoreLayout, compaction_epoch_id: str) -> Path:
+    return layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME / compaction_epoch_id
 
 
 def _restore_temp_path(target_path: Path, restore_epoch_id: str) -> Path:
@@ -1463,6 +2121,18 @@ def _restore_temp_path(target_path: Path, restore_epoch_id: str) -> Path:
 
 def _restore_rollback_path(target_path: Path, restore_epoch_id: str) -> Path:
     return target_path.with_name(f".{target_path.name}.{restore_epoch_id}.restore-rollback")
+
+
+def _compaction_temp_path(target_path: Path, compaction_epoch_id: str) -> Path:
+    return target_path.with_name(
+        f".{target_path.name}.{compaction_epoch_id}.compaction-new.tmp"
+    )
+
+
+def _compaction_rollback_path(target_path: Path, compaction_epoch_id: str) -> Path:
+    return target_path.with_name(
+        f".{target_path.name}.{compaction_epoch_id}.compaction-rollback"
+    )
 
 
 def _sqlite_sidecar_paths(database_path: Path) -> tuple[Path, ...]:
@@ -1554,6 +2224,74 @@ def _restore_rolled_back_payload(
     }
 
 
+def _compaction_intent_payload(
+    *,
+    compaction_epoch_id: str,
+    started_utc: str,
+    state_set_hash: str,
+    prepared_files: tuple[_PreparedCompactionFile, ...],
+) -> dict[str, object]:
+    return {
+        "schema_version": STATE_COMPACTION_EPOCH_SCHEMA_VERSION,
+        "status": "PREPARED",
+        "compaction_epoch_id": compaction_epoch_id,
+        "started_utc": started_utc,
+        "state_set_hash": state_set_hash,
+        "compaction_files": [
+            {
+                **prepared.compaction_file.to_payload(),
+                "temp_path": str(prepared.temp_path),
+                "rollback_path": str(prepared.rollback_path),
+                "sidecar_rollbacks": [
+                    {
+                        "path": str(sidecar.path),
+                        "rollback_path": str(sidecar.rollback_path),
+                    }
+                    for sidecar in prepared.sidecar_rollbacks
+                ],
+            }
+            for prepared in prepared_files
+        ],
+    }
+
+
+def _compaction_committed_payload(
+    *,
+    compaction_epoch_id: str,
+    started_utc: str,
+    state_set_hash: str,
+    compacted_files: tuple[SqliteStateCompactedFile, ...],
+) -> dict[str, object]:
+    return {
+        "schema_version": STATE_COMPACTION_EPOCH_SCHEMA_VERSION,
+        "status": "COMMITTED",
+        "compaction_epoch_id": compaction_epoch_id,
+        "started_utc": started_utc,
+        "state_set_hash": state_set_hash,
+        "compacted_files": [entry.to_payload() for entry in compacted_files],
+    }
+
+
+def _compaction_rolled_back_payload(
+    *,
+    intent: _CompactionEpochIntent,
+    recovered_utc: str,
+    rolled_back_store_count: int,
+    removed_temp_file_count: int,
+    restored_sidecar_count: int,
+) -> dict[str, object]:
+    return {
+        "schema_version": STATE_COMPACTION_EPOCH_SCHEMA_VERSION,
+        "status": "ROLLED_BACK",
+        "compaction_epoch_id": intent.compaction_epoch_id,
+        "recovered_utc": recovered_utc,
+        "state_set_hash": intent.state_set_hash,
+        "rolled_back_store_count": rolled_back_store_count,
+        "removed_temp_file_count": removed_temp_file_count,
+        "restored_sidecar_count": restored_sidecar_count,
+    }
+
+
 def _validate_manifest_store_set(stores: tuple[SqliteStateStoreBackup, ...]) -> None:
     seen = tuple(entry.store for entry in stores)
     if seen != STATE_BACKUP_SET_STORES:
@@ -1577,6 +2315,23 @@ def _state_set_hash(
                 "backup_set_id": backup_set_id,
                 "created_utc": created_utc,
                 "stores": [entry.to_payload() for entry in stores],
+            }
+        )
+    )
+
+
+def _state_compaction_set_hash(
+    *,
+    compaction_epoch_id: str,
+    started_utc: str,
+    compaction_files: tuple[SqliteStateCompactionFile, ...],
+) -> str:
+    return _sha256_bytes(
+        _canonical_json_bytes(
+            {
+                "compaction_epoch_id": compaction_epoch_id,
+                "started_utc": started_utc,
+                "compaction_files": [entry.to_payload() for entry in compaction_files],
             }
         )
     )
@@ -1645,6 +2400,11 @@ def _validate_backup_set_id(value: str) -> None:
 def _validate_restore_epoch_id(value: str) -> None:
     if STATE_BACKUP_SET_ID_PATTERN.fullmatch(value) is None:
         raise SqliteStateBackupViolation("STATE_RESTORE_EPOCH_ID_INVALID")
+
+
+def _validate_compaction_epoch_id(value: str) -> None:
+    if STATE_BACKUP_SET_ID_PATTERN.fullmatch(value) is None:
+        raise SqliteStateBackupViolation("STATE_COMPACTION_EPOCH_ID_INVALID")
 
 
 def _validate_local_absolute_path(path: Path, field_name: str) -> None:

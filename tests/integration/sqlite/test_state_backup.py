@@ -21,6 +21,10 @@ from mediasync_home.adapters.sqlite.migrations import (
 from mediasync_home.adapters.sqlite.state_backup import (
     BACKUP_SET_INTENT_FILENAME,
     BACKUP_SET_MANIFEST_FILENAME,
+    STATE_COMPACTION_COMMITTED_FILENAME,
+    STATE_COMPACTION_EPOCHS_DIR_NAME,
+    STATE_COMPACTION_INTENT_FILENAME,
+    STATE_COMPACTION_ROLLED_BACK_FILENAME,
     STATE_RESTORE_COMMITTED_FILENAME,
     STATE_RESTORE_EPOCHS_DIR_NAME,
     STATE_RESTORE_INTENT_FILENAME,
@@ -28,9 +32,11 @@ from mediasync_home.adapters.sqlite.state_backup import (
     SqliteStateBackupViolation,
     admit_sqlite_state_restore_maintenance,
     apply_sqlite_state_restore_plan,
+    compact_sqlite_state_stores,
     create_sqlite_state_backup_set,
     load_sqlite_state_backup_manifest,
     plan_sqlite_state_restore,
+    recover_incomplete_sqlite_state_compaction_epochs,
     recover_incomplete_sqlite_state_restore_epochs,
     restore_sqlite_state_backup_set,
     verify_sqlite_state_backup_set,
@@ -341,6 +347,98 @@ def test_sqlite_state_restore_startup_recovery_ignores_committed_epoch(
     assert _read_user_versions(layout) == backup_versions
 
 
+def test_sqlite_state_compaction_epoch_swaps_verified_pair_and_preserves_rollback(
+    tmp_path: Path,
+) -> None:
+    layout = build_state_store_layout(tmp_path / "state")
+    _initialize_state_stores(layout)
+    _set_user_version(layout.catalog, 77)
+    _set_user_version(layout.recovery, 88)
+
+    receipt = compact_sqlite_state_stores(
+        layout,
+        compaction_epoch_id="compact-a",
+        started_utc="2026-07-30T12:05:00Z",
+    )
+
+    epoch_dir = layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME / "compact-a"
+    assert receipt.compaction_epoch_id == "compact-a"
+    assert len(receipt.state_set_hash) == 64
+    assert receipt.intent_path == epoch_dir / STATE_COMPACTION_INTENT_FILENAME
+    assert receipt.committed_path == epoch_dir / STATE_COMPACTION_COMMITTED_FILENAME
+    assert receipt.intent_path.is_file()
+    assert receipt.committed_path.is_file()
+    assert [entry.store.value for entry in receipt.compacted_files] == [
+        "catalog",
+        "recovery",
+    ]
+    assert [entry.target_path for entry in receipt.compacted_files] == [
+        layout.catalog,
+        layout.recovery,
+    ]
+    assert all(entry.rollback_path is not None for entry in receipt.compacted_files)
+    assert _read_user_versions(layout) == (77, 88)
+    assert (
+        layout.catalog.with_name(".catalog.sqlite.compact-a.compaction-rollback")
+    ).is_file()
+    assert (
+        layout.recovery.with_name(".recovery.sqlite.compact-a.compaction-rollback")
+    ).is_file()
+
+
+def test_sqlite_state_compaction_recovery_rolls_back_interrupted_epoch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = build_state_store_layout(tmp_path / "state")
+    _initialize_state_stores(layout)
+    _set_user_version(layout.catalog, 77)
+    _set_user_version(layout.recovery, 88)
+    original_replace = Path.replace
+
+    def interrupted_replace(self: Path, target: str | Path) -> Path:
+        target_path = Path(target)
+        if self.name.startswith(".recovery.sqlite.compact-b.compaction-new") and (
+            target_path == layout.recovery
+        ):
+            raise KeyboardInterrupt("simulated host crash")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", interrupted_replace)
+    with pytest.raises(KeyboardInterrupt):
+        compact_sqlite_state_stores(
+            layout,
+            compaction_epoch_id="compact-b",
+            started_utc="2026-07-30T12:05:00Z",
+        )
+    monkeypatch.setattr(Path, "replace", original_replace)
+
+    epoch_dir = layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME / "compact-b"
+    assert (epoch_dir / STATE_COMPACTION_INTENT_FILENAME).is_file()
+    assert not (epoch_dir / STATE_COMPACTION_COMMITTED_FILENAME).exists()
+    assert layout.catalog.with_name(".catalog.sqlite.compact-b.compaction-rollback").is_file()
+    assert layout.recovery.with_name(".recovery.sqlite.compact-b.compaction-rollback").is_file()
+    assert layout.recovery.with_name(".recovery.sqlite.compact-b.compaction-new.tmp").is_file()
+
+    report = recover_incomplete_sqlite_state_compaction_epochs(
+        layout,
+        recovered_utc="2026-07-30T12:06:00Z",
+    )
+
+    assert report.scanned_epoch_count == 1
+    assert report.committed_epoch_count == 0
+    assert report.previously_rolled_back_epoch_count == 0
+    assert len(report.recovered_epochs) == 1
+    assert report.recovered_epochs[0].compaction_epoch_id == "compact-b"
+    assert report.recovered_epochs[0].rolled_back_store_count == 2
+    assert report.recovered_epochs[0].removed_temp_file_count == 1
+    assert (epoch_dir / STATE_COMPACTION_ROLLED_BACK_FILENAME).is_file()
+    assert not layout.catalog.with_name(".catalog.sqlite.compact-b.compaction-rollback").exists()
+    assert not layout.recovery.with_name(".recovery.sqlite.compact-b.compaction-rollback").exists()
+    assert not layout.recovery.with_name(".recovery.sqlite.compact-b.compaction-new.tmp").exists()
+    assert _read_user_versions(layout) == (77, 88)
+
+
 def test_sqlite_state_restore_maintenance_admits_clean_state(
     tmp_path: Path,
 ) -> None:
@@ -358,6 +456,7 @@ def test_sqlite_state_restore_maintenance_admits_clean_state(
     assert admission.active_resource_lease_count == 0
     assert admission.unresolved_target_intent_segment_count == 0
     assert admission.incomplete_restore_epoch_count == 0
+    assert admission.incomplete_compaction_epoch_count == 0
     assert admission.to_payload()["admitted"] is True
 
 
@@ -376,6 +475,9 @@ def test_sqlite_state_restore_maintenance_blocks_active_mutation_evidence(
     (layout.root / STATE_RESTORE_EPOCHS_DIR_NAME / "restore-pending").mkdir(
         parents=True
     )
+    (layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME / "compact-pending").mkdir(
+        parents=True
+    )
 
     admission = admit_sqlite_state_restore_maintenance(layout)
 
@@ -387,6 +489,7 @@ def test_sqlite_state_restore_maintenance_blocks_active_mutation_evidence(
     assert admission.active_resource_lease_count == 1
     assert admission.unresolved_target_intent_segment_count == 1
     assert admission.incomplete_restore_epoch_count == 1
+    assert admission.incomplete_compaction_epoch_count == 1
     assert {blocker.code for blocker in admission.blockers} == {
         "STATE_RESTORE_MAINTENANCE_ACTIVE_RUNS",
         "STATE_RESTORE_MAINTENANCE_ACTIVE_RUN_TARGETS",
@@ -395,6 +498,7 @@ def test_sqlite_state_restore_maintenance_blocks_active_mutation_evidence(
         "STATE_RESTORE_MAINTENANCE_ACTIVE_RESOURCE_LEASES",
         "STATE_RESTORE_MAINTENANCE_UNRESOLVED_TARGET_INTENTS",
         "STATE_RESTORE_MAINTENANCE_INCOMPLETE_RESTORE_EPOCHS",
+        "STATE_RESTORE_MAINTENANCE_INCOMPLETE_COMPACTION_EPOCHS",
     }
 
 

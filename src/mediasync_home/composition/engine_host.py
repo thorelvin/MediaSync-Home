@@ -53,10 +53,14 @@ from mediasync_home.adapters.sqlite.runs import SqliteRunStore
 from mediasync_home.adapters.sqlite.schedules import SqliteScheduleStore
 from mediasync_home.adapters.sqlite.snapshots import SqliteSnapshotEntryStore
 from mediasync_home.adapters.sqlite.state_backup import (
-    SqliteStateRestoreReceipt,
+    SqliteStateCompactionEpochRecoveryReport,
+    SqliteStateCompactionReceipt,
     SqliteStateRestoreEpochRecoveryReport,
+    SqliteStateRestoreReceipt,
     SqliteStateRestoreMaintenanceAdmission,
     admit_sqlite_state_restore_maintenance,
+    compact_sqlite_state_stores,
+    recover_incomplete_sqlite_state_compaction_epochs,
     recover_incomplete_sqlite_state_restore_epochs,
     restore_sqlite_state_backup_set,
 )
@@ -205,6 +209,7 @@ class EngineHostRuntime:
     service: EngineHostIpcService
     state_layout: StateStoreLayout | None = None
     state_restore_recovery: SqliteStateRestoreEpochRecoveryReport | None = None
+    state_compaction_recovery: SqliteStateCompactionEpochRecoveryReport | None = None
     startup_reconciliation: EngineHostStartupReconciliationReport | None = None
     reconciler_instance_id: str | None = None
     run_executor_queue_store: RunExecutorQueueStore | None = None
@@ -240,6 +245,25 @@ class EngineHostRuntime:
             backup_dir,
             target_layout,
             restore_epoch_id=restore_epoch_id,
+            started_utc=started_utc,
+        )
+
+    def compact_state_stores(
+        self,
+        *,
+        compaction_epoch_id: str,
+        started_utc: str,
+    ) -> SqliteStateCompactionReceipt:
+        if self.state_layout is None:
+            raise RuntimeError("STATE_COMPACTION_RUNTIME_NOT_CONFIGURED")
+        admission = self.admit_state_restore_maintenance()
+        if not admission.admitted:
+            raise EngineHostStateCompactionNotAdmitted(admission)
+        target_layout = self.state_layout
+        self.close()
+        return compact_sqlite_state_stores(
+            target_layout,
+            compaction_epoch_id=compaction_epoch_id,
             started_utc=started_utc,
         )
 
@@ -502,6 +526,12 @@ class EngineHostRuntime:
 class EngineHostStateRestoreNotAdmitted(RuntimeError):
     def __init__(self, admission: SqliteStateRestoreMaintenanceAdmission) -> None:
         super().__init__("STATE_RESTORE_MAINTENANCE_NOT_ADMITTED")
+        self.admission = admission
+
+
+class EngineHostStateCompactionNotAdmitted(RuntimeError):
+    def __init__(self, admission: SqliteStateRestoreMaintenanceAdmission) -> None:
+        super().__init__("STATE_COMPACTION_MAINTENANCE_NOT_ADMITTED")
         self.admission = admission
 
 
@@ -1011,6 +1041,9 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                     "state_restore_recovery": _state_restore_recovery_payload(
                         runtime.state_restore_recovery
                     ),
+                    "state_compaction_recovery": _state_compaction_recovery_payload(
+                        runtime.state_compaction_recovery
+                    ),
                     "state_root": None
                     if runtime.state_layout is None
                     else str(runtime.state_layout.root),
@@ -1142,6 +1175,10 @@ def build_engine_host_runtime(
         layout,
         recovered_utc=_utc_now(),
     )
+    state_compaction_recovery = recover_incomplete_sqlite_state_compaction_epochs(
+        layout,
+        recovered_utc=_utc_now(),
+    )
     catalog_connection = sqlite3.connect(layout.catalog)
     recovery_connection = sqlite3.connect(layout.recovery)
     try:
@@ -1238,6 +1275,7 @@ def build_engine_host_runtime(
         service=service,
         state_layout=layout,
         state_restore_recovery=state_restore_recovery,
+        state_compaction_recovery=state_compaction_recovery,
         startup_reconciliation=startup_reconciliation,
         reconciler_instance_id=reconciler_instance_id,
         run_executor_queue_store=runs,
@@ -1605,6 +1643,14 @@ def _startup_reconciliation_payload(
 
 def _state_restore_recovery_payload(
     report: SqliteStateRestoreEpochRecoveryReport | None,
+) -> dict[str, object] | None:
+    if report is None:
+        return None
+    return report.to_payload()
+
+
+def _state_compaction_recovery_payload(
+    report: SqliteStateCompactionEpochRecoveryReport | None,
 ) -> dict[str, object] | None:
     if report is None:
         return None
