@@ -141,6 +141,44 @@ def test_reparse_guard_accepts_handle_final_path_under_root(tmp_path: Path) -> N
     )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="handle final-path proof is Windows-specific")
+def test_reparse_guard_rejects_reparse_swap_after_clean_chain_inspection(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    parent = root / "Pictures"
+    parent.mkdir(parents=True)
+    guard = LocalReparseGuard(
+        probe=_ReparseSwapProbe(
+            root=root,
+            swapped_path=parent,
+            root_final_path="\\\\?\\C:\\endpoint-root",
+            clean_final_path="\\\\?\\C:\\endpoint-root\\Pictures",
+        )
+    )
+
+    evidence = guard.reject_reparse_chain(
+        root=root,
+        relative_parts=("Pictures",),
+        missing_code="CHAIN_MISSING",
+        missing_next_action="refresh",
+        reparse_code="CHAIN_REPARSE",
+        reparse_next_action="revalidate",
+    )
+
+    assert evidence.inspected_paths == (root, parent)
+    with pytest.raises(ReparseGuardError) as exc_info:
+        guard.require_resolved_under_root(
+            root=root,
+            path=parent,
+            strict=True,
+            escape_code="PATH_ESCAPED",
+            escape_next_action="refresh endpoint",
+        )
+
+    assert exc_info.value.validation_code == "PATH_ESCAPED"
+
+
 class _OverlayProbe:
     def __init__(self, *, reparse_paths: set[Path]) -> None:
         self._reparse_paths = {path.resolve(strict=False) for path in reparse_paths}
@@ -174,3 +212,47 @@ class _FinalPathProbe:
             ),
             final_path=final_path,
         )
+
+
+class _ReparseSwapProbe:
+    def __init__(
+        self,
+        *,
+        root: Path,
+        swapped_path: Path,
+        root_final_path: str,
+        clean_final_path: str,
+    ) -> None:
+        self._root = root.resolve(strict=False)
+        self._swapped_path = swapped_path.resolve(strict=False)
+        self._root_final_path = root_final_path
+        self._clean_final_path = clean_final_path
+        self._calls: dict[Path, int] = {}
+
+    def inspect_path(self, path: Path) -> ReparseInspection:
+        resolved = path.resolve(strict=False)
+        self._calls[resolved] = self._calls.get(resolved, 0) + 1
+        if resolved == self._root:
+            return ReparseInspection(
+                path=path,
+                exists=True,
+                is_reparse_point=False,
+                identity=FileIdentityEvidence(
+                    kind="WIN32_HANDLE_VOLUME_FILE_ID",
+                    value=self._root_final_path,
+                ),
+                final_path=self._root_final_path,
+            )
+        if resolved == self._swapped_path:
+            swapped = self._calls[resolved] > 1
+            return ReparseInspection(
+                path=path,
+                exists=True,
+                is_reparse_point=swapped,
+                identity=FileIdentityEvidence(
+                    kind="WIN32_HANDLE_VOLUME_FILE_ID",
+                    value=self._clean_final_path,
+                ),
+                final_path=self._clean_final_path,
+            )
+        return ReparseInspection(path=path, exists=False, is_reparse_point=False)

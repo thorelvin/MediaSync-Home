@@ -220,6 +220,12 @@ class LocalReparseGuard:
         if (
             root_inspection.exists
             and path_inspection.exists
+            and (root_inspection.is_reparse_point or path_inspection.is_reparse_point)
+        ):
+            raise ReparseGuardError(escape_code, escape_next_action)
+        if (
+            root_inspection.exists
+            and path_inspection.exists
             and root_inspection.final_path is not None
             and path_inspection.final_path is not None
         ):
