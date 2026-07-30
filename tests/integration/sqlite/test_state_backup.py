@@ -26,6 +26,7 @@ from mediasync_home.adapters.sqlite.state_backup import (
     STATE_RESTORE_INTENT_FILENAME,
     STATE_RESTORE_ROLLED_BACK_FILENAME,
     SqliteStateBackupViolation,
+    admit_sqlite_state_restore_maintenance,
     apply_sqlite_state_restore_plan,
     create_sqlite_state_backup_set,
     load_sqlite_state_backup_manifest,
@@ -340,6 +341,63 @@ def test_sqlite_state_restore_startup_recovery_ignores_committed_epoch(
     assert _read_user_versions(layout) == backup_versions
 
 
+def test_sqlite_state_restore_maintenance_admits_clean_state(
+    tmp_path: Path,
+) -> None:
+    layout = build_state_store_layout(tmp_path / "state")
+    _initialize_state_stores(layout)
+
+    admission = admit_sqlite_state_restore_maintenance(layout)
+
+    assert admission.admitted is True
+    assert admission.blockers == ()
+    assert admission.active_run_count == 0
+    assert admission.active_run_target_count == 0
+    assert admission.non_terminal_command_receipt_count == 0
+    assert admission.pending_outbox_message_count == 0
+    assert admission.active_resource_lease_count == 0
+    assert admission.unresolved_target_intent_segment_count == 0
+    assert admission.incomplete_restore_epoch_count == 0
+    assert admission.to_payload()["admitted"] is True
+
+
+def test_sqlite_state_restore_maintenance_blocks_active_mutation_evidence(
+    tmp_path: Path,
+) -> None:
+    layout = build_state_store_layout(tmp_path / "state")
+    _initialize_state_stores(layout)
+    _insert_active_catalog_restore_maintenance_evidence(layout)
+    _insert_active_recovery_intent_segment(
+        layout,
+        segment_id="segment-a",
+        sequence=0,
+        updated_utc="2026-07-30T12:00:00.000Z",
+    )
+    (layout.root / STATE_RESTORE_EPOCHS_DIR_NAME / "restore-pending").mkdir(
+        parents=True
+    )
+
+    admission = admit_sqlite_state_restore_maintenance(layout)
+
+    assert admission.admitted is False
+    assert admission.active_run_count == 1
+    assert admission.active_run_target_count == 1
+    assert admission.non_terminal_command_receipt_count == 1
+    assert admission.pending_outbox_message_count == 1
+    assert admission.active_resource_lease_count == 1
+    assert admission.unresolved_target_intent_segment_count == 1
+    assert admission.incomplete_restore_epoch_count == 1
+    assert {blocker.code for blocker in admission.blockers} == {
+        "STATE_RESTORE_MAINTENANCE_ACTIVE_RUNS",
+        "STATE_RESTORE_MAINTENANCE_ACTIVE_RUN_TARGETS",
+        "STATE_RESTORE_MAINTENANCE_NON_TERMINAL_COMMAND_RECEIPTS",
+        "STATE_RESTORE_MAINTENANCE_PENDING_OUTBOX_MESSAGES",
+        "STATE_RESTORE_MAINTENANCE_ACTIVE_RESOURCE_LEASES",
+        "STATE_RESTORE_MAINTENANCE_UNRESOLVED_TARGET_INTENTS",
+        "STATE_RESTORE_MAINTENANCE_INCOMPLETE_RESTORE_EPOCHS",
+    }
+
+
 def test_sqlite_state_backup_set_rejects_mixed_store_file_from_another_epoch(
     tmp_path: Path,
 ) -> None:
@@ -494,4 +552,121 @@ def _insert_active_recovery_intent_segment(
                 updated_utc,
                 updated_utc,
             ),
+        )
+
+
+def _insert_active_catalog_restore_maintenance_evidence(layout: StateStoreLayout) -> None:
+    with sqlite3.connect(layout.catalog) as connection:
+        connection.execute(
+            """
+            INSERT INTO command_receipts (
+                idempotency_key,
+                request_id,
+                client_instance_id,
+                principal_fingerprint,
+                command_name,
+                payload_hash,
+                protocol_version,
+                schema_version,
+                state,
+                payload_hash_scope,
+                payload_canonicalization_algorithm,
+                payload_hash_algorithm
+            )
+            VALUES (
+                'cmd-a',
+                'request-a',
+                'client-a',
+                'principal-a',
+                'START_RUN',
+                ?,
+                1,
+                1,
+                'RUNNING',
+                'COMMAND_PAYLOAD',
+                'RFC8785',
+                'SHA-256'
+            )
+            """,
+            ("a" * 64,),
+        )
+        connection.execute(
+            """
+            INSERT INTO outbox_messages (
+                id,
+                message_type,
+                aggregate_type,
+                aggregate_id,
+                idempotency_key,
+                payload_json,
+                payload_hash,
+                state
+            )
+            VALUES (
+                'outbox-a',
+                'COMMAND_EFFECT_ACCEPTED',
+                'command',
+                'cmd-a',
+                'outbox-key-a',
+                '{}',
+                ?,
+                'PENDING'
+            )
+            """,
+            ("b" * 64,),
+        )
+        connection.execute(
+            """
+            INSERT INTO runs (
+                id,
+                job_id,
+                job_revision_id,
+                plan_id,
+                command_request_id,
+                logical_run_group_id,
+                trigger_type,
+                state,
+                summary_json,
+                app_version,
+                plan_checksum,
+                idempotency_key,
+                planned_operations,
+                planned_bytes
+            )
+            VALUES (
+                'run-a',
+                'job-a',
+                'job-rev-a',
+                'plan-a',
+                'request-a',
+                'group-a',
+                'MANUAL_LOCAL_PREVIEW',
+                'EXECUTING',
+                '{}',
+                '0B-dev',
+                ?,
+                'run-key-a',
+                1,
+                10
+            )
+            """,
+            ("c" * 64,),
+        )
+        connection.execute(
+            """
+            INSERT INTO run_targets (
+                id,
+                run_id,
+                endpoint_id,
+                endpoint_revision_id,
+                state
+            )
+            VALUES (
+                'run-target-a',
+                'run-a',
+                'target-a',
+                'target-rev-a',
+                'EXECUTING'
+            )
+            """
         )

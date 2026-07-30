@@ -9,7 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from mediasync_home.adapters.sqlite.connection_policy import SqliteStore, StateStoreLayout
+from mediasync_home.adapters.sqlite.connection_policy import (
+    SqliteStore,
+    StateStoreLayout,
+    apply_sqlite_connection_policy,
+    catalog_reader_policy,
+    recovery_reader_policy,
+)
 
 
 STATE_BACKUP_SET_MANIFEST_SCHEMA_VERSION = 2
@@ -23,6 +29,29 @@ STATE_RESTORE_EPOCHS_DIR_NAME = "state-restore-epochs"
 STATE_RESTORE_INTENT_FILENAME = "state-restore.intent.json"
 STATE_RESTORE_COMMITTED_FILENAME = "state-restore.committed.json"
 STATE_RESTORE_ROLLED_BACK_FILENAME = "state-restore.rolled-back.json"
+STATE_RESTORE_MAINTENANCE_TERMINAL_RUN_STATES = (
+    "COMPLETED",
+    "COMPLETED_WITH_WARNINGS",
+    "PARTIAL_FAILURE",
+    "FAILED",
+    "CANCELLED",
+    "BLOCKED_BY_SAFETY",
+)
+STATE_RESTORE_MAINTENANCE_TERMINAL_RUN_TARGET_STATES = (
+    "SUCCEEDED",
+    "SUCCEEDED_WITH_WARNINGS",
+    "FAILED",
+    "CANCELLED",
+    "BLOCKED",
+)
+STATE_RESTORE_MAINTENANCE_TERMINAL_COMMAND_RECEIPT_STATES = (
+    "SUCCEEDED",
+    "REJECTED",
+    "FAILED",
+    "CANCELLED",
+)
+STATE_RESTORE_MAINTENANCE_TERMINAL_OUTBOX_STATES = ("DELIVERED", "DEAD_LETTER")
+STATE_RESTORE_MAINTENANCE_UNRESOLVED_INTENT_STATES = ("BUILDING", "DURABLE")
 
 
 class SqliteStateBackupViolation(ValueError):
@@ -234,6 +263,86 @@ class SqliteStateRestoreEpochRecoveryReport:
 
 
 @dataclass(frozen=True, slots=True)
+class SqliteStateRestoreMaintenanceBlocker:
+    code: str
+    count: int
+    store: SqliteStore | None = None
+    detail: str | None = None
+
+    def to_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "code": self.code,
+            "count": self.count,
+        }
+        if self.store is not None:
+            payload["store"] = self.store.value
+        if self.detail is not None:
+            payload["detail"] = self.detail
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class SqliteStateRestoreMaintenanceAdmission:
+    active_run_count: int
+    active_run_target_count: int
+    non_terminal_command_receipt_count: int
+    pending_outbox_message_count: int
+    active_resource_lease_count: int
+    unresolved_target_intent_segment_count: int
+    incomplete_restore_epoch_count: int
+    retained_run_target_lease_count: int = 0
+    blockers: tuple[SqliteStateRestoreMaintenanceBlocker, ...] = ()
+
+    @property
+    def admitted(self) -> bool:
+        return not self.blockers
+
+    def with_retained_run_target_lease_count(
+        self,
+        retained_count: int,
+    ) -> SqliteStateRestoreMaintenanceAdmission:
+        if retained_count <= 0:
+            return self
+        return SqliteStateRestoreMaintenanceAdmission(
+            active_run_count=self.active_run_count,
+            active_run_target_count=self.active_run_target_count,
+            non_terminal_command_receipt_count=self.non_terminal_command_receipt_count,
+            pending_outbox_message_count=self.pending_outbox_message_count,
+            active_resource_lease_count=self.active_resource_lease_count,
+            unresolved_target_intent_segment_count=(
+                self.unresolved_target_intent_segment_count
+            ),
+            incomplete_restore_epoch_count=self.incomplete_restore_epoch_count,
+            retained_run_target_lease_count=retained_count,
+            blockers=self.blockers
+            + (
+                SqliteStateRestoreMaintenanceBlocker(
+                    code="STATE_RESTORE_MAINTENANCE_RETAINED_RUN_TARGET_LEASES",
+                    count=retained_count,
+                ),
+            ),
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "admitted": self.admitted,
+            "active_run_count": self.active_run_count,
+            "active_run_target_count": self.active_run_target_count,
+            "non_terminal_command_receipt_count": (
+                self.non_terminal_command_receipt_count
+            ),
+            "pending_outbox_message_count": self.pending_outbox_message_count,
+            "active_resource_lease_count": self.active_resource_lease_count,
+            "unresolved_target_intent_segment_count": (
+                self.unresolved_target_intent_segment_count
+            ),
+            "incomplete_restore_epoch_count": self.incomplete_restore_epoch_count,
+            "retained_run_target_lease_count": self.retained_run_target_lease_count,
+            "blockers": [entry.to_payload() for entry in self.blockers],
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class _PreparedRestoreFile:
     restore_file: SqliteStateRestoreFile
     temp_path: Path
@@ -418,6 +527,85 @@ def restore_sqlite_state_backup_set(
         plan,
         restore_epoch_id=restore_epoch_id,
         started_utc=started_utc,
+    )
+
+
+def admit_sqlite_state_restore_maintenance(
+    layout: StateStoreLayout,
+) -> SqliteStateRestoreMaintenanceAdmission:
+    _validate_state_store_layout(layout, field_name="STATE_RESTORE_MAINTENANCE")
+
+    active_run_count = 0
+    active_run_target_count = 0
+    non_terminal_command_receipt_count = 0
+    pending_outbox_message_count = 0
+    active_resource_lease_count = 0
+    unresolved_target_intent_segment_count = 0
+    blockers: list[SqliteStateRestoreMaintenanceBlocker] = []
+
+    try:
+        catalog_counts = _catalog_restore_maintenance_counts(layout.catalog)
+        active_run_count = catalog_counts[0]
+        active_run_target_count = catalog_counts[1]
+        non_terminal_command_receipt_count = catalog_counts[2]
+        pending_outbox_message_count = catalog_counts[3]
+    except SqliteStateBackupViolation as exc:
+        blockers.append(
+            SqliteStateRestoreMaintenanceBlocker(
+                code="STATE_RESTORE_MAINTENANCE_CATALOG_UNREADABLE",
+                count=1,
+                store=SqliteStore.CATALOG,
+                detail=str(exc),
+            )
+        )
+
+    try:
+        recovery_counts = _recovery_restore_maintenance_counts(layout.recovery)
+        active_resource_lease_count = recovery_counts[0]
+        unresolved_target_intent_segment_count = recovery_counts[1]
+    except SqliteStateBackupViolation as exc:
+        blockers.append(
+            SqliteStateRestoreMaintenanceBlocker(
+                code="STATE_RESTORE_MAINTENANCE_RECOVERY_UNREADABLE",
+                count=1,
+                store=SqliteStore.RECOVERY,
+                detail=str(exc),
+            )
+        )
+
+    try:
+        incomplete_restore_epoch_count = _incomplete_restore_epoch_count(layout)
+    except SqliteStateBackupViolation as exc:
+        incomplete_restore_epoch_count = 0
+        blockers.append(
+            SqliteStateRestoreMaintenanceBlocker(
+                code="STATE_RESTORE_MAINTENANCE_EPOCHS_UNREADABLE",
+                count=1,
+                detail=str(exc),
+            )
+        )
+
+    blockers.extend(
+        _count_blockers(
+            active_run_count=active_run_count,
+            active_run_target_count=active_run_target_count,
+            non_terminal_command_receipt_count=non_terminal_command_receipt_count,
+            pending_outbox_message_count=pending_outbox_message_count,
+            active_resource_lease_count=active_resource_lease_count,
+            unresolved_target_intent_segment_count=unresolved_target_intent_segment_count,
+            incomplete_restore_epoch_count=incomplete_restore_epoch_count,
+        )
+    )
+
+    return SqliteStateRestoreMaintenanceAdmission(
+        active_run_count=active_run_count,
+        active_run_target_count=active_run_target_count,
+        non_terminal_command_receipt_count=non_terminal_command_receipt_count,
+        pending_outbox_message_count=pending_outbox_message_count,
+        active_resource_lease_count=active_resource_lease_count,
+        unresolved_target_intent_segment_count=unresolved_target_intent_segment_count,
+        incomplete_restore_epoch_count=incomplete_restore_epoch_count,
+        blockers=tuple(blockers),
     )
 
 
@@ -695,6 +883,237 @@ def _current_target_intent_evidence(recovery_path: Path) -> tuple[int, str | Non
             return _target_intent_evidence(connection, store=SqliteStore.RECOVERY)
     except sqlite3.Error as exc:
         raise SqliteStateBackupViolation("STATE_RESTORE_CURRENT_RECOVERY_UNREADABLE") from exc
+
+
+def _catalog_restore_maintenance_counts(catalog_path: Path) -> tuple[int, int, int, int]:
+    if not catalog_path.exists():
+        return (0, 0, 0, 0)
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = _readonly_state_store_connection(
+            catalog_path,
+            store=SqliteStore.CATALOG,
+        )
+        identity = _optional_scalar(
+            connection,
+            "SELECT store FROM store_identity WHERE singleton = 1",
+        )
+        if identity != SqliteStore.CATALOG.value:
+            raise SqliteStateBackupViolation(
+                "STATE_RESTORE_MAINTENANCE_CATALOG_IDENTITY_MISMATCH"
+            )
+        return (
+            _count_states_not_in(
+                connection,
+                table_name="runs",
+                terminal_states=STATE_RESTORE_MAINTENANCE_TERMINAL_RUN_STATES,
+            ),
+            _count_states_not_in(
+                connection,
+                table_name="run_targets",
+                terminal_states=STATE_RESTORE_MAINTENANCE_TERMINAL_RUN_TARGET_STATES,
+            ),
+            _count_states_not_in(
+                connection,
+                table_name="command_receipts",
+                terminal_states=(
+                    STATE_RESTORE_MAINTENANCE_TERMINAL_COMMAND_RECEIPT_STATES
+                ),
+            ),
+            _count_states_not_in(
+                connection,
+                table_name="outbox_messages",
+                terminal_states=STATE_RESTORE_MAINTENANCE_TERMINAL_OUTBOX_STATES,
+            ),
+        )
+    except sqlite3.Error as exc:
+        raise SqliteStateBackupViolation(
+            "STATE_RESTORE_MAINTENANCE_CATALOG_EVIDENCE_UNREADABLE"
+        ) from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _recovery_restore_maintenance_counts(recovery_path: Path) -> tuple[int, int]:
+    if not recovery_path.exists():
+        return (0, 0)
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = _readonly_state_store_connection(
+            recovery_path,
+            store=SqliteStore.RECOVERY,
+        )
+        identity = _optional_scalar(
+            connection,
+            "SELECT store FROM store_identity WHERE singleton = 1",
+        )
+        if identity != SqliteStore.RECOVERY.value:
+            raise SqliteStateBackupViolation(
+                "STATE_RESTORE_MAINTENANCE_RECOVERY_IDENTITY_MISMATCH"
+            )
+        return (
+            _count_states_in(
+                connection,
+                table_name="resource_leases",
+                states=("ACQUIRED",),
+            ),
+            _count_states_in(
+                connection,
+                table_name="recovery_intent_segments",
+                states=STATE_RESTORE_MAINTENANCE_UNRESOLVED_INTENT_STATES,
+            ),
+        )
+    except sqlite3.Error as exc:
+        raise SqliteStateBackupViolation(
+            "STATE_RESTORE_MAINTENANCE_RECOVERY_EVIDENCE_UNREADABLE"
+        ) from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _readonly_state_store_connection(
+    database_path: Path,
+    *,
+    store: SqliteStore,
+) -> sqlite3.Connection:
+    connection = sqlite3.connect(f"file:{database_path.as_posix()}?mode=ro", uri=True)
+    try:
+        if store is SqliteStore.CATALOG:
+            apply_sqlite_connection_policy(connection, catalog_reader_policy(database_path))
+        elif store is SqliteStore.RECOVERY:
+            apply_sqlite_connection_policy(connection, recovery_reader_policy(database_path))
+        else:
+            raise SqliteStateBackupViolation("STATE_BACKUP_STORE_UNSUPPORTED")
+    except Exception:
+        connection.close()
+        raise
+    return connection
+
+
+def _incomplete_restore_epoch_count(layout: StateStoreLayout) -> int:
+    epochs_dir = layout.root / STATE_RESTORE_EPOCHS_DIR_NAME
+    if not epochs_dir.exists():
+        return 0
+    if not epochs_dir.is_dir():
+        raise SqliteStateBackupViolation("STATE_RESTORE_EPOCHS_PATH_NOT_DIRECTORY")
+    count = 0
+    for epoch_dir in epochs_dir.iterdir():
+        if not epoch_dir.is_dir():
+            continue
+        if (epoch_dir / STATE_RESTORE_COMMITTED_FILENAME).exists():
+            continue
+        if (epoch_dir / STATE_RESTORE_ROLLED_BACK_FILENAME).exists():
+            continue
+        count += 1
+    return count
+
+
+def _count_blockers(
+    *,
+    active_run_count: int,
+    active_run_target_count: int,
+    non_terminal_command_receipt_count: int,
+    pending_outbox_message_count: int,
+    active_resource_lease_count: int,
+    unresolved_target_intent_segment_count: int,
+    incomplete_restore_epoch_count: int,
+) -> tuple[SqliteStateRestoreMaintenanceBlocker, ...]:
+    blockers: list[SqliteStateRestoreMaintenanceBlocker] = []
+    _append_count_blocker(
+        blockers,
+        code="STATE_RESTORE_MAINTENANCE_ACTIVE_RUNS",
+        count=active_run_count,
+        store=SqliteStore.CATALOG,
+    )
+    _append_count_blocker(
+        blockers,
+        code="STATE_RESTORE_MAINTENANCE_ACTIVE_RUN_TARGETS",
+        count=active_run_target_count,
+        store=SqliteStore.CATALOG,
+    )
+    _append_count_blocker(
+        blockers,
+        code="STATE_RESTORE_MAINTENANCE_NON_TERMINAL_COMMAND_RECEIPTS",
+        count=non_terminal_command_receipt_count,
+        store=SqliteStore.CATALOG,
+    )
+    _append_count_blocker(
+        blockers,
+        code="STATE_RESTORE_MAINTENANCE_PENDING_OUTBOX_MESSAGES",
+        count=pending_outbox_message_count,
+        store=SqliteStore.CATALOG,
+    )
+    _append_count_blocker(
+        blockers,
+        code="STATE_RESTORE_MAINTENANCE_ACTIVE_RESOURCE_LEASES",
+        count=active_resource_lease_count,
+        store=SqliteStore.RECOVERY,
+    )
+    _append_count_blocker(
+        blockers,
+        code="STATE_RESTORE_MAINTENANCE_UNRESOLVED_TARGET_INTENTS",
+        count=unresolved_target_intent_segment_count,
+        store=SqliteStore.RECOVERY,
+    )
+    _append_count_blocker(
+        blockers,
+        code="STATE_RESTORE_MAINTENANCE_INCOMPLETE_RESTORE_EPOCHS",
+        count=incomplete_restore_epoch_count,
+    )
+    return tuple(blockers)
+
+
+def _append_count_blocker(
+    blockers: list[SqliteStateRestoreMaintenanceBlocker],
+    *,
+    code: str,
+    count: int,
+    store: SqliteStore | None = None,
+) -> None:
+    if count > 0:
+        blockers.append(
+            SqliteStateRestoreMaintenanceBlocker(
+                code=code,
+                count=count,
+                store=store,
+            )
+        )
+
+
+def _count_states_not_in(
+    connection: sqlite3.Connection,
+    *,
+    table_name: str,
+    terminal_states: tuple[str, ...],
+) -> int:
+    placeholders = _sql_placeholders(terminal_states)
+    return _required_int_scalar(
+        connection,
+        f"SELECT count(*) FROM {table_name} WHERE state NOT IN ({placeholders})",
+        terminal_states,
+    )
+
+
+def _count_states_in(
+    connection: sqlite3.Connection,
+    *,
+    table_name: str,
+    states: tuple[str, ...],
+) -> int:
+    placeholders = _sql_placeholders(states)
+    return _required_int_scalar(
+        connection,
+        f"SELECT count(*) FROM {table_name} WHERE state IN ({placeholders})",
+        states,
+    )
+
+
+def _sql_placeholders(values: tuple[object, ...]) -> str:
+    if not values:
+        raise SqliteStateBackupViolation("STATE_BACKUP_SQL_PLACEHOLDERS_EMPTY")
+    return ", ".join("?" for _ in values)
 
 
 def _target_intent_evidence_from_manifest(
@@ -1241,15 +1660,23 @@ def _safe_file_name(value: str) -> str:
     return value
 
 
-def _required_scalar(connection: sqlite3.Connection, query: str) -> object:
-    row = connection.execute(query).fetchone()
+def _required_scalar(
+    connection: sqlite3.Connection,
+    query: str,
+    parameters: tuple[object, ...] = (),
+) -> object:
+    row = connection.execute(query, parameters).fetchone()
     if row is None:
         raise SqliteStateBackupViolation("STATE_BACKUP_SQLITE_EVIDENCE_MISSING")
     return cast(object, row[0])
 
 
-def _required_int_scalar(connection: sqlite3.Connection, query: str) -> int:
-    value = _required_scalar(connection, query)
+def _required_int_scalar(
+    connection: sqlite3.Connection,
+    query: str,
+    parameters: tuple[object, ...] = (),
+) -> int:
+    value = _required_scalar(connection, query, parameters)
     if isinstance(value, bool) or not isinstance(value, int):
         raise SqliteStateBackupViolation("STATE_BACKUP_SQLITE_EVIDENCE_INVALID")
     return value

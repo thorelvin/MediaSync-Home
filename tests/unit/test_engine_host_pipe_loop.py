@@ -758,6 +758,8 @@ def test_engine_host_runtime_without_state_root_preserves_non_persistent_service
         assert runtime.recovery_connection is None
         assert runtime.service.command_receipt_store is None
         assert runtime.service.outbox_store is None
+        with pytest.raises(RuntimeError, match="STATE_RESTORE_RUNTIME_NOT_CONFIGURED"):
+            runtime.admit_state_restore_maintenance()
     finally:
         runtime.close()
 
@@ -820,6 +822,9 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.startup_reconciliation.skipped_external_resource_requeue_reason == (
             "EXTERNAL_RESOURCE_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF"
         )
+        admission = runtime.admit_state_restore_maintenance()
+        assert admission.admitted is True
+        assert admission.blockers == ()
 
         ipc_client = InProcessIpcClient(
             service=runtime.service,
@@ -1061,6 +1066,34 @@ def test_engine_host_startup_task_scheduler_reconciliation_uses_injected_registr
         assert report.claims_attempted == 2
         assert report.claim_idle is True
         assert report.claim_findings[0].action is TaskSchedulerReconciliationAction.IN_SYNC
+    finally:
+        runtime.close()
+
+
+def test_engine_host_runtime_state_restore_maintenance_blocks_retained_leases(
+    tmp_path: Path,
+) -> None:
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=startup_status(ProcessRole.ENGINE_HOST),
+        state_root=tmp_path / "state",
+        reconciler_instance_id="host-new",
+    )
+    try:
+        assert runtime.run_executor_lease_registry is not None
+        runtime.run_executor_lease_registry.retain_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-target-a",
+            lease=_FakeLiveLease(),
+        )
+
+        admission = runtime.admit_state_restore_maintenance()
+
+        assert admission.admitted is False
+        assert admission.retained_run_target_lease_count == 1
+        assert [blocker.code for blocker in admission.blockers] == [
+            "STATE_RESTORE_MAINTENANCE_RETAINED_RUN_TARGET_LEASES"
+        ]
     finally:
         runtime.close()
 

@@ -54,6 +54,8 @@ from mediasync_home.adapters.sqlite.schedules import SqliteScheduleStore
 from mediasync_home.adapters.sqlite.snapshots import SqliteSnapshotEntryStore
 from mediasync_home.adapters.sqlite.state_backup import (
     SqliteStateRestoreEpochRecoveryReport,
+    SqliteStateRestoreMaintenanceAdmission,
+    admit_sqlite_state_restore_maintenance,
     recover_incomplete_sqlite_state_restore_epochs,
 )
 from mediasync_home.adapters.sqlite.trigger_occurrences import SqliteTriggerOccurrenceStore
@@ -217,6 +219,16 @@ class EngineHostRuntime:
     run_executor_process_instance_id: str | None = None
     catalog_connection: sqlite3.Connection | None = None
     recovery_connection: sqlite3.Connection | None = None
+
+    def admit_state_restore_maintenance(self) -> SqliteStateRestoreMaintenanceAdmission:
+        if self.state_layout is None:
+            raise RuntimeError("STATE_RESTORE_RUNTIME_NOT_CONFIGURED")
+        admission = admit_sqlite_state_restore_maintenance(self.state_layout)
+        if self.run_executor_lease_registry is None:
+            return admission
+        return admission.with_retained_run_target_lease_count(
+            self.run_executor_lease_registry.retained_count
+        )
 
     def task_scheduler_stage_desired_resource_page(
         self,
