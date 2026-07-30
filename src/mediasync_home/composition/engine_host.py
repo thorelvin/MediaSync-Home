@@ -110,6 +110,7 @@ from mediasync_home.application.recovery_reconciliation import (
 from mediasync_home.application.recovery_resume import RecoveryResumeStartupReport
 from mediasync_home.application.runs import EndpointLeaseAuthority, RunIds, RunTargetCompletionOutcome
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
+from mediasync_home.application.state_maintenance import RestoreStateFromBackupSetCommand
 from mediasync_home.application.startup_reconciliation import (
     EngineHostStartupReconciliationReport,
     EngineHostStartupReconciliationRequest,
@@ -1271,7 +1272,7 @@ def build_engine_host_runtime(
         catalog_connection.close()
         recovery_connection.close()
         raise
-    return EngineHostRuntime(
+    runtime = EngineHostRuntime(
         service=service,
         state_layout=layout,
         state_restore_recovery=state_restore_recovery,
@@ -1293,6 +1294,11 @@ def build_engine_host_runtime(
         catalog_connection=catalog_connection,
         recovery_connection=recovery_connection,
     )
+    runtime.service.state_restore_executor = lambda command: _execute_state_restore_command(
+        runtime,
+        command,
+    )
+    return runtime
 
 
 def build_run_executor_staging_transfer_port(
@@ -1305,6 +1311,17 @@ def build_run_executor_staging_transfer_port(
     if backend == "robocopy":
         return RobocopyStagingTransferAdapter(root_resolver=root_resolver)
     raise RuntimeError("RUN_EXECUTOR_STAGING_BACKEND_UNSUPPORTED")
+
+
+def _execute_state_restore_command(
+    runtime: EngineHostRuntime,
+    command: RestoreStateFromBackupSetCommand,
+) -> dict[str, object]:
+    return runtime.restore_state_from_backup_set(
+        command.backup_dir,
+        restore_epoch_id=command.restore_epoch_id,
+        started_utc=command.started_utc,
+    ).to_payload()
 
 
 def build_task_scheduler_registry(backend: str) -> TaskSchedulerRegistryPort:

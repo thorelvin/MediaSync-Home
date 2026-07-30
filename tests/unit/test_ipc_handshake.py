@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -86,6 +87,7 @@ from mediasync_home.application.snapshots import (
     validate_snapshot_entry_page_query,
     validate_snapshot_issue_page_query,
 )
+from mediasync_home.application.state_maintenance import StateMaintenanceCommandName
 from mediasync_home.application.trigger_occurrences import (
     TriggerCommandName,
     TriggerKind,
@@ -1635,6 +1637,120 @@ def test_enabled_enqueue_trigger_occurrence_rejects_schedule_revision_mismatch()
     assert receipt.rejection_reason == IpcReason.COMMAND_PRECONDITION_FAILED.value
     assert occurrences.occurrences == {}
     assert runs.runs == {}
+
+
+def test_restore_state_command_runs_in_read_only_ipc_mode(
+    tmp_path: Path,
+) -> None:
+    receipts = _InMemoryCommandReceiptStore()
+    service = _service()
+    service.command_receipt_store = receipts
+    calls = []
+
+    def restore_executor(command):
+        calls.append(command)
+        return {
+            "backup_set_id": "set-a",
+            "committed_path": str(tmp_path / "state" / "state-restore.committed.json"),
+            "intent_path": str(tmp_path / "state" / "state-restore.intent.json"),
+            "restore_epoch_id": command.restore_epoch_id,
+            "restored_files": [],
+            "state_set_hash": "a" * 64,
+        }
+
+    service.state_restore_executor = restore_executor
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    command_payload = {
+        "backup_dir": str(tmp_path / "state-backups" / "set-a"),
+        "restore_epoch_id": "restore-ipc-a",
+        "started_utc": "2026-07-30T12:05:00Z",
+    }
+
+    response = ipc_client.submit_command(
+        StateMaintenanceCommandName.RESTORE_STATE_FROM_BACKUP_SET.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=command_payload,
+        payload_hash=payload_hash(command_payload),
+    )
+
+    assert response.status is IpcStatus.ACCEPTED
+    assert response.reason is None
+    assert response.payload["recognized"] is True
+    assert response.payload["read_only_ipc_mode"] is True
+    assert response.payload["mutations_enabled"] is False
+    assert response.payload["restored"] is True
+    assert response.payload["host_restart_required"] is True
+    assert response.payload["restore_epoch_id"] == "restore-ipc-a"
+    assert response.payload["restore_receipt"]["restore_epoch_id"] == "restore-ipc-a"
+    assert calls[0].backup_dir == tmp_path / "state-backups" / "set-a"
+    assert receipts.receipts == {}
+
+
+def test_restore_state_command_requires_maintenance_executor(
+    tmp_path: Path,
+) -> None:
+    service = _service()
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    command_payload = {
+        "backup_dir": str(tmp_path / "state-backups" / "set-a"),
+        "restore_epoch_id": "restore-ipc-a",
+        "started_utc": "2026-07-30T12:05:00Z",
+    }
+
+    response = ipc_client.submit_command(
+        StateMaintenanceCommandName.RESTORE_STATE_FROM_BACKUP_SET.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=command_payload,
+        payload_hash=payload_hash(command_payload),
+    )
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED
+    assert response.payload["recognized"] is True
+    assert response.payload["executor_configured"] is False
+    assert response.payload["restored"] is False
+    assert response.payload["read_only_ipc_mode"] is True
+
+
+def test_restore_state_command_requires_read_only_ipc_mode(
+    tmp_path: Path,
+) -> None:
+    service = _service(mutations_enabled=True)
+    calls = []
+
+    def restore_executor(command):
+        calls.append(command)
+        return {"restore_epoch_id": command.restore_epoch_id}
+
+    service.state_restore_executor = restore_executor
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    command_payload = {
+        "backup_dir": str(tmp_path / "state-backups" / "set-a"),
+        "restore_epoch_id": "restore-ipc-a",
+        "started_utc": "2026-07-30T12:05:00Z",
+    }
+
+    response = ipc_client.submit_command(
+        StateMaintenanceCommandName.RESTORE_STATE_FROM_BACKUP_SET.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=command_payload,
+        payload_hash=payload_hash(command_payload),
+    )
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.COMMAND_PRECONDITION_FAILED
+    assert response.payload["recognized"] is True
+    assert response.payload["executor_configured"] is True
+    assert response.payload["restored"] is False
+    assert response.payload["read_only_ipc_mode"] is False
+    assert response.payload["error_code"] == "RESTORE_STATE_REQUIRES_READ_ONLY_IPC_MODE"
+    assert calls == []
 
 
 def test_enabled_create_standard_backup_job_persists_job_and_succeeds_receipt() -> None:

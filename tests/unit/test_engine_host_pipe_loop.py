@@ -34,6 +34,7 @@ from mediasync_home.application.run_executor_cycle import (
     RunExecutorCyclePumpOutcome,
 )
 from mediasync_home.application.runtime_status import startup_status
+from mediasync_home.application.state_maintenance import StateMaintenanceCommandName
 from mediasync_home.application.schedules import ScheduleDefinition
 from mediasync_home.application.task_scheduler import (
     TaskSchedulerDefinition,
@@ -43,7 +44,7 @@ from mediasync_home.application.task_scheduler import (
     bind_same_user_task_scheduler_definition_hash,
     build_same_user_task_scheduler_definition,
 )
-from mediasync_home.application.trigger_occurrences import TriggerKind
+from mediasync_home.application.trigger_occurrences import TriggerKind, payload_hash
 from mediasync_home.composition import engine_host as engine_host_module
 from mediasync_home.composition.engine_host import (
     EngineHostStateCompactionNotAdmitted,
@@ -1182,6 +1183,66 @@ def test_engine_host_runtime_restore_closes_sqlite_handles_and_swaps_state(
         )
 
         assert receipt.restore_epoch_id == "restore-runtime-a"
+        assert runtime.catalog_connection is None
+        assert runtime.recovery_connection is None
+        assert _read_sqlite_user_version(runtime.state_layout.catalog) == backup_catalog_version
+    finally:
+        runtime.close()
+
+
+def test_engine_host_ipc_restore_command_runs_read_only_maintenance_restore(
+    tmp_path: Path,
+) -> None:
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=startup_status(ProcessRole.ENGINE_HOST),
+        state_root=tmp_path / "state",
+        reconciler_instance_id="host-new",
+    )
+    try:
+        assert runtime.state_layout is not None
+        assert runtime.catalog_connection is not None
+        assert runtime.recovery_connection is not None
+        create_sqlite_state_backup_set(
+            runtime.state_layout,
+            tmp_path / "state-backups",
+            backup_set_id="set-a",
+            created_utc="2026-07-30T12:00:00Z",
+        )
+        backup_catalog_version = _read_sqlite_user_version(runtime.state_layout.catalog)
+        runtime.catalog_connection.execute("PRAGMA user_version = 77")
+        runtime.catalog_connection.commit()
+        assert _read_sqlite_user_version(runtime.state_layout.catalog) == 77
+        ipc_client = InProcessIpcClient(
+            service=runtime.service,
+            identity=_identity(),
+            role=ProcessRole.GUI,
+            client_instance_id="55555555-5555-4555-8555-555555555555",
+        )
+        assert ipc_client.connect().status is IpcStatus.ACCEPTED
+        command_payload = {
+            "backup_dir": str(tmp_path / "state-backups" / "set-a"),
+            "restore_epoch_id": "restore-ipc-runtime-a",
+            "started_utc": "2026-07-30T12:05:00Z",
+        }
+
+        response = ipc_client.submit_command(
+            StateMaintenanceCommandName.RESTORE_STATE_FROM_BACKUP_SET.value,
+            request_id="44444444-4444-4444-8444-444444444444",
+            idempotency_key="66666666-6666-4666-8666-666666666666",
+            payload=command_payload,
+            payload_hash=payload_hash(command_payload),
+        )
+
+        assert response.status is IpcStatus.ACCEPTED
+        assert response.reason is None
+        assert response.payload["read_only_ipc_mode"] is True
+        assert response.payload["mutations_enabled"] is False
+        assert response.payload["restored"] is True
+        assert response.payload["host_restart_required"] is True
+        assert response.payload["restore_receipt"]["restore_epoch_id"] == (
+            "restore-ipc-runtime-a"
+        )
         assert runtime.catalog_connection is None
         assert runtime.recovery_connection is None
         assert _read_sqlite_user_version(runtime.state_layout.catalog) == backup_catalog_version

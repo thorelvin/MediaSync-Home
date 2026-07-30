@@ -84,6 +84,13 @@ from mediasync_home.application.snapshots import (
     SnapshotEntryReadModelStore,
     SnapshotIssueReadModelStore,
 )
+from mediasync_home.application.state_maintenance import (
+    RestoreStateFromBackupSetCommand,
+    StateMaintenanceCommandName,
+    StateMaintenancePayloadError,
+    StateRestoreCommandExecutor,
+    parse_restore_state_from_backup_set_command,
+)
 from mediasync_home.application.trigger_occurrences import (
     EnqueueTriggerOccurrenceCommand,
     TriggerCommandName,
@@ -133,6 +140,7 @@ class EngineHostIpcService:
     external_resource_state_store: ExternalResourceStateStore | None = None
     command_receipt_store: CommandReceiptStore | None = None
     command_effect_transaction: CommandEffectTransaction | None = None
+    state_restore_executor: StateRestoreCommandExecutor | None = None
     outbox_store: OutboxStore | None = None
     _accepted_clients: dict[str, VerifiedClientIdentity] = field(default_factory=dict)
 
@@ -383,6 +391,8 @@ class EngineHostIpcService:
             return self._handle_start_run(command, identity)
         if command.command_name == TriggerCommandName.ENQUEUE_TRIGGER_OCCURRENCE.value:
             return self._handle_enqueue_trigger_occurrence(command, identity)
+        if command.command_name == StateMaintenanceCommandName.RESTORE_STATE_FROM_BACKUP_SET.value:
+            return self._handle_restore_state_from_backup_set(command)
         receipt_response = self._record_terminal_rejected_receipt(
             command,
             identity,
@@ -396,6 +406,79 @@ class EngineHostIpcService:
             IpcReason.MUTATING_COMMANDS_DISABLED,
             response_payload,
         )
+
+    def _handle_restore_state_from_backup_set(
+        self,
+        envelope: IpcCommandEnvelope,
+    ) -> IpcResponse:
+        try:
+            command = parse_restore_state_from_backup_set_command(
+                request_id=envelope.request_id,
+                idempotency_key=envelope.idempotency_key,
+                payload=envelope.payload,
+            )
+        except StateMaintenancePayloadError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+
+        if self.status.mutations_enabled:
+            response_payload = _state_restore_response_payload(
+                envelope=envelope,
+                command=command,
+                recognized=True,
+                restored=False,
+                restore_receipt=None,
+                mutations_enabled=True,
+                executor_configured=self.state_restore_executor is not None,
+            )
+            response_payload["error_code"] = "RESTORE_STATE_REQUIRES_READ_ONLY_IPC_MODE"
+            return IpcResponse.rejected(
+                IpcReason.COMMAND_PRECONDITION_FAILED,
+                response_payload,
+            )
+
+        if self.state_restore_executor is None:
+            response_payload = _state_restore_response_payload(
+                envelope=envelope,
+                command=command,
+                recognized=True,
+                restored=False,
+                restore_receipt=None,
+                mutations_enabled=self.status.mutations_enabled,
+                executor_configured=False,
+            )
+            return IpcResponse.rejected(
+                IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED,
+                response_payload,
+            )
+
+        try:
+            restore_receipt = self.state_restore_executor(command)
+        except Exception as exc:
+            response_payload = _state_restore_response_payload(
+                envelope=envelope,
+                command=command,
+                recognized=True,
+                restored=False,
+                restore_receipt=None,
+                mutations_enabled=self.status.mutations_enabled,
+                executor_configured=True,
+            )
+            response_payload["error_code"] = str(exc) or type(exc).__name__
+            return IpcResponse.rejected(
+                IpcReason.COMMAND_PRECONDITION_FAILED,
+                response_payload,
+            )
+
+        response_payload = _state_restore_response_payload(
+            envelope=envelope,
+            command=command,
+            recognized=True,
+            restored=True,
+            restore_receipt=restore_receipt,
+            mutations_enabled=self.status.mutations_enabled,
+            executor_configured=True,
+        )
+        return IpcResponse.accepted(response_payload)
 
     def _handle_enqueue_trigger_occurrence(
         self,
@@ -1125,6 +1208,33 @@ def _trigger_occurrence_response_payload(
             "planned_bytes": run.planned_bytes,
             "trigger_occurrence_id": run.trigger_occurrence_id,
         }
+    return result
+
+
+def _state_restore_response_payload(
+    *,
+    envelope: IpcCommandEnvelope,
+    command: RestoreStateFromBackupSetCommand,
+    recognized: bool,
+    restored: bool,
+    restore_receipt: dict[str, object] | None,
+    mutations_enabled: bool,
+    executor_configured: bool,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "backup_dir": str(command.backup_dir),
+        "command_name": envelope.command_name,
+        "executor_configured": executor_configured,
+        "host_restart_required": restored,
+        "mutations_enabled": mutations_enabled,
+        "read_only_ipc_mode": not mutations_enabled,
+        "recognized": recognized,
+        "restore_epoch_id": command.restore_epoch_id,
+        "restored": restored,
+        "started_utc": command.started_utc,
+    }
+    if restore_receipt is not None:
+        result["restore_receipt"] = restore_receipt
     return result
 
 
