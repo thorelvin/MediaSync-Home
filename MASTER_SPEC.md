@@ -5642,6 +5642,8 @@ Lokal struktur:
     backup-set.manifest.json
 ```
 
+0B-implementasjonsnote: Den første konkrete grensen ligger i `adapters/sqlite/state_backup.py`. Den oppretter ett manifestert backup-sett for ADR-003-paret med SQLite Online Backup, per-store identity/schema/migration high-water, `quick_check`, `foreign_key_check`, size/SHA-256 og combined state-set hash, og verifiserer at catalog/recovery-medlemmene ikke er manglende, manipulerte eller blandet fra ulike epoker. Full quiesce/maintenance-lease-wiring, restore swap, compaction epoch og target-intent restoreblokkering er fortsatt senere arbeid.
+
 Bindende backup-protokoll:
 
 1. Ta Engine singleton og en eksklusiv maintenancelease.
