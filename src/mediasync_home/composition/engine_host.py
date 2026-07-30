@@ -26,6 +26,7 @@ from mediasync_home.adapters.local_endpoint_classifier import (
 from mediasync_home.adapters.local_snapshot_scanner import (
     LocalFilesystemSnapshotScanner,
 )
+from mediasync_home.adapters.local_state_capacity import LocalStateCapacityProbe
 from mediasync_home.adapters.robocopy import RobocopyStagingTransferAdapter
 from mediasync_home.adapters.runtime_policy import current_process_runtime_policy
 from mediasync_home.adapters.staging import LocalFileStagingTransferAdapter
@@ -36,11 +37,13 @@ from mediasync_home.adapters.task_scheduler import (
 from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
 from mediasync_home.adapters.sqlite.command_receipts import SqliteCommandReceiptStore
 from mediasync_home.adapters.sqlite.connection_policy import (
+    SqliteFailureKind,
     SqliteStore,
     StateStoreLayout,
     apply_sqlite_connection_policy,
     build_state_store_layout,
     catalog_critical_writer_policy,
+    classify_sqlite_exception,
     recovery_writer_policy,
 )
 from mediasync_home.adapters.sqlite.installation_state import SqliteInstallationStateStore
@@ -97,6 +100,7 @@ from mediasync_home.application.run_executor import (
     RunExecutorPumpOutcome,
     RunExecutorPumpStopReason,
     RunExecutorQueueStore,
+    RunExecutorViolation,
     RunTargetLeaseRegistry,
     execute_bounded_run_executor_preflight_pump,
     execute_one_run_target_execution_start_step,
@@ -150,6 +154,14 @@ from mediasync_home.application.runtime_status import (
     startup_status,
 )
 from mediasync_home.application.state_maintenance import RestoreStateFromBackupSetCommand
+from mediasync_home.application.state_capacity import (
+    StateCapacityGate,
+    StateCapacityPolicy,
+    StateCapacityProbe,
+    StateCapacityReport,
+    run_execution_growth_estimate,
+    startup_state_growth_estimate,
+)
 from mediasync_home.application.startup_reconciliation import (
     EngineHostStartupReconciliationReport,
     EngineHostStartupReconciliationRequest,
@@ -291,6 +303,8 @@ class EngineHostRuntime:
         SnapshotMaterializationRefreshReport | None
     ) = None
     state_layout: StateStoreLayout | None = None
+    state_capacity_gate: StateCapacityGate | None = None
+    state_capacity_report: StateCapacityReport | None = None
     state_restore_recovery: SqliteStateRestoreEpochRecoveryReport | None = None
     state_restore_startup_reconciliation: SqliteStateRestoreStartupReconciliationReport | None = None
     state_compaction_recovery: SqliteStateCompactionEpochRecoveryReport | None = None
@@ -593,25 +607,56 @@ class EngineHostRuntime:
             or self.run_executor_process_instance_id is None
         ):
             raise RuntimeError("RUN_EXECUTOR_RUNTIME_NOT_CONFIGURED")
-        return execute_bounded_run_executor_cycle(
-            runs=self.run_executor_queue_store,
-            leases=self.run_executor_lease_authority,
-            lease_registry=self.run_executor_lease_registry,
-            plans=self.run_executor_plan_store,
-            recovery_operations=self.run_executor_recovery_operation_store,
-            intent_segments=self.run_executor_recovery_intent_segment_store,
-            catalog_handoffs=self.run_executor_catalog_handoff_store,
-            process_instance_id=self.run_executor_process_instance_id,
-            max_steps=max_steps,
-            final_commit_port=final_commit_port or self.run_executor_final_commit_port,
-            old_target_preservation_port=(
-                old_target_preservation_port or self.run_executor_old_target_preservation_port
-            ),
-            recovery_object_cleanup_port=(
-                recovery_object_cleanup_port or self.run_executor_recovery_object_cleanup_port
-            ),
-            staging_transfer_port=staging_transfer_port or self.run_executor_staging_transfer_port,
-        )
+        if max_steps < 1:
+            raise RunExecutorViolation("RUN_EXECUTOR_CYCLE_REQUIRES_POSITIVE_STEP_LIMIT")
+        if max_steps > MAX_RUN_EXECUTOR_PUMP_STEPS:
+            raise RunExecutorViolation("RUN_EXECUTOR_CYCLE_STEP_LIMIT_TOO_LARGE")
+        capacity_block = self._run_capacity_block()
+        if capacity_block is not None:
+            return capacity_block
+        try:
+            return execute_bounded_run_executor_cycle(
+                runs=self.run_executor_queue_store,
+                leases=self.run_executor_lease_authority,
+                lease_registry=self.run_executor_lease_registry,
+                plans=self.run_executor_plan_store,
+                recovery_operations=self.run_executor_recovery_operation_store,
+                intent_segments=self.run_executor_recovery_intent_segment_store,
+                catalog_handoffs=self.run_executor_catalog_handoff_store,
+                process_instance_id=self.run_executor_process_instance_id,
+                max_steps=max_steps,
+                final_commit_port=final_commit_port or self.run_executor_final_commit_port,
+                old_target_preservation_port=(
+                    old_target_preservation_port or self.run_executor_old_target_preservation_port
+                ),
+                recovery_object_cleanup_port=(
+                    recovery_object_cleanup_port or self.run_executor_recovery_object_cleanup_port
+                ),
+                staging_transfer_port=(
+                    staging_transfer_port or self.run_executor_staging_transfer_port
+                ),
+            )
+        except Exception as exc:
+            if (
+                self.state_capacity_gate is None
+                or classify_sqlite_exception(exc) is not SqliteFailureKind.FULL
+            ):
+                raise
+            report = self.state_capacity_gate.latch_sqlite_full("executor")
+            self.state_capacity_report = report
+            self.run_executor_lease_registry.release_all()
+            return _capacity_blocked_run_executor_outcome(report)
+
+    def _run_capacity_block(self) -> RunExecutorCyclePumpOutcome | None:
+        if self.state_capacity_gate is None:
+            return None
+        report = self.state_capacity_gate.evaluate(run_execution_growth_estimate())
+        self.state_capacity_report = report
+        if report.allows_new_analysis_and_transfers:
+            return None
+        if self.run_executor_lease_registry is not None:
+            self.run_executor_lease_registry.release_all()
+        return _capacity_blocked_run_executor_outcome(report)
 
     def close(self) -> None:
         if self.run_executor_lease_registry is not None:
@@ -1280,6 +1325,8 @@ def build_engine_host_runtime(
     inactive_outbox_owner_instance_ids: tuple[str, ...] = (),
     inactive_external_resource_owner_instance_ids: tuple[str, ...] = (),
     run_executor_staging_backend: str = "local-file",
+    state_capacity_policy: StateCapacityPolicy | None = None,
+    state_capacity_probe: StateCapacityProbe | None = None,
 ) -> EngineHostRuntime:
     if state_root is None:
         return EngineHostRuntime(
@@ -1292,6 +1339,11 @@ def build_engine_host_runtime(
 
     layout = build_state_store_layout(state_root)
     layout.root.mkdir(parents=True, exist_ok=True)
+    capacity_gate = StateCapacityGate(
+        probe=state_capacity_probe or LocalStateCapacityProbe(layout.root),
+        policy=state_capacity_policy,
+    )
+    state_capacity_report = capacity_gate.evaluate(startup_state_growth_estimate())
     state_restore_recovery = recover_incomplete_sqlite_state_restore_epochs(
         layout,
         recovered_utc=_utc_now(),
@@ -1361,12 +1413,14 @@ def build_engine_host_runtime(
             id_factory=UuidSnapshotMaterializationIdFactory(),
             entry_store=snapshots,
             seal_store=snapshots,
+            capacity_gate=capacity_gate,
         )
         snapshot_materialization_refresh = (
             job_snapshot_materializer.refresh_job_snapshots(
                 observed_utc=_utc_now(),
             )
         )
+        state_capacity_report = capacity_gate.latest_report()
         plans = SqlitePlanStore(catalog_connection)
         runs = SqliteRunStore(catalog_connection)
         schedules = SqliteScheduleStore(catalog_connection)
@@ -1447,8 +1501,15 @@ def build_engine_host_runtime(
             external_resource_state_store=external_resource_state,
             cataloged_file_read_store=catalog_handoffs,
             command_receipt_store=command_receipts,
-            command_effect_transaction=SqliteImmediateTransactionRunner(catalog_connection),
+            command_effect_transaction=SqliteImmediateTransactionRunner(
+                catalog_connection,
+                failure_observer=lambda failure_kind: _observe_catalog_capacity_failure(
+                    capacity_gate,
+                    failure_kind,
+                ),
+            ),
             outbox_store=outbox,
+            state_capacity_provider=lambda: capacity_gate.latest_report().to_dict(),
         )
     except Exception:
         catalog_connection.close()
@@ -1460,6 +1521,8 @@ def build_engine_host_runtime(
         endpoint_classification_refresh=endpoint_classification_refresh,
         snapshot_materialization_refresh=snapshot_materialization_refresh,
         state_layout=layout,
+        state_capacity_gate=capacity_gate,
+        state_capacity_report=state_capacity_report,
         state_restore_recovery=state_restore_recovery,
         state_restore_startup_reconciliation=state_restore_startup_reconciliation,
         state_compaction_recovery=state_compaction_recovery,
@@ -1485,6 +1548,29 @@ def build_engine_host_runtime(
         command,
     )
     return runtime
+
+
+def _observe_catalog_capacity_failure(
+    gate: StateCapacityGate,
+    failure_kind: SqliteFailureKind,
+) -> None:
+    if failure_kind is SqliteFailureKind.FULL:
+        gate.latch_sqlite_full(SqliteStore.CATALOG.value)
+
+
+def _capacity_blocked_run_executor_outcome(
+    report: StateCapacityReport,
+) -> RunExecutorCyclePumpOutcome:
+    return RunExecutorCyclePumpOutcome(
+        steps_attempted=0,
+        stopped_reason=RunExecutorPumpStopReason.BLOCKED,
+        last_step=None,
+        validation_codes=(report.reason_code,),
+        next_action=(
+            "Free space in local application state storage before starting "
+            "another analysis or transfer."
+        ),
+    )
 
 
 def build_run_executor_staging_transfer_port(

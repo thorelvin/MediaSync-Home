@@ -7,6 +7,10 @@ from pathlib import Path
 from mediasync_home.adapters.endpoint_leases import EndpointLeaseUnavailable
 from mediasync_home.adapters.local_snapshot_scanner import LocalSnapshotScanError
 from mediasync_home.adapters.sqlite.endpoint_roots import local_path_from_file_uri
+from mediasync_home.adapters.sqlite.connection_policy import (
+    SqliteFailureKind,
+    classify_sqlite_exception,
+)
 from mediasync_home.application.endpoint_classification import (
     EXCLUDABLE_CONTROL_AREA_STATES,
     EndpointControlAreaState,
@@ -17,6 +21,10 @@ from mediasync_home.application.snapshot_scanning import (
     JobSnapshotMaterializationResult,
     SnapshotMaterializationIdFactory,
     SnapshotMaterializationRefreshReport,
+)
+from mediasync_home.application.state_capacity import (
+    StateCapacityGate,
+    snapshot_analysis_growth_estimate,
 )
 from mediasync_home.application.snapshots import (
     SnapshotEntryMaterializationStore,
@@ -75,12 +83,14 @@ class SqliteJobSnapshotMaterializer:
         id_factory: SnapshotMaterializationIdFactory,
         entry_store: SnapshotEntryMaterializationStore,
         seal_store: SnapshotSealStore,
+        capacity_gate: StateCapacityGate | None = None,
     ) -> None:
         self._connection = connection
         self._scanner = scanner
         self._id_factory = id_factory
         self._entry_store = entry_store
         self._seal_store = seal_store
+        self._capacity_gate = capacity_gate
 
     def refresh_job_snapshots(
         self,
@@ -97,9 +107,21 @@ class SqliteJobSnapshotMaterializer:
             if reused is not None:
                 results.append(reused)
                 continue
+            capacity_reason = self._analysis_capacity_block_reason(
+                endpoint_count=len(candidate.endpoints)
+            )
+            if capacity_reason is not None:
+                results.append(
+                    _result(
+                        candidate,
+                        state="BLOCKED",
+                        reason_code=capacity_reason,
+                    )
+                )
+                continue
             blocked_reason = _job_scan_precondition_reason(candidate)
             if blocked_reason is not None:
-                self._persist_blocked_without_analysis(
+                persisted_reason = self._persist_blocked_without_analysis(
                     candidate,
                     reason_code=blocked_reason,
                     observed_utc=observed_utc,
@@ -108,7 +130,7 @@ class SqliteJobSnapshotMaterializer:
                     _result(
                         candidate,
                         state="BLOCKED",
-                        reason_code=blocked_reason,
+                        reason_code=persisted_reason,
                     )
                 )
                 continue
@@ -291,7 +313,7 @@ class SqliteJobSnapshotMaterializer:
             OSError,
         ) as exc:
             reason_code = _scan_failure_reason(exc)
-            self._persist_blocked_without_analysis(
+            reason_code = self._persist_blocked_without_analysis(
                 candidate,
                 reason_code=reason_code,
                 observed_utc=observed_utc,
@@ -306,6 +328,18 @@ class SqliteJobSnapshotMaterializer:
                 candidate,
                 state="FAILED",
                 reason_code="JOB_SNAPSHOT_SCAN_FAILED",
+            )
+        capacity_reason = self._analysis_capacity_block_reason(
+            endpoint_count=len(scanned),
+            entry_count=sum(len(item.scan.entries) for item in scanned),
+            coverage_count=sum(len(item.scan.coverage) for item in scanned),
+            issue_count=sum(len(item.scan.issues) for item in scanned),
+        )
+        if capacity_reason is not None:
+            return _result(
+                candidate,
+                state="BLOCKED",
+                reason_code=capacity_reason,
             )
         all_complete = all(item.scan.complete for item in scanned)
         state = "SEALED" if all_complete else "BLOCKED"
@@ -336,13 +370,20 @@ class SqliteJobSnapshotMaterializer:
                 observed_utc=observed_utc,
             )
             self._connection.execute("COMMIT")
-        except Exception:
-            if self._connection.in_transaction:
-                self._connection.execute("ROLLBACK")
+        except Exception as exc:
+            _rollback(self._connection)
+            persistence_reason = self._persistence_failure_reason(
+                exc,
+                default="JOB_SNAPSHOT_PERSISTENCE_FAILED",
+            )
             return _result(
                 candidate,
-                state="FAILED",
-                reason_code="JOB_SNAPSHOT_PERSISTENCE_FAILED",
+                state=(
+                    "BLOCKED"
+                    if persistence_reason == "STATE_CAPACITY_SQLITE_FULL"
+                    else "FAILED"
+                ),
+                reason_code=persistence_reason,
             )
         return _result(
             candidate,
@@ -451,7 +492,7 @@ class SqliteJobSnapshotMaterializer:
         *,
         reason_code: str,
         observed_utc: str,
-    ) -> None:
+    ) -> str:
         try:
             self._connection.execute("BEGIN IMMEDIATE")
             self._upsert_materialization(
@@ -464,12 +505,53 @@ class SqliteJobSnapshotMaterializer:
                 observed_utc=observed_utc,
             )
             self._connection.execute("COMMIT")
+            return reason_code
         except sqlite3.Error as exc:
-            if self._connection.in_transaction:
-                self._connection.execute("ROLLBACK")
+            _rollback(self._connection)
+            failure_reason = self._persistence_failure_reason(
+                exc,
+                default="JOB_SNAPSHOT_BLOCK_PERSISTENCE_FAILED",
+            )
+            if failure_reason == "STATE_CAPACITY_SQLITE_FULL":
+                return failure_reason
             raise SqliteJobSnapshotMaterializationError(
                 "JOB_SNAPSHOT_BLOCK_PERSISTENCE_FAILED"
             ) from exc
+
+    def _analysis_capacity_block_reason(
+        self,
+        *,
+        endpoint_count: int,
+        entry_count: int | None = None,
+        coverage_count: int = 0,
+        issue_count: int = 0,
+    ) -> str | None:
+        if self._capacity_gate is None:
+            return None
+        report = self._capacity_gate.evaluate(
+            snapshot_analysis_growth_estimate(
+                endpoint_count=endpoint_count,
+                entry_count=entry_count,
+                coverage_count=coverage_count,
+                issue_count=issue_count,
+            )
+        )
+        if report.allows_new_analysis_and_transfers:
+            return None
+        return report.reason_code
+
+    def _persistence_failure_reason(
+        self,
+        error: BaseException,
+        *,
+        default: str,
+    ) -> str:
+        failure_kind = classify_sqlite_exception(error)
+        if failure_kind is not SqliteFailureKind.FULL:
+            return default
+        if self._capacity_gate is not None:
+            self._capacity_gate.latch_sqlite_full("catalog")
+        return "STATE_CAPACITY_SQLITE_FULL"
 
     def _upsert_materialization(
         self,
@@ -521,6 +603,15 @@ class SqliteJobSnapshotMaterializer:
                 observed_utc,
             ),
         )
+
+
+def _rollback(connection: sqlite3.Connection) -> None:
+    if not connection.in_transaction:
+        return
+    try:
+        connection.execute("ROLLBACK")
+    except sqlite3.Error:
+        pass
 
 
 def _job_scan_precondition_reason(

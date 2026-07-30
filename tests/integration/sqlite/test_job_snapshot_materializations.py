@@ -23,6 +23,11 @@ from mediasync_home.application.snapshot_scanning import (
     DirectoryCaseContext,
     SnapshotMaterializationIds,
 )
+from mediasync_home.application.state_capacity import (
+    StateCapacityGate,
+    StateCapacityObservation,
+    StateCapacityPolicy,
+)
 
 
 @dataclass
@@ -57,6 +62,69 @@ class _FixedCaseModeProbe:
                 "CASE_MODE_UNAVAILABLE" if self._case_mode == "UNKNOWN" else None
             ),
         )
+
+
+@dataclass(frozen=True)
+class _FixedCapacityProbe:
+    observation: StateCapacityObservation
+
+    def measure(self) -> StateCapacityObservation:
+        return self.observation
+
+
+def test_job_snapshot_materializer_hard_capacity_stop_starts_no_analysis(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    (source / "must-not-be-scanned.txt").write_text("content", encoding="utf-8")
+    database = tmp_path / "catalog.sqlite"
+    factory = _FixedMaterializationIdFactory()
+    capacity_gate = StateCapacityGate(
+        probe=_FixedCapacityProbe(
+            StateCapacityObservation(
+                state_size_bytes=2,
+                local_free_space_bytes=1_000_000_000,
+                measurement_complete=True,
+                scanned_entry_count=0,
+            )
+        ),
+        policy=StateCapacityPolicy(
+            soft_quota_bytes=1,
+            hard_stop_quota_bytes=2,
+            minimum_free_space_bytes=0,
+            internal_backup_reserve_bytes=0,
+        ),
+    )
+
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_active_job_with_endpoints(connection, source=source, target=target)
+        store = SqliteSnapshotEntryStore(connection)
+
+        report = SqliteJobSnapshotMaterializer(
+            connection,
+            scanner=LocalFilesystemSnapshotScanner(
+                case_mode_probe=_FixedCaseModeProbe(),
+            ),
+            id_factory=factory,
+            entry_store=store,
+            seal_store=store,
+            capacity_gate=capacity_gate,
+        ).refresh_job_snapshots(
+            observed_utc="2026-07-30T22:00:00Z",
+        )
+
+        assert report.blocked_job_count == 1
+        assert report.failed_job_count == 0
+        assert report.results[0].reason_code == "STATE_CAPACITY_HARD_QUOTA"
+        assert factory.calls == 0
+        assert connection.execute("SELECT count(*) FROM analyses").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(*) FROM standard_backup_job_snapshot_materializations"
+        ).fetchone() == (0,)
 
 
 def test_job_snapshot_materializer_seals_source_and_target_and_reuses_them(

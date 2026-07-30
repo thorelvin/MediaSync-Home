@@ -80,6 +80,13 @@ class CommandReceiptReconciliationViolation(ValueError):
     pass
 
 
+class CommandEffectStorageFailure(RuntimeError):
+    def __init__(self, error_code: str, *, retryable: bool) -> None:
+        super().__init__(error_code)
+        self.error_code = error_code
+        self.retryable = retryable
+
+
 @dataclass(frozen=True)
 class CommandReceipt:
     request_id: str

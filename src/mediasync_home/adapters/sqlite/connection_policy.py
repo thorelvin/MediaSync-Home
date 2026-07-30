@@ -219,6 +219,19 @@ def classify_sqlite_error(error: sqlite3.Error) -> SqliteFailureKind:
     return classify_sqlite_error_message(str(error))
 
 
+def classify_sqlite_exception(error: BaseException) -> SqliteFailureKind:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, sqlite3.Error):
+            failure_kind = classify_sqlite_error(current)
+            if failure_kind is not SqliteFailureKind.UNKNOWN:
+                return failure_kind
+        current = current.__cause__ or current.__context__
+    return SqliteFailureKind.UNKNOWN
+
+
 def classify_sqlite_error_name(error_name: str) -> SqliteFailureKind:
     normalized = error_name.upper()
     if normalized == "SQLITE_BUSY_SNAPSHOT":

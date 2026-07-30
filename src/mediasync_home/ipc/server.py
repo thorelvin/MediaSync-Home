@@ -20,6 +20,7 @@ from mediasync_home.application.catalog_read_models import (
     query_cataloged_files,
 )
 from mediasync_home.application.command_receipts import (
+    CommandEffectStorageFailure,
     CommandReceipt,
     CommandReceiptConflict,
     CommandEffectTransaction,
@@ -219,6 +220,7 @@ class EngineHostIpcService:
     command_effect_transaction: CommandEffectTransaction | None = None
     state_restore_executor: StateRestoreCommandExecutor | None = None
     outbox_store: OutboxStore | None = None
+    state_capacity_provider: Callable[[], dict[str, object]] | None = None
     _accepted_clients: dict[str, _AcceptedClient] = field(default_factory=dict)
     _global_frame_times: deque[float] = field(default_factory=deque)
 
@@ -261,20 +263,22 @@ class EngineHostIpcService:
             accepted_client.last_seen_monotonic = now
         if not accepted_client.frame_times:
             accepted_client.frame_times.append(now)
-        return IpcResponse.accepted(
-            {
-                "server_nonce": str(uuid4()),
-                "verified_user_sid_hash": identity.user_sid_hash,
-                "host_status": self.status.to_dict(),
-                "resource_limits": self.resource_limits.to_payload(),
-            }
-        )
+        response_payload: dict[str, object] = {
+            "server_nonce": str(uuid4()),
+            "verified_user_sid_hash": identity.user_sid_hash,
+            "host_status": self.status.to_dict(),
+            "resource_limits": self.resource_limits.to_payload(),
+        }
+        self._add_state_capacity_payload(response_payload)
+        return IpcResponse.accepted(response_payload)
 
     def query_status(self, client_instance_id: str) -> IpcResponse:
         rejection = self._authorize_client_request(client_instance_id)
         if rejection is not None:
             return rejection
-        return IpcResponse.accepted({"host_status": self.status.to_dict()})
+        response_payload: dict[str, object] = {"host_status": self.status.to_dict()}
+        self._add_state_capacity_payload(response_payload)
+        return IpcResponse.accepted(response_payload)
 
     def query_backup_overview(
         self,
@@ -1387,7 +1391,20 @@ class EngineHostIpcService:
     def _run_command_effect_transaction(self, work: Callable[[], IpcResponse]) -> IpcResponse:
         if self.command_effect_transaction is None:
             return work()
-        return self.command_effect_transaction.run(work)
+        try:
+            return self.command_effect_transaction.run(work)
+        except CommandEffectStorageFailure as exc:
+            return IpcResponse.rejected(
+                IpcReason.COMMAND_PRECONDITION_FAILED,
+                {
+                    "error_code": exc.error_code,
+                    "retryable": exc.retryable,
+                },
+            )
+
+    def _add_state_capacity_payload(self, payload: dict[str, object]) -> None:
+        if self.state_capacity_provider is not None:
+            payload["state_capacity"] = self.state_capacity_provider()
 
     def _enqueue_command_effect_outbox(self, receipt: CommandReceipt) -> None:
         if self.outbox_store is None:

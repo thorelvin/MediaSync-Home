@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import TypeVar
 
 import pytest
 
@@ -15,6 +17,7 @@ from mediasync_home.application.catalog_read_models import (
     CatalogedFileReadModelStore,
 )
 from mediasync_home.application.command_receipts import (
+    CommandEffectStorageFailure,
     CommandReceipt,
     CommandReceiptState,
     CommandReceiptStore,
@@ -128,6 +131,7 @@ REQUEST_ID_A = "44444444-4444-4444-8444-444444444444"
 REQUEST_ID_B = "77777777-7777-4777-8777-777777777777"
 IDEMPOTENCY_KEY_A = "66666666-6666-4666-8666-666666666666"
 PAYLOAD_HASH_A = "98cdbb1f712331be51355f90ab8c193c5c6f681d33d5c052cd38fe94820f3d02"
+_T = TypeVar("_T")
 PAYLOAD_HASH_B = "cbed2c1daab2fe4217ac17819f2f3aa86a7c8b0657d613e255a214724254de3b"
 TRIGGER_DELIVERY_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -192,6 +196,16 @@ class _InMemoryJobDraftStore(JobDraftStore):
 
     def load_standard_backup_draft(self, draft_id: str) -> StandardBackupJobDraft | None:
         return self._drafts.get(draft_id)
+
+
+class _FailingCommandEffectTransaction:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run(self, work: Callable[[], _T]) -> _T:
+        del work
+        self.calls += 1
+        raise CommandEffectStorageFailure("SQLITE_FULL", retryable=False)
 
 
 class _InMemoryCommandReceiptStore(CommandReceiptStore):
@@ -778,6 +792,23 @@ def test_gui_client_handshake_and_status_query_succeed() -> None:
     assert snapshot_issues.payload["snapshot_issues"]["read_model_available"] is False
     assert cataloged_files.status is IpcStatus.ACCEPTED
     assert cataloged_files.payload["cataloged_files"]["read_model_available"] is False
+
+
+def test_handshake_and_status_publish_current_state_capacity() -> None:
+    service = _service()
+    capacity: dict[str, object] = {
+        "scope": "LOCAL_APPDATA_STATE",
+        "status": "HARD_STOP",
+        "reason_code": "STATE_CAPACITY_LOCAL_FREE_SPACE_LOW",
+    }
+    service.state_capacity_provider = lambda: capacity
+    ipc_client = _client(service=service)
+
+    handshake = ipc_client.connect()
+    status = ipc_client.query_status()
+
+    assert handshake.payload["state_capacity"] == capacity
+    assert status.payload["state_capacity"] == capacity
 
 
 def test_backup_overview_query_requires_prior_handshake() -> None:
@@ -1803,6 +1834,40 @@ def test_enabled_create_standard_backup_job_persists_job_and_succeeds_receipt() 
     assert receipt.state is CommandReceiptState.SUCCEEDED
     assert catalog.load_standard_backup_job("job-a") is not None
     assert id_factory.calls == 1
+
+
+def test_command_storage_failure_is_sanitized_and_not_retried() -> None:
+    drafts = _InMemoryJobDraftStore()
+    drafts.save_standard_backup_draft(
+        StandardBackupJobDraft.new("draft-a")
+        .with_source(name="Pictures", path_label="C:/Users/Ada/Pictures")
+        .with_added_target(name="USB 1", path_label="E:/Backup")
+    )
+    transaction = _FailingCommandEffectTransaction()
+    service = _service(mutations_enabled=True)
+    service.job_draft_store = drafts
+    service.standard_backup_job_catalog = _InMemoryStandardBackupJobCatalog()
+    service.standard_backup_job_id_factory = _FixedStandardBackupJobIdFactory()
+    service.command_receipt_store = _InMemoryCommandReceiptStore()
+    service.command_effect_transaction = transaction
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"draft_id": "draft-a"},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.COMMAND_PRECONDITION_FAILED
+    assert response.payload == {
+        "error_code": "SQLITE_FULL",
+        "retryable": False,
+    }
+    assert transaction.calls == 1
 
 
 def test_created_job_stays_accepted_when_post_commit_classification_fails() -> None:

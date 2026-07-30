@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     catalog_critical_writer_policy,
     catalog_reader_policy,
     build_state_store_layout,
+    classify_sqlite_exception,
     classify_sqlite_error_message,
     classify_sqlite_error_name,
     recovery_reader_policy,
@@ -131,3 +133,14 @@ def test_classifies_documented_sqlite_error_messages() -> None:
     assert classify_sqlite_error_message("file is not a database") is SqliteFailureKind.NOT_A_DATABASE
     assert classify_sqlite_error_message("attempt to write a readonly database") is SqliteFailureKind.READ_ONLY
     assert classify_sqlite_error_message("disk I/O error") is SqliteFailureKind.IO
+
+
+def test_classifies_wrapped_sqlite_error_from_exception_chain() -> None:
+    sqlite_error = sqlite3.OperationalError("database or disk is full")
+    try:
+        try:
+            raise sqlite_error
+        except sqlite3.Error as exc:
+            raise RuntimeError("sanitized repository failure") from exc
+    except RuntimeError as wrapped:
+        assert classify_sqlite_exception(wrapped) is SqliteFailureKind.FULL

@@ -6,6 +6,7 @@ import sys
 import time
 import types
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,11 @@ from mediasync_home.application.run_executor_cycle import (
 )
 from mediasync_home.application.runtime_status import local_writable_status, startup_status
 from mediasync_home.application.state_maintenance import StateMaintenanceCommandName
+from mediasync_home.application.state_capacity import (
+    StateCapacityObservation,
+    StateCapacityPolicy,
+    StateCapacityStatus,
+)
 from mediasync_home.application.schedules import ScheduleDefinition
 from mediasync_home.application.task_scheduler import (
     TaskSchedulerDefinition,
@@ -961,6 +967,49 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         runtime.close()
 
 
+def test_engine_host_hard_capacity_stop_is_published_and_starts_no_executor_step(
+    tmp_path: Path,
+) -> None:
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=startup_status(ProcessRole.ENGINE_HOST),
+        state_root=tmp_path / "state",
+        state_capacity_policy=StateCapacityPolicy(
+            soft_quota_bytes=1,
+            hard_stop_quota_bytes=2,
+            minimum_free_space_bytes=0,
+            internal_backup_reserve_bytes=0,
+        ),
+        state_capacity_probe=_FixedStateCapacityProbe(
+            StateCapacityObservation(
+                state_size_bytes=2,
+                local_free_space_bytes=1_000_000_000,
+                measurement_complete=True,
+                scanned_entry_count=0,
+            )
+        ),
+    )
+
+    try:
+        ipc_client = InProcessIpcClient(
+            service=runtime.service,
+            identity=_identity(),
+            role=ProcessRole.GUI,
+            client_instance_id="55555555-5555-4555-8555-555555555557",
+        )
+        handshake = ipc_client.connect()
+        outcome = runtime.run_executor_cycle(max_steps=1)
+
+        assert runtime.state_capacity_report is not None
+        assert runtime.state_capacity_report.status is StateCapacityStatus.HARD_STOP
+        assert handshake.payload["state_capacity"]["status"] == "HARD_STOP"
+        assert outcome.steps_attempted == 0
+        assert outcome.stopped_reason is RunExecutorPumpStopReason.BLOCKED
+        assert outcome.validation_codes == ("STATE_CAPACITY_HARD_QUOTA",)
+    finally:
+        runtime.close()
+
+
 def test_local_writable_runtime_creates_job_from_inline_gui_draft(tmp_path: Path) -> None:
     source_root = tmp_path / "Pictures"
     target_root = tmp_path / "Backup"
@@ -1854,6 +1903,7 @@ def _read_sqlite_user_version(database_path: Path) -> int:
 class _FakeRuntime:
     service = object()
     state_layout = None
+    state_capacity_report = None
     state_restore_recovery = None
     state_restore_startup_reconciliation = None
     state_compaction_recovery = None
@@ -1884,6 +1934,14 @@ class _FakeRuntime:
             validation_codes=(),
             next_action="No runnable work.",
         )
+
+
+@dataclass(frozen=True)
+class _FixedStateCapacityProbe:
+    observation: StateCapacityObservation
+
+    def measure(self) -> StateCapacityObservation:
+        return self.observation
 
 
 class _ScriptedRuntime(_FakeRuntime):

@@ -1582,3 +1582,16 @@ Bindende policy:
 - rekonstruerbar hashcache, metrics og gamle logs kan ryddes gjennom en manifestert policy; jobbrevisjoner, planseal, outcomes, baselines, handoffs og ikke-terminal recovery kan ikke kastes;
 - flytting av lokal state til en annen lokal fast disk er en maintenance-saga med quiesce, verifisert backup-sett, same-volume/cross-volume copy-verify-swap og rollback;
 - NAS, SMB og flyttbare medier er fortsatt forbudt for autoritativ SQLite-state.
+
+0B-implementasjonsnote: `StateCapacityGate` måler den lokale state-roten med en
+avgrenset, symlink-fri skann og reserverer estimert catalog-, recovery-, hashcache-
+og loggvekst, intern backupreserve og minimum ledig plass. Standardgrensene er 4
+GiB soft quota, 8 GiB hard stop, 1 GiB minimum ledig plass og 512 MiB intern
+backupreserve. Snapshotmaterialisering sjekker både et konservativt estimat før
+skann og målte radantall før første databasetransaksjon; run-executoren sjekker
+før første steg. Soft quota publiserer bare anbefalingen
+`CLEAN_NON_AUTHORITATIVE_CACHE_AND_LOGS`; ingen automatisk sletting utføres.
+Faktisk `SQLITE_FULL` rulles tilbake, klassifiseres uten ukontrollert retry,
+latches til Engine Host restart og publiseres gjennom handshake/status. Catalog
+og recovery er separate SQLite-filer, og integrasjonstesten fyller bare catalog
+mens den verifiserer at tidligere committet recoverybevis fortsatt kan leses.
