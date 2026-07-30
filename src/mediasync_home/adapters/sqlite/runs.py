@@ -9,6 +9,13 @@ from mediasync_home.application.activity_read_models import (
     RunActivitySummary,
     RunTargetActivitySummary,
 )
+from mediasync_home.application.progress_read_models import (
+    MAX_PROGRESS_SNAPSHOT_TARGETS,
+    ProgressSnapshotQueryError,
+    RunProgressSnapshot,
+    RunProgressSnapshotStore,
+    RunTargetProgressSnapshot,
+)
 from mediasync_home.application.runs import (
     RunState,
     RunStore,
@@ -23,7 +30,7 @@ class SqliteRunStoreError(ValueError):
     pass
 
 
-class SqliteRunStore(RunStore, RunActivityReadModelStore):
+class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotStore):
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
@@ -316,6 +323,83 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore):
                 targets=self._load_target_activity_summaries(str(row[0])),
             )
             for row in rows
+        )
+
+    def load_run_progress_snapshot(self, run_id: str) -> RunProgressSnapshot | None:
+        rows = self._connection.execute(
+            """
+            SELECT
+                runs.id,
+                runs.job_id,
+                runs.job_revision_id,
+                runs.plan_id,
+                runs.state,
+                runs.started_utc,
+                runs.finished_utc,
+                runs.planned_operations,
+                runs.planned_bytes,
+                runs.warning_count,
+                runs.error_count,
+                runs.row_version,
+                run_targets.id,
+                run_targets.endpoint_id,
+                run_targets.endpoint_revision_id,
+                run_targets.state,
+                run_targets.planned_operations,
+                run_targets.completed_operations,
+                run_targets.planned_bytes,
+                run_targets.completed_bytes,
+                run_targets.warning_count,
+                run_targets.error_count,
+                run_targets.row_version
+            FROM runs
+            LEFT JOIN run_targets ON run_targets.run_id = runs.id
+            WHERE runs.id = ?
+            ORDER BY run_targets.id
+            LIMIT ?
+            """,
+            (run_id, MAX_PROGRESS_SNAPSHOT_TARGETS + 1),
+        ).fetchall()
+        if not rows:
+            return None
+        target_rows = tuple(row for row in rows if row[12] is not None)
+        if len(target_rows) > MAX_PROGRESS_SNAPSHOT_TARGETS:
+            raise ProgressSnapshotQueryError("RUN_PROGRESS_TARGET_LIMIT_EXCEEDED")
+
+        targets = tuple(
+            RunTargetProgressSnapshot(
+                run_target_id=str(target_row[12]),
+                endpoint_id=str(target_row[13]),
+                endpoint_revision_id=str(target_row[14]),
+                state=RunTargetState(str(target_row[15])),
+                planned_operations=int(target_row[16]),
+                completed_operations=int(target_row[17]),
+                planned_bytes=int(target_row[18]),
+                completed_bytes=int(target_row[19]),
+                warning_count=int(target_row[20]),
+                error_count=int(target_row[21]),
+            )
+            for target_row in target_rows
+        )
+        row = rows[0]
+        state = RunState(str(row[4]))
+        return RunProgressSnapshot(
+            run_id=str(row[0]),
+            job_id=str(row[1]),
+            job_revision_id=str(row[2]),
+            plan_id=str(row[3]),
+            sequence_no=int(row[11]) + sum(int(target_row[22]) for target_row in target_rows),
+            state=state,
+            terminal=state in _TERMINAL_RUN_STATES,
+            started_utc=str(row[5]),
+            finished_utc=None if row[6] is None else str(row[6]),
+            planned_operations=int(row[7]),
+            completed_operations=sum(target.completed_operations for target in targets),
+            planned_bytes=int(row[8]),
+            completed_bytes=sum(target.completed_bytes for target in targets),
+            warning_count=int(row[9]),
+            error_count=int(row[10]),
+            targets=targets,
         )
 
     def load_next_pending_run_target(self, run_id: str) -> StartedRunTarget | None:
@@ -1056,3 +1140,16 @@ def _json_object(payload: str) -> dict[str, object]:
     if not isinstance(data, dict):
         raise SqliteRunStoreError("RUN_JSON_INVALID")
     return data
+
+
+_TERMINAL_RUN_STATES = frozenset(
+    {
+        RunState.COMPLETED,
+        RunState.COMPLETED_WITH_WARNINGS,
+        RunState.PARTIAL_FAILURE,
+        RunState.FAILED,
+        RunState.CANCELLED,
+        RunState.BLOCKED_BY_SAFETY,
+        RunState.RECOVERY_REQUIRED,
+    }
+)

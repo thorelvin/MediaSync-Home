@@ -65,6 +65,11 @@ from mediasync_home.application.plan_read_models import (
     query_plan_endpoints,
     query_plan_operations,
 )
+from mediasync_home.application.progress_read_models import (
+    ProgressSnapshotQueryError,
+    RunProgressSnapshotStore,
+    query_run_progress,
+)
 from mediasync_home.application.plans import (
     PlanEndpointReadModelStore,
     PlanOperationReadModelStore,
@@ -121,6 +126,7 @@ from mediasync_home.application.trigger_runs import (
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
 from mediasync_home.ipc.protocol import (
+    MAX_PROGRESS_EVENT_BYTES,
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
     HandshakeRequest,
@@ -129,6 +135,7 @@ from mediasync_home.ipc.protocol import (
     IpcReason,
     IpcResponse,
     IpcStatus,
+    encode_frame,
 )
 
 
@@ -203,6 +210,7 @@ class EngineHostIpcService:
         Callable[[], SnapshotMaterializationRefreshReport] | None
     ) = None
     run_activity_read_store: RunActivityReadModelStore | None = None
+    run_progress_snapshot_store: RunProgressSnapshotStore | None = None
     plan_operation_read_store: PlanOperationReadModelStore | None = None
     plan_endpoint_read_store: PlanEndpointReadModelStore | None = None
     snapshot_entry_read_store: SnapshotEntryReadModelStore | None = None
@@ -342,6 +350,28 @@ class EngineHostIpcService:
         except ActivityOverviewQueryError:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         return IpcResponse.accepted({"activity_overview": overview.to_dict()})
+
+    def query_run_progress(
+        self,
+        client_instance_id: str,
+        *,
+        run_id: str,
+        after_sequence_no: int | None = None,
+    ) -> IpcResponse:
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
+        try:
+            result = query_run_progress(
+                run_progress_store=self.run_progress_snapshot_store,
+                run_id=run_id,
+                after_sequence_no=after_sequence_no,
+            )
+            response = IpcResponse.accepted({"run_progress": result.to_dict()})
+            encode_frame(response.to_dict(), limit=MAX_PROGRESS_EVENT_BYTES)
+        except (ProgressSnapshotQueryError, IpcProtocolError, TypeError, ValueError):
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        return response
 
     def query_plan_operations(
         self,

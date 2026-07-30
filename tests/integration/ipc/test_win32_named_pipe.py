@@ -139,6 +139,21 @@ def test_named_pipe_activity_overview_query_succeeds_after_handshake() -> None:
     assert overview.payload["activity_overview"]["read_model_available"] is False
 
 
+def test_named_pipe_run_progress_query_succeeds_after_handshake() -> None:
+    server, client = _server_and_client()
+
+    handshake = _roundtrip(server, client.connect)
+    progress = _roundtrip(
+        server,
+        lambda: client.query_run_progress(run_id="run-a", after_sequence_no=4),
+    )
+
+    assert handshake.status is IpcStatus.ACCEPTED
+    assert progress.status is IpcStatus.ACCEPTED
+    assert progress.payload["run_progress"]["read_model_available"] is False
+    assert progress.payload["run_progress"]["requested_after_sequence_no"] == 4
+
+
 def test_named_pipe_plan_operations_query_succeeds_after_handshake() -> None:
     server, client = _server_and_client()
 

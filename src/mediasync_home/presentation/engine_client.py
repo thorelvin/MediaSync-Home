@@ -37,6 +37,14 @@ class StatusIpcClient(Protocol):
     ) -> IpcResponse:
         pass
 
+    def query_run_progress(
+        self,
+        *,
+        run_id: str,
+        after_sequence_no: int | None = None,
+    ) -> IpcResponse:
+        pass
+
     def query_plan_operations(
         self,
         *,
@@ -148,6 +156,19 @@ class EngineClient:
                 job_id=job_id,
                 limit=limit,
                 offset=offset,
+            )
+        )
+
+    def get_run_progress(
+        self,
+        *,
+        run_id: str,
+        after_sequence_no: int | None = None,
+    ) -> IpcResponse:
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_run_progress(
+                run_id=run_id,
+                after_sequence_no=after_sequence_no,
             )
         )
 

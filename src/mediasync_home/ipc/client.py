@@ -78,6 +78,18 @@ class InProcessIpcClient:
             offset=offset,
         )
 
+    def query_run_progress(
+        self,
+        *,
+        run_id: str,
+        after_sequence_no: int | None = None,
+    ) -> IpcResponse:
+        return self.service.query_run_progress(
+            self.client_instance_id,
+            run_id=run_id,
+            after_sequence_no=after_sequence_no,
+        )
+
     def query_plan_operations(
         self,
         *,

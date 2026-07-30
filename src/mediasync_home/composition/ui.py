@@ -42,6 +42,13 @@ class GuiIpcClient(Protocol):
         offset: int | None = None,
     ) -> IpcResponse: ...
 
+    def query_run_progress(
+        self,
+        *,
+        run_id: str,
+        after_sequence_no: int | None = None,
+    ) -> IpcResponse: ...
+
     def query_plan_operations(
         self,
         *,
@@ -115,6 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--query-backup-overview", action="store_true")
     mode.add_argument("--query-backup-job-detail", action="store_true")
     mode.add_argument("--query-activity-overview", action="store_true")
+    mode.add_argument("--query-run-progress", action="store_true")
     mode.add_argument("--query-plan-operations", action="store_true")
     mode.add_argument("--query-plan-endpoints", action="store_true")
     mode.add_argument("--query-snapshot-entries", action="store_true")
@@ -131,6 +139,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--offset", type=int)
     parser.add_argument("--after-json")
+    parser.add_argument("--after-sequence-no", type=int)
     parser.add_argument("--coverage-state", action="append")
     parser.add_argument("--blocking-only", action="store_true")
     parser.add_argument("--request-id")
@@ -200,6 +209,7 @@ def _pipe_action_requested(args: argparse.Namespace) -> bool:
         or args.query_backup_overview
         or args.query_backup_job_detail
         or args.query_activity_overview
+        or args.query_run_progress
         or args.query_plan_operations
         or args.query_plan_endpoints
         or args.query_snapshot_entries
@@ -235,6 +245,11 @@ def _run_pipe_action(args: argparse.Namespace, client: GuiIpcClient) -> IpcRespo
             job_id=args.job_id,
             limit=args.limit,
             offset=args.offset,
+        )
+    if args.query_run_progress:
+        return client.query_run_progress(
+            run_id=args.run_id or "",
+            after_sequence_no=args.after_sequence_no,
         )
     if args.query_plan_operations:
         return client.query_plan_operations(

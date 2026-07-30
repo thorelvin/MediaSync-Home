@@ -849,6 +849,70 @@ def test_sqlite_run_store_lists_recent_run_activity_summaries(tmp_path: Path) ->
         assert page[0].targets[0].warning_count == 1
 
 
+def test_sqlite_run_progress_snapshot_sequence_tracks_authoritative_changes(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        plans = SqlitePlanStore(connection)
+        runs = SqliteRunStore(connection)
+        plan = _sealed_plan()
+        plans.save_sealed_plan(plan)
+        start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+
+        queued = runs.load_run_progress_snapshot("run-a")
+        begin_next_run_target_preflight(run_id="run-a", runs=runs)
+        preflight = runs.load_run_progress_snapshot("run-a")
+
+        assert queued is not None
+        assert queued.sequence_no == 2
+        assert queued.state is RunState.QUEUED
+        assert queued.completed_operations == 0
+        assert preflight is not None
+        assert preflight.sequence_no > queued.sequence_no
+        assert preflight.state is RunState.PREFLIGHT
+        assert preflight.targets[0].state is RunTargetState.ACQUIRING_LEASE
+
+
+def test_sqlite_run_progress_snapshot_reports_terminal_totals(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        runs = _start_sqlite_executing_run(connection)
+        executing = runs.load_run_progress_snapshot("run-a")
+
+        runs.record_run_target_succeeded(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            completed_operations=1,
+            completed_bytes=128,
+        )
+        completed = runs.load_run_progress_snapshot("run-a")
+
+        assert executing is not None
+        assert completed is not None
+        assert completed.sequence_no > executing.sequence_no
+        assert completed.state is RunState.COMPLETED
+        assert completed.terminal is True
+        assert completed.completed_operations == 1
+        assert completed.completed_bytes == 128
+        assert completed.targets[0].state is RunTargetState.SUCCEEDED
+
+
 def test_sqlite_run_store_requires_sealed_plan_binding(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:

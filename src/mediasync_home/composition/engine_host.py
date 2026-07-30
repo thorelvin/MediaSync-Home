@@ -1504,6 +1504,7 @@ def build_engine_host_runtime(
             run_store=runs,
             run_id_factory=UuidRunIdFactory(),
             run_activity_read_store=runs,
+            run_progress_snapshot_store=runs,
             schedule_store=schedules,
             trigger_occurrence_store=trigger_occurrences,
             external_resource_state_store=external_resource_state,

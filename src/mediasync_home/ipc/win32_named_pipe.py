@@ -736,6 +736,12 @@ class Win32NamedPipeServer:
                 limit=_optional_query_int(request.get("limit")),
                 offset=_optional_query_int(request.get("offset")),
             )
+        if message_type == "QUERY_RUN_PROGRESS":
+            return self.service.query_run_progress(
+                str(request["client_instance_id"]),
+                run_id=str(request["run_id"]),
+                after_sequence_no=_optional_query_int(request.get("after_sequence_no")),
+            )
         if message_type == "QUERY_PLAN_OPERATIONS":
             return self.service.query_plan_operations(
                 str(request["client_instance_id"]),
@@ -865,6 +871,21 @@ class Win32NamedPipeClient:
             request["limit"] = limit
         if offset is not None:
             request["offset"] = offset
+        return self._roundtrip(request)
+
+    def query_run_progress(
+        self,
+        *,
+        run_id: str,
+        after_sequence_no: int | None = None,
+    ) -> IpcResponse:
+        request: dict[str, Any] = {
+            "message_type": "QUERY_RUN_PROGRESS",
+            "client_instance_id": self.client_instance_id,
+            "run_id": run_id,
+        }
+        if after_sequence_no is not None:
+            request["after_sequence_no"] = after_sequence_no
         return self._roundtrip(request)
 
     def query_plan_operations(

@@ -852,6 +852,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.service.plan_operation_read_store is not None
         assert runtime.service.plan_endpoint_read_store is not None
         assert runtime.service.run_activity_read_store is not None
+        assert runtime.service.run_progress_snapshot_store is not None
         assert runtime.service.schedule_store is not None
         assert runtime.service.trigger_occurrence_store is not None
         assert runtime.service.external_resource_state_store is not None

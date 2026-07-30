@@ -103,6 +103,30 @@ def test_ui_pipe_action_queries_activity_overview_after_handshake() -> None:
     }
 
 
+def test_ui_pipe_action_queries_run_progress_after_handshake() -> None:
+    client = _FakeGuiIpcClient()
+    args = build_parser().parse_args(
+        [
+            "--pipe-name",
+            "pipe-a",
+            "--query-run-progress",
+            "--run-id",
+            "run-a",
+            "--after-sequence-no",
+            "8",
+        ]
+    )
+
+    response = _run_pipe_action(args, client)
+
+    assert response.payload == {"run_progress": "ok"}
+    assert client.calls == ("connect", "query_run_progress")
+    assert client.run_progress_query == {
+        "run_id": "run-a",
+        "after_sequence_no": 8,
+    }
+
+
 def test_ui_pipe_action_queries_plan_operations_after_handshake() -> None:
     client = _FakeGuiIpcClient()
     args = build_parser().parse_args(
@@ -544,6 +568,7 @@ class _FakeGuiIpcClient:
         self.overview_query: dict[str, object] | None = None
         self.backup_job_detail_query: dict[str, object] | None = None
         self.activity_query: dict[str, object] | None = None
+        self.run_progress_query: dict[str, object] | None = None
         self.plan_operations_query: dict[str, object] | None = None
         self.plan_endpoints_query: dict[str, object] | None = None
         self.snapshot_entries_query: dict[str, object] | None = None
@@ -593,6 +618,19 @@ class _FakeGuiIpcClient:
             "offset": offset,
         }
         return IpcResponse.accepted({"activity": "ok"})
+
+    def query_run_progress(
+        self,
+        *,
+        run_id: str,
+        after_sequence_no: int | None = None,
+    ) -> IpcResponse:
+        self.calls = (*self.calls, "query_run_progress")
+        self.run_progress_query = {
+            "run_id": run_id,
+            "after_sequence_no": after_sequence_no,
+        }
+        return IpcResponse.accepted({"run_progress": "ok"})
 
     def query_plan_operations(
         self,
