@@ -15,9 +15,19 @@ from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_VERSION = "2.9.2"
+ACTIVE_WORK_ORDER = "Milepæl 1"
 REQUIRED_PACKAGES = {"jsonschema": "4.26.0", "PyYAML": "6.0.3"}
 TEXT_SUFFIXES = {".md", ".json", ".yaml", ".yml", ".sql", ".py", ".txt"}
-IGNORED_SCAN_DIRS = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+IGNORED_SCAN_DIRS = {
+    ".git",
+    ".import_linter_cache",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "venv",
+}
 ADR_PATTERN = re.compile(r"ADR-\d{3}")
 REQ_PATTERN = re.compile(
     r"(?:SAF|REC|SYNC|DB|END|META|AUTO|PERF|ARC|DUR|SEC|OWN|CTRL|CASE|HASH|SRC|PATH|DUP|VER|TIME|LOCK|OPS|FILTER|PROC|DOC|UX|OBS)-\d{3}"
@@ -473,11 +483,11 @@ def check_bundle_rules() -> None:
     if not master.rstrip().endswith(footer):
         fail("MASTER_SPEC.md footer version mismatch")
     agents = read_text(ROOT / "AGENTS.md")
-    if "Milepæl 0B" not in agents:
-        fail("AGENTS.md does not name the active 0B work order")
+    if ACTIVE_WORK_ORDER not in agents:
+        fail(f"AGENTS.md does not name the active {ACTIVE_WORK_ORDER} work order")
     start = read_text(ROOT / "docs/CODEX_START_PROMPT.md")
-    if "Utfør Milepæl 0B" not in start:
-        fail("start prompt does not name the active 0B work order")
+    if f"Utfør {ACTIVE_WORK_ORDER}" not in start:
+        fail(f"start prompt does not name the active {ACTIVE_WORK_ORDER} work order")
     for phrase in (
         "owner_decision",
         "DEFERRED_WITH_SCOPE_REDUCTION",
