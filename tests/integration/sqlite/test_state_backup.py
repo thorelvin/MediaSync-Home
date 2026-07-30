@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 from pathlib import Path
@@ -169,6 +170,71 @@ def test_sqlite_state_restore_plan_blocks_same_timestamp_extra_target_intent(
         match="STATE_RESTORE_BLOCKED_BY_NEWER_TARGET_INTENTS",
     ):
         plan_sqlite_state_restore(tmp_path / "state-backups" / "set-a", layout)
+
+
+def test_sqlite_state_restore_plan_blocks_newer_target_side_intent_marker(
+    tmp_path: Path,
+) -> None:
+    layout = build_state_store_layout(tmp_path / "state")
+    target_root = tmp_path / "target"
+    _initialize_state_stores(layout)
+    create_sqlite_state_backup_set(
+        layout,
+        tmp_path / "state-backups",
+        backup_set_id="set-a",
+        created_utc="2026-07-30T12:00:00Z",
+    )
+    _insert_endpoint_revision(layout, target_root=target_root, owner_installation_id="owner-a")
+    _write_target_side_intent_marker(
+        target_root,
+        owner_installation_id="owner-a",
+        segment_id="segment-a",
+        sequence=0,
+        updated_utc="2026-07-30T12:01:00.000Z",
+    )
+
+    with pytest.raises(
+        SqliteStateBackupViolation,
+        match="STATE_RESTORE_BLOCKED_BY_NEWER_TARGET_INTENTS",
+    ):
+        plan_sqlite_state_restore(tmp_path / "state-backups" / "set-a", layout)
+
+
+def test_sqlite_state_restore_plan_dedupes_matching_target_side_intent_marker(
+    tmp_path: Path,
+) -> None:
+    layout = build_state_store_layout(tmp_path / "state")
+    target_root = tmp_path / "target"
+    _initialize_state_stores(layout)
+    _insert_endpoint_revision(layout, target_root=target_root, owner_installation_id="owner-a")
+    _insert_active_recovery_intent_segment(
+        layout,
+        segment_id="segment-a",
+        sequence=0,
+        updated_utc="2026-07-30T12:00:00.000Z",
+    )
+    _write_target_side_intent_marker(
+        target_root,
+        owner_installation_id="owner-a",
+        segment_id="segment-a",
+        sequence=0,
+        updated_utc="2026-07-30T12:00:00.000Z",
+    )
+    create_sqlite_state_backup_set(
+        layout,
+        tmp_path / "state-backups",
+        backup_set_id="set-a",
+        created_utc="2026-07-30T12:00:00Z",
+    )
+
+    plan = plan_sqlite_state_restore(tmp_path / "state-backups" / "set-a", layout)
+
+    assert plan.backup_unresolved_target_intent_count == 1
+    assert plan.current_unresolved_target_intent_count == 1
+    assert plan.current_target_side_intent_marker_count == 1
+    assert plan.current_target_side_intent_marker_high_water_utc == (
+        "2026-07-30T12:00:00.000Z"
+    )
 
 
 def test_sqlite_state_restore_swap_restores_verified_pair_and_preserves_rollback(
@@ -790,6 +856,82 @@ def _read_user_version(database_path: Path) -> int:
 
 def _sqlite_sidecar_path(database_path: Path, suffix: str) -> Path:
     return Path(f"{database_path}-{suffix}")
+
+
+def _insert_endpoint_revision(
+    layout: StateStoreLayout,
+    *,
+    target_root: Path,
+    owner_installation_id: str,
+) -> None:
+    target_root.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(layout.catalog) as connection:
+        connection.execute("INSERT OR IGNORE INTO endpoints (id) VALUES ('target-a')")
+        connection.execute(
+            """
+            INSERT INTO endpoint_revisions (
+                endpoint_id,
+                id,
+                display_name,
+                root_uri,
+                owner_installation_id,
+                ownership_epoch
+            )
+            VALUES (
+                'target-a',
+                'target-rev-a',
+                'Target A',
+                ?,
+                ?,
+                1
+            )
+            """,
+            (target_root.as_uri(), owner_installation_id),
+        )
+
+
+def _write_target_side_intent_marker(
+    target_root: Path,
+    *,
+    owner_installation_id: str,
+    segment_id: str,
+    sequence: int,
+    updated_utc: str,
+) -> Path:
+    relative_path = (
+        f"installations/{owner_installation_id}/recovery/run-a/"
+        f"segment-{sequence:06d}.intent.jsonl"
+    )
+    marker_path = target_root / ".mediasync" / Path(relative_path)
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "segment_id": segment_id,
+        "run_id": "run-a",
+        "run_target_id": "run-target-a",
+        "target_endpoint_id": "target-a",
+        "target_endpoint_revision_id": "target-rev-a",
+        "endpoint_generation": 1,
+        "owner_installation_id": owner_installation_id,
+        "ownership_epoch": 1,
+        "lease_id": "lease-a",
+        "fencing_token": 1,
+        "segment_sequence": sequence,
+        "relative_path": relative_path,
+        "operation_count": 1,
+        "byte_count": 10,
+        "segment_hash": f"{sequence + 1:064x}",
+        "previous_segment_hash": None if sequence == 0 else f"{sequence:064x}",
+        "durability_state": "DURABLE",
+        "state": "DURABLE",
+        "created_utc": updated_utc,
+        "updated_utc": updated_utc,
+    }
+    marker_path.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    return marker_path
 
 
 def _insert_active_recovery_intent_segment(

@@ -6,9 +6,11 @@ import os
 import re
 import shutil
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, cast
+from urllib.parse import unquote, urlparse
 
 from mediasync_home.adapters.sqlite.connection_policy import (
     SqliteStore,
@@ -58,6 +60,10 @@ STATE_RESTORE_MAINTENANCE_TERMINAL_COMMAND_RECEIPT_STATES = (
 )
 STATE_RESTORE_MAINTENANCE_TERMINAL_OUTBOX_STATES = ("DELIVERED", "DEAD_LETTER")
 STATE_RESTORE_MAINTENANCE_UNRESOLVED_INTENT_STATES = ("BUILDING", "DURABLE")
+TARGET_SIDE_INTENT_MARKER_SCHEMA_VERSION = 1
+TARGET_SIDE_INTENT_MARKER_STATES = ("BUILDING", "DURABLE")
+TARGET_SIDE_INTENT_MARKER_HEADER_BYTES = 64 * 1024
+TARGET_SIDE_INTENT_MARKER_SCAN_LIMIT = 10_000
 
 
 class SqliteStateBackupViolation(ValueError):
@@ -158,6 +164,8 @@ class SqliteStateRestorePlan:
     backup_target_intent_high_water_utc: str | None
     current_unresolved_target_intent_count: int
     current_target_intent_high_water_utc: str | None
+    current_target_side_intent_marker_count: int = 0
+    current_target_side_intent_marker_high_water_utc: str | None = None
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -177,6 +185,12 @@ class SqliteStateRestorePlan:
                 self.current_unresolved_target_intent_count
             ),
             "current_target_intent_high_water_utc": self.current_target_intent_high_water_utc,
+            "current_target_side_intent_marker_count": (
+                self.current_target_side_intent_marker_count
+            ),
+            "current_target_side_intent_marker_high_water_utc": (
+                self.current_target_side_intent_marker_high_water_utc
+            ),
         }
 
 
@@ -600,6 +614,21 @@ class SqliteStateMaintenanceRetentionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class _TargetIntentEvidence:
+    unresolved_count: int
+    high_water_utc: str | None
+    target_side_marker_count: int = 0
+    target_side_marker_high_water_utc: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _TargetIntentSegmentSummary:
+    segment_id: str
+    updated_utc: str
+    marker_path: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class _PreparedRestoreFile:
     restore_file: SqliteStateRestoreFile
     temp_path: Path
@@ -740,14 +769,14 @@ def plan_sqlite_state_restore(
         _validate_state_store_layout(current_layout, field_name="STATE_RESTORE_CURRENT")
     verified = verify_sqlite_state_backup_set(backup_dir, manifest=manifest)
     backup_intent_count, backup_high_water = _target_intent_evidence_from_manifest(verified)
-    current_intent_count, current_high_water = _current_target_intent_evidence(
-        (current_layout or target_layout).recovery
+    current_intent_evidence = _current_target_intent_evidence_for_layout(
+        current_layout or target_layout
     )
     if _has_newer_unresolved_target_intents(
         backup_count=backup_intent_count,
         backup_high_water=backup_high_water,
-        current_count=current_intent_count,
-        current_high_water=current_high_water,
+        current_count=current_intent_evidence.unresolved_count,
+        current_high_water=current_intent_evidence.high_water_utc,
     ):
         raise SqliteStateBackupViolation("STATE_RESTORE_BLOCKED_BY_NEWER_TARGET_INTENTS")
 
@@ -776,8 +805,14 @@ def plan_sqlite_state_restore(
         restore_files=restore_files,
         backup_unresolved_target_intent_count=backup_intent_count,
         backup_target_intent_high_water_utc=backup_high_water,
-        current_unresolved_target_intent_count=current_intent_count,
-        current_target_intent_high_water_utc=current_high_water,
+        current_unresolved_target_intent_count=current_intent_evidence.unresolved_count,
+        current_target_intent_high_water_utc=current_intent_evidence.high_water_utc,
+        current_target_side_intent_marker_count=(
+            current_intent_evidence.target_side_marker_count
+        ),
+        current_target_side_intent_marker_high_water_utc=(
+            current_intent_evidence.target_side_marker_high_water_utc
+        ),
     )
 
 
@@ -1981,9 +2016,33 @@ def _target_intent_evidence(
     return (count, high_water)
 
 
+def _current_target_intent_evidence_for_layout(layout: StateStoreLayout) -> _TargetIntentEvidence:
+    db_segments = _current_target_intent_segments(layout.recovery)
+    target_side_segments = _target_side_intent_marker_segments(layout.catalog)
+    combined_segments = dict(db_segments)
+    for segment_id, marker in target_side_segments.items():
+        existing = combined_segments.get(segment_id)
+        if existing is None or marker.updated_utc > existing.updated_utc:
+            combined_segments[segment_id] = marker
+    return _target_intent_evidence_from_segments(
+        combined_segments,
+        target_side_marker_count=len(target_side_segments),
+        target_side_marker_high_water_utc=_high_water(target_side_segments.values()),
+    )
+
+
 def _current_target_intent_evidence(recovery_path: Path) -> tuple[int, str | None]:
+    evidence = _target_intent_evidence_from_segments(
+        _current_target_intent_segments(recovery_path)
+    )
+    return (evidence.unresolved_count, evidence.high_water_utc)
+
+
+def _current_target_intent_segments(
+    recovery_path: Path,
+) -> dict[str, _TargetIntentSegmentSummary]:
     if not recovery_path.exists():
-        return (0, None)
+        return {}
     try:
         with sqlite3.connect(f"file:{recovery_path.as_posix()}?mode=ro", uri=True) as connection:
             identity = _optional_scalar(
@@ -1992,9 +2051,174 @@ def _current_target_intent_evidence(recovery_path: Path) -> tuple[int, str | Non
             )
             if identity != SqliteStore.RECOVERY.value:
                 raise SqliteStateBackupViolation("STATE_RESTORE_CURRENT_RECOVERY_MISMATCH")
-            return _target_intent_evidence(connection, store=SqliteStore.RECOVERY)
+            rows = connection.execute(
+                """
+                SELECT id, updated_utc
+                FROM recovery_intent_segments
+                WHERE state IN ('BUILDING', 'DURABLE')
+                """
+            ).fetchall()
     except sqlite3.Error as exc:
         raise SqliteStateBackupViolation("STATE_RESTORE_CURRENT_RECOVERY_UNREADABLE") from exc
+    return {
+        str(row[0]): _TargetIntentSegmentSummary(
+            segment_id=str(row[0]),
+            updated_utc=str(row[1]),
+        )
+        for row in rows
+    }
+
+
+def _target_side_intent_marker_segments(
+    catalog_path: Path,
+) -> dict[str, _TargetIntentSegmentSummary]:
+    if not catalog_path.exists():
+        return {}
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = _readonly_state_store_connection(
+            catalog_path,
+            store=SqliteStore.CATALOG,
+        )
+        rows = connection.execute(
+            """
+            SELECT DISTINCT root_uri, owner_installation_id
+            FROM endpoint_revisions
+            WHERE owner_installation_id IS NOT NULL
+            """
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise SqliteStateBackupViolation("STATE_RESTORE_CURRENT_CATALOG_UNREADABLE") from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+    markers: dict[str, _TargetIntentSegmentSummary] = {}
+    scanned = 0
+    for root_uri, owner_installation_id in rows:
+        root = _local_path_from_file_uri(str(root_uri))
+        owner = _safe_file_name(str(owner_installation_id))
+        owner_recovery_root = root / ".mediasync" / "installations" / owner / "recovery"
+        if not owner_recovery_root.exists():
+            continue
+        if not owner_recovery_root.is_dir():
+            raise SqliteStateBackupViolation("STATE_RESTORE_TARGET_INTENT_ROOT_NOT_DIRECTORY")
+        for run_dir in sorted(path for path in owner_recovery_root.iterdir() if path.is_dir()):
+            for marker_path in sorted(run_dir.glob("*.intent.jsonl")):
+                scanned += 1
+                if scanned > TARGET_SIDE_INTENT_MARKER_SCAN_LIMIT:
+                    raise SqliteStateBackupViolation("STATE_RESTORE_TARGET_INTENT_SCAN_LIMIT")
+                marker = _target_side_intent_marker_from_path(
+                    marker_path,
+                    root=root,
+                )
+                existing = markers.get(marker.segment_id)
+                if existing is not None and existing.marker_path != marker.marker_path:
+                    raise SqliteStateBackupViolation("STATE_RESTORE_TARGET_INTENT_DUPLICATE")
+                markers[marker.segment_id] = marker
+    return markers
+
+
+def _target_side_intent_marker_from_path(
+    marker_path: Path,
+    *,
+    root: Path,
+) -> _TargetIntentSegmentSummary:
+    if not marker_path.is_file():
+        raise SqliteStateBackupViolation("STATE_RESTORE_TARGET_INTENT_MARKER_NOT_FILE")
+    payload = _read_target_side_intent_marker_header(marker_path)
+    if _int_field(payload, "schema_version") != TARGET_SIDE_INTENT_MARKER_SCHEMA_VERSION:
+        raise SqliteStateBackupViolation("STATE_RESTORE_TARGET_INTENT_SCHEMA_UNSUPPORTED")
+    state = _str_field(payload, "state")
+    if state not in TARGET_SIDE_INTENT_MARKER_STATES:
+        raise SqliteStateBackupViolation("STATE_RESTORE_TARGET_INTENT_STATE_UNSUPPORTED")
+    if _str_field(payload, "durability_state") != "DURABLE":
+        raise SqliteStateBackupViolation("STATE_RESTORE_TARGET_INTENT_NOT_DURABLE")
+    segment_id = _safe_file_name(_str_field(payload, "segment_id"))
+    _str_field(payload, "run_id")
+    _str_field(payload, "run_target_id")
+    _str_field(payload, "target_endpoint_id")
+    _str_field(payload, "target_endpoint_revision_id")
+    _str_field(payload, "owner_installation_id")
+    _str_field(payload, "lease_id")
+    _positive_int_field(payload, "endpoint_generation")
+    _positive_int_field(payload, "ownership_epoch")
+    _positive_int_field(payload, "fencing_token")
+    _non_negative_int_field(payload, "segment_sequence")
+    _positive_int_field(payload, "operation_count")
+    _non_negative_int_field(payload, "byte_count")
+    _hex_field(payload, "segment_hash")
+    previous_hash = payload.get("previous_segment_hash")
+    if previous_hash is not None:
+        _hex_field(payload, "previous_segment_hash")
+    relative_path = _str_field(payload, "relative_path").replace("\\", "/")
+    try:
+        expected_relative_path = marker_path.relative_to(root / ".mediasync").as_posix()
+    except ValueError as exc:
+        raise SqliteStateBackupViolation("STATE_RESTORE_TARGET_INTENT_PATH_ESCAPE") from exc
+    if relative_path != expected_relative_path:
+        raise SqliteStateBackupViolation("STATE_RESTORE_TARGET_INTENT_PATH_MISMATCH")
+    return _TargetIntentSegmentSummary(
+        segment_id=segment_id,
+        updated_utc=_str_field(payload, "updated_utc"),
+        marker_path=marker_path,
+    )
+
+
+def _read_target_side_intent_marker_header(marker_path: Path) -> dict[str, Any]:
+    try:
+        with marker_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                if len(line.encode("utf-8")) > TARGET_SIDE_INTENT_MARKER_HEADER_BYTES:
+                    raise SqliteStateBackupViolation("STATE_RESTORE_TARGET_INTENT_HEADER_TOO_LARGE")
+                payload = json.loads(line)
+                if not isinstance(payload, dict):
+                    raise SqliteStateBackupViolation("STATE_RESTORE_TARGET_INTENT_HEADER_NOT_OBJECT")
+                return payload
+    except FileNotFoundError as exc:
+        raise SqliteStateBackupViolation("STATE_RESTORE_TARGET_INTENT_MARKER_MISSING") from exc
+    except json.JSONDecodeError as exc:
+        raise SqliteStateBackupViolation("STATE_RESTORE_TARGET_INTENT_HEADER_INVALID_JSON") from exc
+    raise SqliteStateBackupViolation("STATE_RESTORE_TARGET_INTENT_HEADER_MISSING")
+
+
+def _target_intent_evidence_from_segments(
+    segments: dict[str, _TargetIntentSegmentSummary],
+    *,
+    target_side_marker_count: int = 0,
+    target_side_marker_high_water_utc: str | None = None,
+) -> _TargetIntentEvidence:
+    return _TargetIntentEvidence(
+        unresolved_count=len(segments),
+        high_water_utc=_high_water(segments.values()),
+        target_side_marker_count=target_side_marker_count,
+        target_side_marker_high_water_utc=target_side_marker_high_water_utc,
+    )
+
+
+def _high_water(segments: Iterable[_TargetIntentSegmentSummary]) -> str | None:
+    high_water: str | None = None
+    for segment in segments:
+        if high_water is None or segment.updated_utc > high_water:
+            high_water = segment.updated_utc
+    return high_water
+
+
+def _local_path_from_file_uri(root_uri: str) -> Path:
+    parsed = urlparse(root_uri)
+    if parsed.scheme.lower() != "file":
+        raise SqliteStateBackupViolation("STATE_RESTORE_ENDPOINT_ROOT_URI_UNSUPPORTED")
+    if parsed.netloc not in {"", "localhost"}:
+        raise SqliteStateBackupViolation("STATE_RESTORE_ENDPOINT_ROOT_URI_NOT_LOCAL")
+    path_text = unquote(parsed.path)
+    if os.name == "nt" and len(path_text) >= 3 and path_text[0] == "/" and path_text[2] == ":":
+        path_text = path_text[1:]
+    path = Path(path_text)
+    if not path.is_absolute():
+        raise SqliteStateBackupViolation("STATE_RESTORE_ENDPOINT_ROOT_URI_NOT_ABSOLUTE")
+    return path
 
 
 def _catalog_restore_maintenance_counts(catalog_path: Path) -> tuple[int, int, int, int]:
@@ -3323,6 +3547,13 @@ def _int_field(payload: dict[str, Any], field_name: str) -> int:
 def _non_negative_int_field(payload: dict[str, Any], field_name: str) -> int:
     value = _int_field(payload, field_name)
     if value < 0:
+        raise SqliteStateBackupViolation(f"STATE_BACKUP_{field_name.upper()}_INVALID")
+    return value
+
+
+def _positive_int_field(payload: dict[str, Any], field_name: str) -> int:
+    value = _int_field(payload, field_name)
+    if value < 1:
         raise SqliteStateBackupViolation(f"STATE_BACKUP_{field_name.upper()}_INVALID")
     return value
 
