@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import mediasync_home.adapters.local_host_locator as local_host_locator_module
 from mediasync_home.adapters.local_host_locator import (
     build_local_engine_host_descriptor_for_user,
     clear_stale_local_engine_host_publication,
@@ -285,3 +286,152 @@ def test_local_host_locator_adapter_clears_only_matching_stale_publication(
 
     assert clear_stale_local_engine_host_publication(newer_publication) is True
     assert load_local_engine_host_publication(state_root) is None
+
+
+def test_local_host_locator_adapter_returns_none_when_state_root_is_missing(
+    tmp_path: Path,
+) -> None:
+    assert load_local_engine_host_publication(tmp_path / "missing-state-root") is None
+
+
+def test_local_host_locator_adapter_rejects_guard_reported_missing_root_reparse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        local_host_locator_module,
+        "LocalReparseGuard",
+        lambda: _RejectingReparseGuard(),
+    )
+
+    with pytest.raises(HostLocatorViolation, match="REPARSE"):
+        load_local_engine_host_publication(tmp_path / "missing-state-root")
+
+
+def test_local_host_locator_adapter_rejects_reparse_publication_file(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    target = tmp_path / "outside.json"
+    target.write_text("{}", encoding="utf-8")
+    publication_path = local_engine_host_publication_path(state_root)
+    _symlink_or_skip(target, publication_path)
+
+    with pytest.raises(HostLocatorViolation, match="REPARSE"):
+        load_local_engine_host_publication(state_root)
+
+
+def test_local_host_locator_adapter_rejects_guard_reported_publication_reparse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    local_engine_host_publication_path(state_root).write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        local_host_locator_module,
+        "LocalReparseGuard",
+        lambda: _RejectingReparseGuard(),
+    )
+
+    with pytest.raises(HostLocatorViolation, match="REPARSE"):
+        load_local_engine_host_publication(state_root)
+
+
+def test_local_host_locator_publish_refuses_reparse_publication_file(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    target = tmp_path / "outside.json"
+    target.write_text("do-not-touch", encoding="utf-8")
+    publication_path = local_engine_host_publication_path(state_root)
+    _symlink_or_skip(target, publication_path)
+    publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=state_root,
+        process_id=4321,
+    )
+
+    with pytest.raises(HostLocatorViolation, match="REPARSE"):
+        publish_local_engine_host_publication(publication)
+
+    assert target.read_text(encoding="utf-8") == "do-not-touch"
+    assert publication_path.is_symlink()
+
+
+def test_local_host_locator_publish_rejects_guard_reported_publication_reparse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=state_root,
+        process_id=4321,
+    )
+    monkeypatch.setattr(
+        local_host_locator_module,
+        "LocalReparseGuard",
+        lambda: _RejectingReparseGuard(),
+    )
+
+    with pytest.raises(HostLocatorViolation, match="REPARSE"):
+        publish_local_engine_host_publication(publication)
+
+    assert not local_engine_host_publication_path(state_root).exists()
+
+
+def test_local_host_locator_publish_preserves_existing_temp_collision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=state_root,
+        process_id=4321,
+    )
+    state_root.mkdir()
+    temp_path = state_root / "engine-host.locator.json.777.fixedtmp.tmp"
+    temp_path.write_text("do-not-delete", encoding="utf-8")
+
+    monkeypatch.setattr(local_host_locator_module.os, "getpid", lambda: 777)
+    monkeypatch.setattr(
+        local_host_locator_module,
+        "uuid4",
+        lambda: _FixedUuid("fixedtmp"),
+    )
+
+    with pytest.raises(FileExistsError):
+        publish_local_engine_host_publication(publication)
+
+    assert temp_path.read_text(encoding="utf-8") == "do-not-delete"
+
+
+class _FixedUuid:
+    def __init__(self, hex_value: str) -> None:
+        self.hex = hex_value
+
+
+class _RejectingReparseGuard:
+    def reject_reparse_chain(self, **kwargs: object) -> object:
+        del kwargs
+        raise local_host_locator_module.ReparseGuardError(
+            "HOST_LOCATOR_PUBLICATION_REPARSE_UNSUPPORTED",
+            "remove reparse path",
+        )
+
+
+def _symlink_or_skip(target: Path, link: Path) -> None:
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink unavailable on this host: {exc}")

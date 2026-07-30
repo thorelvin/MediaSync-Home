@@ -4,6 +4,7 @@ import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
+from uuid import uuid4
 
 from mediasync_home.application.host_locator import (
     LOCAL_ENGINE_HOST_PUBLICATION_FILENAME,
@@ -14,6 +15,7 @@ from mediasync_home.application.host_locator import (
     local_engine_host_publication_from_payload,
     validate_installation_id,
 )
+from mediasync_home.adapters.reparse_guard import LocalReparseGuard, ReparseGuardError
 
 
 def build_local_engine_host_descriptor_for_user(
@@ -61,12 +63,23 @@ def publish_local_engine_host_publication(
 ) -> Path:
     path = local_engine_host_publication_path(publication.state_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    temp_path.write_text(
-        json.dumps(publication.to_payload(), sort_keys=True, separators=(",", ":")),
-        encoding="utf-8",
-    )
-    temp_path.replace(path)
+    _ensure_publication_path_safe(publication.state_root, allow_missing_publication=True)
+    temp_path = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    temp_created = False
+    try:
+        with temp_path.open("x", encoding="utf-8") as handle:
+            temp_created = True
+            handle.write(
+                json.dumps(publication.to_payload(), sort_keys=True, separators=(",", ":"))
+            )
+        temp_path.replace(path)
+        temp_created = False
+    finally:
+        if temp_created:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
     return path
 
 
@@ -74,6 +87,7 @@ def load_local_engine_host_publication(
     state_root: Path,
 ) -> LocalEngineHostPublication | None:
     path = local_engine_host_publication_path(state_root)
+    _ensure_publication_path_safe(state_root, allow_missing_publication=True)
     if not path.is_file():
         return None
     raw_payload = json.loads(path.read_text(encoding="utf-8"))
@@ -99,3 +113,24 @@ def clear_stale_local_engine_host_publication(
     except FileNotFoundError:
         return False
     return True
+
+
+def _ensure_publication_path_safe(
+    state_root: Path,
+    *,
+    allow_missing_publication: bool,
+) -> None:
+    try:
+        LocalReparseGuard().reject_reparse_chain(
+            root=state_root,
+            relative_parts=(LOCAL_ENGINE_HOST_PUBLICATION_FILENAME,),
+            missing_code="HOST_LOCATOR_PUBLICATION_MISSING",
+            missing_next_action="Start a local-preview Engine Host before adopting its locator.",
+            reparse_code="HOST_LOCATOR_PUBLICATION_REPARSE_UNSUPPORTED",
+            reparse_next_action="Remove the reparse-point HostLocator control path before retrying.",
+            allow_missing_suffix=allow_missing_publication,
+        )
+    except ReparseGuardError as exc:
+        if allow_missing_publication and exc.validation_code == "HOST_LOCATOR_PUBLICATION_MISSING":
+            return
+        raise HostLocatorViolation(exc.validation_code) from exc
