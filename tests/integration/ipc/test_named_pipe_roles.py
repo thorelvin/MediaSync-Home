@@ -427,7 +427,7 @@ def test_launcher_local_preview_status_clears_stale_publication_before_fallback(
         pipe_name=descriptor.pipe_name,
         mutex_name=descriptor.mutex_name,
         state_root=state_root,
-        process_id=4321,
+        process_id=os.getpid(),
     )
     publication_path = publish_local_engine_host_publication(stale_publication)
 
@@ -463,7 +463,7 @@ def test_launcher_local_preview_status_clears_stale_publication_before_fallback(
     assert payload["stale_host_locator_publication_cleared"] is True
     assert payload["host_locator_publication"] == stale_publication.to_payload()
     assert host_events[0]["host_locator"]["process_id"] == final_publication["process_id"]
-    assert final_publication["process_id"] != 4321
+    assert final_publication["process_id"] != os.getpid()
     assert final_publication["pipe_name"] == descriptor.pipe_name
     assert host_events[-1]["served_requests"] == 2
     assert not publication_path.exists()
@@ -635,7 +635,7 @@ def test_gui_status_query_clears_dead_host_locator_when_pipe_omitted(
         pipe_name=descriptor.pipe_name,
         mutex_name=descriptor.mutex_name,
         state_root=state_root,
-        process_id=4321,
+        process_id=os.getpid(),
     )
     publication_path = publish_local_engine_host_publication(stale_publication)
 
@@ -693,7 +693,7 @@ def test_trigger_status_query_clears_dead_host_locator_when_pipe_omitted(
         pipe_name=descriptor.pipe_name,
         mutex_name=descriptor.mutex_name,
         state_root=state_root,
-        process_id=4321,
+        process_id=os.getpid(),
     )
     publication_path = publish_local_engine_host_publication(stale_publication)
 

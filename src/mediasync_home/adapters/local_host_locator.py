@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import os
+from contextlib import suppress
 from collections.abc import Mapping
+from ctypes import wintypes
 from pathlib import Path
+from typing import Protocol
 from uuid import uuid4
 
 from mediasync_home.application.host_locator import (
@@ -12,10 +16,53 @@ from mediasync_home.application.host_locator import (
     LocalEngineHostDescriptor,
     LocalEngineHostPublication,
     build_local_engine_host_descriptor,
+    local_engine_host_publication_matches_descriptor,
     local_engine_host_publication_from_payload,
     validate_installation_id,
 )
 from mediasync_home.adapters.reparse_guard import LocalReparseGuard, ReparseGuardError
+
+
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+STILL_ACTIVE = 259
+ERROR_INVALID_PARAMETER = 87
+
+
+class ProcessLivenessProbe(Protocol):
+    def is_process_running(self, process_id: int) -> bool | None: ...
+
+
+class LocalProcessLivenessProbe:
+    def is_process_running(self, process_id: int) -> bool | None:
+        if os.name != "nt":
+            return None
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.GetExitCodeProcess.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(wintypes.DWORD),
+            ]
+            kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            handle = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION,
+                False,
+                process_id,
+            )
+            if not handle:
+                return False if ctypes.get_last_error() == ERROR_INVALID_PARAMETER else None
+            try:
+                exit_code = wintypes.DWORD()
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return None
+                return int(exit_code.value) == STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        except (AttributeError, OSError, ValueError):
+            return None
 
 
 def build_local_engine_host_descriptor_for_user(
@@ -96,6 +143,26 @@ def load_local_engine_host_publication(
     return local_engine_host_publication_from_payload(
         {str(key): value for key, value in raw_payload.items()}
     )
+
+
+def load_matching_live_local_engine_host_publication(
+    descriptor: LocalEngineHostDescriptor,
+    *,
+    process_probe: ProcessLivenessProbe | None = None,
+) -> LocalEngineHostPublication | None:
+    if descriptor.state_root is None:
+        return None
+    publication = load_local_engine_host_publication(descriptor.state_root)
+    if publication is None:
+        return None
+    if not local_engine_host_publication_matches_descriptor(publication, descriptor):
+        return None
+    probe = process_probe or LocalProcessLivenessProbe()
+    if probe.is_process_running(publication.process_id) is False:
+        with suppress(OSError):
+            clear_stale_local_engine_host_publication(publication)
+        return None
+    return publication
 
 
 def clear_stale_local_engine_host_publication(

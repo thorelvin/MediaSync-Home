@@ -12,7 +12,6 @@ from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.application.host_locator import (
     LocalEngineHostDescriptor,
     LocalEngineHostPublication,
-    local_engine_host_publication_matches_descriptor,
 )
 from mediasync_home.ipc.protocol import IpcProtocolError, IpcReason, IpcResponse
 
@@ -304,17 +303,14 @@ def _load_matching_publication_for_descriptor(
     if descriptor.state_root is None:
         return None
 
-    from mediasync_home.adapters.local_host_locator import load_local_engine_host_publication
+    from mediasync_home.adapters.local_host_locator import (
+        load_matching_live_local_engine_host_publication,
+    )
 
     try:
-        publication = load_local_engine_host_publication(descriptor.state_root)
+        return load_matching_live_local_engine_host_publication(descriptor)
     except (OSError, ValueError):
         return None
-    if publication is None:
-        return None
-    if not local_engine_host_publication_matches_descriptor(publication, descriptor):
-        return None
-    return publication
 
 
 def _clear_stale_host_publication(

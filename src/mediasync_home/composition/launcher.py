@@ -23,7 +23,6 @@ from mediasync_home.application.process_supervision import (
 from mediasync_home.application.host_locator import (
     LocalEngineHostDescriptor,
     LocalEngineHostPublication,
-    local_engine_host_publication_matches_descriptor,
 )
 from mediasync_home.domain.process_roles import ProcessRole
 
@@ -565,17 +564,14 @@ def _load_matching_host_publication(
     if host_descriptor.state_root is None:
         return None
 
-    from mediasync_home.adapters.local_host_locator import load_local_engine_host_publication
+    from mediasync_home.adapters.local_host_locator import (
+        load_matching_live_local_engine_host_publication,
+    )
 
     try:
-        publication = load_local_engine_host_publication(host_descriptor.state_root)
+        return load_matching_live_local_engine_host_publication(host_descriptor)
     except (OSError, ValueError):
         return None
-    if publication is None:
-        return None
-    if not local_engine_host_publication_matches_descriptor(publication, host_descriptor):
-        return None
-    return publication
 
 
 def _parse_json_object_lines(value: str) -> tuple[dict[str, object], ...]:

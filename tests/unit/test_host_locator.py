@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from mediasync_home.adapters.local_host_locator import (
     build_local_engine_host_descriptor_for_user,
     clear_stale_local_engine_host_publication,
     default_local_preview_state_root,
+    load_matching_live_local_engine_host_publication,
     load_local_engine_host_publication,
     local_engine_host_publication_path,
     publish_local_engine_host_publication,
@@ -288,6 +290,106 @@ def test_local_host_locator_adapter_clears_only_matching_stale_publication(
     assert load_local_engine_host_publication(state_root) is None
 
 
+def test_load_matching_live_publication_accepts_unknown_process_liveness(
+    tmp_path: Path,
+) -> None:
+    descriptor = build_local_engine_host_descriptor(
+        installation_id="local-dev",
+        user_scope_hash=USER_HASH,
+        state_root=tmp_path / "state",
+    )
+    publication = build_local_engine_host_publication(
+        installation_id=descriptor.installation_id,
+        pipe_name=descriptor.pipe_name,
+        mutex_name=descriptor.mutex_name,
+        state_root=tmp_path / "state",
+        process_id=4321,
+    )
+    process_probe = _ProcessProbe(is_running=None)
+    publish_local_engine_host_publication(publication)
+
+    assert (
+        load_matching_live_local_engine_host_publication(
+            descriptor,
+            process_probe=process_probe,
+        )
+        == publication
+    )
+    assert process_probe.process_ids == [4321]
+    assert load_local_engine_host_publication(tmp_path / "state") == publication
+
+
+def test_load_matching_live_publication_clears_dead_matching_publication(
+    tmp_path: Path,
+) -> None:
+    descriptor = build_local_engine_host_descriptor(
+        installation_id="local-dev",
+        user_scope_hash=USER_HASH,
+        state_root=tmp_path / "state",
+    )
+    publication = build_local_engine_host_publication(
+        installation_id=descriptor.installation_id,
+        pipe_name=descriptor.pipe_name,
+        mutex_name=descriptor.mutex_name,
+        state_root=tmp_path / "state",
+        process_id=4321,
+    )
+    process_probe = _ProcessProbe(is_running=False)
+    publish_local_engine_host_publication(publication)
+
+    assert (
+        load_matching_live_local_engine_host_publication(
+            descriptor,
+            process_probe=process_probe,
+        )
+        is None
+    )
+    assert process_probe.process_ids == [4321]
+    assert load_local_engine_host_publication(tmp_path / "state") is None
+
+
+def test_load_matching_live_publication_keeps_mismatched_dead_publication(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    descriptor = build_local_engine_host_descriptor(
+        installation_id="local-dev",
+        user_scope_hash=USER_HASH,
+        state_root=state_root,
+    )
+    other_descriptor = build_local_engine_host_descriptor(
+        installation_id="other-dev",
+        user_scope_hash=USER_HASH,
+        state_root=state_root,
+    )
+    publication = build_local_engine_host_publication(
+        installation_id=other_descriptor.installation_id,
+        pipe_name=other_descriptor.pipe_name,
+        mutex_name=other_descriptor.mutex_name,
+        state_root=state_root,
+        process_id=4321,
+    )
+    process_probe = _ProcessProbe(is_running=False)
+    publish_local_engine_host_publication(publication)
+
+    assert (
+        load_matching_live_local_engine_host_publication(
+            descriptor,
+            process_probe=process_probe,
+        )
+        is None
+    )
+    assert process_probe.process_ids == []
+    assert load_local_engine_host_publication(state_root) == publication
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process liveness probe requires Windows")
+def test_local_process_liveness_probe_reports_current_process_live() -> None:
+    probe = local_host_locator_module.LocalProcessLivenessProbe()
+
+    assert probe.is_process_running(os.getpid()) is True
+
+
 def test_local_host_locator_adapter_returns_none_when_state_root_is_missing(
     tmp_path: Path,
 ) -> None:
@@ -419,6 +521,16 @@ def test_local_host_locator_publish_preserves_existing_temp_collision(
 class _FixedUuid:
     def __init__(self, hex_value: str) -> None:
         self.hex = hex_value
+
+
+class _ProcessProbe:
+    def __init__(self, *, is_running: bool | None) -> None:
+        self._is_running = is_running
+        self.process_ids: list[int] = []
+
+    def is_process_running(self, process_id: int) -> bool | None:
+        self.process_ids.append(process_id)
+        return self._is_running
 
 
 class _RejectingReparseGuard:
