@@ -23,6 +23,9 @@ from mediasync_home.adapters.final_verification import LocalFinalArtifactVerific
 from mediasync_home.adapters.local_endpoint_classifier import (
     LocalEndpointControlAreaClassifier,
 )
+from mediasync_home.adapters.local_snapshot_scanner import (
+    LocalFilesystemSnapshotScanner,
+)
 from mediasync_home.adapters.robocopy import RobocopyStagingTransferAdapter
 from mediasync_home.adapters.runtime_policy import current_process_runtime_policy
 from mediasync_home.adapters.staging import LocalFileStagingTransferAdapter
@@ -50,6 +53,9 @@ from mediasync_home.adapters.sqlite.job_catalog import SqliteStandardBackupJobCa
 from mediasync_home.adapters.sqlite.job_draft_store import SqliteJobDraftStore
 from mediasync_home.adapters.sqlite.job_endpoints import (
     SqliteStandardBackupJobEndpointRegistrar,
+)
+from mediasync_home.adapters.sqlite.job_snapshots import (
+    SqliteJobSnapshotMaterializer,
 )
 from mediasync_home.adapters.sqlite.lease_tokens import SqliteResourceLeaseStore
 from mediasync_home.adapters.sqlite.migrations import (
@@ -106,6 +112,10 @@ from mediasync_home.application.endpoint_registration import (
 from mediasync_home.application.job_creation import StandardBackupJobIds
 from mediasync_home.application.job_endpoints import EndpointIds
 from mediasync_home.application.installation_state import InstallationState
+from mediasync_home.application.snapshot_scanning import (
+    SnapshotMaterializationIds,
+    SnapshotMaterializationRefreshReport,
+)
 from mediasync_home.application.run_operation_planning import (
     RunTargetOperationPlanningOutcome,
     plan_run_target_recovery_operations,
@@ -209,6 +219,20 @@ class UuidInstallationIdFactory:
         return str(uuid4())
 
 
+class UuidSnapshotMaterializationIdFactory:
+    def new_snapshot_materialization_ids(
+        self,
+        *,
+        snapshot_count: int,
+    ) -> SnapshotMaterializationIds:
+        return SnapshotMaterializationIds(
+            analysis_id=f"analysis-{uuid4().hex}",
+            snapshot_ids=tuple(
+                f"snapshot-{uuid4().hex}" for _ in range(snapshot_count)
+            ),
+        )
+
+
 class RetainedRunTargetPermitValidator:
     def __init__(self, lease_registry: RunTargetLeaseRegistry) -> None:
         self._lease_registry = lease_registry
@@ -263,6 +287,9 @@ class EngineHostRuntime:
     service: EngineHostIpcService
     installation_state: InstallationState | None = None
     endpoint_classification_refresh: EndpointClassificationRefreshReport | None = None
+    snapshot_materialization_refresh: (
+        SnapshotMaterializationRefreshReport | None
+    ) = None
     state_layout: StateStoreLayout | None = None
     state_restore_recovery: SqliteStateRestoreEpochRecoveryReport | None = None
     state_restore_startup_reconciliation: SqliteStateRestoreStartupReconciliationReport | None = None
@@ -1328,6 +1355,18 @@ def build_engine_host_runtime(
             )
         )
         snapshots = SqliteSnapshotEntryStore(catalog_connection)
+        job_snapshot_materializer = SqliteJobSnapshotMaterializer(
+            catalog_connection,
+            scanner=LocalFilesystemSnapshotScanner(),
+            id_factory=UuidSnapshotMaterializationIdFactory(),
+            entry_store=snapshots,
+            seal_store=snapshots,
+        )
+        snapshot_materialization_refresh = (
+            job_snapshot_materializer.refresh_job_snapshots(
+                observed_utc=_utc_now(),
+            )
+        )
         plans = SqlitePlanStore(catalog_connection)
         runs = SqliteRunStore(catalog_connection)
         schedules = SqliteScheduleStore(catalog_connection)
@@ -1388,6 +1427,11 @@ def build_engine_host_runtime(
                     observed_utc=_utc_now(),
                 )
             ),
+            job_snapshot_refresh=lambda: (
+                job_snapshot_materializer.refresh_job_snapshots(
+                    observed_utc=_utc_now(),
+                )
+            ),
             standard_backup_job_id_factory=UuidStandardBackupJobIdFactory(),
             snapshot_entry_read_store=snapshots,
             snapshot_coverage_read_store=snapshots,
@@ -1414,6 +1458,7 @@ def build_engine_host_runtime(
         service=service,
         installation_state=installation_state,
         endpoint_classification_refresh=endpoint_classification_refresh,
+        snapshot_materialization_refresh=snapshot_materialization_refresh,
         state_layout=layout,
         state_restore_recovery=state_restore_recovery,
         state_restore_startup_reconciliation=state_restore_startup_reconciliation,

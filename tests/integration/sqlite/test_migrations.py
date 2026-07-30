@@ -28,7 +28,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 25
+        assert current_schema_version(connection, plan.store) == 26
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -44,6 +44,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "standard_backup_job_drafts",
             "standard_backup_job_revision_details",
             "standard_backup_job_endpoint_bindings",
+            "standard_backup_job_snapshot_materializations",
             "command_receipts",
             "command_dedup_tombstones",
             "plan_seal_details",
@@ -60,7 +61,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 25
+        assert _row_count(connection, "schema_migrations") == 26
         assert _foreign_key(
             connection,
             "endpoint_heads",
@@ -109,6 +110,20 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "endpoint_revisions",
             ("endpoint_id", "endpoint_revision_id"),
             ("endpoint_id", "id"),
+        )
+        assert _foreign_key(
+            connection,
+            "standard_backup_job_snapshot_materializations",
+            "job_revisions",
+            ("job_id", "job_revision_id"),
+            ("job_id", "id"),
+        )
+        assert _foreign_key(
+            connection,
+            "standard_backup_job_snapshot_materializations",
+            "analyses",
+            ("analysis_id",),
+            ("id",),
         )
         assert _foreign_key(
             connection,
@@ -293,6 +308,19 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         assert _column_names(connection, "snapshot_batches") >= {
             "coverage_update_count",
             "issue_count",
+        }
+        assert _column_names(
+            connection,
+            "standard_backup_job_snapshot_materializations",
+        ) >= {
+            "analysis_id",
+            "state",
+            "reason_code",
+            "snapshot_count",
+            "sealed_snapshot_count",
+            "started_utc",
+            "completed_utc",
+            "row_version",
         }
 
 

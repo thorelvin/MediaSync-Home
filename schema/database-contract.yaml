@@ -66,6 +66,10 @@ invariants:
         child_columns: [job_id, job_revision_id]
         parent_table: job_revisions
         parent_columns: [job_id, id]
+      - child_table: standard_backup_job_snapshot_materializations
+        child_columns: [job_id, job_revision_id]
+        parent_table: job_revisions
+        parent_columns: [job_id, id]
       - child_table: analysis_targets
         child_columns: [endpoint_id, endpoint_revision_id]
         parent_table: endpoint_revisions

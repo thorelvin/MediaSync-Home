@@ -152,6 +152,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_endpoint_classification_observations",
                 statements=CATALOG_ENDPOINT_CLASSIFICATION_OBSERVATIONS,
             ),
+            SqliteMigration(
+                version=26,
+                name="catalog_standard_backup_job_snapshot_materializations",
+                statements=CATALOG_STANDARD_BACKUP_JOB_SNAPSHOT_MATERIALIZATIONS,
+            ),
         ),
     )
 
@@ -1325,6 +1330,53 @@ CATALOG_ENDPOINT_CLASSIFICATION_OBSERVATIONS = (
             inspection_status,
             classification_state,
             endpoint_id
+        )
+    """,
+)
+
+CATALOG_STANDARD_BACKUP_JOB_SNAPSHOT_MATERIALIZATIONS = (
+    """
+    CREATE TABLE standard_backup_job_snapshot_materializations (
+        job_id TEXT NOT NULL,
+        job_revision_id TEXT NOT NULL,
+        analysis_id TEXT,
+        state TEXT NOT NULL CHECK (state IN ('SEALED', 'BLOCKED')),
+        reason_code TEXT NOT NULL CHECK (length(trim(reason_code)) > 0),
+        snapshot_count INTEGER NOT NULL DEFAULT 0 CHECK (snapshot_count >= 0),
+        sealed_snapshot_count INTEGER NOT NULL DEFAULT 0 CHECK (
+            sealed_snapshot_count >= 0
+            AND sealed_snapshot_count <= snapshot_count
+        ),
+        started_utc TEXT NOT NULL CHECK (length(trim(started_utc)) > 0),
+        completed_utc TEXT NOT NULL CHECK (length(trim(completed_utc)) > 0),
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+        PRIMARY KEY (job_id, job_revision_id),
+        FOREIGN KEY (job_id, job_revision_id)
+            REFERENCES job_revisions (job_id, id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (analysis_id)
+            REFERENCES analyses (id)
+            ON DELETE RESTRICT,
+        CHECK (
+            (
+                state = 'SEALED'
+                AND analysis_id IS NOT NULL
+                AND snapshot_count >= 1
+                AND sealed_snapshot_count = snapshot_count
+            )
+            OR (
+                state = 'BLOCKED'
+                AND sealed_snapshot_count = 0
+            )
+        )
+    )
+    """,
+    """
+    CREATE INDEX idx_standard_backup_job_snapshot_materializations_state
+        ON standard_backup_job_snapshot_materializations (
+            state,
+            completed_utc,
+            job_id
         )
     """,
 )

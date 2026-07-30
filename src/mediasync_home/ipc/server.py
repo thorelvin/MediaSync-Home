@@ -88,6 +88,9 @@ from mediasync_home.application.snapshot_read_models import (
     query_snapshot_entries,
     query_snapshot_issues,
 )
+from mediasync_home.application.snapshot_scanning import (
+    SnapshotMaterializationRefreshReport,
+)
 from mediasync_home.application.snapshots import (
     SnapshotCoverageReadModelStore,
     SnapshotEntryReadModelStore,
@@ -137,6 +140,9 @@ class EngineHostIpcService:
     standard_backup_job_endpoint_registrar: StandardBackupJobEndpointRegistrar | None = None
     endpoint_classification_refresh: (
         Callable[[], EndpointClassificationRefreshReport] | None
+    ) = None
+    job_snapshot_refresh: (
+        Callable[[], SnapshotMaterializationRefreshReport] | None
     ) = None
     run_activity_read_store: RunActivityReadModelStore | None = None
     plan_operation_read_store: PlanOperationReadModelStore | None = None
@@ -889,7 +895,8 @@ class EngineHostIpcService:
         response = self._run_command_effect_transaction(
             lambda: self._dispatch_create_standard_backup_job_in_transaction(envelope, identity, command)
         )
-        return self._refresh_endpoint_classification_after_job_command(response)
+        response = self._refresh_endpoint_classification_after_job_command(response)
+        return self._refresh_job_snapshots_after_job_command(response)
 
     def _refresh_endpoint_classification_after_job_command(
         self,
@@ -914,6 +921,36 @@ class EngineHostIpcService:
             payload["endpoint_classification_refresh"] = {
                 "completed": False,
                 "reason_code": "ENDPOINT_CLASSIFICATION_REFRESH_FAILED",
+            }
+        return IpcResponse.accepted(payload)
+
+    def _refresh_job_snapshots_after_job_command(
+        self,
+        response: IpcResponse,
+    ) -> IpcResponse:
+        if response.status is not IpcStatus.ACCEPTED or self.job_snapshot_refresh is None:
+            return response
+        payload = dict(response.payload)
+        classification_refresh = payload.get("endpoint_classification_refresh")
+        if (
+            isinstance(classification_refresh, dict)
+            and classification_refresh.get("completed") is False
+        ):
+            payload["job_snapshot_refresh"] = {
+                "completed": False,
+                "reason_code": "JOB_SNAPSHOT_CLASSIFICATION_REFRESH_REQUIRED",
+            }
+            return IpcResponse.accepted(payload)
+        try:
+            report = self.job_snapshot_refresh()
+            payload["job_snapshot_refresh"] = {
+                "completed": True,
+                "report": report.to_dict(),
+            }
+        except Exception:
+            payload["job_snapshot_refresh"] = {
+                "completed": False,
+                "reason_code": "JOB_SNAPSHOT_REFRESH_FAILED",
             }
         return IpcResponse.accepted(payload)
 

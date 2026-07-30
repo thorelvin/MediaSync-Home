@@ -829,13 +829,16 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.recovery_connection is not None
         assert runtime.installation_state is not None
         assert runtime.installation_state.product_channel == "local-preview"
-        assert runtime.installation_state.catalog_schema_version == 25
+        assert runtime.installation_state.catalog_schema_version == 26
         assert runtime.installation_state.recovery_schema_version == 5
         assert runtime.installation_state.ipc_protocol_major == 1
+        assert runtime.snapshot_materialization_refresh is not None
+        assert runtime.snapshot_materialization_refresh.scanned_job_count == 0
         assert runtime.service.job_draft_store is not None
         assert runtime.service.standard_backup_job_read_store is not None
         assert runtime.service.standard_backup_job_detail_store is not None
         assert runtime.service.standard_backup_job_endpoint_registrar is not None
+        assert runtime.service.job_snapshot_refresh is not None
         assert runtime.service.snapshot_entry_read_store is not None
         assert runtime.service.snapshot_coverage_read_store is not None
         assert runtime.service.snapshot_issue_read_store is not None
@@ -860,7 +863,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
             runtime.run_executor_recovery_object_cleanup_port
             is runtime.run_executor_final_commit_port
         )
-        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 25
+        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 26
         assert current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY) == 5
         assert runtime.startup_reconciliation is not None
         assert runtime.startup_reconciliation.reconciler_instance_id == "host-new"
@@ -1027,6 +1030,17 @@ def test_local_writable_runtime_creates_job_from_inline_gui_draft(tmp_path: Path
                 "blocked_binding_count": 0,
             },
         }
+        snapshot_refresh = response.payload["job_snapshot_refresh"]
+        assert snapshot_refresh["completed"] is True
+        snapshot_report = snapshot_refresh["report"]
+        assert snapshot_report["scanned_job_count"] == 1
+        assert snapshot_report["reused_job_count"] == 0
+        assert snapshot_report["blocked_job_count"] == 0
+        assert snapshot_report["failed_job_count"] == 0
+        assert snapshot_report["sealed_snapshot_count"] == 2
+        assert snapshot_report["results"][0]["state"] == "SEALED"
+        assert snapshot_report["results"][0]["reason_code"] == "JOB_SNAPSHOTS_SEALED"
+        assert len(snapshot_report["results"][0]["snapshot_ids"]) == 2
         assert overview.payload["backup_overview"]["draft"]["source_name"] == "Pictures"
         assert overview.payload["backup_overview"]["jobs"][0]["source_name"] == "Pictures"
         assert runtime.catalog_connection is not None
@@ -1036,8 +1050,24 @@ def test_local_writable_runtime_creates_job_from_inline_gui_draft(tmp_path: Path
         binding_count = runtime.catalog_connection.execute(
             "SELECT count(*) FROM standard_backup_job_endpoint_bindings"
         ).fetchone()
+        snapshot_materialization = runtime.catalog_connection.execute(
+            """
+            SELECT state, snapshot_count, sealed_snapshot_count
+            FROM standard_backup_job_snapshot_materializations
+            """
+        ).fetchone()
+        sealed_snapshot_count = runtime.catalog_connection.execute(
+            """
+            SELECT count(*)
+            FROM snapshots
+            WHERE complete = 1
+                AND immutable = 1
+            """
+        ).fetchone()
         assert endpoint_count == (2,)
         assert binding_count == (2,)
+        assert snapshot_materialization == ("SEALED", 2, 2)
+        assert sealed_snapshot_count == (2,)
         assert not (source_root / ".mediasync").exists()
         assert not (target_root / ".mediasync").exists()
     finally:
