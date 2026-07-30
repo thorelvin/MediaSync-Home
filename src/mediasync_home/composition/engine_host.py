@@ -67,6 +67,7 @@ from mediasync_home.application.run_executor_cycle import (
     RunExecutorCyclePumpOutcome,
     execute_bounded_run_executor_cycle,
 )
+from mediasync_home.application.host_locator import LocalEngineHostPublication
 from mediasync_home.application.run_operation_planning import (
     RunTargetOperationPlanningOutcome,
     plan_run_target_recovery_operations,
@@ -828,6 +829,7 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
     host_mutex = _acquire_host_mutex(args.host_mutex_name, output=output, pipe_name=args.pipe_name)
     if args.host_mutex_name and host_mutex is None:
         return 3
+    host_locator_publication: LocalEngineHostPublication | None = None
     host_locator_payload: dict[str, object] | None = None
     host_locator_path: Path | None = None
     runtime: EngineHostRuntime | None = None
@@ -836,13 +838,14 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
     task_scheduler_reconciliation: TaskSchedulerResourcePumpReport | None = None
     try:
         if args.publish_host_locator:
-            host_locator_payload, host_locator_path = _publish_local_host_locator(
+            host_locator_publication, host_locator_path = _publish_local_host_locator(
                 installation_id=args.installation_id,
                 pipe_name=args.pipe_name,
                 mutex_name=args.host_mutex_name,
                 state_root=args.state_root,
                 process_id=os.getpid(),
             )
+            host_locator_payload = host_locator_publication.to_payload()
         runtime = build_engine_host_runtime(
             authorization=authorization,
             service_status=service_status,
@@ -981,6 +984,8 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
         )
         return 2
     finally:
+        if host_locator_publication is not None:
+            _clear_local_host_locator_publication(host_locator_publication)
         if task_scheduler_maintenance_loop is not None:
             task_scheduler_maintenance_loop.stop()
         if executor_maintenance_loop is not None:
@@ -1645,7 +1650,7 @@ def _publish_local_host_locator(
     mutex_name: str | None,
     state_root: Path | None,
     process_id: int,
-) -> tuple[dict[str, object], Path]:
+) -> tuple[LocalEngineHostPublication, Path]:
     if mutex_name is None:
         raise RuntimeError("HOST_LOCATOR_MUTEX_REQUIRED")
     if state_root is None:
@@ -1662,7 +1667,20 @@ def _publish_local_host_locator(
         process_id=process_id,
     )
     path = publish_local_engine_host_publication(publication)
-    return publication.to_payload(), path
+    return publication, path
+
+
+def _clear_local_host_locator_publication(
+    publication: LocalEngineHostPublication,
+) -> bool:
+    from mediasync_home.adapters.local_host_locator import (
+        clear_stale_local_engine_host_publication,
+    )
+
+    try:
+        return clear_stale_local_engine_host_publication(publication)
+    except OSError:
+        return False
 
 
 def _thread_safe_emit(output: Emit) -> Emit:

@@ -279,7 +279,7 @@ def test_launcher_local_preview_status_uses_host_locator_when_pipe_omitted(
     payload = json.loads(result.stdout)
     host_events = payload["engine_host"]["events"]
     publication_path = state_root / LOCAL_ENGINE_HOST_PUBLICATION_FILENAME
-    publication = json.loads(publication_path.read_text(encoding="utf-8"))
+    publication = host_events[0]["host_locator"]
 
     assert result.stderr == ""
     assert payload["accepted"] is True
@@ -318,6 +318,7 @@ def test_launcher_local_preview_status_uses_host_locator_when_pipe_omitted(
     assert host_events[0]["host_locator_path"] == str(publication_path)
     assert host_events[0]["state_root"] == str(state_root)
     assert host_events[-1]["served_requests"] == 2
+    assert not publication_path.exists()
 
 
 def test_launcher_local_preview_status_adopts_live_published_host(
@@ -357,6 +358,7 @@ def test_launcher_local_preview_status_adopts_live_published_host(
     )
     try:
         _wait_for_file(publication_path)
+        publication = json.loads(publication_path.read_text(encoding="utf-8"))
         result = subprocess.run(
             [
                 sys.executable,
@@ -383,7 +385,6 @@ def test_launcher_local_preview_status_adopts_live_published_host(
 
     payload = json.loads(result.stdout)
     host_events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
-    publication = json.loads(publication_path.read_text(encoding="utf-8"))
 
     assert result.stderr == ""
     assert stderr == ""
@@ -407,6 +408,7 @@ def test_launcher_local_preview_status_adopts_live_published_host(
     ]
     assert host_events[0]["host_locator"] == publication
     assert host_events[-1]["served_requests"] == 2
+    assert not publication_path.exists()
 
 
 def test_launcher_local_preview_status_clears_stale_publication_before_fallback(
@@ -452,7 +454,7 @@ def test_launcher_local_preview_status_clears_stale_publication_before_fallback(
 
     payload = json.loads(result.stdout)
     host_events = payload["engine_host"]["events"]
-    final_publication = json.loads(publication_path.read_text(encoding="utf-8"))
+    final_publication = host_events[0]["host_locator"]
 
     assert result.stderr == ""
     assert payload["accepted"] is True
@@ -464,6 +466,7 @@ def test_launcher_local_preview_status_clears_stale_publication_before_fallback(
     assert final_publication["process_id"] != 4321
     assert final_publication["pipe_name"] == descriptor.pipe_name
     assert host_events[-1]["served_requests"] == 2
+    assert not publication_path.exists()
 
 
 def test_gui_status_query_uses_host_locator_when_pipe_omitted(

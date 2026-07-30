@@ -10,10 +10,16 @@ from pathlib import Path
 
 import pytest
 
+from mediasync_home.adapters import local_host_locator as local_host_locator_module
+from mediasync_home.adapters.local_host_locator import (
+    load_local_engine_host_publication,
+    publish_local_engine_host_publication,
+)
 from mediasync_home.adapters.robocopy import RobocopyStagingTransferAdapter
 from mediasync_home.adapters.sqlite.connection_policy import SqliteStore
 from mediasync_home.adapters.sqlite.migrations import current_schema_version
 from mediasync_home.application.external_resources import ExternalResourceState, ExternalResourceType
+from mediasync_home.application.host_locator import build_local_engine_host_publication
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
 from mediasync_home.application.run_executor import RunExecutorPumpStopReason
 from mediasync_home.application.run_executor_cycle import (
@@ -53,6 +59,9 @@ from mediasync_home.ipc.protocol import IpcReason, IpcStatus
 EXPECTED_USER = "same-user"
 EXPECTED_SESSION = 42
 TASK_SCHEDULER_EXECUTABLE = r"C:\Program Files\MediaSync Home\MediaSyncHome.exe"
+HOST_LOCATOR_KEY = "1234567890abcdef12345678"
+HOST_LOCATOR_PIPE = f"MediaSyncHome-0B-{HOST_LOCATOR_KEY}"
+HOST_LOCATOR_MUTEX = f"Local\\MediaSyncHome-0B-{HOST_LOCATOR_KEY}"
 
 
 def test_bounded_pipe_loop_serves_exact_request_limit() -> None:
@@ -448,6 +457,106 @@ def test_engine_host_run_uses_long_running_pipe_mode(monkeypatch: pytest.MonkeyP
         "served_requests": 2,
         "stop_reason": "INTERRUPTED",
     }
+
+
+def test_engine_host_run_clears_own_host_locator_on_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_win32_pipe = types.ModuleType("mediasync_home.ipc.win32_named_pipe")
+    runtime = _FakeRuntime()
+    host_mutex = _FakeHostMutex(HOST_LOCATOR_MUTEX)
+    state_root = tmp_path / "state"
+    lines: list[str] = []
+
+    class FakeWin32NamedPipeServer(_FakePipeServer):
+        def __init__(self, *, pipe_name: str, service: object) -> None:
+            super().__init__()
+            self.pipe_name = pipe_name
+            self.service = service
+
+    fake_win32_pipe.Win32NamedPipeServer = FakeWin32NamedPipeServer
+    fake_win32_pipe.current_user_policy = _authorization
+    monkeypatch.setitem(sys.modules, "mediasync_home.ipc.win32_named_pipe", fake_win32_pipe)
+    monkeypatch.setattr(local_host_locator_module, "LocalReparseGuard", _PermissiveReparseGuard)
+    monkeypatch.setattr(engine_host_module.os, "name", "nt")
+    monkeypatch.setattr(engine_host_module.os, "getpid", lambda: 1111)
+    monkeypatch.setattr(engine_host_module, "current_process_runtime_policy", lambda root: None)
+    monkeypatch.setattr(engine_host_module, "build_engine_host_runtime", lambda **kwargs: runtime)
+    monkeypatch.setattr(engine_host_module, "_acquire_host_mutex", lambda *args, **kwargs: host_mutex)
+
+    code = run_engine_host(
+        [
+            "--pipe-name",
+            HOST_LOCATOR_PIPE,
+            "--state-root",
+            str(state_root),
+            "--host-mutex-name",
+            HOST_LOCATOR_MUTEX,
+            "--publish-host-locator",
+        ],
+        emit=lines.append,
+    )
+
+    events = [json.loads(line) for line in lines]
+    assert code == 0
+    assert runtime.closed is True
+    assert host_mutex.closed is True
+    assert events[0]["host_locator"]["process_id"] == 1111
+    assert events[0]["host_locator_path"] == str(state_root / "engine-host.locator.json")
+    assert load_local_engine_host_publication(state_root) is None
+
+
+def test_engine_host_run_preserves_replaced_host_locator_on_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_win32_pipe = types.ModuleType("mediasync_home.ipc.win32_named_pipe")
+    runtime = _FakeRuntime()
+    host_mutex = _FakeHostMutex(HOST_LOCATOR_MUTEX)
+    state_root = tmp_path / "state"
+    newer_publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name=HOST_LOCATOR_PIPE,
+        mutex_name=HOST_LOCATOR_MUTEX,
+        state_root=state_root,
+        process_id=2222,
+    )
+
+    class FakeWin32NamedPipeServer(_FakePipeServer):
+        def __init__(self, *, pipe_name: str, service: object) -> None:
+            super().__init__()
+            self.pipe_name = pipe_name
+            self.service = service
+
+        def serve_once(self) -> None:
+            publish_local_engine_host_publication(newer_publication)
+            super().serve_once()
+
+    fake_win32_pipe.Win32NamedPipeServer = FakeWin32NamedPipeServer
+    fake_win32_pipe.current_user_policy = _authorization
+    monkeypatch.setitem(sys.modules, "mediasync_home.ipc.win32_named_pipe", fake_win32_pipe)
+    monkeypatch.setattr(local_host_locator_module, "LocalReparseGuard", _PermissiveReparseGuard)
+    monkeypatch.setattr(engine_host_module.os, "name", "nt")
+    monkeypatch.setattr(engine_host_module.os, "getpid", lambda: 1111)
+    monkeypatch.setattr(engine_host_module, "current_process_runtime_policy", lambda root: None)
+    monkeypatch.setattr(engine_host_module, "build_engine_host_runtime", lambda **kwargs: runtime)
+    monkeypatch.setattr(engine_host_module, "_acquire_host_mutex", lambda *args, **kwargs: host_mutex)
+
+    code = run_engine_host(
+        [
+            "--pipe-name",
+            HOST_LOCATOR_PIPE,
+            "--state-root",
+            str(state_root),
+            "--host-mutex-name",
+            HOST_LOCATOR_MUTEX,
+            "--publish-host-locator",
+        ],
+    )
+
+    assert code == 0
+    assert load_local_engine_host_publication(state_root) == newer_publication
 
 
 def test_engine_host_run_emits_executor_cycle_after_request(
@@ -925,6 +1034,20 @@ class _FakePipeServer:
             raise KeyboardInterrupt
         if self.calls == self._fail_on_call:
             raise RuntimeError("internal detail must not leak")
+
+
+class _PermissiveReparseGuard:
+    def reject_reparse_chain(self, **kwargs: object) -> object:
+        return object()
+
+
+class _FakeHostMutex:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _FakeLiveLease:
