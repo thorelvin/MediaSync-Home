@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import ctypes
 import os
+import subprocess
 import sys
+import textwrap
+import time
 from ctypes import wintypes
 from pathlib import Path
 
@@ -55,6 +58,97 @@ def test_win32_transfer_supervisor_kill_on_close_prevents_orphan_child(
         _terminate_if_still_active(monitor_handle)
         _close_handle(monitor_handle)
         process.close()
+
+
+def test_win32_transfer_child_dies_when_owning_host_process_exits(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    pid_path = tmp_path / "child.pid"
+    release_path = tmp_path / "release-host-exit"
+    helper_code = textwrap.dedent(
+        """
+        import os
+        import sys
+        import time
+        from pathlib import Path
+
+        from mediasync_home.adapters.process_supervisor import Win32JobObjectTransferSupervisor
+        from mediasync_home.application.process_supervision import build_transfer_child_launch_plan
+
+        work_root = Path(sys.argv[1])
+        pid_path = Path(sys.argv[2])
+        release_path = Path(sys.argv[3])
+        python_executable = Path(sys.argv[4])
+        plan = build_transfer_child_launch_plan(
+            executable=python_executable,
+            arguments=("-c", "import time; time.sleep(60)"),
+            working_directory=work_root,
+            working_directory_root=work_root,
+            environment={
+                "PYTHONUTF8": "1",
+                "SystemRoot": os.environ.get("SystemRoot", r"C:\\Windows"),
+                "TEMP": str(work_root),
+                "TMP": str(work_root),
+            },
+        )
+        process = Win32JobObjectTransferSupervisor().start(plan)
+        pid_path.write_text(str(process.process_id), encoding="utf-8")
+        deadline = time.monotonic() + 20
+        while not release_path.exists():
+            if time.monotonic() > deadline:
+                os._exit(88)
+            time.sleep(0.05)
+        os._exit(77)
+        """
+    )
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    existing_python_path = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        str(repo_root / "src")
+        if not existing_python_path
+        else f"{repo_root / 'src'}{os.pathsep}{existing_python_path}"
+    )
+    helper = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            helper_code,
+            str(tmp_path),
+            str(pid_path),
+            str(release_path),
+            str(Path(sys.executable).resolve()),
+        ],
+        cwd=repo_root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    monitor_handle: object | None = None
+    try:
+        _wait_for_helper_file(pid_path, helper, timeout_seconds=10.0)
+        child_process_id = int(pid_path.read_text(encoding="utf-8"))
+        monitor_handle = _open_process_monitor(child_process_id)
+
+        assert _wait_for_process_exit(monitor_handle, timeout_ms=100) is False
+
+        release_path.write_text("exit", encoding="utf-8")
+        stdout, stderr = helper.communicate(timeout=10)
+
+        assert stdout == ""
+        assert stderr == ""
+        assert helper.returncode == 77
+        assert _wait_for_process_exit(monitor_handle, timeout_ms=5_000)
+        assert _get_exit_code_process(monitor_handle) != _STILL_ACTIVE
+    finally:
+        if helper.poll() is None:
+            helper.kill()
+            helper.communicate(timeout=5)
+        if monitor_handle is not None:
+            _terminate_if_still_active(monitor_handle)
+            _close_handle(monitor_handle)
 
 
 def _kernel32() -> object:
@@ -111,6 +205,26 @@ def _terminate_if_still_active(handle: object) -> None:
     kernel32 = _kernel32()
     kernel32.TerminateProcess(handle, 97)
     _wait_for_process_exit(handle, timeout_ms=5_000)
+
+
+def _wait_for_helper_file(
+    path: Path,
+    helper: subprocess.Popen[str],
+    *,
+    timeout_seconds: float,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if path.is_file():
+            return
+        if helper.poll() is not None:
+            stdout, stderr = helper.communicate(timeout=1)
+            raise AssertionError(
+                f"helper exited before creating {path.name}: "
+                f"returncode={helper.returncode} stdout={stdout!r} stderr={stderr!r}"
+            )
+        time.sleep(0.05)
+    raise AssertionError(f"timed out waiting for helper file {path}")
 
 
 def _close_handle(handle: object) -> None:
