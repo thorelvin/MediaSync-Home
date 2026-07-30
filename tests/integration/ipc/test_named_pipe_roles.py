@@ -202,8 +202,9 @@ def test_gui_creates_durable_backup_job_through_local_writable_pipe(
     assert gui_response["status"] == "ACCEPTED"
     assert gui_response["payload"]["created"] is True
     endpoint_bindings = gui_response["payload"]["endpoint_bindings"]
-    assert endpoint_bindings["source"]["registration_state"] == "REGISTRATION_PENDING"
+    assert endpoint_bindings["source"]["registration_state"] == "READ_ONLY_READY"
     assert endpoint_bindings["targets"][0]["registration_state"] == "REGISTRATION_PENDING"
+    assert gui_response["payload"]["endpoint_classification_refresh"]["completed"] is True
     assert host_events[0]["host_status"]["mutations_enabled"] is True
     assert host_events[-1]["served_requests"] == 2
     assert persisted is not None
@@ -215,7 +216,7 @@ def test_gui_creates_durable_backup_job_through_local_writable_pipe(
             "SOURCE",
             0,
             endpoint_bindings["source"]["root_uri"],
-            "REGISTRATION_PENDING",
+            "READ_ONLY_READY",
         ),
         (
             "TARGET",
@@ -226,6 +227,8 @@ def test_gui_creates_durable_backup_job_through_local_writable_pipe(
     ]
     assert endpoint_count == (2,)
     assert root_claim_count == (2,)
+    assert not (source_root / ".mediasync").exists()
+    assert not (target_root / ".mediasync").exists()
 
 
 def test_gui_can_disconnect_and_reconnect_without_stopping_engine_host() -> None:

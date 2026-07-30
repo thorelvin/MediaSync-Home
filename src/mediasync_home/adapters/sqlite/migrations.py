@@ -147,6 +147,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_installation_state",
                 statements=CATALOG_INSTALLATION_STATE,
             ),
+            SqliteMigration(
+                version=25,
+                name="catalog_endpoint_classification_observations",
+                statements=CATALOG_ENDPOINT_CLASSIFICATION_OBSERVATIONS,
+            ),
         ),
     )
 
@@ -1253,6 +1258,74 @@ CATALOG_INSTALLATION_STATE = (
     BEGIN
         SELECT RAISE(ABORT, 'INSTALLATION_STATE_DELETE_FORBIDDEN');
     END
+    """,
+)
+
+CATALOG_ENDPOINT_CLASSIFICATION_OBSERVATIONS = (
+    """
+    ALTER TABLE standard_backup_job_endpoint_bindings
+        ADD COLUMN registration_reason_code TEXT NOT NULL
+            DEFAULT 'ENDPOINT_CLASSIFICATION_PENDING'
+            CHECK (length(trim(registration_reason_code)) > 0)
+    """,
+    """
+    CREATE TABLE endpoint_classification_observations (
+        endpoint_id TEXT NOT NULL,
+        endpoint_revision_id TEXT NOT NULL,
+        local_installation_id TEXT NOT NULL CHECK (
+            length(trim(local_installation_id)) > 0
+        ),
+        inspection_status TEXT NOT NULL CHECK (
+            inspection_status IN ('CLASSIFIED', 'FAILED')
+        ),
+        classification_state TEXT CHECK (
+            classification_state IS NULL
+            OR classification_state IN (
+                'ABSENT',
+                'VALID_OWNED',
+                'VALID_FOREIGN',
+                'VALID_READ_ONLY_NEWER_SCHEMA',
+                'PARTIAL_CONTROL_AREA',
+                'UNKNOWN_EMPTY_DIRECTORY',
+                'UNKNOWN_NONEMPTY_DIRECTORY',
+                'CASE_ALIAS_COLLISION',
+                'CORRUPT_MARKER'
+            )
+        ),
+        reason_codes_json TEXT NOT NULL,
+        marker_json TEXT,
+        error_code TEXT,
+        next_action TEXT,
+        observed_utc TEXT NOT NULL CHECK (length(trim(observed_utc)) > 0),
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+        PRIMARY KEY (endpoint_id, endpoint_revision_id),
+        FOREIGN KEY (endpoint_id, endpoint_revision_id)
+            REFERENCES endpoint_revisions (endpoint_id, id)
+            ON DELETE RESTRICT,
+        CHECK (
+            (
+                inspection_status = 'CLASSIFIED'
+                AND classification_state IS NOT NULL
+                AND error_code IS NULL
+                AND next_action IS NULL
+            )
+            OR (
+                inspection_status = 'FAILED'
+                AND classification_state IS NULL
+                AND marker_json IS NULL
+                AND length(trim(error_code)) > 0
+                AND length(trim(next_action)) > 0
+            )
+        )
+    )
+    """,
+    """
+    CREATE INDEX idx_endpoint_classification_observations_status
+        ON endpoint_classification_observations (
+            inspection_status,
+            classification_state,
+            endpoint_id
+        )
     """,
 )
 

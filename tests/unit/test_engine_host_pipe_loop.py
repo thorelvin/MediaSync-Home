@@ -829,7 +829,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.recovery_connection is not None
         assert runtime.installation_state is not None
         assert runtime.installation_state.product_channel == "local-preview"
-        assert runtime.installation_state.catalog_schema_version == 24
+        assert runtime.installation_state.catalog_schema_version == 25
         assert runtime.installation_state.recovery_schema_version == 5
         assert runtime.installation_state.ipc_protocol_major == 1
         assert runtime.service.job_draft_store is not None
@@ -860,7 +860,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
             runtime.run_executor_recovery_object_cleanup_port
             is runtime.run_executor_final_commit_port
         )
-        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 24
+        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 25
         assert current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY) == 5
         assert runtime.startup_reconciliation is not None
         assert runtime.startup_reconciliation.reconciler_instance_id == "host-new"
@@ -959,6 +959,10 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
 
 
 def test_local_writable_runtime_creates_job_from_inline_gui_draft(tmp_path: Path) -> None:
+    source_root = tmp_path / "Pictures"
+    target_root = tmp_path / "Backup"
+    source_root.mkdir()
+    target_root.mkdir()
     runtime = build_engine_host_runtime(
         authorization=_authorization(),
         service_status=local_writable_status(ProcessRole.ENGINE_HOST),
@@ -970,11 +974,11 @@ def test_local_writable_runtime_creates_job_from_inline_gui_draft(tmp_path: Path
             "draft_id": "draft-a",
             "schema_version": 1,
             "source_name": "Pictures",
-            "source_path_label": "C:/Users/Ada/Pictures",
+            "source_path_label": str(source_root),
             "targets": [
                 {
                     "name": "USB 1",
-                    "path_label": "E:/Backup",
+                    "path_label": str(target_root),
                     "independent_device_id": None,
                 }
             ],
@@ -1002,10 +1006,27 @@ def test_local_writable_runtime_creates_job_from_inline_gui_draft(tmp_path: Path
         assert response.status is IpcStatus.ACCEPTED
         assert response.payload["created"] is True
         endpoint_bindings = response.payload["endpoint_bindings"]
-        assert endpoint_bindings["source"]["root_uri"] == "file:///C:/Users/Ada/Pictures"
-        assert endpoint_bindings["source"]["registration_state"] == "REGISTRATION_PENDING"
-        assert endpoint_bindings["targets"][0]["root_uri"] == "file:///E:/Backup"
+        assert endpoint_bindings["source"]["root_uri"] == source_root.as_uri()
+        assert endpoint_bindings["source"]["registration_state"] == "READ_ONLY_READY"
+        assert endpoint_bindings["source"]["registration_reason_code"] == (
+            "ENDPOINT_SOURCE_READ_ONLY_WITHOUT_CONTROL_AREA"
+        )
+        assert endpoint_bindings["targets"][0]["root_uri"] == target_root.as_uri()
         assert endpoint_bindings["targets"][0]["registration_state"] == "REGISTRATION_PENDING"
+        assert endpoint_bindings["targets"][0]["registration_reason_code"] == (
+            "ENDPOINT_TARGET_REGISTRATION_REQUIRED"
+        )
+        assert response.payload["endpoint_classification_refresh"] == {
+            "completed": True,
+            "report": {
+                "classified_endpoint_count": 2,
+                "failed_endpoint_count": 0,
+                "pending_binding_count": 1,
+                "read_only_ready_binding_count": 1,
+                "writable_ready_binding_count": 0,
+                "blocked_binding_count": 0,
+            },
+        }
         assert overview.payload["backup_overview"]["draft"]["source_name"] == "Pictures"
         assert overview.payload["backup_overview"]["jobs"][0]["source_name"] == "Pictures"
         assert runtime.catalog_connection is not None
@@ -1017,6 +1038,8 @@ def test_local_writable_runtime_creates_job_from_inline_gui_draft(tmp_path: Path
         ).fetchone()
         assert endpoint_count == (2,)
         assert binding_count == (2,)
+        assert not (source_root / ".mediasync").exists()
+        assert not (target_root / ".mediasync").exists()
     finally:
         runtime.close()
 
@@ -1068,6 +1091,7 @@ def test_engine_host_runtime_backfills_endpoint_bindings_for_existing_job(
     with sqlite3.connect(state_root / "catalog.sqlite") as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("DELETE FROM standard_backup_job_endpoint_bindings")
+        connection.execute("DELETE FROM endpoint_classification_observations")
         connection.execute("DELETE FROM endpoint_root_claims")
         connection.execute("DELETE FROM endpoint_heads")
         connection.execute("DELETE FROM endpoint_revisions")
@@ -1093,9 +1117,12 @@ def test_engine_host_runtime_backfills_endpoint_bindings_for_existing_job(
         ).fetchall()
         assert endpoint_count == (2,)
         assert binding_states == [
-            ("SOURCE", 0, "REGISTRATION_PENDING"),
-            ("TARGET", 1, "REGISTRATION_PENDING"),
+            ("SOURCE", 0, "BLOCKED"),
+            ("TARGET", 1, "BLOCKED"),
         ]
+        assert restarted.endpoint_classification_refresh is not None
+        assert restarted.endpoint_classification_refresh.failed_endpoint_count == 2
+        assert restarted.endpoint_classification_refresh.blocked_binding_count == 2
     finally:
         restarted.close()
 

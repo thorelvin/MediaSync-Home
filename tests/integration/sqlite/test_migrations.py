@@ -28,12 +28,13 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 24
+        assert current_schema_version(connection, plan.store) == 25
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
             "job_heads",
             "installation_state",
+            "endpoint_classification_observations",
             "file_entries",
             "directory_coverage",
             "snapshot_issues",
@@ -59,7 +60,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 24
+        assert _row_count(connection, "schema_migrations") == 25
         assert _foreign_key(
             connection,
             "endpoint_heads",
@@ -98,6 +99,13 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         assert _foreign_key(
             connection,
             "standard_backup_job_endpoint_bindings",
+            "endpoint_revisions",
+            ("endpoint_id", "endpoint_revision_id"),
+            ("endpoint_id", "id"),
+        )
+        assert _foreign_key(
+            connection,
+            "endpoint_classification_observations",
             "endpoint_revisions",
             ("endpoint_id", "endpoint_revision_id"),
             ("endpoint_id", "id"),
@@ -265,10 +273,73 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "control_marker_checksum_algorithm",
             "control_marker_checksum",
         }
+        assert "registration_reason_code" in _column_names(
+            connection,
+            "standard_backup_job_endpoint_bindings",
+        )
+        assert _column_names(connection, "endpoint_classification_observations") >= {
+            "endpoint_id",
+            "endpoint_revision_id",
+            "local_installation_id",
+            "inspection_status",
+            "classification_state",
+            "reason_codes_json",
+            "marker_json",
+            "error_code",
+            "next_action",
+            "observed_utc",
+            "row_version",
+        }
         assert _column_names(connection, "snapshot_batches") >= {
             "coverage_update_count",
             "issue_count",
         }
+
+
+def test_catalog_classification_observation_requires_coherent_status(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_migrations(connection, catalog_migration_plan())
+        connection.execute("INSERT INTO endpoints (id) VALUES ('endpoint-a')")
+        connection.execute(
+            """
+            INSERT INTO endpoint_revisions (endpoint_id, id, display_name, root_uri)
+            VALUES ('endpoint-a', 'revision-a', 'Source', 'file:///C:/Source')
+            """
+        )
+
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+            connection.execute(
+                """
+                INSERT INTO endpoint_classification_observations (
+                    endpoint_id,
+                    endpoint_revision_id,
+                    local_installation_id,
+                    inspection_status,
+                    classification_state,
+                    reason_codes_json,
+                    marker_json,
+                    error_code,
+                    next_action,
+                    observed_utc
+                )
+                VALUES (
+                    'endpoint-a',
+                    'revision-a',
+                    'installation-a',
+                    'FAILED',
+                    'ABSENT',
+                    '[]',
+                    NULL,
+                    'FAILED',
+                    'Retry.',
+                    '2026-07-30T21:00:00Z'
+                )
+                """
+            )
 
 
 def test_catalog_migration_preserves_case_collision_entries(tmp_path: Path) -> None:

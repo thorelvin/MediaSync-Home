@@ -64,7 +64,7 @@ class SqliteEndpointRootResolver(EndpointRootResolver):
         if row is None:
             return None
         return EndpointRootDescriptor(
-            root=_local_path_from_file_uri(str(row[0])),
+            root=local_path_from_file_uri(str(row[0])),
             control_area_id=_optional_str(row[1]),
             root_identity_hash_algorithm=_optional_str(row[2]),
             root_identity_hash=_optional_str(row[3]),
@@ -75,7 +75,7 @@ class SqliteEndpointRootResolver(EndpointRootResolver):
         )
 
 
-def _local_path_from_file_uri(root_uri: str) -> Path:
+def local_path_from_file_uri(root_uri: str) -> Path:
     parsed = urlparse(root_uri)
     if parsed.scheme.lower() != "file":
         raise EndpointLeaseUnavailable(

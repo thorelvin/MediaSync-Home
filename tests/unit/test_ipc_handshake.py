@@ -20,6 +20,9 @@ from mediasync_home.application.command_receipts import (
     CommandReceiptStore,
     ensure_idempotency_compatible,
 )
+from mediasync_home.application.endpoint_registration import (
+    EndpointClassificationRefreshReport,
+)
 from mediasync_home.application.job_creation import (
     JobCreationCommandName,
     SealedStandardBackupJob,
@@ -1797,6 +1800,48 @@ def test_enabled_create_standard_backup_job_persists_job_and_succeeds_receipt() 
     assert receipt.state is CommandReceiptState.SUCCEEDED
     assert catalog.load_standard_backup_job("job-a") is not None
     assert id_factory.calls == 1
+
+
+def test_created_job_stays_accepted_when_post_commit_classification_fails() -> None:
+    drafts = _InMemoryJobDraftStore()
+    catalog = _InMemoryStandardBackupJobCatalog()
+    receipts = _InMemoryCommandReceiptStore()
+    drafts.save_standard_backup_draft(
+        StandardBackupJobDraft.new("draft-a")
+        .with_source(name="Pictures", path_label="C:/Users/Ada/Pictures")
+        .with_added_target(name="USB 1", path_label="E:/Backup")
+    )
+    service = _service(mutations_enabled=True)
+    service.job_draft_store = drafts
+    service.standard_backup_job_catalog = catalog
+    service.standard_backup_job_id_factory = _FixedStandardBackupJobIdFactory()
+    service.command_receipt_store = receipts
+
+    def fail_refresh() -> EndpointClassificationRefreshReport:
+        raise RuntimeError("private filesystem detail")
+
+    service.endpoint_classification_refresh = fail_refresh
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload={"draft_id": "draft-a"},
+        payload_hash=PAYLOAD_HASH_A,
+    )
+
+    assert response.status is IpcStatus.ACCEPTED
+    assert response.payload["created"] is True
+    assert response.payload["endpoint_classification_refresh"] == {
+        "completed": False,
+        "reason_code": "ENDPOINT_CLASSIFICATION_REFRESH_FAILED",
+    }
+    assert catalog.load_standard_backup_job("job-a") is not None
+    receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
+    assert receipt is not None
+    assert receipt.state is CommandReceiptState.SUCCEEDED
 
 
 def test_enabled_create_standard_backup_job_replay_returns_existing_success_receipt() -> None:

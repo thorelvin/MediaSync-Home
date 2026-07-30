@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 from mediasync_home.application.job_creation import SealedStandardBackupJob
 from mediasync_home.application.job_endpoints import (
+    ENDPOINT_CLASSIFICATION_PENDING,
     EndpointIdFactory,
     EndpointRegistrationState,
     JobEndpointRole,
@@ -71,9 +72,10 @@ class SqliteStandardBackupJobEndpointRegistrar(StandardBackupJobEndpointRegistra
                         ordinal,
                         endpoint_id,
                         endpoint_revision_id,
-                        registration_state
+                        registration_state,
+                        registration_reason_code
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         job.job_id,
@@ -83,6 +85,7 @@ class SqliteStandardBackupJobEndpointRegistrar(StandardBackupJobEndpointRegistra
                         endpoint_id,
                         endpoint_revision_id,
                         EndpointRegistrationState.REGISTRATION_PENDING.value,
+                        ENDPOINT_CLASSIFICATION_PENDING,
                     ),
                 )
             registered = self.load_standard_backup_job_endpoint_set(
@@ -122,7 +125,8 @@ class SqliteStandardBackupJobEndpointRegistrar(StandardBackupJobEndpointRegistra
                 bindings.endpoint_revision_id,
                 revisions.display_name,
                 revisions.root_uri,
-                bindings.registration_state
+                bindings.registration_state,
+                bindings.registration_reason_code
             FROM standard_backup_job_endpoint_bindings AS bindings
             INNER JOIN endpoint_revisions AS revisions
                 ON revisions.endpoint_id = bindings.endpoint_id
@@ -146,6 +150,7 @@ class SqliteStandardBackupJobEndpointRegistrar(StandardBackupJobEndpointRegistra
                 display_name=str(row[4]),
                 root_uri=str(row[5]),
                 registration_state=EndpointRegistrationState(str(row[6])),
+                registration_reason_code=str(row[7]),
             )
             for row in rows
         )

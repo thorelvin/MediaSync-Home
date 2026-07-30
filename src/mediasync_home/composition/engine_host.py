@@ -20,6 +20,9 @@ from mediasync_home.adapters.endpoint_leases import (
 )
 from mediasync_home.adapters.final_commit import LocalResolvingFinalCommitAdapter
 from mediasync_home.adapters.final_verification import LocalFinalArtifactVerificationAdapter
+from mediasync_home.adapters.local_endpoint_classifier import (
+    LocalEndpointControlAreaClassifier,
+)
 from mediasync_home.adapters.robocopy import RobocopyStagingTransferAdapter
 from mediasync_home.adapters.runtime_policy import current_process_runtime_policy
 from mediasync_home.adapters.staging import LocalFileStagingTransferAdapter
@@ -39,6 +42,9 @@ from mediasync_home.adapters.sqlite.connection_policy import (
 )
 from mediasync_home.adapters.sqlite.installation_state import SqliteInstallationStateStore
 from mediasync_home.adapters.sqlite.endpoint_roots import SqliteEndpointRootResolver
+from mediasync_home.adapters.sqlite.endpoint_classifications import (
+    SqliteEndpointClassificationRefresher,
+)
 from mediasync_home.adapters.sqlite.external_resources import SqliteExternalResourceStateStore
 from mediasync_home.adapters.sqlite.job_catalog import SqliteStandardBackupJobCatalog
 from mediasync_home.adapters.sqlite.job_draft_store import SqliteJobDraftStore
@@ -94,6 +100,9 @@ from mediasync_home.application.run_executor_cycle import (
     execute_bounded_run_executor_cycle,
 )
 from mediasync_home.application.host_locator import LocalEngineHostPublication
+from mediasync_home.application.endpoint_registration import (
+    EndpointClassificationRefreshReport,
+)
 from mediasync_home.application.job_creation import StandardBackupJobIds
 from mediasync_home.application.job_endpoints import EndpointIds
 from mediasync_home.application.installation_state import InstallationState
@@ -253,6 +262,7 @@ class TaskSchedulerStartupReconciliationOptions:
 class EngineHostRuntime:
     service: EngineHostIpcService
     installation_state: InstallationState | None = None
+    endpoint_classification_refresh: EndpointClassificationRefreshReport | None = None
     state_layout: StateStoreLayout | None = None
     state_restore_recovery: SqliteStateRestoreEpochRecoveryReport | None = None
     state_restore_startup_reconciliation: SqliteStateRestoreStartupReconciliationReport | None = None
@@ -1307,6 +1317,16 @@ def build_engine_host_runtime(
         )
         for existing_job in standard_backup_jobs.list_active_standard_backup_jobs():
             standard_backup_job_endpoints.register_standard_backup_job_endpoints(existing_job)
+        endpoint_classification_refresher = SqliteEndpointClassificationRefresher(
+            catalog_connection,
+            classifier=LocalEndpointControlAreaClassifier(),
+            local_installation_id=installation_state.installation_id,
+        )
+        endpoint_classification_refresh = (
+            endpoint_classification_refresher.refresh_endpoint_classifications(
+                observed_utc=_utc_now(),
+            )
+        )
         snapshots = SqliteSnapshotEntryStore(catalog_connection)
         plans = SqlitePlanStore(catalog_connection)
         runs = SqliteRunStore(catalog_connection)
@@ -1363,6 +1383,11 @@ def build_engine_host_runtime(
             standard_backup_job_read_store=standard_backup_jobs,
             standard_backup_job_detail_store=standard_backup_jobs,
             standard_backup_job_endpoint_registrar=standard_backup_job_endpoints,
+            endpoint_classification_refresh=lambda: (
+                endpoint_classification_refresher.refresh_endpoint_classifications(
+                    observed_utc=_utc_now(),
+                )
+            ),
             standard_backup_job_id_factory=UuidStandardBackupJobIdFactory(),
             snapshot_entry_read_store=snapshots,
             snapshot_coverage_read_store=snapshots,
@@ -1388,6 +1413,7 @@ def build_engine_host_runtime(
     runtime = EngineHostRuntime(
         service=service,
         installation_state=installation_state,
+        endpoint_classification_refresh=endpoint_classification_refresh,
         state_layout=layout,
         state_restore_recovery=state_restore_recovery,
         state_restore_startup_reconciliation=state_restore_startup_reconciliation,

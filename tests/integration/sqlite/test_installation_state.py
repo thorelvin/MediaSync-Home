@@ -43,7 +43,7 @@ def test_installation_state_is_created_once_and_reused(tmp_path: Path) -> None:
         assert UUID(created.installation_id).version == 4
         assert reloaded == created
         assert created.product_channel == "local-preview"
-        assert created.catalog_schema_version == 24
+        assert created.catalog_schema_version == 25
         assert created.recovery_schema_version == 5
         assert created.ipc_protocol_major == 1
         assert created.row_version == 1
@@ -89,7 +89,7 @@ def test_installation_state_rejects_product_channel_change(tmp_path: Path) -> No
             store.load_or_create(
                 product_channel="stable",
                 app_version="0.0.0",
-                catalog_schema_version=24,
+                catalog_schema_version=25,
                 recovery_schema_version=5,
                 ipc_protocol_major=1,
             )
@@ -125,7 +125,7 @@ def test_installation_state_schema_enforces_singleton(tmp_path: Path) -> None:
                     recovery_schema_version,
                     ipc_protocol_major
                 )
-                VALUES (?, 'local-preview', '0.0.0', 24, 5, 1)
+                VALUES (?, 'local-preview', '0.0.0', 25, 5, 1)
                 """,
                 ("55555555-5555-4555-8555-555555555555",),
             )
@@ -160,7 +160,7 @@ def _load_or_create(store: SqliteInstallationStateStore):
     return store.load_or_create(
         product_channel="local-preview",
         app_version="0.0.0",
-        catalog_schema_version=24,
+        catalog_schema_version=25,
         recovery_schema_version=5,
         ipc_protocol_major=1,
     )

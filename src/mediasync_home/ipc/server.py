@@ -26,6 +26,9 @@ from mediasync_home.application.command_receipts import (
 )
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.external_resources import ExternalResourceStateStore
+from mediasync_home.application.endpoint_registration import (
+    EndpointClassificationRefreshReport,
+)
 from mediasync_home.application.job_creation import (
     CreateStandardBackupJobCommand,
     JobCreationOutcome,
@@ -118,6 +121,7 @@ from mediasync_home.ipc.protocol import (
     IpcProtocolError,
     IpcReason,
     IpcResponse,
+    IpcStatus,
 )
 
 
@@ -131,6 +135,9 @@ class EngineHostIpcService:
     standard_backup_job_read_store: StandardBackupJobReadModelStore | None = None
     standard_backup_job_detail_store: StandardBackupJobDetailReadModelStore | None = None
     standard_backup_job_endpoint_registrar: StandardBackupJobEndpointRegistrar | None = None
+    endpoint_classification_refresh: (
+        Callable[[], EndpointClassificationRefreshReport] | None
+    ) = None
     run_activity_read_store: RunActivityReadModelStore | None = None
     plan_operation_read_store: PlanOperationReadModelStore | None = None
     plan_endpoint_read_store: PlanEndpointReadModelStore | None = None
@@ -879,8 +886,53 @@ class EngineHostIpcService:
         identity: VerifiedClientIdentity,
         command: CreateStandardBackupJobCommand,
     ) -> IpcResponse:
-        return self._run_command_effect_transaction(
+        response = self._run_command_effect_transaction(
             lambda: self._dispatch_create_standard_backup_job_in_transaction(envelope, identity, command)
+        )
+        return self._refresh_endpoint_classification_after_job_command(response)
+
+    def _refresh_endpoint_classification_after_job_command(
+        self,
+        response: IpcResponse,
+    ) -> IpcResponse:
+        if (
+            response.status is not IpcStatus.ACCEPTED
+            or self.endpoint_classification_refresh is None
+        ):
+            return response
+        payload = dict(response.payload)
+        try:
+            report = self.endpoint_classification_refresh()
+            payload["endpoint_classification_refresh"] = {
+                "completed": True,
+                "report": report.to_dict(),
+            }
+            endpoint_set = self._reload_response_endpoint_set(payload)
+            if endpoint_set is not None:
+                payload["endpoint_bindings"] = endpoint_set.to_dict()
+        except Exception:
+            payload["endpoint_classification_refresh"] = {
+                "completed": False,
+                "reason_code": "ENDPOINT_CLASSIFICATION_REFRESH_FAILED",
+            }
+        return IpcResponse.accepted(payload)
+
+    def _reload_response_endpoint_set(
+        self,
+        payload: dict[str, Any],
+    ) -> StandardBackupJobEndpointSet | None:
+        if self.standard_backup_job_endpoint_registrar is None:
+            return None
+        job = payload.get("job")
+        if not isinstance(job, dict):
+            return None
+        job_id = job.get("job_id")
+        job_revision_id = job.get("job_revision_id")
+        if not isinstance(job_id, str) or not isinstance(job_revision_id, str):
+            return None
+        return self.standard_backup_job_endpoint_registrar.load_standard_backup_job_endpoint_set(
+            job_id=job_id,
+            job_revision_id=job_revision_id,
         )
 
     def _dispatch_create_standard_backup_job_in_transaction(

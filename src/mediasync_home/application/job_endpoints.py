@@ -19,6 +19,9 @@ class EndpointRegistrationState(str, Enum):
     BLOCKED = "BLOCKED"
 
 
+ENDPOINT_CLASSIFICATION_PENDING = "ENDPOINT_CLASSIFICATION_PENDING"
+
+
 @dataclass(frozen=True, slots=True)
 class EndpointIds:
     endpoint_id: str
@@ -36,6 +39,7 @@ class StandardBackupJobEndpointBinding:
     display_name: str
     root_uri: str
     registration_state: EndpointRegistrationState
+    registration_reason_code: str
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -48,6 +52,7 @@ class StandardBackupJobEndpointBinding:
             "display_name": self.display_name,
             "root_uri": self.root_uri,
             "registration_state": self.registration_state.value,
+            "registration_reason_code": self.registration_reason_code,
         }
 
 
