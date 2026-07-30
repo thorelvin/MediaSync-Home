@@ -54,7 +54,7 @@ def test_live_robocopy_adapter_runs_contained_and_publishes_manifested_payload(
 
     evidence = adapter.transfer_to_staging(_operation(payload))
 
-    assert evidence.transfer_state == "ROBOCOPY_EXIT_1_TRANSFERRED_TO_STAGING"
+    assert evidence.transfer_state == "ROBOCOPY_EXIT_1_COPIED_TRANSFERRED_TO_STAGING"
     assert (staging_root / "object-live.payload").read_bytes() == payload
     manifest_path = work_root / "manifests" / "object-live.manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

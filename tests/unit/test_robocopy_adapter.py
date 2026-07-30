@@ -18,8 +18,11 @@ from mediasync_home.adapters.robocopy import (
     WindowsSystemExecutableResolver,
     build_robocopy_batch_manifest,
     build_robocopy_directory_manifest_command_plan,
+    build_robocopy_result,
     publish_robocopy_batch_inbox,
     build_robocopy_single_file_command_plan,
+    classify_robocopy_exit_code,
+    decode_robocopy_exit_code,
     validate_robocopy_command_line,
     write_robocopy_batch_manifest,
 )
@@ -109,6 +112,92 @@ def test_robocopy_profile_rejects_forbidden_typed_switch(tmp_path: Path) -> None
             working_directory_root=tmp_path / "work",
             profile=RobocopyTransferProfile(switches=("/E", "/MOVE")),
         )
+
+
+@pytest.mark.parametrize("success_max_exit_code", [-1, 8, 16])
+def test_robocopy_profile_rejects_invalid_success_threshold(
+    tmp_path: Path,
+    success_max_exit_code: int,
+) -> None:
+    with pytest.raises(
+        RobocopyConfigurationError,
+        match="ROBOCOPY_PROFILE_SUCCESS_MAX_EXIT_CODE_INVALID",
+    ):
+        build_robocopy_batch_manifest(
+            batch_id="batch-a",
+            source_parent=tmp_path / "source",
+            staging_inbox=tmp_path / "inbox",
+            log_path=tmp_path / "log.txt",
+            entries=(
+                _manifest_entry(
+                    operation_id="op-a",
+                    staging_object_id="object-a",
+                    source_file_name="A.jpg",
+                    payload_path=tmp_path / "staging" / "object-a.payload",
+                    payload=b"image",
+                ),
+            ),
+            profile=RobocopyTransferProfile(success_max_exit_code=success_max_exit_code),
+        )
+
+
+def test_robocopy_profile_rejects_non_positive_timeout(tmp_path: Path) -> None:
+    with pytest.raises(RobocopyConfigurationError, match="ROBOCOPY_PROFILE_TIMEOUT_INVALID"):
+        build_robocopy_batch_manifest(
+            batch_id="batch-a",
+            source_parent=tmp_path / "source",
+            staging_inbox=tmp_path / "inbox",
+            log_path=tmp_path / "log.txt",
+            entries=(
+                _manifest_entry(
+                    operation_id="op-a",
+                    staging_object_id="object-a",
+                    source_file_name="A.jpg",
+                    payload_path=tmp_path / "staging" / "object-a.payload",
+                    payload=b"image",
+                ),
+            ),
+            profile=RobocopyTransferProfile(timeout_seconds=0),
+        )
+
+
+@pytest.mark.parametrize(
+    (
+        "exit_code",
+        "category",
+        "copied",
+        "extras_reported",
+        "mismatches_reported",
+        "failed",
+    ),
+    [
+        (-1, "INVALID", False, False, False, True),
+        (0, "NON_FATAL", False, False, False, False),
+        (1, "NON_FATAL", True, False, False, False),
+        (2, "NON_FATAL", False, True, False, False),
+        (3, "NON_FATAL", True, True, False, False),
+        (4, "NON_FATAL", False, False, True, False),
+        (7, "NON_FATAL", True, True, True, False),
+        (8, "FATAL", False, False, False, True),
+        (15, "FATAL", True, True, True, True),
+    ],
+)
+def test_robocopy_exit_code_decoder_records_result_flags(
+    exit_code: int,
+    category: str,
+    copied: bool,
+    extras_reported: bool,
+    mismatches_reported: bool,
+    failed: bool,
+) -> None:
+    classification = decode_robocopy_exit_code(exit_code)
+
+    assert classify_robocopy_exit_code(exit_code) == category
+    assert classification.category == category
+    assert classification.copied is copied
+    assert classification.extras_reported is extras_reported
+    assert classification.mismatches_reported is mismatches_reported
+    assert classification.failed is failed
 
 
 def test_robocopy_batch_manifest_is_canonical_and_immutable(tmp_path: Path) -> None:
@@ -245,6 +334,16 @@ def test_robocopy_directory_manifest_command_plan_uses_exact_file_list(
         "B.jpg",
     )
     assert len(build_windows_command_line(plan.argv)) <= ROBOCOPY_CONSERVATIVE_COMMAND_LINE_LIMIT
+    result = build_robocopy_result(command_plan=plan, exit_code=7)
+    assert result.category == "NON_FATAL"
+    assert result.copied is True
+    assert result.extras_reported is True
+    assert result.mismatches_reported is True
+    assert result.failed is False
+    assert result.arguments_hash == plan.command_line_sha256
+    assert result.manifest_hash == manifest.manifest_hash
+    assert len(result.environment_hash) == 64
+    assert result.executable_path == plan.executable.executable_path
 
 
 def test_robocopy_directory_manifest_command_plan_rejects_conservative_limit(
@@ -407,7 +506,7 @@ def test_robocopy_staging_transfer_starts_contained_process_and_publishes_payloa
 
     evidence = adapter.transfer_to_staging(_operation(source_file.read_bytes()))
 
-    assert evidence.transfer_state == "ROBOCOPY_EXIT_1_TRANSFERRED_TO_STAGING"
+    assert evidence.transfer_state == "ROBOCOPY_EXIT_1_COPIED_TRANSFERRED_TO_STAGING"
     assert (staging_root / "object-a.payload").read_bytes() == b"image-bytes"
     manifest_payload = json.loads(
         (work_root / "manifests" / "object-a.manifest.json").read_text(encoding="utf-8")
@@ -501,6 +600,86 @@ def test_robocopy_staging_transfer_rejects_fatal_exit_code(tmp_path: Path) -> No
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
+def test_robocopy_staging_transfer_rejects_invalid_negative_exit_code(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_file = source_root / "Pictures" / "A.jpg"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"image-bytes")
+    target_root.mkdir()
+    adapter = RobocopyStagingTransferAdapter(
+        root_resolver=_RootResolver(source_root=source_root, target_root=target_root),
+        staging_root=tmp_path / "staging",
+        robocopy_work_root=tmp_path / "work",
+        process_supervisor=_FakeRobocopySupervisor(exit_code=-1),
+        executable_resolver=_FakeExecutableResolver(_resolved_executable(tmp_path)),
+    )
+
+    with pytest.raises(LocalFileStagingError) as exc_info:
+        adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+
+    assert exc_info.value.validation_code == "ROBOCOPY_TRANSFER_FAILED"
+    assert not (tmp_path / "staging" / "object-a.payload").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
+def test_robocopy_staging_transfer_records_nonfatal_extra_exit_flag(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_file = source_root / "Pictures" / "A.jpg"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"image-bytes")
+    target_root.mkdir()
+    adapter = RobocopyStagingTransferAdapter(
+        root_resolver=_RootResolver(source_root=source_root, target_root=target_root),
+        staging_root=tmp_path / "staging",
+        robocopy_work_root=tmp_path / "work",
+        process_supervisor=_FakeRobocopySupervisor(exit_code=3),
+        executable_resolver=_FakeExecutableResolver(_resolved_executable(tmp_path)),
+    )
+
+    evidence = adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+
+    assert (
+        evidence.transfer_state
+        == "ROBOCOPY_EXIT_3_COPIED_EXTRAS_REPORTED_TRANSFERRED_TO_STAGING"
+    )
+    assert (tmp_path / "staging" / "object-a.payload").read_bytes() == b"image-bytes"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
+def test_robocopy_staging_transfer_blocks_extra_inbox_content_despite_nonfatal_exit(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_file = source_root / "Pictures" / "A.jpg"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"image-bytes")
+    target_root.mkdir()
+    adapter = RobocopyStagingTransferAdapter(
+        root_resolver=_RootResolver(source_root=source_root, target_root=target_root),
+        staging_root=tmp_path / "staging",
+        robocopy_work_root=tmp_path / "work",
+        process_supervisor=_FakeRobocopySupervisor(
+            exit_code=3,
+            extra_inbox_files={"unexpected.tmp": b"extra"},
+        ),
+        executable_resolver=_FakeExecutableResolver(_resolved_executable(tmp_path)),
+    )
+
+    with pytest.raises(LocalFileStagingError) as exc_info:
+        adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+
+    assert exc_info.value.validation_code == "STAGING_MANIFEST_MISMATCH"
+    assert not (tmp_path / "staging" / "object-a.payload").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
 def test_robocopy_staging_transfer_rejects_changed_source_bytes(tmp_path: Path) -> None:
     source_root = tmp_path / "source"
     target_root = tmp_path / "target"
@@ -547,9 +726,16 @@ class _FakeExecutableResolver:
 
 
 class _FakeRobocopySupervisor:
-    def __init__(self, *, exit_code: int | None, copied_payload: bytes | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        exit_code: int | None,
+        copied_payload: bytes | None = None,
+        extra_inbox_files: dict[str, bytes] | None = None,
+    ) -> None:
         self.exit_code = exit_code
         self.copied_payload = copied_payload
+        self.extra_inbox_files = extra_inbox_files or {}
         self.launch_plans: list[object] = []
         self.process: _FakeRobocopyProcess | None = None
 
@@ -565,6 +751,8 @@ class _FakeRobocopySupervisor:
             if payload is None:
                 payload = (source_parent / file_name).read_bytes()
             (staging_inbox / file_name).write_bytes(payload)
+            for extra_name, extra_payload in self.extra_inbox_files.items():
+                (staging_inbox / extra_name).write_bytes(extra_payload)
         self.process = _FakeRobocopyProcess(exit_code=self.exit_code)
         return self.process
 

@@ -75,6 +75,16 @@ class RobocopyTransferProfile:
 
 
 @dataclass(frozen=True)
+class RobocopyExitClassification:
+    exit_code: int
+    category: str
+    copied: bool
+    extras_reported: bool
+    mismatches_reported: bool
+    failed: bool
+
+
+@dataclass(frozen=True)
 class RobocopyBatchManifestEntry:
     operation_id: str
     staging_object_id: str
@@ -112,6 +122,23 @@ class RobocopyCommandPlan:
     file_names: tuple[str, ...] = ()
     batch_manifest_hash: str | None = None
     manifest_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class RobocopyResult:
+    exit_code: int
+    category: str
+    copied: bool
+    extras_reported: bool
+    mismatches_reported: bool
+    failed: bool
+    terminated_by_supervisor: bool
+    executable_path: Path
+    executable_version: str | None
+    arguments_hash: str
+    environment_hash: str
+    manifest_hash: str | None
+    log_path: Path
 
 
 class SystemExecutableResolver(Protocol):
@@ -177,7 +204,7 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
             staging_root=staging_root,
             reparse_guard=reparse_guard,
         )
-        validate_robocopy_switches(profile.switches)
+        validate_robocopy_profile(profile)
         self._robocopy_work_root = None if robocopy_work_root is None else Path(robocopy_work_root)
         self._process_supervisor = process_supervisor or Win32JobObjectTransferSupervisor()
         self._executable_resolver = executable_resolver or WindowsSystemExecutableResolver()
@@ -239,8 +266,11 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
                 working_directory_root=self._robocopy_work_root_for(operation),
                 profile=self._profile,
             )
-            exit_code = self._run_robocopy(command_plan.launch_plan)
-            if exit_code > self._profile.success_max_exit_code:
+            result = build_robocopy_result(
+                command_plan=command_plan,
+                exit_code=self._run_robocopy(command_plan.launch_plan),
+            )
+            if result.failed or result.exit_code > self._profile.success_max_exit_code:
                 raise LocalFileStagingError(
                     "ROBOCOPY_TRANSFER_FAILED",
                     "Retry the transfer after reviewing the Robocopy batch log.",
@@ -253,7 +283,7 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
             ) from exc
 
         return StagingTransferEvidence(
-            transfer_state=f"ROBOCOPY_EXIT_{exit_code}_TRANSFERRED_TO_STAGING"
+            transfer_state=_robocopy_transfer_state(result)
         )
 
     def _run_robocopy(self, launch_plan: ProcessLaunchPlan) -> int:
@@ -347,7 +377,7 @@ def build_robocopy_batch_manifest(
         raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_LOG_PATH_MUST_BE_ABSOLUTE")
     if not entries:
         raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_REQUIRES_ENTRIES")
-    validate_robocopy_switches(profile.switches)
+    validate_robocopy_profile(profile)
     _validate_manifest_entries(entries)
     profile_hash = _sha256_text(
         _canonical_json(
@@ -418,7 +448,7 @@ def build_robocopy_directory_manifest_command_plan(
         raise RobocopyConfigurationError("ROBOCOPY_WORKING_DIRECTORY_MUST_BE_ABSOLUTE")
     if not manifest_path.is_absolute():
         raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_PATH_MUST_BE_ABSOLUTE")
-    validate_robocopy_switches(profile.switches)
+    validate_robocopy_profile(profile)
     file_names = tuple(entry.source_file_name for entry in manifest.entries)
     argv = (
         str(executable.executable_path),
@@ -480,7 +510,7 @@ def build_robocopy_single_file_command_plan(
         raise RobocopyConfigurationError("ROBOCOPY_LOG_PATH_MUST_BE_ABSOLUTE")
     if not working_directory.is_absolute():
         raise RobocopyConfigurationError("ROBOCOPY_WORKING_DIRECTORY_MUST_BE_ABSOLUTE")
-    validate_robocopy_switches(profile.switches)
+    validate_robocopy_profile(profile)
     source_file_name = _validate_source_file_name(source_file.name)
 
     argv = (
@@ -541,12 +571,76 @@ def validate_robocopy_switches(arguments: tuple[str, ...]) -> None:
             raise RobocopyConfigurationError("ROBOCOPY_FORBIDDEN_SWITCH")
 
 
+def validate_robocopy_profile(profile: RobocopyTransferProfile) -> None:
+    validate_robocopy_switches(profile.switches)
+    if (
+        profile.success_max_exit_code < 0
+        or profile.success_max_exit_code > ROBOCOPY_SUCCESS_MAX_EXIT_CODE
+    ):
+        raise RobocopyConfigurationError("ROBOCOPY_PROFILE_SUCCESS_MAX_EXIT_CODE_INVALID")
+    if profile.timeout_seconds is not None and profile.timeout_seconds <= 0:
+        raise RobocopyConfigurationError("ROBOCOPY_PROFILE_TIMEOUT_INVALID")
+
+
 def classify_robocopy_exit_code(exit_code: int) -> str:
+    return decode_robocopy_exit_code(exit_code).category
+
+
+def decode_robocopy_exit_code(exit_code: int) -> RobocopyExitClassification:
     if exit_code < 0:
-        return "INVALID"
-    if exit_code <= ROBOCOPY_SUCCESS_MAX_EXIT_CODE:
-        return "NON_FATAL"
-    return "FATAL"
+        return RobocopyExitClassification(
+            exit_code=exit_code,
+            category="INVALID",
+            copied=False,
+            extras_reported=False,
+            mismatches_reported=False,
+            failed=True,
+        )
+    return RobocopyExitClassification(
+        exit_code=exit_code,
+        category="NON_FATAL" if exit_code <= ROBOCOPY_SUCCESS_MAX_EXIT_CODE else "FATAL",
+        copied=bool(exit_code & 0x01),
+        extras_reported=bool(exit_code & 0x02),
+        mismatches_reported=bool(exit_code & 0x04),
+        failed=bool(exit_code & ~ROBOCOPY_SUCCESS_MAX_EXIT_CODE),
+    )
+
+
+def build_robocopy_result(
+    *,
+    command_plan: RobocopyCommandPlan,
+    exit_code: int,
+    terminated_by_supervisor: bool = False,
+) -> RobocopyResult:
+    classification = decode_robocopy_exit_code(exit_code)
+    return RobocopyResult(
+        exit_code=classification.exit_code,
+        category=classification.category,
+        copied=classification.copied,
+        extras_reported=classification.extras_reported,
+        mismatches_reported=classification.mismatches_reported,
+        failed=classification.failed,
+        terminated_by_supervisor=terminated_by_supervisor,
+        executable_path=command_plan.executable.executable_path,
+        executable_version=command_plan.executable.file_version,
+        arguments_hash=command_plan.command_line_sha256,
+        environment_hash=_environment_hash(command_plan.launch_plan.environment),
+        manifest_hash=command_plan.batch_manifest_hash,
+        log_path=command_plan.log_path,
+    )
+
+
+def _robocopy_transfer_state(result: RobocopyResult) -> str:
+    flag_names: list[str] = []
+    if result.copied:
+        flag_names.append("COPIED")
+    if result.extras_reported:
+        flag_names.append("EXTRAS_REPORTED")
+    if result.mismatches_reported:
+        flag_names.append("MISMATCHES_REPORTED")
+    if not flag_names:
+        flag_names.append("NO_CHANGES")
+    return f"ROBOCOPY_EXIT_{result.exit_code}_{'_'.join(flag_names)}_TRANSFERRED_TO_STAGING"
 
 
 def normalize_dos_path(path: str) -> str:
@@ -875,6 +969,14 @@ def _robocopy_environment(system_directory: Path) -> dict[str, str]:
         "TEMP": os.environ.get("TEMP", str(system_directory)),
         "TMP": os.environ.get("TMP", str(system_directory)),
     }
+
+
+def _environment_hash(environment: tuple[tuple[str, str], ...]) -> str:
+    return _sha256_text(
+        _canonical_json(
+            {"environment": [[name, value] for name, value in sorted(environment)]}
+        )
+    )
 
 
 def _robocopy_switch_name(argument: str) -> str | None:

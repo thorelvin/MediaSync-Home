@@ -47,7 +47,7 @@ Round-trip-suiten skal minst dekke mellomrom, tomme argumenter, Unicode, UNC, tr
 
 Job Object skal minst ha kill-on-close. Engine Host-krasj eller tvungen upgrade skal derfor ikke etterlate Robocopy som fortsetter uten lease/recoveryeier. Containment er en precondition, ikke best-effort. Dersom child kan kjøre før assignment eller assignment ikke kan bevises, startes ikke batchen.
 
-0B-implementasjonsnote: Prosesssupervisoren har nå en egen Win32 transferchild-adapterflate for `CREATE_SUSPENDED`, kill-on-close Job Object, assignment før resume og suspended-child cleanup på pre-resume feil. Robocopy-wiringen har også en opt-in adapter som skriver canonical batchmanifest no-overwrite før child start, bygger typed single-file/directory-manifest argv, validerer switcher etter final Windows-parsing, resolver `Robocopy.exe` via Windows systemkatalog/final-path-sjekk, bruker den delte lokale ReparseGuard-grensen fra staging og starter via transferchild-supervisoren. En live temp-only smoke kjører nå production-adapteren mot faktisk systemkatalog-resolvert Robocopy under Win32 Job Object-supervisoren, verifiserer manifestert payload/logg og beviser missing-source fatal retur uten payloadpublisering. Host-kill/orphan-process lab, bredere fault-injection, bred returkodesemantikk og live reparse-race lab er fortsatt pending; persisted endpoint identity binding og simulated post-inspection reparse-swap evidence er etablert i egne 0B-slices.
+0B-implementasjonsnote: Prosesssupervisoren har nå en egen Win32 transferchild-adapterflate for `CREATE_SUSPENDED`, kill-on-close Job Object, assignment før resume og suspended-child cleanup på pre-resume feil. Robocopy-wiringen har også en opt-in adapter som skriver canonical batchmanifest no-overwrite før child start, bygger typed single-file/directory-manifest argv, validerer switcher etter final Windows-parsing, resolver `Robocopy.exe` via Windows systemkatalog/final-path-sjekk, bruker den delte lokale ReparseGuard-grensen fra staging og starter via transferchild-supervisoren. En live temp-only smoke kjører nå production-adapteren mot faktisk systemkatalog-resolvert Robocopy under Win32 Job Object-supervisoren, verifiserer manifestert payload/logg og beviser missing-source fatal retur uten payloadpublisering. `RobocopyResult` klassifiserer nå exit-bitene, binder attemptet til executable-, command-, environment-, manifest- og loggevidence, og profile guard avviser alle forsøk på å gjøre 8+ til suksess; manifestenumerering er fortsatt autoritativ etter nonfatal flags. Host-kill/orphan-process lab, bredere fault-injection og live reparse-race lab er fortsatt pending; persisted endpoint identity binding og simulated post-inspection reparse-swap evidence er etablert i egne 0B-slices.
 
 Ingen brukerverdi tolkes som flagg. Kilde, staginginbox og eksakte filer kommer fra forseglet plan/manifest og går gjennom `SafePath`/handlebasert rotvalidering.
 
@@ -187,6 +187,7 @@ Adaptive regler:
 @dataclass(frozen=True)
 class RobocopyResult:
     exit_code: int
+    category: str
     copied: bool
     extras_reported: bool
     mismatches_reported: bool
@@ -196,11 +197,11 @@ class RobocopyResult:
     executable_version: str | None
     arguments_hash: str
     environment_hash: str
-    manifest_hash: str
+    manifest_hash: str | None
     log_path: Path
 ```
 
-Selv en ikke-fatal exit code etterfølges av stagingmanifestkontroll og valgt verifisering. En fatal code kan etterlate resumérbar staging, men aldri en final commit.
+`success_max_exit_code` kan være strengere enn 7, men aldri høyere. Selv en ikke-fatal exit code etterfølges av stagingmanifestkontroll og valgt verifisering. En fatal code kan etterlate resumérbar staging, men aldri en final commit.
 
 ### 15.7 Fremdrift med lav overhead
 
