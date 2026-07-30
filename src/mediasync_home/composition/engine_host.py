@@ -53,10 +53,12 @@ from mediasync_home.adapters.sqlite.runs import SqliteRunStore
 from mediasync_home.adapters.sqlite.schedules import SqliteScheduleStore
 from mediasync_home.adapters.sqlite.snapshots import SqliteSnapshotEntryStore
 from mediasync_home.adapters.sqlite.state_backup import (
+    SqliteStateRestoreReceipt,
     SqliteStateRestoreEpochRecoveryReport,
     SqliteStateRestoreMaintenanceAdmission,
     admit_sqlite_state_restore_maintenance,
     recover_incomplete_sqlite_state_restore_epochs,
+    restore_sqlite_state_backup_set,
 )
 from mediasync_home.adapters.sqlite.trigger_occurrences import SqliteTriggerOccurrenceStore
 from mediasync_home.application.run_executor import (
@@ -219,6 +221,27 @@ class EngineHostRuntime:
     run_executor_process_instance_id: str | None = None
     catalog_connection: sqlite3.Connection | None = None
     recovery_connection: sqlite3.Connection | None = None
+
+    def restore_state_from_backup_set(
+        self,
+        backup_dir: Path,
+        *,
+        restore_epoch_id: str,
+        started_utc: str,
+    ) -> SqliteStateRestoreReceipt:
+        if self.state_layout is None:
+            raise RuntimeError("STATE_RESTORE_RUNTIME_NOT_CONFIGURED")
+        admission = self.admit_state_restore_maintenance()
+        if not admission.admitted:
+            raise EngineHostStateRestoreNotAdmitted(admission)
+        target_layout = self.state_layout
+        self.close()
+        return restore_sqlite_state_backup_set(
+            backup_dir,
+            target_layout,
+            restore_epoch_id=restore_epoch_id,
+            started_utc=started_utc,
+        )
 
     def admit_state_restore_maintenance(self) -> SqliteStateRestoreMaintenanceAdmission:
         if self.state_layout is None:
@@ -470,8 +493,16 @@ class EngineHostRuntime:
             self.run_executor_lease_registry.release_all()
         if self.catalog_connection is not None:
             self.catalog_connection.close()
+            self.catalog_connection = None
         if self.recovery_connection is not None:
             self.recovery_connection.close()
+            self.recovery_connection = None
+
+
+class EngineHostStateRestoreNotAdmitted(RuntimeError):
+    def __init__(self, admission: SqliteStateRestoreMaintenanceAdmission) -> None:
+        super().__init__("STATE_RESTORE_MAINTENANCE_NOT_ADMITTED")
+        self.admission = admission
 
 
 class ExecutorMaintenanceLoop:

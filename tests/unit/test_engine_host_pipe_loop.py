@@ -19,7 +19,10 @@ from mediasync_home.adapters.local_host_locator import (
 from mediasync_home.adapters.robocopy import RobocopyStagingTransferAdapter
 from mediasync_home.adapters.sqlite.connection_policy import SqliteStore
 from mediasync_home.adapters.sqlite.migrations import current_schema_version
-from mediasync_home.adapters.sqlite.state_backup import SqliteStateRestoreEpochRecoveryReport
+from mediasync_home.adapters.sqlite.state_backup import (
+    SqliteStateRestoreEpochRecoveryReport,
+    create_sqlite_state_backup_set,
+)
 from mediasync_home.application.external_resources import ExternalResourceState, ExternalResourceType
 from mediasync_home.application.host_locator import build_local_engine_host_publication
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
@@ -42,6 +45,7 @@ from mediasync_home.application.task_scheduler import (
 from mediasync_home.application.trigger_occurrences import TriggerKind
 from mediasync_home.composition import engine_host as engine_host_module
 from mediasync_home.composition.engine_host import (
+    EngineHostStateRestoreNotAdmitted,
     ExecutorMaintenanceLoop,
     HostLocatorHeartbeatLoop,
     TaskSchedulerMaintenanceLoop,
@@ -1098,6 +1102,87 @@ def test_engine_host_runtime_state_restore_maintenance_blocks_retained_leases(
         runtime.close()
 
 
+def test_engine_host_runtime_restore_closes_sqlite_handles_and_swaps_state(
+    tmp_path: Path,
+) -> None:
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=startup_status(ProcessRole.ENGINE_HOST),
+        state_root=tmp_path / "state",
+        reconciler_instance_id="host-new",
+    )
+    try:
+        assert runtime.state_layout is not None
+        assert runtime.catalog_connection is not None
+        assert runtime.recovery_connection is not None
+        create_sqlite_state_backup_set(
+            runtime.state_layout,
+            tmp_path / "state-backups",
+            backup_set_id="set-a",
+            created_utc="2026-07-30T12:00:00Z",
+        )
+        backup_catalog_version = _read_sqlite_user_version(runtime.state_layout.catalog)
+        runtime.catalog_connection.execute("PRAGMA user_version = 77")
+        runtime.catalog_connection.commit()
+        assert _read_sqlite_user_version(runtime.state_layout.catalog) == 77
+
+        receipt = runtime.restore_state_from_backup_set(
+            tmp_path / "state-backups" / "set-a",
+            restore_epoch_id="restore-runtime-a",
+            started_utc="2026-07-30T12:05:00Z",
+        )
+
+        assert receipt.restore_epoch_id == "restore-runtime-a"
+        assert runtime.catalog_connection is None
+        assert runtime.recovery_connection is None
+        assert _read_sqlite_user_version(runtime.state_layout.catalog) == backup_catalog_version
+    finally:
+        runtime.close()
+
+
+def test_engine_host_runtime_restore_refuses_blocked_admission_without_closing_handles(
+    tmp_path: Path,
+) -> None:
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=startup_status(ProcessRole.ENGINE_HOST),
+        state_root=tmp_path / "state",
+        reconciler_instance_id="host-new",
+    )
+    try:
+        assert runtime.state_layout is not None
+        assert runtime.catalog_connection is not None
+        assert runtime.recovery_connection is not None
+        create_sqlite_state_backup_set(
+            runtime.state_layout,
+            tmp_path / "state-backups",
+            backup_set_id="set-a",
+            created_utc="2026-07-30T12:00:00Z",
+        )
+        assert runtime.run_executor_lease_registry is not None
+        runtime.run_executor_lease_registry.retain_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-target-a",
+            lease=_FakeLiveLease(),
+        )
+
+        with pytest.raises(
+            EngineHostStateRestoreNotAdmitted,
+            match="STATE_RESTORE_MAINTENANCE_NOT_ADMITTED",
+        ) as exc_info:
+            runtime.restore_state_from_backup_set(
+                tmp_path / "state-backups" / "set-a",
+                restore_epoch_id="restore-runtime-b",
+                started_utc="2026-07-30T12:05:00Z",
+            )
+
+        assert exc_info.value.admission.retained_run_target_lease_count == 1
+        assert runtime.catalog_connection is not None
+        assert runtime.recovery_connection is not None
+    finally:
+        runtime.close()
+
+
 def test_engine_host_runtime_releases_executor_leases_on_close(tmp_path: Path) -> None:
     runtime = build_engine_host_runtime(
         authorization=_authorization(),
@@ -1172,6 +1257,13 @@ class _FakeLiveLease:
 
     def release(self) -> None:
         self.released = True
+
+
+def _read_sqlite_user_version(database_path: Path) -> int:
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute("PRAGMA user_version").fetchone()
+    assert row is not None
+    return int(row[0])
 
 
 class _FakeRuntime:
