@@ -16,6 +16,7 @@ from mediasync_home.application.external_resources import (
     validate_external_resource_claim,
     validate_external_resource_completion,
     validate_external_resource_startup_reconciliation_request,
+    validate_expired_external_resource_claim_requeue,
 )
 
 
@@ -152,6 +153,7 @@ class SqliteExternalResourceStateStore(ExternalResourceStateStore):
         resource_type: ExternalResourceType,
         owner_instance_id: str,
         claim_token: str,
+        claim_started_utc: str,
         claim_ttl_ms: int,
     ) -> ExternalResourceRecord | None:
         try:
@@ -159,6 +161,7 @@ class SqliteExternalResourceStateStore(ExternalResourceStateStore):
                 resource_type=resource_type,
                 owner_instance_id=owner_instance_id,
                 claim_token=claim_token,
+                claim_started_utc=claim_started_utc,
                 claim_ttl_ms=claim_ttl_ms,
             )
             self._connection.execute("BEGIN IMMEDIATE")
@@ -185,7 +188,7 @@ class SqliteExternalResourceStateStore(ExternalResourceStateStore):
                     claim_owner_instance_id = ?,
                     claim_generation = claim_generation + 1,
                     claim_token = ?,
-                    claim_started_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    claim_started_utc = ?,
                     claim_ttl_ms = ?,
                     last_attempt_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                     attempt_count = attempt_count + 1,
@@ -198,6 +201,7 @@ class SqliteExternalResourceStateStore(ExternalResourceStateStore):
                 (
                     owner_instance_id,
                     claim_token,
+                    claim_started_utc,
                     claim_ttl_ms,
                     resource_type.value,
                     resource_id,
@@ -224,6 +228,83 @@ class SqliteExternalResourceStateStore(ExternalResourceStateStore):
                     "EXTERNAL_RESOURCE_VALIDATION_FAILED"
                 ) from exc
             raise SqliteExternalResourceStateStoreError("EXTERNAL_RESOURCE_CLAIM_FAILED") from exc
+
+    def requeue_expired_external_resource_claim(
+        self,
+        *,
+        resource_type: ExternalResourceType,
+        resource_id: str,
+        owner_instance_id: str,
+        claim_generation: int,
+        claim_token: str,
+        requeued_utc: str,
+    ) -> ExternalResourceRecord:
+        try:
+            validate_expired_external_resource_claim_requeue(
+                resource_type=resource_type,
+                resource_id=resource_id,
+                owner_instance_id=owner_instance_id,
+                claim_generation=claim_generation,
+                claim_token=claim_token,
+                requeued_utc=requeued_utc,
+            )
+            self._connection.execute("BEGIN IMMEDIATE")
+            cursor = self._connection.execute(
+                """
+                UPDATE external_resource_state
+                SET
+                    state = 'PENDING',
+                    claim_owner_instance_id = NULL,
+                    claim_generation = claim_generation + 1,
+                    claim_token = NULL,
+                    claim_started_utc = NULL,
+                    claim_ttl_ms = NULL,
+                    last_error_code =
+                        'EXTERNAL_RESOURCE_CLAIM_REQUEUED_AFTER_MONOTONIC_EXPIRY',
+                    row_version = row_version + 1
+                WHERE resource_type = ?
+                    AND resource_id = ?
+                    AND state = 'CLAIMED'
+                    AND claim_owner_instance_id = ?
+                    AND claim_generation = ?
+                    AND claim_token = ?
+                """,
+                (
+                    resource_type.value,
+                    resource_id,
+                    owner_instance_id,
+                    claim_generation,
+                    claim_token,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise SqliteExternalResourceStateStoreError(
+                    "EXTERNAL_RESOURCE_EXPIRED_CLAIM_MISMATCH"
+                )
+            loaded = self.load_external_resource_state(
+                resource_type=resource_type,
+                resource_id=resource_id,
+            )
+            if loaded is None:
+                raise SqliteExternalResourceStateStoreError("EXTERNAL_RESOURCE_LOAD_FAILED")
+            self._connection.execute("COMMIT")
+            return loaded
+        except (
+            sqlite3.Error,
+            ExternalResourceViolation,
+            SqliteExternalResourceStateStoreError,
+        ) as exc:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteExternalResourceStateStoreError):
+                raise
+            if isinstance(exc, ExternalResourceViolation):
+                raise SqliteExternalResourceStateStoreError(
+                    "EXTERNAL_RESOURCE_VALIDATION_FAILED"
+                ) from exc
+            raise SqliteExternalResourceStateStoreError(
+                "EXTERNAL_RESOURCE_EXPIRED_CLAIM_REQUEUE_FAILED"
+            ) from exc
 
     def mark_external_resource_in_sync(
         self,

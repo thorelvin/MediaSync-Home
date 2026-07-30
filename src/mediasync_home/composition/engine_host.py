@@ -6,7 +6,7 @@ import os
 import sqlite3
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
@@ -30,6 +30,7 @@ from mediasync_home.adapters.local_state_capacity import LocalStateCapacityProbe
 from mediasync_home.adapters.robocopy import RobocopyStagingTransferAdapter
 from mediasync_home.adapters.runtime_policy import current_process_runtime_policy
 from mediasync_home.adapters.staging import LocalFileStagingTransferAdapter
+from mediasync_home.adapters.system_clock import SystemClock
 from mediasync_home.adapters.task_scheduler import (
     Pywin32TaskSchedulerGateway,
     WindowsTaskSchedulerRegistry,
@@ -105,6 +106,7 @@ from mediasync_home.application.run_executor import (
     execute_bounded_run_executor_preflight_pump,
     execute_one_run_target_execution_start_step,
 )
+from mediasync_home.application.clocks import ClockPort
 from mediasync_home.application.run_executor_cycle import (
     RunExecutorCyclePumpOutcome,
     execute_bounded_run_executor_cycle,
@@ -297,6 +299,7 @@ class TaskSchedulerStartupReconciliationOptions:
 @dataclass
 class EngineHostRuntime:
     service: EngineHostIpcService
+    clock: ClockPort = field(default_factory=SystemClock)
     installation_state: InstallationState | None = None
     endpoint_classification_refresh: EndpointClassificationRefreshReport | None = None
     snapshot_materialization_refresh: (
@@ -442,6 +445,7 @@ class EngineHostRuntime:
             schedules=self.service.schedule_store,
             registry=registry,
             external_resources=self.service.external_resource_state_store,
+            clock=self.clock,
         )
 
     def task_scheduler_reconcile_resources_bounded(
@@ -482,6 +486,7 @@ class EngineHostRuntime:
             schedules=self.service.schedule_store,
             registry=registry,
             external_resources=self.service.external_resource_state_store,
+            clock=self.clock,
         )
 
     def run_executor_preflight_pump(self, *, max_steps: int) -> RunExecutorPumpOutcome:
@@ -1327,14 +1332,17 @@ def build_engine_host_runtime(
     run_executor_staging_backend: str = "local-file",
     state_capacity_policy: StateCapacityPolicy | None = None,
     state_capacity_probe: StateCapacityProbe | None = None,
+    clock: ClockPort | None = None,
 ) -> EngineHostRuntime:
+    runtime_clock = clock or SystemClock()
     if state_root is None:
         return EngineHostRuntime(
             service=EngineHostIpcService(
                 authorization,
                 status=service_status,
                 installation_id=installation_id,
-            )
+            ),
+            clock=runtime_clock,
         )
 
     layout = build_state_store_layout(state_root)
@@ -1346,11 +1354,11 @@ def build_engine_host_runtime(
     state_capacity_report = capacity_gate.evaluate(startup_state_growth_estimate())
     state_restore_recovery = recover_incomplete_sqlite_state_restore_epochs(
         layout,
-        recovered_utc=_utc_now(),
+        recovered_utc=runtime_clock.utc_now(),
     )
     state_compaction_recovery = recover_incomplete_sqlite_state_compaction_epochs(
         layout,
-        recovered_utc=_utc_now(),
+        recovered_utc=runtime_clock.utc_now(),
     )
     state_restore_startup_reconciliation = reconcile_committed_sqlite_state_restore_epochs(
         layout
@@ -1403,7 +1411,7 @@ def build_engine_host_runtime(
         )
         endpoint_classification_refresh = (
             endpoint_classification_refresher.refresh_endpoint_classifications(
-                observed_utc=_utc_now(),
+                observed_utc=runtime_clock.utc_now(),
             )
         )
         snapshots = SqliteSnapshotEntryStore(catalog_connection)
@@ -1417,7 +1425,7 @@ def build_engine_host_runtime(
         )
         snapshot_materialization_refresh = (
             job_snapshot_materializer.refresh_job_snapshots(
-                observed_utc=_utc_now(),
+                observed_utc=runtime_clock.utc_now(),
             )
         )
         state_capacity_report = capacity_gate.latest_report()
@@ -1478,12 +1486,12 @@ def build_engine_host_runtime(
             standard_backup_job_endpoint_registrar=standard_backup_job_endpoints,
             endpoint_classification_refresh=lambda: (
                 endpoint_classification_refresher.refresh_endpoint_classifications(
-                    observed_utc=_utc_now(),
+                    observed_utc=runtime_clock.utc_now(),
                 )
             ),
             job_snapshot_refresh=lambda: (
                 job_snapshot_materializer.refresh_job_snapshots(
-                    observed_utc=_utc_now(),
+                    observed_utc=runtime_clock.utc_now(),
                 )
             ),
             standard_backup_job_id_factory=UuidStandardBackupJobIdFactory(),
@@ -1517,6 +1525,7 @@ def build_engine_host_runtime(
         raise
     runtime = EngineHostRuntime(
         service=service,
+        clock=runtime_clock,
         installation_state=installation_state,
         endpoint_classification_refresh=endpoint_classification_refresh,
         snapshot_materialization_refresh=snapshot_materialization_refresh,
@@ -2151,10 +2160,6 @@ def _host_locator_heartbeat_utc() -> str:
     from mediasync_home.application.host_locator import format_host_locator_heartbeat_utc
 
     return format_host_locator_heartbeat_utc(datetime.now(timezone.utc))
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _refresh_local_host_locator_publication(

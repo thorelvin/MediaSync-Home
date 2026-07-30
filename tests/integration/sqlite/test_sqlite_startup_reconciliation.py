@@ -89,7 +89,12 @@ def test_sqlite_engine_host_startup_reconciliation_coordinates_stores(
             prepared = _store_prepared_receipt(receipts, "idempotency-prepared")
             message = command_effect_outbox_message(_succeeded_receipt("idempotency-effect"))
             outbox.enqueue_outbox_message(message)
-            outbox.claim_next_pending(owner_instance_id="host-old", claim_token="claim-old")
+            outbox.claim_next_pending(
+                owner_instance_id="host-old",
+                claim_token="claim-old",
+                claim_started_utc="2026-07-31T00:00:00.000Z",
+                claim_ttl_ms=30_000,
+            )
 
             report = reconcile_engine_host_after_startup(
                 EngineHostStartupReconciliationRequest(

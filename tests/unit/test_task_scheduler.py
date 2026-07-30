@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+from mediasync_home.application.clocks import MonotonicClaimWindow
 from mediasync_home.application.schedules import ScheduleDefinition
 from mediasync_home.application.task_scheduler import (
     ObservedTaskSchedulerDefinition,
@@ -34,9 +35,11 @@ from mediasync_home.application.external_resources import (
     ExternalResourceType,
 )
 from mediasync_home.application.trigger_occurrences import TriggerKind
+from tests.support.fake_clock import FakeClock
 
 
 EXECUTABLE = r"C:\Program Files\MediaSync Home\MediaSyncHome.exe"
+CLAIM_TTL_MS = 30_000
 
 
 def test_same_user_task_scheduler_definition_uses_only_protocol_arguments() -> None:
@@ -427,6 +430,7 @@ def test_stage_task_scheduler_desired_resource_page_blocks_advanced_logon_policy
 
 
 def test_reconcile_claimed_task_scheduler_resource_applies_and_completes_claim() -> None:
+    clock, claim_window = _clock_and_claim_window()
     schedule = _bound_schedule()
     definition = build_same_user_task_scheduler_definition(
         schedule,
@@ -443,6 +447,8 @@ def test_reconcile_claimed_task_scheduler_resource_applies_and_completes_claim()
         schedules=_ScheduleStore(schedule),
         registry=registry,
         external_resources=resources,
+        clock=clock,
+        claim_window=claim_window,
     )
 
     assert result.action is TaskSchedulerReconciliationAction.ENABLE_OWNED_TASK
@@ -465,6 +471,7 @@ def test_reconcile_claimed_task_scheduler_resource_applies_and_completes_claim()
 
 
 def test_reconcile_claimed_task_scheduler_resource_completes_in_sync_without_apply() -> None:
+    clock, claim_window = _clock_and_claim_window()
     schedule = _bound_schedule()
     definition = build_same_user_task_scheduler_definition(
         schedule,
@@ -481,6 +488,8 @@ def test_reconcile_claimed_task_scheduler_resource_completes_in_sync_without_app
         schedules=_ScheduleStore(schedule),
         registry=registry,
         external_resources=resources,
+        clock=clock,
+        claim_window=claim_window,
     )
 
     assert result.action is TaskSchedulerReconciliationAction.IN_SYNC
@@ -491,6 +500,7 @@ def test_reconcile_claimed_task_scheduler_resource_completes_in_sync_without_app
 
 
 def test_reconcile_claimed_task_scheduler_resource_blocks_unsafe_drift() -> None:
+    clock, claim_window = _clock_and_claim_window()
     schedule = _bound_schedule()
     definition = build_same_user_task_scheduler_definition(
         schedule,
@@ -507,6 +517,8 @@ def test_reconcile_claimed_task_scheduler_resource_blocks_unsafe_drift() -> None
         schedules=_ScheduleStore(schedule),
         registry=registry,
         external_resources=resources,
+        clock=clock,
+        claim_window=claim_window,
     )
 
     assert result.action is TaskSchedulerReconciliationAction.BLOCK_BINARY_DRIFT
@@ -525,6 +537,7 @@ def test_reconcile_claimed_task_scheduler_resource_blocks_unsafe_drift() -> None
 
 
 def test_reconcile_claimed_task_scheduler_resource_blocks_stale_claim_desired_state() -> None:
+    clock, claim_window = _clock_and_claim_window()
     schedule = _bound_schedule()
     resources = _ExternalResourceStore()
 
@@ -535,6 +548,8 @@ def test_reconcile_claimed_task_scheduler_resource_blocks_stale_claim_desired_st
         schedules=_ScheduleStore(schedule),
         registry=_Registry(),
         external_resources=resources,
+        clock=clock,
+        claim_window=claim_window,
     )
 
     assert result.action is TaskSchedulerReconciliationAction.BLOCK_INVALID_DESIRED_STATE
@@ -550,6 +565,7 @@ def test_reconcile_claimed_task_scheduler_resource_blocks_stale_claim_desired_st
 
 
 def test_reconcile_next_pending_task_scheduler_resource_claims_and_completes() -> None:
+    clock = FakeClock()
     schedule = _bound_schedule()
     definition = build_same_user_task_scheduler_definition(
         schedule,
@@ -576,6 +592,7 @@ def test_reconcile_next_pending_task_scheduler_resource_claims_and_completes() -
         schedules=_ScheduleStore(schedule),
         registry=_Registry(_observed(definition)),
         external_resources=resources,
+        clock=clock,
     )
 
     assert result is not None
@@ -612,9 +629,100 @@ def test_reconcile_next_pending_task_scheduler_resource_reports_idle() -> None:
         schedules=_ScheduleStore(),
         registry=_Registry(),
         external_resources=_ExternalResourceStore(),
+        clock=FakeClock(),
     )
 
     assert result is None
+
+
+@pytest.mark.parametrize(
+    "jumped_utc",
+    ("1999-01-01T00:00:00.000Z", "2099-01-01T00:00:00.000Z"),
+)
+def test_task_scheduler_live_claim_ignores_wall_clock_jumps(jumped_utc: str) -> None:
+    clock = FakeClock()
+    schedule = _bound_schedule()
+    definition = build_same_user_task_scheduler_definition(
+        schedule,
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    resources = _ExternalResourceStore(
+        ExternalResourceRecord(
+            resource_type=ExternalResourceType.TASK_SCHEDULER,
+            resource_id=schedule.schedule_id,
+            desired_generation=schedule.definition_generation,
+            desired_hash=schedule.desired_definition_hash,
+        )
+    )
+
+    result = reconcile_next_pending_task_scheduler_resource(
+        TaskSchedulerPendingResourceReconciliationRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            owner_instance_id="host-a",
+            claim_token="claim-a",
+            claim_ttl_ms=CLAIM_TTL_MS,
+        ),
+        schedules=_ScheduleStore(schedule),
+        registry=_Registry(
+            _observed(definition),
+            clock=clock,
+            jumped_utc_on_load=jumped_utc,
+        ),
+        external_resources=resources,
+        clock=clock,
+    )
+
+    assert result is not None
+    assert result.completed is True
+    assert result.action is TaskSchedulerReconciliationAction.IN_SYNC
+    assert resources.expired_requeues == ()
+
+
+def test_task_scheduler_requeues_claim_when_monotonic_deadline_expires_after_apply() -> None:
+    clock = FakeClock()
+    schedule = _bound_schedule()
+    resources = _ExternalResourceStore(
+        ExternalResourceRecord(
+            resource_type=ExternalResourceType.TASK_SCHEDULER,
+            resource_id=schedule.schedule_id,
+            desired_generation=schedule.definition_generation,
+            desired_hash=schedule.desired_definition_hash,
+        )
+    )
+    registry = _Registry(
+        clock=clock,
+        advance_monotonic_ms_on_apply=CLAIM_TTL_MS,
+    )
+
+    result = reconcile_next_pending_task_scheduler_resource(
+        TaskSchedulerPendingResourceReconciliationRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            owner_instance_id="host-a",
+            claim_token="claim-a",
+            claim_ttl_ms=CLAIM_TTL_MS,
+        ),
+        schedules=_ScheduleStore(schedule),
+        registry=registry,
+        external_resources=resources,
+        clock=clock,
+    )
+
+    assert result is not None
+    assert result.action is TaskSchedulerReconciliationAction.RETRY_CLAIM_EXPIRED
+    assert result.applied is True
+    assert result.completed is False
+    assert resources.completed == ()
+    assert resources.expired_requeues[0][:5] == (
+        ExternalResourceType.TASK_SCHEDULER,
+        "schedule-a",
+        "host-a",
+        1,
+        "claim-a",
+    )
+    assert len(registry.applied) == 1
 
 
 def test_task_scheduler_orphan_page_deletes_only_owned_absent_schedules() -> None:
@@ -791,6 +899,7 @@ def test_task_scheduler_resource_pump_stages_pages_and_drains_claims() -> None:
         schedules=_ScheduleStore(*schedules),
         registry=registry,
         external_resources=resources,
+        clock=FakeClock(),
     )
 
     assert report.schedule_pages_attempted == 2
@@ -838,6 +947,7 @@ def test_task_scheduler_resource_pump_reports_stage_cursor_when_page_budget_exha
         ),
         registry=_Registry(),
         external_resources=resources,
+        clock=FakeClock(),
     )
 
     assert report.schedule_pages_attempted == 1
@@ -867,6 +977,7 @@ def test_task_scheduler_resource_pump_requires_bounded_limits() -> None:
             schedules=_ScheduleStore(),
             registry=_Registry(),
             external_resources=_ExternalResourceStore(),
+            clock=FakeClock(),
         )
     with pytest.raises(
         TaskSchedulerDefinitionViolation,
@@ -886,6 +997,7 @@ def test_task_scheduler_resource_pump_requires_bounded_limits() -> None:
             schedules=_ScheduleStore(),
             registry=_Registry(),
             external_resources=_ExternalResourceStore(),
+            clock=FakeClock(),
         )
 
 
@@ -923,12 +1035,23 @@ class _ScheduleStore:
 
 
 class _Registry:
-    def __init__(self, *observed: ObservedTaskSchedulerDefinition) -> None:
+    def __init__(
+        self,
+        *observed: ObservedTaskSchedulerDefinition,
+        clock: FakeClock | None = None,
+        jumped_utc_on_load: str | None = None,
+        advance_monotonic_ms_on_apply: int = 0,
+    ) -> None:
         self.observed = {definition.task_path: definition for definition in observed}
         self.applied: list[TaskSchedulerDefinition] = []
         self.deleted: tuple[str, ...] = ()
+        self.clock = clock
+        self.jumped_utc_on_load = jumped_utc_on_load
+        self.advance_monotonic_ms_on_apply = advance_monotonic_ms_on_apply
 
     def load_task(self, task_path: str) -> ObservedTaskSchedulerDefinition | None:
+        if self.clock is not None and self.jumped_utc_on_load is not None:
+            self.clock.set_utc(self.jumped_utc_on_load)
         return self.observed.get(task_path)
 
     def list_tasks(
@@ -957,6 +1080,8 @@ class _Registry:
 
     def apply_task_definition(self, definition: TaskSchedulerDefinition) -> None:
         self.applied.append(definition)
+        if self.clock is not None:
+            self.clock.advance_monotonic_ms(self.advance_monotonic_ms_on_apply)
 
     def delete_task(self, task_path: str) -> None:
         self.deleted = (*self.deleted, task_path)
@@ -970,6 +1095,10 @@ class _ExternalResourceStore(ExternalResourceStateStore):
         self.completed: tuple[tuple[ExternalResourceType, str, int, str, str], ...] = ()
         self.blocked: tuple[tuple[ExternalResourceType, str, str, str], ...] = ()
         self.claims: tuple[tuple[ExternalResourceType, str, str, int], ...] = ()
+        self.claimed: dict[tuple[ExternalResourceType, str], ExternalResourceRecord] = {}
+        self.expired_requeues: tuple[
+            tuple[ExternalResourceType, str, str, int, str, str], ...
+        ] = ()
 
     def upsert_desired_resource_state(
         self,
@@ -1012,6 +1141,7 @@ class _ExternalResourceStore(ExternalResourceStateStore):
         resource_type: ExternalResourceType,
         owner_instance_id: str,
         claim_token: str,
+        claim_started_utc: str,
         claim_ttl_ms: int,
     ) -> ExternalResourceRecord | None:
         self.claims = (
@@ -1021,14 +1151,56 @@ class _ExternalResourceStore(ExternalResourceStateStore):
         for index, record in enumerate(self.pending):
             if record.resource_type is resource_type:
                 self.pending.pop(index)
-                return replace(
+                claimed = replace(
                     record,
                     state=ExternalResourceState.CLAIMED,
                     claim_owner_instance_id=owner_instance_id,
+                    claim_generation=record.claim_generation + 1,
                     claim_token=claim_token,
+                    claim_started_utc=claim_started_utc,
                     claim_ttl_ms=claim_ttl_ms,
                 )
+                self.claimed[(resource_type, claimed.resource_id)] = claimed
+                return claimed
         return None
+
+    def requeue_expired_external_resource_claim(
+        self,
+        *,
+        resource_type: ExternalResourceType,
+        resource_id: str,
+        owner_instance_id: str,
+        claim_generation: int,
+        claim_token: str,
+        requeued_utc: str,
+    ) -> ExternalResourceRecord:
+        claimed = self.claimed.pop((resource_type, resource_id))
+        assert claimed.claim_owner_instance_id == owner_instance_id
+        assert claimed.claim_generation == claim_generation
+        assert claimed.claim_token == claim_token
+        requeued = replace(
+            claimed,
+            state=ExternalResourceState.PENDING,
+            claim_owner_instance_id=None,
+            claim_generation=claim_generation + 1,
+            claim_token=None,
+            claim_started_utc=None,
+            claim_ttl_ms=None,
+            last_error_code="EXTERNAL_RESOURCE_CLAIM_REQUEUED_AFTER_MONOTONIC_EXPIRY",
+        )
+        self.pending.append(requeued)
+        self.expired_requeues = (
+            *self.expired_requeues,
+            (
+                resource_type,
+                resource_id,
+                owner_instance_id,
+                claim_generation,
+                claim_token,
+                requeued_utc,
+            ),
+        )
+        return requeued
 
     def mark_external_resource_in_sync(
         self,
@@ -1039,6 +1211,7 @@ class _ExternalResourceStore(ExternalResourceStateStore):
         claim_token: str,
         observed_hash: str,
     ) -> ExternalResourceRecord:
+        self.claimed.pop((resource_type, resource_id), None)
         self.completed = (
             *self.completed,
             (resource_type, resource_id, desired_generation, claim_token, observed_hash),
@@ -1061,6 +1234,7 @@ class _ExternalResourceStore(ExternalResourceStateStore):
         claim_token: str,
         error_code: str,
     ) -> ExternalResourceRecord:
+        self.claimed.pop((resource_type, resource_id), None)
         self.blocked = (
             *self.blocked,
             (resource_type, resource_id, claim_token, error_code),
@@ -1170,5 +1344,14 @@ def _claimed_resource(
         desired_generation=schedule.definition_generation,
         desired_hash=schedule.desired_definition_hash if desired_hash is None else desired_hash,
         state=ExternalResourceState.CLAIMED,
+        claim_owner_instance_id="host-a",
+        claim_generation=1,
         claim_token="claim-a",
+        claim_started_utc=FakeClock().utc_now(),
+        claim_ttl_ms=CLAIM_TTL_MS,
     )
+
+
+def _clock_and_claim_window() -> tuple[FakeClock, MonotonicClaimWindow]:
+    clock = FakeClock()
+    return clock, MonotonicClaimWindow.start(clock, ttl_ms=CLAIM_TTL_MS)

@@ -1011,6 +1011,8 @@ Lagrer ønsket Task Scheduler-tilstand.
 
 Reconciliation fullfører med compare-and-swap på `desired_generation` + `claim_token`. Et sent adapterresultat fra eldre generasjon kan aldri markere nyere ønsket tilstand som observert.
 
+En levende owner binder claimen til en in-memory monoton deadline fra samme runtimeklokke som startet claimen. Dersom deadlinen nås under ekstern avstemming, kan resultatet ikke fullføre den gamle tokenen; owner/generation/token invalideres i stedet med en kort compare-and-swap-requeue. `claim_started_utc` og `claim_ttl_ms` er bare audit- og startupdata. Etter restart kreves separat bevis for at forrige owner ikke lever.
+
 #### `trigger_occurrences`
 
 - `id TEXT PRIMARY KEY`

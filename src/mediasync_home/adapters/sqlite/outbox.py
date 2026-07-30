@@ -91,7 +91,13 @@ class SqliteOutboxStore(OutboxStore, OutboxStartupReconciliationStore):
         *,
         owner_instance_id: str,
         claim_token: str,
+        claim_started_utc: str,
+        claim_ttl_ms: int,
     ) -> OutboxMessage | None:
+        if claim_ttl_ms <= 0:
+            raise SqliteOutboxStoreError("OUTBOX_CLAIM_TTL_MUST_BE_POSITIVE")
+        if not claim_started_utc.strip() or not claim_started_utc.endswith("Z"):
+            raise SqliteOutboxStoreError("OUTBOX_CLAIM_STARTED_UTC_INVALID")
         outer_transaction = self._connection.in_transaction
         try:
             if not outer_transaction:
@@ -121,7 +127,8 @@ class SqliteOutboxStore(OutboxStore, OutboxStartupReconciliationStore):
                     claim_owner_instance_id = ?,
                     claim_generation = claim_generation + 1,
                     claim_token = ?,
-                    claim_started_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    claim_started_utc = ?,
+                    claim_ttl_ms = ?,
                     attempt_count = attempt_count + 1,
                     last_attempt_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                     updated_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
@@ -130,7 +137,14 @@ class SqliteOutboxStore(OutboxStore, OutboxStartupReconciliationStore):
                     AND state = 'PENDING'
                     AND claim_generation = ?
                 """,
-                (owner_instance_id, claim_token, message_id, current_generation),
+                (
+                    owner_instance_id,
+                    claim_token,
+                    claim_started_utc,
+                    claim_ttl_ms,
+                    message_id,
+                    current_generation,
+                ),
             )
             if cursor.rowcount != 1:
                 raise SqliteOutboxStoreError("OUTBOX_CLAIM_CONFLICT")
@@ -146,6 +160,67 @@ class SqliteOutboxStore(OutboxStore, OutboxStartupReconciliationStore):
             if isinstance(exc, SqliteOutboxStoreError):
                 raise
             raise SqliteOutboxStoreError("OUTBOX_CLAIM_FAILED") from exc
+
+    def requeue_expired_claim(
+        self,
+        *,
+        message_id: str,
+        owner_instance_id: str,
+        claim_generation: int,
+        claim_token: str,
+        requeued_utc: str,
+    ) -> OutboxMessage:
+        if claim_generation < 1:
+            raise SqliteOutboxStoreError("OUTBOX_EXPIRED_CLAIM_GENERATION_INVALID")
+        if not requeued_utc.strip() or not requeued_utc.endswith("Z"):
+            raise SqliteOutboxStoreError("OUTBOX_EXPIRED_CLAIM_REQUEUED_UTC_INVALID")
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            cursor = self._connection.execute(
+                """
+                UPDATE outbox_messages
+                SET
+                    state = 'PENDING',
+                    claim_owner_instance_id = NULL,
+                    claim_generation = claim_generation + 1,
+                    claim_token = NULL,
+                    claim_started_utc = NULL,
+                    claim_ttl_ms = NULL,
+                    next_attempt_utc = ?,
+                    last_error_code = 'OUTBOX_CLAIM_REQUEUED_AFTER_MONOTONIC_EXPIRY',
+                    updated_utc = ?,
+                    row_version = row_version + 1
+                WHERE id = ?
+                    AND state = 'CLAIMED'
+                    AND claim_owner_instance_id = ?
+                    AND claim_generation = ?
+                    AND claim_token = ?
+                """,
+                (
+                    requeued_utc,
+                    requeued_utc,
+                    message_id,
+                    owner_instance_id,
+                    claim_generation,
+                    claim_token,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise SqliteOutboxStoreError("OUTBOX_EXPIRED_CLAIM_MISMATCH")
+            requeued = self.load_outbox_message(message_id)
+            if requeued is None:
+                raise SqliteOutboxStoreError("OUTBOX_EXPIRED_CLAIM_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return requeued
+        except (sqlite3.Error, SqliteOutboxStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteOutboxStoreError):
+                raise
+            raise SqliteOutboxStoreError("OUTBOX_EXPIRED_CLAIM_REQUEUE_FAILED") from exc
 
     def mark_delivered(
         self,
@@ -372,6 +447,8 @@ class SqliteOutboxStore(OutboxStore, OutboxStartupReconciliationStore):
                 claim_owner_instance_id,
                 claim_generation,
                 claim_token,
+                claim_started_utc,
+                claim_ttl_ms,
                 attempt_count,
                 terminal_effect_hash,
                 last_error_code
@@ -394,9 +471,11 @@ class SqliteOutboxStore(OutboxStore, OutboxStartupReconciliationStore):
             claim_owner_instance_id=None if row[8] is None else str(row[8]),
             claim_generation=int(row[9]),
             claim_token=None if row[10] is None else str(row[10]),
-            attempt_count=int(row[11]),
-            terminal_effect_hash=None if row[12] is None else str(row[12]),
-            last_error_code=None if row[13] is None else str(row[13]),
+            claim_started_utc=None if row[11] is None else str(row[11]),
+            claim_ttl_ms=None if row[12] is None else int(row[12]),
+            attempt_count=int(row[13]),
+            terminal_effect_hash=None if row[14] is None else str(row[14]),
+            last_error_code=None if row[15] is None else str(row[15]),
         )
 
 

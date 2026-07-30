@@ -25,6 +25,11 @@ from mediasync_home.application.outbox import (
     requeued_claimed_message_after_startup,
     validate_outbox_startup_reconciliation_request,
 )
+from tests.support.fake_clock import FakeClock
+
+
+CLAIM_STARTED_UTC = "2026-07-31T00:00:00.000Z"
+CLAIM_TTL_MS = 30_000
 
 
 def test_command_effect_outbox_message_is_stable_for_succeeded_receipt() -> None:
@@ -54,7 +59,13 @@ def test_claim_and_deliver_helpers_preserve_fencing_shape() -> None:
     message = command_effect_outbox_message(_succeeded_receipt())
 
     claimed = replace(
-        claimed_message(message, owner_instance_id="host-a", claim_token="claim-a"),
+        claimed_message(
+            message,
+            owner_instance_id="host-a",
+            claim_token="claim-a",
+            claim_started_utc=CLAIM_STARTED_UTC,
+            claim_ttl_ms=CLAIM_TTL_MS,
+        ),
         last_error_code="OLD_WARNING",
     )
     delivered = delivered_message(claimed, terminal_effect_hash="a" * 64)
@@ -94,12 +105,19 @@ def test_dead_letter_requires_claimed_message_and_error_code() -> None:
         dead_letter_message(message, error_code="PERMANENT_FAILURE")
     with pytest.raises(OutboxViolation, match="OUTBOX_DEAD_LETTER_REQUIRES_ERROR_CODE"):
         dead_letter_message(
-            claimed_message(message, owner_instance_id="host-a", claim_token="claim-a"),
+            claimed_message(
+                message,
+                owner_instance_id="host-a",
+                claim_token="claim-a",
+                claim_started_utc=CLAIM_STARTED_UTC,
+                claim_ttl_ms=CLAIM_TTL_MS,
+            ),
             error_code=" ",
         )
 
 
 def test_outbox_dispatcher_delivers_claimed_message() -> None:
+    clock = FakeClock()
     store = _MemoryOutboxStore(command_effect_outbox_message(_succeeded_receipt()))
     delivery = _DeliveryPort(OutboxDeliveryResult(OutboxDeliveryOutcome.DELIVERED, "b" * 64))
 
@@ -108,6 +126,8 @@ def test_outbox_dispatcher_delivers_claimed_message() -> None:
         delivery=delivery,
         owner_instance_id="host-a",
         claim_tokens=_FixedClaimTokenFactory("claim-a"),
+        clock=clock,
+        claim_ttl_ms=CLAIM_TTL_MS,
     )
 
     assert result.claimed is True
@@ -121,6 +141,7 @@ def test_outbox_dispatcher_delivers_claimed_message() -> None:
 
 
 def test_outbox_dispatcher_dead_letters_permanent_failure() -> None:
+    clock = FakeClock()
     store = _MemoryOutboxStore(command_effect_outbox_message(_succeeded_receipt()))
     delivery = _DeliveryPort(
         OutboxDeliveryResult(
@@ -134,6 +155,8 @@ def test_outbox_dispatcher_dead_letters_permanent_failure() -> None:
         delivery=delivery,
         owner_instance_id="host-a",
         claim_tokens=_FixedClaimTokenFactory("claim-a"),
+        clock=clock,
+        claim_ttl_ms=CLAIM_TTL_MS,
     )
 
     assert result.claimed is True
@@ -145,6 +168,7 @@ def test_outbox_dispatcher_dead_letters_permanent_failure() -> None:
 
 
 def test_outbox_dispatcher_returns_idle_when_no_pending_message() -> None:
+    clock = FakeClock()
     store = _MemoryOutboxStore(None)
     delivery = _DeliveryPort(OutboxDeliveryResult(OutboxDeliveryOutcome.DELIVERED, "b" * 64))
 
@@ -153,10 +177,63 @@ def test_outbox_dispatcher_returns_idle_when_no_pending_message() -> None:
         delivery=delivery,
         owner_instance_id="host-a",
         claim_tokens=_FixedClaimTokenFactory("claim-a"),
+        clock=clock,
+        claim_ttl_ms=CLAIM_TTL_MS,
     )
 
     assert result.claimed is False
     assert delivery.delivered_messages == ()
+
+
+@pytest.mark.parametrize(
+    "jumped_utc",
+    ("1999-01-01T00:00:00.000Z", "2099-01-01T00:00:00.000Z"),
+)
+def test_outbox_live_claim_ignores_wall_clock_jumps(jumped_utc: str) -> None:
+    clock = FakeClock()
+    store = _MemoryOutboxStore(command_effect_outbox_message(_succeeded_receipt()))
+    delivery = _ClockChangingDeliveryPort(clock, jumped_utc=jumped_utc)
+
+    result = dispatch_one_outbox_message(
+        store=store,
+        delivery=delivery,
+        owner_instance_id="host-a",
+        claim_tokens=_FixedClaimTokenFactory("claim-a"),
+        clock=clock,
+        claim_ttl_ms=CLAIM_TTL_MS,
+    )
+
+    assert result.delivered is True
+    assert result.claim_expired is False
+    assert store.message is not None
+    assert store.message.state is OutboxMessageState.DELIVERED
+
+
+def test_outbox_late_result_is_rejected_and_claim_is_requeued() -> None:
+    clock = FakeClock()
+    store = _MemoryOutboxStore(command_effect_outbox_message(_succeeded_receipt()))
+    delivery = _ClockChangingDeliveryPort(
+        clock,
+        advance_monotonic_ms=CLAIM_TTL_MS,
+    )
+
+    result = dispatch_one_outbox_message(
+        store=store,
+        delivery=delivery,
+        owner_instance_id="host-a",
+        claim_tokens=_FixedClaimTokenFactory("claim-a"),
+        clock=clock,
+        claim_ttl_ms=CLAIM_TTL_MS,
+    )
+
+    assert result.claimed is True
+    assert result.delivered is False
+    assert result.claim_expired is True
+    assert store.message is not None
+    assert store.message.state is OutboxMessageState.PENDING
+    assert store.message.claim_generation == 2
+    assert store.message.claim_token is None
+    assert store.message.terminal_effect_hash is None
 
 
 def test_startup_reconciliation_request_requires_bounded_inactive_owner_proof() -> None:
@@ -199,6 +276,8 @@ def test_startup_reconciliation_requeues_claimed_message_and_invalidates_claim()
         command_effect_outbox_message(_succeeded_receipt()),
         owner_instance_id="host-a",
         claim_token="claim-a",
+        claim_started_utc=CLAIM_STARTED_UTC,
+        claim_ttl_ms=CLAIM_TTL_MS,
     )
 
     requeued = requeued_claimed_message_after_startup(
@@ -236,6 +315,28 @@ class _DeliveryPort(OutboxDeliveryPort):
         return self._result
 
 
+class _ClockChangingDeliveryPort(OutboxDeliveryPort):
+    def __init__(
+        self,
+        clock: FakeClock,
+        *,
+        jumped_utc: str | None = None,
+        advance_monotonic_ms: int = 0,
+    ) -> None:
+        self._clock = clock
+        self._jumped_utc = jumped_utc
+        self._advance_monotonic_ms = advance_monotonic_ms
+
+    def deliver_outbox_message(self, message: OutboxMessage) -> OutboxDeliveryResult:
+        if self._jumped_utc is not None:
+            self._clock.set_utc(self._jumped_utc)
+        self._clock.advance_monotonic_ms(self._advance_monotonic_ms)
+        return OutboxDeliveryResult(
+            OutboxDeliveryOutcome.DELIVERED,
+            terminal_effect_hash="b" * 64,
+        )
+
+
 class _MemoryOutboxStore(OutboxStore):
     def __init__(self, message: OutboxMessage | None) -> None:
         self.message = message
@@ -254,6 +355,8 @@ class _MemoryOutboxStore(OutboxStore):
         *,
         owner_instance_id: str,
         claim_token: str,
+        claim_started_utc: str,
+        claim_ttl_ms: int,
     ) -> OutboxMessage | None:
         if self.message is None or self.message.state is not OutboxMessageState.PENDING:
             return None
@@ -261,6 +364,34 @@ class _MemoryOutboxStore(OutboxStore):
             self.message,
             owner_instance_id=owner_instance_id,
             claim_token=claim_token,
+            claim_started_utc=claim_started_utc,
+            claim_ttl_ms=claim_ttl_ms,
+        )
+        return self.message
+
+    def requeue_expired_claim(
+        self,
+        *,
+        message_id: str,
+        owner_instance_id: str,
+        claim_generation: int,
+        claim_token: str,
+        requeued_utc: str,
+    ) -> OutboxMessage:
+        message = self.load_outbox_message(message_id)
+        assert message is not None
+        assert message.claim_owner_instance_id == owner_instance_id
+        assert message.claim_generation == claim_generation
+        assert message.claim_token == claim_token
+        self.message = replace(
+            message,
+            state=OutboxMessageState.PENDING,
+            claim_owner_instance_id=None,
+            claim_generation=claim_generation + 1,
+            claim_token=None,
+            claim_started_utc=None,
+            claim_ttl_ms=None,
+            last_error_code="OUTBOX_CLAIM_REQUEUED_AFTER_MONOTONIC_EXPIRY",
         )
         return self.message
 

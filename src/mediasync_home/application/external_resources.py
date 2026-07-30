@@ -88,8 +88,20 @@ class ExternalResourceStateStore(Protocol):
         resource_type: ExternalResourceType,
         owner_instance_id: str,
         claim_token: str,
+        claim_started_utc: str,
         claim_ttl_ms: int,
     ) -> ExternalResourceRecord | None: ...
+
+    def requeue_expired_external_resource_claim(
+        self,
+        *,
+        resource_type: ExternalResourceType,
+        resource_id: str,
+        owner_instance_id: str,
+        claim_generation: int,
+        claim_token: str,
+        requeued_utc: str,
+    ) -> ExternalResourceRecord: ...
 
     def mark_external_resource_in_sync(
         self,
@@ -145,13 +157,35 @@ def validate_external_resource_claim(
     owner_instance_id: str,
     claim_token: str,
     claim_ttl_ms: int,
+    claim_started_utc: str | None = None,
 ) -> None:
     if not isinstance(resource_type, ExternalResourceType):
         raise ExternalResourceViolation("EXTERNAL_RESOURCE_INVALID_TYPE")
     _identifier(owner_instance_id, "OWNER_INSTANCE_ID")
     _identifier(claim_token, "CLAIM_TOKEN")
+    if claim_started_utc is not None:
+        _utc(claim_started_utc, "CLAIM_STARTED_UTC")
     if claim_ttl_ms <= 0:
         raise ExternalResourceViolation("EXTERNAL_RESOURCE_CLAIM_TTL_MUST_BE_POSITIVE")
+
+
+def validate_expired_external_resource_claim_requeue(
+    *,
+    resource_type: ExternalResourceType,
+    resource_id: str,
+    owner_instance_id: str,
+    claim_generation: int,
+    claim_token: str,
+    requeued_utc: str,
+) -> None:
+    validate_external_resource_identity(resource_type=resource_type, resource_id=resource_id)
+    _identifier(owner_instance_id, "OWNER_INSTANCE_ID")
+    if claim_generation < 1:
+        raise ExternalResourceViolation(
+            "EXTERNAL_RESOURCE_EXPIRED_CLAIM_GENERATION_MUST_BE_POSITIVE"
+        )
+    _identifier(claim_token, "CLAIM_TOKEN")
+    _utc(requeued_utc, "REQUEUED_UTC")
 
 
 def validate_external_resource_completion(
@@ -244,4 +278,9 @@ def _identifier(value: str, field_name: str) -> None:
 
 def _hash(value: str, field_name: str) -> None:
     if HEX_256_PATTERN.fullmatch(value) is None:
+        raise ExternalResourceViolation(f"EXTERNAL_RESOURCE_INVALID_{field_name}")
+
+
+def _utc(value: str, field_name: str) -> None:
+    if not value.strip() or not value.endswith("Z"):
         raise ExternalResourceViolation(f"EXTERNAL_RESOURCE_INVALID_{field_name}")

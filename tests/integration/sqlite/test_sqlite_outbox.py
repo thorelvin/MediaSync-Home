@@ -24,6 +24,11 @@ from mediasync_home.application.outbox import (
     command_effect_outbox_message,
     dispatch_one_outbox_message,
 )
+from tests.support.fake_clock import FakeClock
+
+
+CLAIM_STARTED_UTC = "2026-07-31T00:00:00.000Z"
+CLAIM_TTL_MS = 30_000
 
 
 def test_sqlite_outbox_enqueue_claim_and_deliver(tmp_path: Path) -> None:
@@ -34,7 +39,7 @@ def test_sqlite_outbox_enqueue_claim_and_deliver(tmp_path: Path) -> None:
         message = command_effect_outbox_message(_succeeded_receipt())
 
         stored = store.enqueue_outbox_message(message)
-        claimed = store.claim_next_pending(owner_instance_id="host-a", claim_token="claim-a")
+        claimed = _claim(store, owner_instance_id="host-a", claim_token="claim-a")
         delivered = store.mark_delivered(
             message_id=message.message_id,
             claim_token="claim-a",
@@ -78,7 +83,7 @@ def test_sqlite_outbox_replay_uses_delivered_tombstone_after_detail_compaction(
         store = SqliteOutboxStore(connection)
         message = command_effect_outbox_message(_succeeded_receipt())
         store.enqueue_outbox_message(message)
-        store.claim_next_pending(owner_instance_id="host-a", claim_token="claim-a")
+        _claim(store, owner_instance_id="host-a", claim_token="claim-a")
         store.mark_delivered(
             message_id=message.message_id,
             claim_token="claim-a",
@@ -92,7 +97,7 @@ def test_sqlite_outbox_replay_uses_delivered_tombstone_after_detail_compaction(
         assert replay.state is OutboxMessageState.DELIVERED
         assert replay.terminal_effect_hash == "b" * 64
         assert _row_count(connection, "outbox_messages") == 0
-        assert store.claim_next_pending(owner_instance_id="host-b", claim_token="claim-b") is None
+        assert _claim(store, owner_instance_id="host-b", claim_token="claim-b") is None
         with pytest.raises(SqliteOutboxStoreError, match="OUTBOX_IDEMPOTENCY_CONFLICT"):
             store.enqueue_outbox_message(replace(message, payload_hash="c" * 64))
 
@@ -104,7 +109,7 @@ def test_sqlite_outbox_delivery_requires_matching_claim_token(tmp_path: Path) ->
         store = SqliteOutboxStore(connection)
         message = command_effect_outbox_message(_succeeded_receipt())
         store.enqueue_outbox_message(message)
-        store.claim_next_pending(owner_instance_id="host-a", claim_token="claim-a")
+        _claim(store, owner_instance_id="host-a", claim_token="claim-a")
 
         with pytest.raises(SqliteOutboxStoreError, match="OUTBOX_DELIVERY_CLAIM_MISMATCH"):
             store.mark_delivered(
@@ -121,7 +126,7 @@ def test_sqlite_outbox_dead_letter_requires_matching_claim_token(tmp_path: Path)
         store = SqliteOutboxStore(connection)
         message = command_effect_outbox_message(_succeeded_receipt())
         store.enqueue_outbox_message(message)
-        store.claim_next_pending(owner_instance_id="host-a", claim_token="claim-a")
+        _claim(store, owner_instance_id="host-a", claim_token="claim-a")
 
         with pytest.raises(SqliteOutboxStoreError, match="OUTBOX_DEAD_LETTER_CLAIM_MISMATCH"):
             store.mark_dead_letter(
@@ -148,6 +153,8 @@ def test_sqlite_outbox_dispatcher_delivers_without_open_transaction(tmp_path: Pa
             delivery=delivery,
             owner_instance_id="host-a",
             claim_tokens=_FixedClaimTokenFactory("claim-a"),
+            clock=FakeClock(),
+            claim_ttl_ms=CLAIM_TTL_MS,
         )
 
         loaded = store.load_outbox_message(message.message_id)
@@ -180,6 +187,8 @@ def test_sqlite_outbox_dispatcher_dead_letters_permanent_failure(tmp_path: Path)
             ),
             owner_instance_id="host-a",
             claim_tokens=_FixedClaimTokenFactory("claim-a"),
+            clock=FakeClock(),
+            claim_ttl_ms=CLAIM_TTL_MS,
         )
 
         loaded = store.load_outbox_message(message.message_id)
@@ -191,13 +200,50 @@ def test_sqlite_outbox_dispatcher_dead_letters_permanent_failure(tmp_path: Path)
         assert _row_count(connection, "effect_dedup_tombstones") == 0
 
 
+def test_sqlite_outbox_requeues_monotonic_expiry_and_rejects_late_completion(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        store = SqliteOutboxStore(connection)
+        message = command_effect_outbox_message(_succeeded_receipt())
+        store.enqueue_outbox_message(message)
+        clock = FakeClock()
+
+        result = dispatch_one_outbox_message(
+            store=store,
+            delivery=_ExpiringDeliveryPort(clock),
+            owner_instance_id="host-a",
+            claim_tokens=_FixedClaimTokenFactory("claim-a"),
+            clock=clock,
+            claim_ttl_ms=CLAIM_TTL_MS,
+        )
+        loaded = store.load_outbox_message(message.message_id)
+
+        assert result.claim_expired is True
+        assert result.delivered is False
+        assert loaded is not None
+        assert loaded.state is OutboxMessageState.PENDING
+        assert loaded.claim_generation == 2
+        assert loaded.claim_token is None
+        assert loaded.last_error_code == "OUTBOX_CLAIM_REQUEUED_AFTER_MONOTONIC_EXPIRY"
+        assert _row_count(connection, "effect_dedup_tombstones") == 0
+        with pytest.raises(SqliteOutboxStoreError, match="OUTBOX_DELIVERY_CLAIM_MISMATCH"):
+            store.mark_delivered(
+                message_id=message.message_id,
+                claim_token="claim-a",
+                terminal_effect_hash="b" * 64,
+            )
+
+
 def test_sqlite_outbox_returns_none_when_no_pending_message(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
         _prepare_catalog(connection, database)
         store = SqliteOutboxStore(connection)
 
-        assert store.claim_next_pending(owner_instance_id="host-a", claim_token="claim-a") is None
+        assert _claim(store, owner_instance_id="host-a", claim_token="claim-a") is None
 
 
 def test_sqlite_outbox_startup_reconciliation_requeues_inactive_owner_claim(
@@ -209,7 +255,7 @@ def test_sqlite_outbox_startup_reconciliation_requeues_inactive_owner_claim(
         store = SqliteOutboxStore(connection)
         message = command_effect_outbox_message(_succeeded_receipt())
         store.enqueue_outbox_message(message)
-        store.claim_next_pending(owner_instance_id="host-a", claim_token="claim-a")
+        _claim(store, owner_instance_id="host-a", claim_token="claim-a")
 
         report = store.requeue_claimed_after_startup(
             OutboxStartupReconciliationRequest(
@@ -236,7 +282,7 @@ def test_sqlite_outbox_startup_reconciliation_requeues_inactive_owner_claim(
                 terminal_effect_hash="b" * 64,
             )
 
-        reclaimed = store.claim_next_pending(owner_instance_id="host-b", claim_token="claim-b")
+        reclaimed = _claim(store, owner_instance_id="host-b", claim_token="claim-b")
 
         assert reclaimed is not None
         assert reclaimed.state is OutboxMessageState.CLAIMED
@@ -264,7 +310,7 @@ def test_sqlite_outbox_startup_reconciliation_does_not_steal_unproven_owner(
         store = SqliteOutboxStore(connection)
         message = command_effect_outbox_message(_succeeded_receipt())
         store.enqueue_outbox_message(message)
-        store.claim_next_pending(owner_instance_id="host-live", claim_token="claim-live")
+        _claim(store, owner_instance_id="host-live", claim_token="claim-live")
 
         report = store.requeue_claimed_after_startup(
             OutboxStartupReconciliationRequest(
@@ -281,12 +327,26 @@ def test_sqlite_outbox_startup_reconciliation_does_not_steal_unproven_owner(
         assert loaded.state is OutboxMessageState.CLAIMED
         assert loaded.claim_owner_instance_id == "host-live"
         assert loaded.claim_token == "claim-live"
-        assert store.claim_next_pending(owner_instance_id="host-b", claim_token="claim-b") is None
+        assert _claim(store, owner_instance_id="host-b", claim_token="claim-b") is None
 
 
 def _prepare_catalog(connection: sqlite3.Connection, database: Path) -> None:
     apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
     apply_sqlite_migrations(connection, catalog_migration_plan())
+
+
+def _claim(
+    store: SqliteOutboxStore,
+    *,
+    owner_instance_id: str,
+    claim_token: str,
+) -> OutboxMessage | None:
+    return store.claim_next_pending(
+        owner_instance_id=owner_instance_id,
+        claim_token=claim_token,
+        claim_started_utc=CLAIM_STARTED_UTC,
+        claim_ttl_ms=CLAIM_TTL_MS,
+    )
 
 
 def _succeeded_receipt() -> CommandReceipt:
@@ -328,6 +388,18 @@ class _AssertingDeliveryPort(OutboxDeliveryPort):
         self.message = message
         self.saw_open_transaction = self._connection.in_transaction
         return self._result
+
+
+class _ExpiringDeliveryPort(OutboxDeliveryPort):
+    def __init__(self, clock: FakeClock) -> None:
+        self._clock = clock
+
+    def deliver_outbox_message(self, message: OutboxMessage) -> OutboxDeliveryResult:
+        self._clock.advance_monotonic_ms(CLAIM_TTL_MS)
+        return OutboxDeliveryResult(
+            OutboxDeliveryOutcome.DELIVERED,
+            terminal_effect_hash="b" * 64,
+        )
 
 
 def _row_count(connection: sqlite3.Connection, table: str) -> int:

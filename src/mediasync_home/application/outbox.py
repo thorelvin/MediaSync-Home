@@ -6,6 +6,11 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Protocol
 
+from mediasync_home.application.clocks import (
+    ClockPort,
+    MonotonicClaimExpired,
+    MonotonicClaimWindow,
+)
 from mediasync_home.application.command_receipts import CommandReceipt, CommandReceiptState
 
 
@@ -45,6 +50,8 @@ class OutboxMessage:
     claim_owner_instance_id: str | None = None
     claim_generation: int = 0
     claim_token: str | None = None
+    claim_started_utc: str | None = None
+    claim_ttl_ms: int | None = None
     attempt_count: int = 0
     terminal_effect_hash: str | None = None
     last_error_code: str | None = None
@@ -63,6 +70,7 @@ class OutboxDispatchResult:
     delivered: bool
     dead_lettered: bool
     message_id: str | None = None
+    claim_expired: bool = False
 
 
 @dataclass(frozen=True)
@@ -89,7 +97,19 @@ class OutboxStore(Protocol):
         *,
         owner_instance_id: str,
         claim_token: str,
+        claim_started_utc: str,
+        claim_ttl_ms: int,
     ) -> OutboxMessage | None: ...
+
+    def requeue_expired_claim(
+        self,
+        *,
+        message_id: str,
+        owner_instance_id: str,
+        claim_generation: int,
+        claim_token: str,
+        requeued_utc: str,
+    ) -> OutboxMessage: ...
 
     def mark_delivered(
         self,
@@ -129,16 +149,39 @@ def dispatch_one_outbox_message(
     delivery: OutboxDeliveryPort,
     owner_instance_id: str,
     claim_tokens: OutboxClaimTokenFactory,
+    clock: ClockPort,
+    claim_ttl_ms: int,
 ) -> OutboxDispatchResult:
+    claim_window = MonotonicClaimWindow.start(clock, ttl_ms=claim_ttl_ms)
     claim_token = claim_tokens.new_claim_token()
     message = store.claim_next_pending(
         owner_instance_id=owner_instance_id,
         claim_token=claim_token,
+        claim_started_utc=claim_window.started_utc,
+        claim_ttl_ms=claim_ttl_ms,
     )
     if message is None:
         return OutboxDispatchResult(claimed=False, delivered=False, dead_lettered=False)
 
-    result = delivery.deliver_outbox_message(message)
+    try:
+        claim_window.assert_active(clock)
+        result = delivery.deliver_outbox_message(message)
+        claim_window.assert_active(clock)
+    except MonotonicClaimExpired:
+        store.requeue_expired_claim(
+            message_id=message.message_id,
+            owner_instance_id=owner_instance_id,
+            claim_generation=message.claim_generation,
+            claim_token=claim_token,
+            requeued_utc=clock.utc_now(),
+        )
+        return OutboxDispatchResult(
+            claimed=True,
+            delivered=False,
+            dead_lettered=False,
+            message_id=message.message_id,
+            claim_expired=True,
+        )
     if result.outcome is OutboxDeliveryOutcome.DELIVERED:
         if result.terminal_effect_hash is None:
             raise OutboxViolation("OUTBOX_DELIVERY_REQUIRES_TERMINAL_EFFECT_HASH")
@@ -206,6 +249,8 @@ def requeued_claimed_message_after_startup(
         claim_owner_instance_id=None,
         claim_generation=message.claim_generation + 1,
         claim_token=None,
+        claim_started_utc=None,
+        claim_ttl_ms=None,
         last_error_code="OUTBOX_CLAIM_REQUEUED_AFTER_STARTUP",
     )
 
@@ -255,6 +300,8 @@ def claimed_message(
     *,
     owner_instance_id: str,
     claim_token: str,
+    claim_started_utc: str,
+    claim_ttl_ms: int,
 ) -> OutboxMessage:
     return replace(
         message,
@@ -262,6 +309,8 @@ def claimed_message(
         claim_owner_instance_id=owner_instance_id,
         claim_generation=message.claim_generation + 1,
         claim_token=claim_token,
+        claim_started_utc=claim_started_utc,
+        claim_ttl_ms=claim_ttl_ms,
         attempt_count=message.attempt_count + 1,
     )
 

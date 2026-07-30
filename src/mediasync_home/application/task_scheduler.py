@@ -7,6 +7,11 @@ from enum import Enum
 from pathlib import PureWindowsPath
 from typing import Protocol
 
+from mediasync_home.application.clocks import (
+    ClockPort,
+    MonotonicClaimExpired,
+    MonotonicClaimWindow,
+)
 from mediasync_home.application.schedules import (
     ScheduleDefinition,
     ScheduleStore,
@@ -35,6 +40,12 @@ class TaskSchedulerDefinitionViolation(ValueError):
     pass
 
 
+class TaskSchedulerClaimExpired(MonotonicClaimExpired):
+    def __init__(self, *, applied: bool) -> None:
+        super().__init__("TASK_SCHEDULER_CLAIM_DEADLINE_EXPIRED")
+        self.applied = applied
+
+
 class TaskSchedulerReconciliationAction(str, Enum):
     CREATE = "CREATE"
     IN_SYNC = "IN_SYNC"
@@ -47,6 +58,7 @@ class TaskSchedulerReconciliationAction(str, Enum):
     BLOCK_BINARY_DRIFT = "BLOCK_BINARY_DRIFT"
     BLOCK_INVALID_DESIRED_STATE = "BLOCK_INVALID_DESIRED_STATE"
     BLOCK_UNKNOWN_TASK = "BLOCK_UNKNOWN_TASK"
+    RETRY_CLAIM_EXPIRED = "RETRY_CLAIM_EXPIRED"
 
 
 SAFE_TASK_SCHEDULER_APPLY_ACTIONS = frozenset(
@@ -541,13 +553,23 @@ def reconcile_claimed_task_scheduler_resource(
     schedules: ScheduleStore,
     registry: TaskSchedulerRegistryPort,
     external_resources: ExternalResourceStateStore,
+    clock: ClockPort,
+    claim_window: MonotonicClaimWindow,
 ) -> TaskSchedulerClaimedResourceReconciliation:
     if claimed.resource_type is not ExternalResourceType.TASK_SCHEDULER:
         raise TaskSchedulerDefinitionViolation("TASK_SCHEDULER_CLAIM_RESOURCE_TYPE_MISMATCH")
     if claimed.state is not ExternalResourceState.CLAIMED or claimed.claim_token is None:
         raise TaskSchedulerDefinitionViolation("TASK_SCHEDULER_RESOURCE_MUST_BE_CLAIMED")
+    if (
+        claimed.claim_started_utc != claim_window.started_utc
+        or claimed.claim_ttl_ms != claim_window.ttl_ms
+    ):
+        raise TaskSchedulerDefinitionViolation("TASK_SCHEDULER_CLAIM_WINDOW_MISMATCH")
+    _assert_task_scheduler_claim_active(clock, claim_window, applied=False)
     schedule = schedules.load_schedule(claimed.resource_id)
+    _assert_task_scheduler_claim_active(clock, claim_window, applied=False)
     if schedule is None:
+        _assert_task_scheduler_claim_active(clock, claim_window, applied=False)
         external_resources.mark_external_resource_blocked(
             resource_type=claimed.resource_type,
             resource_id=claimed.resource_id,
@@ -574,6 +596,7 @@ def reconcile_claimed_task_scheduler_resource(
         ):
             raise TaskSchedulerDefinitionViolation("TASK_SCHEDULER_CLAIM_DESIRED_DRIFT")
     except TaskSchedulerDefinitionViolation as exc:
+        _assert_task_scheduler_claim_active(clock, claim_window, applied=False)
         external_resources.mark_external_resource_blocked(
             resource_type=claimed.resource_type,
             resource_id=claimed.resource_id,
@@ -595,7 +618,9 @@ def reconcile_claimed_task_scheduler_resource(
         executable_path=executable_path,
         observed=registry.load_task(desired.task_path),
     )
+    _assert_task_scheduler_claim_active(clock, claim_window, applied=False)
     if plan.action.value.startswith("BLOCK_"):
+        _assert_task_scheduler_claim_active(clock, claim_window, applied=False)
         external_resources.mark_external_resource_blocked(
             resource_type=claimed.resource_type,
             resource_id=claimed.resource_id,
@@ -613,8 +638,11 @@ def reconcile_claimed_task_scheduler_resource(
 
     applied = False
     if plan.action in SAFE_TASK_SCHEDULER_APPLY_ACTIONS:
+        _assert_task_scheduler_claim_active(clock, claim_window, applied=False)
         registry.apply_task_definition(plan.desired)
         applied = True
+        _assert_task_scheduler_claim_active(clock, claim_window, applied=True)
+    _assert_task_scheduler_claim_active(clock, claim_window, applied=applied)
     external_resources.mark_external_resource_in_sync(
         resource_type=claimed.resource_type,
         resource_id=claimed.resource_id,
@@ -638,31 +666,59 @@ def reconcile_next_pending_task_scheduler_resource(
     schedules: ScheduleStore,
     registry: TaskSchedulerRegistryPort,
     external_resources: ExternalResourceStateStore,
+    clock: ClockPort,
 ) -> TaskSchedulerClaimedResourceReconciliation | None:
     _non_empty_text(request.installation_id, "TASK_SCHEDULER_INSTALLATION_ID_REQUIRED")
     _normalized_executable_path(request.executable_path)
+    claim_window = MonotonicClaimWindow.start(clock, ttl_ms=request.claim_ttl_ms)
     validate_external_resource_claim(
         resource_type=ExternalResourceType.TASK_SCHEDULER,
         owner_instance_id=request.owner_instance_id,
         claim_token=request.claim_token,
+        claim_started_utc=claim_window.started_utc,
         claim_ttl_ms=request.claim_ttl_ms,
     )
     claimed = external_resources.claim_next_pending_external_resource(
         resource_type=ExternalResourceType.TASK_SCHEDULER,
         owner_instance_id=request.owner_instance_id,
         claim_token=request.claim_token,
+        claim_started_utc=claim_window.started_utc,
         claim_ttl_ms=request.claim_ttl_ms,
     )
     if claimed is None:
         return None
-    return reconcile_claimed_task_scheduler_resource(
-        claimed,
-        installation_id=request.installation_id,
-        executable_path=request.executable_path,
-        schedules=schedules,
-        registry=registry,
-        external_resources=external_resources,
-    )
+    try:
+        return reconcile_claimed_task_scheduler_resource(
+            claimed,
+            installation_id=request.installation_id,
+            executable_path=request.executable_path,
+            schedules=schedules,
+            registry=registry,
+            external_resources=external_resources,
+            clock=clock,
+            claim_window=claim_window,
+        )
+    except TaskSchedulerClaimExpired as exc:
+        if claimed.claim_owner_instance_id is None or claimed.claim_token is None:
+            raise TaskSchedulerDefinitionViolation(
+                "TASK_SCHEDULER_EXPIRED_CLAIM_IDENTITY_MISSING"
+            ) from None
+        external_resources.requeue_expired_external_resource_claim(
+            resource_type=claimed.resource_type,
+            resource_id=claimed.resource_id,
+            owner_instance_id=claimed.claim_owner_instance_id,
+            claim_generation=claimed.claim_generation,
+            claim_token=claimed.claim_token,
+            requeued_utc=clock.utc_now(),
+        )
+        return TaskSchedulerClaimedResourceReconciliation(
+            resource_id=claimed.resource_id,
+            action=TaskSchedulerReconciliationAction.RETRY_CLAIM_EXPIRED,
+            applied=exc.applied,
+            completed=False,
+            blocked=False,
+            reason="TASK_SCHEDULER_CLAIM_DEADLINE_EXPIRED",
+        )
 
 
 def reconcile_task_scheduler_orphan_page(
@@ -708,6 +764,7 @@ def reconcile_task_scheduler_resources_bounded(
     schedules: ScheduleStore,
     registry: TaskSchedulerRegistryPort,
     external_resources: ExternalResourceStateStore,
+    clock: ClockPort,
 ) -> TaskSchedulerResourcePumpReport:
     _validate_task_scheduler_resource_pump_request(request)
     cursor = request.after_schedule_id
@@ -754,11 +811,14 @@ def reconcile_task_scheduler_resources_bounded(
             schedules=schedules,
             registry=registry,
             external_resources=external_resources,
+            clock=clock,
         )
         if finding is None:
             claim_idle = True
             break
         claim_findings.append(finding)
+        if finding.action is TaskSchedulerReconciliationAction.RETRY_CLAIM_EXPIRED:
+            break
 
     orphan_report = reconcile_task_scheduler_orphan_page(
         TaskSchedulerOrphanReconciliationRequest(
@@ -951,6 +1011,18 @@ def _trigger_task_arguments(
         "--task-definition-hash",
         task_definition_hash,
     )
+
+
+def _assert_task_scheduler_claim_active(
+    clock: ClockPort,
+    claim_window: MonotonicClaimWindow,
+    *,
+    applied: bool,
+) -> None:
+    try:
+        claim_window.assert_active(clock)
+    except MonotonicClaimExpired as exc:
+        raise TaskSchedulerClaimExpired(applied=applied) from exc
 
 
 def _task_path(installation_id: str, schedule_id: str) -> str:

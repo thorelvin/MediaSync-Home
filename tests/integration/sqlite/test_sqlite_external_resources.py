@@ -15,10 +15,15 @@ from mediasync_home.adapters.sqlite.external_resources import (
 )
 from mediasync_home.adapters.sqlite.migrations import apply_sqlite_migrations, catalog_migration_plan
 from mediasync_home.application.external_resources import (
+    ExternalResourceRecord,
     ExternalResourceStartupReconciliationRequest,
     ExternalResourceState,
     ExternalResourceType,
 )
+
+
+CLAIM_STARTED_UTC = "2026-07-31T00:00:00.000Z"
+CLAIM_TTL_MS = 30_000
 
 
 def test_sqlite_external_resource_state_claims_and_completes_current_desired_generation(
@@ -35,12 +40,7 @@ def test_sqlite_external_resource_state_claims_and_completes_current_desired_gen
             desired_generation=1,
             desired_hash="a" * 64,
         )
-        claimed = store.claim_next_pending_external_resource(
-            resource_type=ExternalResourceType.TASK_SCHEDULER,
-            owner_instance_id="host-a",
-            claim_token="claim-a",
-            claim_ttl_ms=30_000,
-        )
+        claimed = _claim(store, owner_instance_id="host-a", claim_token="claim-a")
         completed = store.mark_external_resource_in_sync(
             resource_type=ExternalResourceType.TASK_SCHEDULER,
             resource_id="schedule-a",
@@ -75,12 +75,7 @@ def test_sqlite_external_resource_state_rejects_late_completion_after_generation
             desired_generation=1,
             desired_hash="a" * 64,
         )
-        store.claim_next_pending_external_resource(
-            resource_type=ExternalResourceType.TASK_SCHEDULER,
-            owner_instance_id="host-a",
-            claim_token="claim-a",
-            claim_ttl_ms=30_000,
-        )
+        _claim(store, owner_instance_id="host-a", claim_token="claim-a")
         updated = store.upsert_desired_resource_state(
             resource_type=ExternalResourceType.TASK_SCHEDULER,
             resource_id="schedule-a",
@@ -121,12 +116,7 @@ def test_sqlite_external_resource_state_blocks_claimed_resource_with_error(
             desired_generation=1,
             desired_hash="a" * 64,
         )
-        store.claim_next_pending_external_resource(
-            resource_type=ExternalResourceType.TASK_SCHEDULER,
-            owner_instance_id="host-a",
-            claim_token="claim-a",
-            claim_ttl_ms=30_000,
-        )
+        _claim(store, owner_instance_id="host-a", claim_token="claim-a")
 
         blocked = store.mark_external_resource_blocked(
             resource_type=ExternalResourceType.TASK_SCHEDULER,
@@ -138,6 +128,64 @@ def test_sqlite_external_resource_state_blocks_claimed_resource_with_error(
         assert blocked.state is ExternalResourceState.BLOCKED
         assert blocked.claim_token is None
         assert blocked.last_error_code == "TASK_SCHEDULER_BINARY_DRIFT"
+
+
+def test_sqlite_external_resource_state_requeues_only_matching_expired_claim(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        store = SqliteExternalResourceStateStore(connection)
+        store.upsert_desired_resource_state(
+            resource_type=ExternalResourceType.TASK_SCHEDULER,
+            resource_id="schedule-a",
+            desired_generation=1,
+            desired_hash="a" * 64,
+        )
+        claimed = _claim(store, owner_instance_id="host-a", claim_token="claim-a")
+        assert claimed is not None
+
+        with pytest.raises(
+            SqliteExternalResourceStateStoreError,
+            match="EXTERNAL_RESOURCE_EXPIRED_CLAIM_MISMATCH",
+        ):
+            store.requeue_expired_external_resource_claim(
+                resource_type=ExternalResourceType.TASK_SCHEDULER,
+                resource_id="schedule-a",
+                owner_instance_id="host-b",
+                claim_generation=claimed.claim_generation,
+                claim_token="claim-a",
+                requeued_utc="2026-07-31T00:00:30.000Z",
+            )
+
+        requeued = store.requeue_expired_external_resource_claim(
+            resource_type=ExternalResourceType.TASK_SCHEDULER,
+            resource_id="schedule-a",
+            owner_instance_id="host-a",
+            claim_generation=claimed.claim_generation,
+            claim_token="claim-a",
+            requeued_utc="2026-07-31T00:00:30.000Z",
+        )
+
+        assert requeued.state is ExternalResourceState.PENDING
+        assert requeued.claim_generation == 2
+        assert requeued.claim_token is None
+        assert (
+            requeued.last_error_code
+            == "EXTERNAL_RESOURCE_CLAIM_REQUEUED_AFTER_MONOTONIC_EXPIRY"
+        )
+        with pytest.raises(
+            SqliteExternalResourceStateStoreError,
+            match="EXTERNAL_RESOURCE_COMPLETION_CLAIM_MISMATCH",
+        ):
+            store.mark_external_resource_in_sync(
+                resource_type=ExternalResourceType.TASK_SCHEDULER,
+                resource_id="schedule-a",
+                desired_generation=1,
+                claim_token="claim-a",
+                observed_hash="a" * 64,
+            )
 
 
 def test_sqlite_external_resource_state_claims_pending_in_resource_order(
@@ -160,12 +208,7 @@ def test_sqlite_external_resource_state_claims_pending_in_resource_order(
             desired_hash="a" * 64,
         )
 
-        claimed = store.claim_next_pending_external_resource(
-            resource_type=ExternalResourceType.TASK_SCHEDULER,
-            owner_instance_id="host-a",
-            claim_token="claim-a",
-            claim_ttl_ms=30_000,
-        )
+        claimed = _claim(store, owner_instance_id="host-a", claim_token="claim-a")
 
         assert claimed is not None
         assert claimed.resource_id == "schedule-a"
@@ -190,18 +233,8 @@ def test_sqlite_external_resource_state_requeues_claimed_from_inactive_owner(
             desired_generation=1,
             desired_hash="b" * 64,
         )
-        store.claim_next_pending_external_resource(
-            resource_type=ExternalResourceType.TASK_SCHEDULER,
-            owner_instance_id="host-a",
-            claim_token="claim-a",
-            claim_ttl_ms=30_000,
-        )
-        store.claim_next_pending_external_resource(
-            resource_type=ExternalResourceType.TASK_SCHEDULER,
-            owner_instance_id="host-live",
-            claim_token="claim-b",
-            claim_ttl_ms=30_000,
-        )
+        _claim(store, owner_instance_id="host-a", claim_token="claim-a")
+        _claim(store, owner_instance_id="host-live", claim_token="claim-b")
 
         report = store.requeue_claimed_after_startup(
             ExternalResourceStartupReconciliationRequest(
@@ -247,11 +280,10 @@ def test_sqlite_external_resource_state_requeue_is_bounded(
                 desired_generation=1,
                 desired_hash=desired_hash,
             )
-            store.claim_next_pending_external_resource(
-                resource_type=ExternalResourceType.TASK_SCHEDULER,
+            _claim(
+                store,
                 owner_instance_id="host-a",
                 claim_token=f"claim-{resource_id}",
-                claim_ttl_ms=30_000,
             )
 
         report = store.requeue_claimed_after_startup(
@@ -310,3 +342,18 @@ def test_sqlite_external_resource_state_rejects_generation_regression_and_hash_c
 def _prepare_catalog(connection: sqlite3.Connection, database: Path) -> None:
     apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
     apply_sqlite_migrations(connection, catalog_migration_plan())
+
+
+def _claim(
+    store: SqliteExternalResourceStateStore,
+    *,
+    owner_instance_id: str,
+    claim_token: str,
+) -> ExternalResourceRecord | None:
+    return store.claim_next_pending_external_resource(
+        resource_type=ExternalResourceType.TASK_SCHEDULER,
+        owner_instance_id=owner_instance_id,
+        claim_token=claim_token,
+        claim_started_utc=CLAIM_STARTED_UTC,
+        claim_ttl_ms=CLAIM_TTL_MS,
+    )
