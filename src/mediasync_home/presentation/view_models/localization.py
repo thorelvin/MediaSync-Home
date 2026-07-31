@@ -190,6 +190,10 @@ class ShellText:
         return "Backup progress" if self.language_tooltip_prefix == "Language" else "Backupfremdrift"
 
     @property
+    def run_result(self) -> str:
+        return "Backup result" if self.language_tooltip_prefix == "Language" else "Backupresultat"
+
+    @property
     def operation_count(self) -> str:
         return "operations" if self.language_tooltip_prefix == "Language" else "operasjoner"
 

@@ -129,6 +129,17 @@ SNAPSHOT_HEALTH_COVERAGE_STATES = (
     "CASE_CONTEXT_UNKNOWN",
     "CANCELLED",
 )
+_TERMINAL_RUN_STATES = frozenset(
+    {
+        "COMPLETED",
+        "COMPLETED_WITH_WARNINGS",
+        "PARTIAL_FAILURE",
+        "FAILED",
+        "CANCELLED",
+        "BLOCKED_BY_SAFETY",
+        "RECOVERY_REQUIRED",
+    }
+)
 
 
 class BackupOverviewProvider(Protocol):
@@ -761,6 +772,12 @@ class MediaSyncWindow(QMainWindow):
             self._analysis_timer.stop()
         self._selected_job_id = job_id
         state = self._refresh_backup_job_detail(job_id)
+        if self._engine_client is not None and hasattr(
+            self._engine_client,
+            "get_activity_overview",
+        ):
+            self._refresh_activity_overview()
+            return
         if state is None or state.plan_id is None:
             self.apply_plan_operation_preview(empty_plan_operation_preview_state())
             self.apply_plan_endpoint_preview(empty_plan_endpoint_preview_state())
@@ -1619,16 +1636,34 @@ class MediaSyncWindow(QMainWindow):
         self._latest_run_job_id = state.latest_job_id
         self._latest_run_plan_id = state.latest_plan_id
         self._latest_run_state = state.latest_run_state
-        if state.job_status is not None:
+        selected_job_id = self._selected_job_id
+        latest_matches_selected = (
+            selected_job_id is None or state.latest_job_id == selected_job_id
+        )
+        active_matches_selected = (
+            selected_job_id is None or state.active_job_id == selected_job_id
+        )
+        if state.job_status is not None and latest_matches_selected:
             self._job_status_state = state.job_status
             self._apply_job_status_state(state.job_status)
-        if state.active_run_id is not None:
+        if state.active_run_id is not None and active_matches_selected:
             self._set_active_run(state.active_run_id)
             self._poll_active_run_progress()
-        elif self._run_progress_state.terminal:
+        elif (
+            state.latest_run_id is not None
+            and state.latest_run_state in _TERMINAL_RUN_STATES
+            and latest_matches_selected
+        ):
             self._active_run_id = None
             self._run_progress_timer.stop()
-        plan_id = state.latest_plan_id or self._job_detail_state.plan_id
+            self._load_run_progress(state.latest_run_id)
+        else:
+            self._active_run_id = None
+            self._run_progress_timer.stop()
+            self._run_progress_state = empty_run_progress_state()
+            self._apply_run_progress_state(self._run_progress_state)
+        latest_plan_id = state.latest_plan_id if latest_matches_selected else None
+        plan_id = latest_plan_id or self._job_detail_state.plan_id
         self._apply_backup_job_detail_state(self._job_detail_state)
         if plan_id is None:
             self.apply_plan_operation_preview(empty_plan_operation_preview_state())
@@ -1646,24 +1681,13 @@ class MediaSyncWindow(QMainWindow):
 
     def _poll_active_run_progress(self) -> None:
         run_id = self._active_run_id
-        if (
-            run_id is None
-            or self._engine_client is None
-            or not hasattr(self._engine_client, "get_run_progress")
-        ):
+        if run_id is None:
             self._run_progress_timer.stop()
             return
-        provider = cast(RunProgressProvider, self._engine_client)
-        response = provider.get_run_progress(
-            run_id=run_id,
-            after_sequence_no=self._run_progress_state.sequence_no,
-        )
-        state = run_progress_from_response(
-            response,
-            previous=self._run_progress_state,
-        )
-        self._run_progress_state = state
-        self._apply_run_progress_state(state)
+        state = self._load_run_progress(run_id)
+        if state is None:
+            self._run_progress_timer.stop()
+            return
         if not state.run_found:
             return
         if state.terminal:
@@ -1674,6 +1698,29 @@ class MediaSyncWindow(QMainWindow):
             self._refresh_backup_overview()
             self._refresh_activity_overview()
             self._refresh_history_timeline()
+
+    def _load_run_progress(self, run_id: str) -> RunProgressViewState | None:
+        if self._engine_client is None or not hasattr(
+            self._engine_client,
+            "get_run_progress",
+        ):
+            return None
+        previous = (
+            self._run_progress_state
+            if self._run_progress_state.run_id == run_id
+            else empty_run_progress_state()
+        )
+        provider = cast(RunProgressProvider, self._engine_client)
+        response = provider.get_run_progress(
+            run_id=run_id,
+            after_sequence_no=previous.sequence_no,
+        )
+        state = run_progress_from_response(response, previous=previous)
+        if state.run_id is not None and state.run_id != run_id:
+            state = empty_run_progress_state()
+        self._run_progress_state = state
+        self._apply_run_progress_state(state)
+        return state
 
     def _apply_run_progress_state(self, state: RunProgressViewState) -> None:
         visible = (
@@ -1711,7 +1758,11 @@ class MediaSyncWindow(QMainWindow):
                     start_button.setEnabled(False)
 
         if self._jobs_run_progress_title is not None:
-            self._jobs_run_progress_title.setText(self._texts().run_progress)
+            self._jobs_run_progress_title.setText(
+                self._texts().run_result
+                if state.terminal
+                else self._texts().run_progress
+            )
         if self._jobs_run_progress_state is not None:
             self._jobs_run_progress_state.setText(
                 self._texts().stopping_after_active_file
@@ -1733,21 +1784,30 @@ class MediaSyncWindow(QMainWindow):
             self._jobs_run_progress_bar.setRange(0, maximum)
             self._jobs_run_progress_bar.setValue(value)
         if self._jobs_run_progress_detail is not None:
+            displayed_bytes = (
+                state.completed_bytes if state.terminal else state.transferred_bytes
+            )
             details = [
                 f"{state.completed_operations} / {state.planned_operations} "
                 f"{self._texts().operation_count}",
-                f"{_format_bytes(state.transferred_bytes)} / "
+                f"{_format_bytes(displayed_bytes)} / "
                 f"{_format_bytes(state.planned_bytes)} {self._texts().transferred.lower()}",
             ]
-            if state.bytes_per_second is not None:
-                details.append(_format_rate(state.bytes_per_second))
-            details.append(
-                (
+            if state.terminal:
+                details.extend(
+                    (
+                        self._terminal_run_summary(state.state),
+                        self._terminal_run_issue_counts(state),
+                    )
+                )
+            else:
+                if state.bytes_per_second is not None:
+                    details.append(_format_rate(state.bytes_per_second))
+                details.append(
                     f"{_format_eta(state.eta_seconds)} {self._texts().remaining}"
                     if state.eta_seconds is not None
                     else self._texts().calculating_eta
                 )
-            )
             self._jobs_run_progress_detail.setText(" · ".join(details))
         if self._jobs_run_active_file is not None:
             active_path = state.active_relative_path
@@ -1898,6 +1958,52 @@ class MediaSyncWindow(QMainWindow):
                 and self._engine_client is not None
                 and hasattr(self._engine_client, "stop_backup_after_active_file")
             )
+
+    def _terminal_run_summary(self, state: str | None) -> str:
+        english = self._selected_language_code is LanguageCode.ENGLISH
+        summaries: dict[str, tuple[str, str]] = {
+            "COMPLETED": (
+                "Backup completed and verified.",
+                "Backupen er fullført og verifisert.",
+            ),
+            "COMPLETED_WITH_WARNINGS": (
+                "Backup completed with warnings. Review History.",
+                "Backupen er fullført med varsler. Se Historikk.",
+            ),
+            "PARTIAL_FAILURE": (
+                "Some files were not backed up. Review History and run again.",
+                "Noen filer ble ikke sikkerhetskopiert. Se Historikk og kjør på nytt.",
+            ),
+            "FAILED": (
+                "Backup failed. Review History before running again.",
+                "Backupen feilet. Se Historikk før du kjører på nytt.",
+            ),
+            "CANCELLED": (
+                "Backup stopped safely. Run it again when ready.",
+                "Backupen ble stoppet trygt. Kjør den på nytt når du er klar.",
+            ),
+            "BLOCKED_BY_SAFETY": (
+                "Backup was blocked to protect your data. Review History.",
+                "Backupen ble blokkert for å beskytte dataene. Se Historikk.",
+            ),
+            "RECOVERY_REQUIRED": (
+                "Recovery is required. Review History before continuing.",
+                "Gjenoppretting kreves. Se Historikk før du fortsetter.",
+            ),
+        }
+        pair = summaries.get(
+            state or "",
+            (
+                "Backup finished. Review History for details.",
+                "Backupen er avsluttet. Se Historikk for detaljer.",
+            ),
+        )
+        return pair[0] if english else pair[1]
+
+    def _terminal_run_issue_counts(self, state: RunProgressViewState) -> str:
+        if self._selected_language_code is LanguageCode.ENGLISH:
+            return f"{state.warning_count} warnings / {state.error_count} errors"
+        return f"{state.warning_count} varsler / {state.error_count} feil"
 
     def _pause_active_backup(self) -> None:
         self._submit_run_control("pause")
@@ -2486,16 +2592,7 @@ class MediaSyncWindow(QMainWindow):
             and state.job_id == self._latest_run_job_id
             and state.plan_id is not None
             and state.plan_id == self._latest_run_plan_id
-            and self._latest_run_state
-            in {
-                "COMPLETED",
-                "COMPLETED_WITH_WARNINGS",
-                "PARTIAL_FAILURE",
-                "FAILED",
-                "CANCELLED",
-                "BLOCKED_BY_SAFETY",
-                "RECOVERY_REQUIRED",
-            }
+            and self._latest_run_state in _TERMINAL_RUN_STATES
         )
         check_mode = (
             state.found
@@ -2562,16 +2659,7 @@ class MediaSyncWindow(QMainWindow):
             and state.job_id == self._latest_run_job_id
             and state.plan_id is not None
             and state.plan_id == self._latest_run_plan_id
-            and self._latest_run_state
-            in {
-                "COMPLETED",
-                "COMPLETED_WITH_WARNINGS",
-                "PARTIAL_FAILURE",
-                "FAILED",
-                "CANCELLED",
-                "BLOCKED_BY_SAFETY",
-                "RECOVERY_REQUIRED",
-            }
+            and self._latest_run_state in _TERMINAL_RUN_STATES
         )
         if (
             state.found

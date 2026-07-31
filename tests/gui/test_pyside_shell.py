@@ -1631,6 +1631,94 @@ def test_jobs_page_shows_live_progress_and_run_controls(qapp) -> None:
         window.deleteLater()
 
 
+def test_jobs_page_restores_terminal_result_after_gui_restart(qapp) -> None:
+    provider = _FakeTerminalRunDashboardEngineClient()
+
+    for _ in range(2):
+        window = build_main_window(
+            initial_state=EngineStatusViewState.disconnected(),
+            engine_client=provider,
+            theme_mode=ThemeMode.LIGHT,
+        )
+        try:
+            window.show()
+            window.refresh_engine_status()
+            window._select_navigation_row(1)
+            qapp.processEvents()
+
+            title = window._jobs_run_progress_title
+            result_state = window.findChild(QLabel, "jobsRunProgressState")
+            detail = window.findChild(QLabel, "jobsRunProgressDetail")
+            progress = window.findChild(QProgressBar, "jobsRunProgressBar")
+            active_file = window.findChild(QLabel, "jobsRunActiveFile")
+            pause = window.findChild(QPushButton, "jobsPauseBackupButton")
+            resume = window.findChild(QPushButton, "jobsResumeBackupButton")
+            stop = window.findChild(QPushButton, "jobsStopBackupButton")
+
+            assert title is not None
+            assert title.isVisible()
+            assert title.text() == "Backupresultat"
+            assert result_state is not None
+            assert result_state.text() == "Fullført"
+            assert detail is not None
+            assert "3 / 3 operasjoner" in detail.text()
+            assert "3.0 KiB / 3.0 KiB overført" in detail.text()
+            assert "Backupen er fullført og verifisert." in detail.text()
+            assert "0 varsler / 0 feil" in detail.text()
+            assert "Beregner gjenstående tid" not in detail.text()
+            assert progress is not None
+            assert progress.value() == progress.maximum()
+            assert active_file is not None and active_file.isHidden()
+            assert pause is not None and pause.isHidden()
+            assert resume is not None and resume.isHidden()
+            assert stop is not None and stop.isHidden()
+            assert window._run_progress_timer.isActive() is False
+        finally:
+            window.close()
+            window.deleteLater()
+            qapp.processEvents()
+
+    assert provider.progress_after_sequences == [None, None]
+
+
+def test_jobs_page_localizes_terminal_partial_failure_summary(qapp) -> None:
+    provider = _FakeTerminalRunDashboardEngineClient(
+        run_state="PARTIAL_FAILURE",
+        completed_operations=2,
+        completed_bytes=2048,
+        warning_count=1,
+        error_count=1,
+    )
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+        user_preferences=UserPreferences(language=UserLanguage.ENGLISH),
+    )
+
+    try:
+        window.show()
+        window.refresh_engine_status()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+
+        title = window._jobs_run_progress_title
+        result_state = window.findChild(QLabel, "jobsRunProgressState")
+        detail = window.findChild(QLabel, "jobsRunProgressDetail")
+
+        assert title is not None and title.text() == "Backup result"
+        assert result_state is not None
+        assert result_state.text() == "Partially completed"
+        assert detail is not None
+        assert "2 / 3 operations" in detail.text()
+        assert "Some files were not backed up. Review History and run again." in detail.text()
+        assert "1 warnings / 1 errors" in detail.text()
+        assert "Calculating remaining time" not in detail.text()
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_jobs_page_wraps_endpoint_retry_diagnostics_without_clipping(qapp) -> None:
     provider = _FakeRunControlDashboardEngineClient()
     provider.target_waiting = True
@@ -2331,6 +2419,139 @@ class _FakeRunControlDashboardEngineClient(_FakeBackupStartDashboardEngineClient
         self.sequence_no += 1
         return IpcResponse.accepted(
             {"applied": True, "run": {"run_id": run_id, "state": "EXECUTING"}}
+        )
+
+
+class _FakeTerminalRunDashboardEngineClient(_FakeBackupStartDashboardEngineClient):
+    def __init__(
+        self,
+        *,
+        run_state: str = "COMPLETED",
+        completed_operations: int = 3,
+        completed_bytes: int = 3072,
+        warning_count: int = 0,
+        error_count: int = 0,
+    ) -> None:
+        super().__init__()
+        self.run_state = run_state
+        self.completed_operations = completed_operations
+        self.completed_bytes = completed_bytes
+        self.warning_count = warning_count
+        self.error_count = error_count
+        self.progress_after_sequences: list[int | None] = []
+
+    def get_activity_overview(
+        self,
+        *,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        del limit, offset
+        self.calls.append("get_activity_overview")
+        assert job_id == "job-a"
+        return IpcResponse.accepted(
+            {
+                "activity_overview": {
+                    "read_model_available": True,
+                    "has_more": False,
+                    "runs": [
+                        {
+                            "run_id": "run-a",
+                            "job_id": "job-a",
+                            "job_revision_id": "job-rev-a",
+                            "plan_id": "plan-a",
+                            "state": self.run_state,
+                            "trigger_type": "MANUAL_LOCAL_PREVIEW",
+                            "started_utc": "2026-07-20T12:00:00.000Z",
+                            "finished_utc": "2026-07-20T12:01:00.000Z",
+                            "planned_operations": 3,
+                            "planned_bytes": 3072,
+                            "warning_count": self.warning_count,
+                            "error_count": self.error_count,
+                            "targets": [
+                                {
+                                    "run_target_id": "run-a-target-0000",
+                                    "endpoint_id": "target-a",
+                                    "endpoint_revision_id": "target-rev-a",
+                                    "state": (
+                                        "SUCCEEDED"
+                                        if self.run_state == "COMPLETED"
+                                        else "FAILED"
+                                    ),
+                                    "planned_operations": 3,
+                                    "completed_operations": self.completed_operations,
+                                    "planned_bytes": 3072,
+                                    "completed_bytes": self.completed_bytes,
+                                    "warning_count": self.warning_count,
+                                    "error_count": self.error_count,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        )
+
+    def get_run_progress(
+        self,
+        *,
+        run_id: str,
+        after_sequence_no: int | None = None,
+    ) -> IpcResponse:
+        self.calls.append("get_run_progress")
+        assert run_id == "run-a"
+        self.progress_after_sequences.append(after_sequence_no)
+        return IpcResponse.accepted(
+            {
+                "run_progress": {
+                    "run_id": run_id,
+                    "read_model_available": True,
+                    "run_found": True,
+                    "changed": after_sequence_no != 12,
+                    "snapshot": (
+                        None
+                        if after_sequence_no == 12
+                        else {
+                            "run_id": run_id,
+                            "job_id": "job-a",
+                            "state": self.run_state,
+                            "terminal": True,
+                            "sequence_no": 12,
+                            "planned_operations": 3,
+                            "completed_operations": self.completed_operations,
+                            "planned_bytes": 3072,
+                            "completed_bytes": self.completed_bytes,
+                            "transferred_operations": self.completed_operations,
+                            "transferred_bytes": self.completed_bytes,
+                            "warning_count": self.warning_count,
+                            "error_count": self.error_count,
+                            "active_relative_path": None,
+                            "active_phase": None,
+                            "active_planned_bytes": None,
+                            "bytes_per_second": None,
+                            "eta_seconds": None,
+                            "stop_requested": False,
+                            "targets": [
+                                {
+                                    "endpoint_id": "target-a",
+                                    "state": (
+                                        "SUCCEEDED"
+                                        if self.run_state == "COMPLETED"
+                                        else "FAILED"
+                                    ),
+                                    "planned_operations": 3,
+                                    "completed_operations": self.completed_operations,
+                                    "planned_bytes": 3072,
+                                    "completed_bytes": self.completed_bytes,
+                                    "warning_count": self.warning_count,
+                                    "error_count": self.error_count,
+                                }
+                            ],
+                        }
+                    ),
+                }
+            }
         )
 
 
