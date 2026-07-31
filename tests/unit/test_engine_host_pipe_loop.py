@@ -18,8 +18,17 @@ from mediasync_home.adapters.local_host_locator import (
     publish_local_engine_host_publication,
 )
 from mediasync_home.adapters.robocopy import RobocopyStagingTransferAdapter
-from mediasync_home.adapters.sqlite.connection_policy import SqliteStore
-from mediasync_home.adapters.sqlite.migrations import current_schema_version
+from mediasync_home.adapters.sqlite.connection_policy import (
+    SqliteStore,
+    apply_sqlite_connection_policy,
+    catalog_critical_writer_policy,
+)
+from mediasync_home.adapters.sqlite.migrations import (
+    SqliteMigrationPlan,
+    apply_sqlite_migrations,
+    catalog_migration_plan,
+    current_schema_version,
+)
 from mediasync_home.adapters.sqlite.state_backup import (
     SqliteStateCompactionEpochRecoveryReport,
     SqliteStateMaintenanceRetentionPolicy,
@@ -835,7 +844,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.recovery_connection is not None
         assert runtime.installation_state is not None
         assert runtime.installation_state.product_channel == "local-preview"
-        assert runtime.installation_state.catalog_schema_version == 26
+        assert runtime.installation_state.catalog_schema_version == 27
         assert runtime.installation_state.recovery_schema_version == 5
         assert runtime.installation_state.ipc_protocol_major == 1
         assert runtime.snapshot_materialization_refresh is not None
@@ -870,7 +879,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
             runtime.run_executor_recovery_object_cleanup_port
             is runtime.run_executor_final_commit_port
         )
-        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 26
+        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 27
         assert current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY) == 5
         assert runtime.startup_reconciliation is not None
         assert runtime.startup_reconciliation.reconciler_instance_id == "host-new"
@@ -1128,54 +1137,105 @@ def test_engine_host_runtime_backfills_endpoint_bindings_for_existing_job(
     tmp_path: Path,
 ) -> None:
     state_root = tmp_path / "state"
-    runtime = build_engine_host_runtime(
-        authorization=_authorization(),
-        service_status=local_writable_status(ProcessRole.ENGINE_HOST),
-        state_root=state_root,
+    state_root.mkdir()
+    database = state_root / "catalog.sqlite"
+    full_plan = catalog_migration_plan()
+    legacy_plan = SqliteMigrationPlan(
+        store=full_plan.store,
+        migrations=full_plan.migrations[:22],
     )
-    payload: dict[str, object] = {
-        "draft_id": "draft-backfill",
-        "draft": {
-            "draft_id": "draft-backfill",
-            "schema_version": 1,
-            "source_name": "Pictures",
-            "source_path_label": "C:/Users/Ada/Pictures",
-            "targets": [
-                {
-                    "name": "USB 1",
-                    "path_label": "E:/Backup",
-                    "independent_device_id": None,
-                }
-            ],
-        },
-    }
-    try:
-        ipc_client = InProcessIpcClient(
-            service=runtime.service,
-            identity=_identity(),
-            role=ProcessRole.GUI,
-            client_instance_id="55555555-5555-4555-8555-555555555556",
+    with sqlite3.connect(database) as connection:
+        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_migrations(connection, legacy_plan)
+        connection.execute(
+            """
+            INSERT INTO standard_backup_job_drafts (
+                draft_id,
+                schema_version,
+                source_name,
+                source_path_label,
+                defaults_json,
+                targets_json
+            )
+            VALUES (?, 1, ?, ?, ?, ?)
+            """,
+            (
+                "draft-backfill",
+                "Pictures",
+                "C:/Users/Ada/Pictures",
+                json.dumps(
+                    {
+                        "behavior": "UPDATE_BACKUP",
+                        "extra_files": "KEEP_ON_TARGET",
+                        "file_selection": "ALL_USER_FILES",
+                        "performance": "AUTO",
+                        "retention": "THIRTY_DAYS",
+                        "verification": "STANDARD",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                json.dumps(
+                    [
+                        {
+                            "independent_device_id": None,
+                            "name": "USB 1",
+                            "path_label": "E:/Backup",
+                        }
+                    ],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ),
         )
-        assert ipc_client.connect().status is IpcStatus.ACCEPTED
-        response = ipc_client.submit_command(
-            JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
-            request_id="44444444-4444-4444-8444-444444444445",
-            idempotency_key="66666666-6666-4666-8666-666666666667",
-            payload=payload,
-            payload_hash=canonical_command_payload_hash(payload),
+        connection.execute(
+            "INSERT INTO jobs (id, kind) VALUES ('job-backfill', 'multi_target_backup')"
         )
-        assert response.status is IpcStatus.ACCEPTED
-    finally:
-        runtime.close()
-
-    with sqlite3.connect(state_root / "catalog.sqlite") as connection:
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("DELETE FROM standard_backup_job_endpoint_bindings")
-        connection.execute("DELETE FROM endpoint_classification_observations")
-        connection.execute("DELETE FROM endpoint_root_claims")
-        connection.execute("DELETE FROM endpoint_heads")
-        connection.execute("DELETE FROM endpoint_revisions")
-        connection.execute("DELETE FROM endpoints")
+        connection.execute(
+            """
+            INSERT INTO filter_sets (job_id, id, description)
+            VALUES ('job-backfill', 'filter-backfill', 'standard backup defaults')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO job_revisions (job_id, id, filter_set_id)
+            VALUES ('job-backfill', 'job-revision-backfill', 'filter-backfill')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO standard_backup_job_revision_details (
+                job_id,
+                job_revision_id,
+                draft_id,
+                command_request_id,
+                idempotency_key,
+                source_name,
+                source_path_label,
+                defaults_json,
+                targets_json
+            )
+            SELECT
+                'job-backfill',
+                'job-revision-backfill',
+                draft_id,
+                'request-backfill',
+                'idempotency-backfill',
+                source_name,
+                source_path_label,
+                defaults_json,
+                targets_json
+            FROM standard_backup_job_drafts
+            WHERE draft_id = 'draft-backfill'
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO job_heads (job_id, active_revision_id)
+            VALUES ('job-backfill', 'job-revision-backfill')
+            """
+        )
         connection.commit()
 
     restarted = build_engine_host_runtime(

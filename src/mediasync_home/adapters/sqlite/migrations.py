@@ -159,6 +159,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_standard_backup_job_snapshot_materializations",
                 statements=CATALOG_STANDARD_BACKUP_JOB_SNAPSHOT_MATERIALIZATIONS,
             ),
+            SqliteMigration(
+                version=27,
+                name="catalog_immutable_revision_guards",
+                statements=CATALOG_IMMUTABLE_REVISION_GUARDS,
+            ),
         ),
     )
 
@@ -1601,6 +1606,99 @@ CATALOG_STANDARD_BACKUP_JOB_SNAPSHOT_MATERIALIZATIONS = (
             completed_utc,
             job_id
         )
+    """,
+)
+
+CATALOG_IMMUTABLE_REVISION_GUARDS = (
+    """
+    CREATE TRIGGER trg_endpoint_revisions_no_update
+    BEFORE UPDATE ON endpoint_revisions
+    BEGIN
+        SELECT RAISE(ABORT, 'ENDPOINT_REVISION_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_endpoint_revisions_no_delete
+    BEFORE DELETE ON endpoint_revisions
+    BEGIN
+        SELECT RAISE(ABORT, 'ENDPOINT_REVISION_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_job_revisions_no_update
+    BEFORE UPDATE ON job_revisions
+    BEGIN
+        SELECT RAISE(ABORT, 'JOB_REVISION_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_job_revisions_no_delete
+    BEFORE DELETE ON job_revisions
+    BEGIN
+        SELECT RAISE(ABORT, 'JOB_REVISION_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_filter_sets_no_update_after_use
+    BEFORE UPDATE ON filter_sets
+    WHEN EXISTS (
+        SELECT 1
+        FROM job_revisions
+        WHERE job_id = OLD.job_id
+            AND filter_set_id = OLD.id
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'FILTER_SET_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_filter_sets_no_delete_after_use
+    BEFORE DELETE ON filter_sets
+    WHEN EXISTS (
+        SELECT 1
+        FROM job_revisions
+        WHERE job_id = OLD.job_id
+            AND filter_set_id = OLD.id
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'FILTER_SET_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_standard_backup_job_revision_details_no_update
+    BEFORE UPDATE ON standard_backup_job_revision_details
+    BEGIN
+        SELECT RAISE(ABORT, 'JOB_REVISION_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_standard_backup_job_revision_details_no_delete
+    BEFORE DELETE ON standard_backup_job_revision_details
+    BEGIN
+        SELECT RAISE(ABORT, 'JOB_REVISION_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_standard_backup_job_endpoint_bindings_identity_immutable
+    BEFORE UPDATE ON standard_backup_job_endpoint_bindings
+    WHEN
+        NEW.job_id IS NOT OLD.job_id
+        OR NEW.job_revision_id IS NOT OLD.job_revision_id
+        OR NEW.role IS NOT OLD.role
+        OR NEW.ordinal IS NOT OLD.ordinal
+        OR NEW.endpoint_id IS NOT OLD.endpoint_id
+        OR NEW.endpoint_revision_id IS NOT OLD.endpoint_revision_id
+        OR NEW.created_utc IS NOT OLD.created_utc
+    BEGIN
+        SELECT RAISE(ABORT, 'JOB_REVISION_BINDING_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_standard_backup_job_endpoint_bindings_no_delete
+    BEFORE DELETE ON standard_backup_job_endpoint_bindings
+    BEGIN
+        SELECT RAISE(ABORT, 'JOB_REVISION_BINDING_IMMUTABLE');
+    END
     """,
 )
 

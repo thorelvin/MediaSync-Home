@@ -43,7 +43,7 @@ def test_installation_state_is_created_once_and_reused(tmp_path: Path) -> None:
         assert UUID(created.installation_id).version == 4
         assert reloaded == created
         assert created.product_channel == "local-preview"
-        assert created.catalog_schema_version == 26
+        assert created.catalog_schema_version == 27
         assert created.recovery_schema_version == 5
         assert created.ipc_protocol_major == 1
         assert created.row_version == 1
@@ -60,7 +60,7 @@ def test_installation_state_updates_compatible_startup_metadata(tmp_path: Path) 
         updated = store.load_or_create(
             product_channel="local-preview",
             app_version="1.2.3",
-            catalog_schema_version=26,
+            catalog_schema_version=27,
             recovery_schema_version=6,
             ipc_protocol_major=2,
         )
@@ -68,7 +68,7 @@ def test_installation_state_updates_compatible_startup_metadata(tmp_path: Path) 
         assert updated.installation_id == created.installation_id
         assert updated.created_utc == created.created_utc
         assert updated.last_started_app_version == "1.2.3"
-        assert updated.catalog_schema_version == 26
+        assert updated.catalog_schema_version == 27
         assert updated.recovery_schema_version == 6
         assert updated.ipc_protocol_major == 2
         assert updated.row_version == 2
@@ -89,7 +89,7 @@ def test_installation_state_rejects_product_channel_change(tmp_path: Path) -> No
             store.load_or_create(
                 product_channel="stable",
                 app_version="0.0.0",
-                catalog_schema_version=26,
+                catalog_schema_version=27,
                 recovery_schema_version=5,
                 ipc_protocol_major=1,
             )
@@ -160,7 +160,7 @@ def _load_or_create(store: SqliteInstallationStateStore):
     return store.load_or_create(
         product_channel="local-preview",
         app_version="0.0.0",
-        catalog_schema_version=26,
+        catalog_schema_version=27,
         recovery_schema_version=5,
         ipc_protocol_major=1,
     )

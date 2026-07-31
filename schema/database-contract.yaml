@@ -46,6 +46,34 @@ invariants:
       child_columns: [job_id, active_revision_id]
       parent_table: job_revisions
       parent_columns: [job_id, id]
+  - id: ARC-005_IMMUTABLE_REVISION_GUARDS
+    requirement_id: ARC-005
+    assertion: Sealed revision content cannot be updated or deleted in place.
+    always_immutable_tables:
+      - endpoint_revisions
+      - job_revisions
+      - standard_backup_job_revision_details
+    immutable_after_reference:
+      table: filter_sets
+      referenced_by_table: job_revisions
+      reference_columns: [job_id, filter_set_id]
+      identity_columns: [job_id, id]
+    identity_guard:
+      table: standard_backup_job_endpoint_bindings
+      immutable_columns:
+        - job_id
+        - job_revision_id
+        - role
+        - ordinal
+        - endpoint_id
+        - endpoint_revision_id
+        - created_utc
+      mutable_columns:
+        - registration_state
+        - registration_reason_code
+    mutable_head_tables:
+      - endpoint_heads
+      - job_heads
   - id: DB-007_PARENT_SCOPE_COMPOSITE_KEYS
     requirement_id: DB-007
     assertion: Security-relevant child rows are bound to their parent scope with composite keys.

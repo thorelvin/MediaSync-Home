@@ -434,6 +434,84 @@ def _validate_parent_scope_invariant(invariant: dict[str, Any]) -> None:
         fail(f"DB-007 missing required composite foreign key(s): {missing}")
 
 
+def _validate_immutable_revision_invariant(invariant: dict[str, Any]) -> None:
+    if invariant.get("requirement_id") != "ARC-005":
+        fail("immutable revision invariant must reference ARC-005")
+
+    immutable_tables = set(
+        _column_tuple(
+            invariant.get("always_immutable_tables"),
+            "ARC-005 always_immutable_tables",
+        )
+    )
+    expected_immutable_tables = {
+        "endpoint_revisions",
+        "job_revisions",
+        "standard_backup_job_revision_details",
+    }
+    if immutable_tables != expected_immutable_tables:
+        fail("ARC-005 always immutable tables drifted")
+
+    after_reference = require_mapping(
+        invariant.get("immutable_after_reference"),
+        "ARC-005 immutable_after_reference",
+    )
+    if after_reference.get("table") != "filter_sets":
+        fail("ARC-005 must protect filter_sets after reference")
+    if after_reference.get("referenced_by_table") != "job_revisions":
+        fail("ARC-005 filter_sets reference owner drifted")
+    if _column_tuple(
+        after_reference.get("reference_columns"),
+        "ARC-005 immutable_after_reference.reference_columns",
+    ) != ("job_id", "filter_set_id"):
+        fail("ARC-005 filter_sets reference columns drifted")
+    if _column_tuple(
+        after_reference.get("identity_columns"),
+        "ARC-005 immutable_after_reference.identity_columns",
+    ) != ("job_id", "id"):
+        fail("ARC-005 filter_sets identity columns drifted")
+
+    identity_guard = require_mapping(
+        invariant.get("identity_guard"),
+        "ARC-005 identity_guard",
+    )
+    if identity_guard.get("table") != "standard_backup_job_endpoint_bindings":
+        fail("ARC-005 endpoint binding guard table drifted")
+    immutable_columns = set(
+        _column_tuple(
+            identity_guard.get("immutable_columns"),
+            "ARC-005 identity_guard.immutable_columns",
+        )
+    )
+    if immutable_columns != {
+        "job_id",
+        "job_revision_id",
+        "role",
+        "ordinal",
+        "endpoint_id",
+        "endpoint_revision_id",
+        "created_utc",
+    }:
+        fail("ARC-005 endpoint binding immutable columns drifted")
+    mutable_columns = set(
+        _column_tuple(
+            identity_guard.get("mutable_columns"),
+            "ARC-005 identity_guard.mutable_columns",
+        )
+    )
+    if mutable_columns != {"registration_state", "registration_reason_code"}:
+        fail("ARC-005 endpoint binding mutable columns drifted")
+
+    mutable_heads = set(
+        _column_tuple(
+            invariant.get("mutable_head_tables"),
+            "ARC-005 mutable_head_tables",
+        )
+    )
+    if mutable_heads != {"endpoint_heads", "job_heads"}:
+        fail("ARC-005 mutable head tables drifted")
+
+
 def validate_state_machines(document: dict[str, Any]) -> int:
     if document.get("schema_version") != 1:
         fail("state-machines.yaml schema_version must be 1")
@@ -508,6 +586,7 @@ def validate_database_contract(document: dict[str, Any]) -> int:
         fail("database-contract.yaml must contain invariants")
     invariant_by_id = _indexed_mappings(invariants, "database-contract.yaml invariants")
     required_ids = {
+        "ARC-005_IMMUTABLE_REVISION_GUARDS",
         "DB-001_FILE_ENTRIES_COMPARISON_KEY_IS_NON_UNIQUE",
         "DB-006_ENDPOINT_HEADS_ARE_SEPARATE",
         "DB-006_JOB_HEADS_ARE_SEPARATE",
@@ -535,6 +614,9 @@ def validate_database_contract(document: dict[str, Any]) -> int:
         head_table="job_heads",
         child_columns=("job_id", "active_revision_id"),
         parent_columns=("job_id", "id"),
+    )
+    _validate_immutable_revision_invariant(
+        invariant_by_id["ARC-005_IMMUTABLE_REVISION_GUARDS"]
     )
     _validate_parent_scope_invariant(invariant_by_id["DB-007_PARENT_SCOPE_COMPOSITE_KEYS"])
     return len(invariants)

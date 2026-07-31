@@ -47,6 +47,7 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
         24,
         25,
         26,
+        27,
     ]
     assert [migration.version for migration in recovery.migrations] == [1, 2, 3, 4, 5]
     assert catalog.migrations[0].name == "catalog_core_contract_skeleton"
@@ -78,6 +79,7 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
         catalog.migrations[25].name
         == "catalog_standard_backup_job_snapshot_materializations"
     )
+    assert catalog.migrations[26].name == "catalog_immutable_revision_guards"
     assert recovery.migrations[0].name == "recovery_journal_skeleton"
     assert recovery.migrations[1].name == "recovery_lease_counters"
     assert recovery.migrations[2].name == "recovery_resource_leases"

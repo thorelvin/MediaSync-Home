@@ -116,6 +116,27 @@ def test_database_contract_rejects_missing_parent_scope_foreign_key() -> None:
         validate_contracts.validate_database_contract(document)
 
 
+def test_database_contract_rejects_missing_immutable_revision_table() -> None:
+    yaml = _yaml_loader()
+    document = validate_contracts.load_yaml(
+        validate_contracts.ROOT / "schema/database-contract.yaml",
+        yaml,
+    )
+    document = copy.deepcopy(document)
+    invariant = _database_invariant(document, "ARC-005_IMMUTABLE_REVISION_GUARDS")
+    invariant["always_immutable_tables"] = [
+        table
+        for table in invariant["always_immutable_tables"]
+        if table != "endpoint_revisions"
+    ]
+
+    with pytest.raises(
+        validate_contracts.ContractValidationError,
+        match="always immutable tables drifted",
+    ):
+        validate_contracts.validate_database_contract(document)
+
+
 def _database_invariant(document: dict[str, object], invariant_id: str) -> dict[str, object]:
     invariants = document["invariants"]
     assert isinstance(invariants, list)

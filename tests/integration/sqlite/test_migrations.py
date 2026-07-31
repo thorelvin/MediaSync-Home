@@ -30,7 +30,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 26
+        assert current_schema_version(connection, plan.store) == 27
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -63,7 +63,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 26
+        assert _row_count(connection, "schema_migrations") == 27
         assert _column_names(connection, "schema_migrations") >= {
             "store",
             "version",
@@ -83,6 +83,16 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "trg_schema_migrations_valid_insert",
             "trg_schema_migrations_immutable_update",
             "trg_schema_migrations_immutable_delete",
+            "trg_endpoint_revisions_no_update",
+            "trg_endpoint_revisions_no_delete",
+            "trg_job_revisions_no_update",
+            "trg_job_revisions_no_delete",
+            "trg_filter_sets_no_update_after_use",
+            "trg_filter_sets_no_delete_after_use",
+            "trg_standard_backup_job_revision_details_no_update",
+            "trg_standard_backup_job_revision_details_no_delete",
+            "trg_standard_backup_job_endpoint_bindings_identity_immutable",
+            "trg_standard_backup_job_endpoint_bindings_no_delete",
         } <= _trigger_names(connection)
         assert _foreign_key(
             connection,
@@ -346,6 +356,156 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         }
 
 
+def test_catalog_revision_rows_are_immutable_but_heads_can_advance(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_migrations(connection, catalog_migration_plan())
+        _insert_immutable_revision_rows(connection)
+
+        with pytest.raises(sqlite3.IntegrityError, match="ENDPOINT_REVISION_IMMUTABLE"):
+            connection.execute(
+                """
+                UPDATE endpoint_revisions
+                SET display_name = 'Changed'
+                WHERE endpoint_id = 'endpoint-a' AND id = 'endpoint-rev-a'
+                """
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="ENDPOINT_REVISION_IMMUTABLE"):
+            connection.execute(
+                """
+                DELETE FROM endpoint_revisions
+                WHERE endpoint_id = 'endpoint-a' AND id = 'endpoint-rev-a'
+                """
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="JOB_REVISION_IMMUTABLE"):
+            connection.execute(
+                """
+                UPDATE job_revisions
+                SET filter_set_id = 'filter-b'
+                WHERE job_id = 'job-a' AND id = 'job-rev-a'
+                """
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="JOB_REVISION_IMMUTABLE"):
+            connection.execute(
+                """
+                DELETE FROM job_revisions
+                WHERE job_id = 'job-a' AND id = 'job-rev-a'
+                """
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="FILTER_SET_IMMUTABLE"):
+            connection.execute(
+                """
+                UPDATE filter_sets
+                SET description = 'Changed'
+                WHERE job_id = 'job-a' AND id = 'filter-a'
+                """
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="FILTER_SET_IMMUTABLE"):
+            connection.execute(
+                "DELETE FROM filter_sets WHERE job_id = 'job-a' AND id = 'filter-a'"
+            )
+
+        connection.execute(
+            """
+            UPDATE endpoint_heads
+            SET active_revision_id = 'endpoint-rev-b'
+            WHERE endpoint_id = 'endpoint-a'
+            """
+        )
+        connection.execute(
+            """
+            UPDATE job_heads
+            SET active_revision_id = 'job-rev-b'
+            WHERE job_id = 'job-a'
+            """
+        )
+
+        assert connection.execute(
+            "SELECT active_revision_id FROM endpoint_heads WHERE endpoint_id = 'endpoint-a'"
+        ).fetchone() == ("endpoint-rev-b",)
+        assert connection.execute(
+            "SELECT active_revision_id FROM job_heads WHERE job_id = 'job-a'"
+        ).fetchone() == ("job-rev-b",)
+
+
+def test_catalog_revision_details_keep_only_registration_status_mutable(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_migrations(connection, catalog_migration_plan())
+        _insert_immutable_revision_rows(connection)
+
+        with pytest.raises(sqlite3.IntegrityError, match="JOB_REVISION_IMMUTABLE"):
+            connection.execute(
+                """
+                UPDATE standard_backup_job_revision_details
+                SET source_name = 'Changed'
+                WHERE job_id = 'job-a' AND job_revision_id = 'job-rev-a'
+                """
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="JOB_REVISION_IMMUTABLE"):
+            connection.execute(
+                """
+                DELETE FROM standard_backup_job_revision_details
+                WHERE job_id = 'job-a' AND job_revision_id = 'job-rev-a'
+                """
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="JOB_REVISION_BINDING_IMMUTABLE",
+        ):
+            connection.execute(
+                """
+                UPDATE standard_backup_job_endpoint_bindings
+                SET endpoint_revision_id = 'endpoint-rev-b'
+                WHERE job_id = 'job-a'
+                    AND job_revision_id = 'job-rev-a'
+                    AND role = 'SOURCE'
+                    AND ordinal = 0
+                """
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="JOB_REVISION_BINDING_IMMUTABLE",
+        ):
+            connection.execute(
+                """
+                DELETE FROM standard_backup_job_endpoint_bindings
+                WHERE job_id = 'job-a'
+                    AND job_revision_id = 'job-rev-a'
+                    AND role = 'SOURCE'
+                    AND ordinal = 0
+                """
+            )
+
+        connection.execute(
+            """
+            UPDATE standard_backup_job_endpoint_bindings
+            SET
+                registration_state = 'READ_ONLY_READY',
+                registration_reason_code = 'ENDPOINT_READ_ONLY_READY'
+            WHERE job_id = 'job-a'
+                AND job_revision_id = 'job-rev-a'
+                AND role = 'SOURCE'
+                AND ordinal = 0
+            """
+        )
+
+        assert connection.execute(
+            """
+            SELECT registration_state, registration_reason_code
+            FROM standard_backup_job_endpoint_bindings
+            WHERE job_id = 'job-a'
+                AND job_revision_id = 'job-rev-a'
+                AND role = 'SOURCE'
+                AND ordinal = 0
+            """
+        ).fetchone() == ("READ_ONLY_READY", "ENDPOINT_READ_ONLY_READY")
+
+
 def test_catalog_classification_observation_requires_coherent_status(
     tmp_path: Path,
 ) -> None:
@@ -561,7 +721,7 @@ def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> N
                 name,
                 migration_checksum
             )
-            VALUES ('catalog', 27, 'future_migration', ?)
+            VALUES ('catalog', 28, 'future_migration', ?)
             """,
             ("f" * 64,),
         )
@@ -724,6 +884,112 @@ def _insert_catalog_parent_rows(connection: sqlite3.Connection) -> None:
         """
         INSERT INTO snapshots (id, analysis_id, endpoint_id, endpoint_revision_id)
             VALUES ('snapshot-a', 'analysis-a', 'endpoint-a', 'endpoint-rev-a')
+        """
+    )
+
+
+def _insert_immutable_revision_rows(connection: sqlite3.Connection) -> None:
+    connection.execute("INSERT INTO endpoints (id) VALUES ('endpoint-a')")
+    connection.executemany(
+        """
+        INSERT INTO endpoint_revisions (endpoint_id, id, display_name, root_uri)
+        VALUES ('endpoint-a', ?, ?, ?)
+        """,
+        (
+            ("endpoint-rev-a", "Source A", "file:///C:/Source"),
+            ("endpoint-rev-b", "Source B", "file:///C:/Source"),
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO endpoint_heads (endpoint_id, active_revision_id)
+        VALUES ('endpoint-a', 'endpoint-rev-a')
+        """
+    )
+    connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')")
+    connection.executemany(
+        """
+        INSERT INTO filter_sets (job_id, id, description)
+        VALUES ('job-a', ?, ?)
+        """,
+        (
+            ("filter-a", "Filter A"),
+            ("filter-b", "Filter B"),
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO job_revisions (job_id, id, filter_set_id)
+        VALUES ('job-a', ?, ?)
+        """,
+        (
+            ("job-rev-a", "filter-a"),
+            ("job-rev-b", "filter-b"),
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO job_heads (job_id, active_revision_id)
+        VALUES ('job-a', 'job-rev-a')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO standard_backup_job_drafts (
+            draft_id,
+            schema_version,
+            defaults_json,
+            targets_json
+        )
+        VALUES ('draft-a', 1, '{}', '[]')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO standard_backup_job_revision_details (
+            job_id,
+            job_revision_id,
+            draft_id,
+            command_request_id,
+            idempotency_key,
+            source_name,
+            source_path_label,
+            defaults_json,
+            targets_json
+        )
+        VALUES (
+            'job-a',
+            'job-rev-a',
+            'draft-a',
+            'request-a',
+            'idempotency-a',
+            'Source A',
+            'C:\\Source',
+            '{}',
+            '[]'
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO standard_backup_job_endpoint_bindings (
+            job_id,
+            job_revision_id,
+            role,
+            ordinal,
+            endpoint_id,
+            endpoint_revision_id,
+            registration_state
+        )
+        VALUES (
+            'job-a',
+            'job-rev-a',
+            'SOURCE',
+            0,
+            'endpoint-a',
+            'endpoint-rev-a',
+            'REGISTRATION_PENDING'
+        )
         """
     )
 
