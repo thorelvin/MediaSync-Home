@@ -173,6 +173,12 @@ class ActivityOverviewViewState:
     read_model_available: bool
     has_more_runs: bool
     latest_plan_id: str | None = None
+    latest_run_id: str | None = None
+    latest_run_state: str | None = None
+    latest_job_id: str | None = None
+    active_run_id: str | None = None
+    active_run_state: str | None = None
+    active_job_id: str | None = None
 
 
 STEP_TITLES = {
@@ -394,11 +400,38 @@ def activity_overview_from_response(response: IpcResponse | None) -> ActivityOve
 
     runs = overview.get("runs")
     run_payloads = tuple(item for item in runs if isinstance(item, dict)) if isinstance(runs, list) else ()
+    active_payload = next(
+        (
+            payload
+            for payload in run_payloads
+            if payload.get("state")
+            in {"CREATED", "QUEUED", "PREFLIGHT", "EXECUTING", "PAUSING", "PAUSED"}
+        ),
+        None,
+    )
     return ActivityOverviewViewState(
         job_status=_activity_status_from_run_payload(run_payloads[0]) if run_payloads else None,
         read_model_available=bool(overview.get("read_model_available", False)),
         has_more_runs=bool(overview.get("has_more", False)),
         latest_plan_id=_required_text(run_payloads[0].get("plan_id")) if run_payloads else None,
+        latest_run_id=_required_text(run_payloads[0].get("run_id")) if run_payloads else None,
+        latest_run_state=_required_text(run_payloads[0].get("state")) if run_payloads else None,
+        latest_job_id=_required_text(run_payloads[0].get("job_id")) if run_payloads else None,
+        active_run_id=(
+            _required_text(active_payload.get("run_id"))
+            if active_payload is not None
+            else None
+        ),
+        active_run_state=(
+            _required_text(active_payload.get("state"))
+            if active_payload is not None
+            else None
+        ),
+        active_job_id=(
+            _required_text(active_payload.get("job_id"))
+            if active_payload is not None
+            else None
+        ),
     )
 
 

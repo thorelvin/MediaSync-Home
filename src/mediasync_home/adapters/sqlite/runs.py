@@ -221,6 +221,182 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
             (job_id,),
         )
 
+    def request_run_pause(self, run_id: str) -> StartedRun | None:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            cursor = self._connection.execute(
+                """
+                UPDATE runs
+                SET
+                    state = 'PAUSING',
+                    row_version = row_version + 1
+                WHERE id = ?
+                    AND state IN ('CREATED', 'QUEUED', 'PREFLIGHT', 'EXECUTING')
+                """,
+                (run_id,),
+            )
+            if cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            run = self.load_started_run(run_id)
+            if run is None:
+                raise SqliteRunStoreError("RUN_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return run
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_PAUSE_REQUEST_FAILED") from exc
+
+    def load_next_pausing_run(self) -> StartedRun | None:
+        return self._load_one(
+            """
+            SELECT
+                id,
+                job_id,
+                job_revision_id,
+                plan_id,
+                command_request_id,
+                command_receipt_id,
+                trigger_occurrence_id,
+                logical_run_group_id,
+                resumed_from_run_id,
+                trigger_type,
+                state,
+                summary_json,
+                warning_count,
+                error_count,
+                app_version,
+                plan_checksum,
+                idempotency_key,
+                planned_operations,
+                planned_bytes
+            FROM runs
+            WHERE state = 'PAUSING'
+            ORDER BY started_utc, id
+            LIMIT 1
+            """,
+            (),
+        )
+
+    def finalize_requested_run_pause(self, run_id: str) -> StartedRun | None:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            self._connection.execute(
+                """
+                UPDATE run_targets
+                SET
+                    state = 'PAUSED',
+                    last_lease_id = NULL,
+                    last_ownership_epoch = NULL,
+                    last_fencing_token = NULL,
+                    row_version = row_version + 1
+                WHERE run_id = ?
+                    AND state IN ('ACQUIRING_LEASE', 'REVALIDATING', 'EXECUTING')
+                    AND EXISTS (
+                        SELECT 1
+                        FROM runs
+                        WHERE runs.id = run_targets.run_id
+                            AND runs.state = 'PAUSING'
+                    )
+                """,
+                (run_id,),
+            )
+            cursor = self._connection.execute(
+                """
+                UPDATE runs
+                SET
+                    state = 'PAUSED',
+                    row_version = row_version + 1
+                WHERE id = ?
+                    AND state = 'PAUSING'
+                """,
+                (run_id,),
+            )
+            if cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            run = self.load_started_run(run_id)
+            if run is None:
+                raise SqliteRunStoreError("RUN_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return run
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_PAUSE_BOUNDARY_FAILED") from exc
+
+    def resume_paused_run(self, run_id: str) -> StartedRun | None:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            self._connection.execute(
+                """
+                UPDATE run_targets
+                SET
+                    state = 'PENDING',
+                    last_lease_id = NULL,
+                    last_ownership_epoch = NULL,
+                    last_fencing_token = NULL,
+                    row_version = row_version + 1
+                WHERE run_id = ?
+                    AND state = 'PAUSED'
+                    AND EXISTS (
+                        SELECT 1
+                        FROM runs
+                        WHERE runs.id = run_targets.run_id
+                            AND runs.state = 'PAUSED'
+                    )
+                """,
+                (run_id,),
+            )
+            cursor = self._connection.execute(
+                """
+                UPDATE runs
+                SET
+                    state = 'QUEUED',
+                    row_version = row_version + 1
+                WHERE id = ?
+                    AND state = 'PAUSED'
+                    AND EXISTS (
+                        SELECT 1
+                        FROM run_targets
+                        WHERE run_targets.run_id = runs.id
+                            AND run_targets.state = 'PENDING'
+                    )
+                """,
+                (run_id,),
+            )
+            if cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            run = self.load_started_run(run_id)
+            if run is None:
+                raise SqliteRunStoreError("RUN_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return run
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_RESUME_FAILED") from exc
+
     def load_next_runnable_run(self) -> StartedRun | None:
         return self._load_one(
             """

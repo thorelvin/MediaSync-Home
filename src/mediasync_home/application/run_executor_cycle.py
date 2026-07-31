@@ -62,6 +62,7 @@ from mediasync_home.domain.capabilities import MutationPermit
 
 
 class RunExecutorCycleAction(str, Enum):
+    RUN_PAUSED = "RUN_PAUSED"
     PREFLIGHT_LEASE_ACQUIRED = "PREFLIGHT_LEASE_ACQUIRED"
     EXECUTION_STARTED = "EXECUTION_STARTED"
     OPERATIONS_PLANNED = "OPERATIONS_PLANNED"
@@ -201,6 +202,29 @@ def execute_one_run_executor_cycle(
     recovery_object_cleanup_port: RecoveryObjectCleanupPort | None = None,
     staging_transfer_port: RunTargetStagingPort | None = None,
 ) -> RunExecutorCycleOutcome:
+    pausing = runs.load_next_pausing_run()
+    if pausing is not None:
+        for run_id, run_target_id in lease_registry.retained_run_target_keys():
+            if run_id == pausing.run_id:
+                lease_registry.release_retained_run_target_lease(
+                    run_id=run_id,
+                    run_target_id=run_target_id,
+                )
+        paused = runs.finalize_requested_run_pause(pausing.run_id)
+        if paused is None:
+            return _blocked(
+                run_id=pausing.run_id,
+                run_target_id=None,
+                validation_codes=("RUN_PAUSE_BOUNDARY_STATE_CONFLICT",),
+                next_action="Reload run state before retrying the pause boundary.",
+            )
+        return _advanced(
+            action=RunExecutorCycleAction.RUN_PAUSED,
+            run_id=paused.run_id,
+            run_target_id=None,
+            next_action="Run paused at a safe operation boundary and released endpoint leases.",
+        )
+
     retained = _next_retained_executing_target(
         runs=runs,
         lease_registry=lease_registry,

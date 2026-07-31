@@ -69,6 +69,45 @@ from mediasync_home.application.runs import (
 from mediasync_home.domain.capabilities import MutationPermit, _issue_mutation_permit
 
 
+def test_executor_finalizes_pause_only_at_cycle_boundary_and_releases_lease() -> None:
+    plan = _sealed_plan()
+    runs = _InMemoryRunStore(
+        _run(
+            state=RunState.PAUSING,
+            plan=plan,
+            target_state=RunTargetState.EXECUTING,
+        )
+    )
+    lease = _FakeLiveLease()
+    registry = HeldRunTargetLeaseRegistry()
+    registry.retain_run_target_lease(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+        lease=lease,
+    )
+
+    outcome = execute_one_run_executor_cycle(
+        runs=runs,
+        leases=_FakeLeaseAuthority(lease),
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=_FakeRecoveryOperationStore(()),
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        process_instance_id="host-a",
+    )
+
+    paused = runs.load_started_run("run-a")
+    assert outcome.action is RunExecutorCycleAction.RUN_PAUSED
+    assert outcome.advanced is True
+    assert lease.released is True
+    assert registry.retained_count == 0
+    assert paused is not None
+    assert paused.state is RunState.PAUSED
+    assert paused.targets[0].state is RunTargetState.PAUSED
+    assert paused.targets[0].last_lease_id is None
+
+
 def test_bounded_executor_cycle_progresses_queued_target_through_staging() -> None:
     plan = _sealed_plan()
     runs = _InMemoryRunStore(_run(state=RunState.QUEUED, plan=plan))
@@ -571,6 +610,38 @@ class _InMemoryRunStore(RunExecutorQueueStore):
             return None
         if not any(target.state is RunTargetState.PENDING for target in self.run.targets):
             return None
+        return self.run
+
+    def load_next_pausing_run(self) -> StartedRun | None:
+        if self.run is None or self.run.state is not RunState.PAUSING:
+            return None
+        return self.run
+
+    def finalize_requested_run_pause(self, run_id: str) -> StartedRun | None:
+        run = self.load_started_run(run_id)
+        if run is None or run.state is not RunState.PAUSING:
+            return None
+        self.run = replace(
+            run,
+            state=RunState.PAUSED,
+            targets=tuple(
+                replace(
+                    target,
+                    state=RunTargetState.PAUSED,
+                    last_lease_id=None,
+                    last_ownership_epoch=None,
+                    last_fencing_token=None,
+                )
+                if target.state
+                in {
+                    RunTargetState.ACQUIRING_LEASE,
+                    RunTargetState.REVALIDATING,
+                    RunTargetState.EXECUTING,
+                }
+                else target
+                for target in run.targets
+            ),
+        )
         return self.run
 
     def load_next_revalidating_run_target_key(self) -> tuple[str, str] | None:

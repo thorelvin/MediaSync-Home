@@ -164,6 +164,58 @@ def test_sqlite_run_store_persists_started_run_from_sealed_plan(tmp_path: Path) 
         assert _row_count(connection, "run_targets") == 1
 
 
+def test_sqlite_run_pause_boundary_and_resume_force_fresh_lease(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        plans = SqlitePlanStore(connection)
+        runs = SqliteRunStore(connection)
+        plan = _sealed_plan()
+        plans.save_sealed_plan(plan)
+        started = start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        ).run
+        assert started is not None
+        connection.execute("UPDATE runs SET state = 'EXECUTING' WHERE id = 'run-a'")
+        connection.execute(
+            """
+            UPDATE run_targets
+            SET
+                state = 'EXECUTING',
+                last_lease_id = 'lease-a',
+                last_ownership_epoch = 1,
+                last_fencing_token = 42
+            WHERE run_id = 'run-a'
+            """
+        )
+
+        pausing = runs.request_run_pause("run-a")
+        paused = runs.finalize_requested_run_pause("run-a")
+        resumed = runs.resume_paused_run("run-a")
+
+        assert pausing is not None
+        assert pausing.state is RunState.PAUSING
+        assert paused is not None
+        assert paused.state is RunState.PAUSED
+        assert paused.targets[0].state is RunTargetState.PAUSED
+        assert paused.targets[0].last_lease_id is None
+        assert paused.targets[0].last_ownership_epoch is None
+        assert paused.targets[0].last_fencing_token is None
+        assert resumed is not None
+        assert resumed.state is RunState.QUEUED
+        assert resumed.targets[0].state is RunTargetState.PENDING
+        assert runs.load_next_runnable_run() == resumed
+
+
 def test_sqlite_run_store_replays_run_idempotency_key(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:

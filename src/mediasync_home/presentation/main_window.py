@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Protocol, cast
 from uuid import uuid4
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, QTimer, Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -106,6 +107,11 @@ from mediasync_home.presentation.view_models.snapshot_health import (
     SnapshotHealthPreviewState,
     empty_snapshot_health_preview_state,
     snapshot_health_preview_from_responses,
+)
+from mediasync_home.presentation.view_models.run_progress import (
+    RunProgressViewState,
+    empty_run_progress_state,
+    run_progress_from_response,
 )
 from mediasync_home.ipc.protocol import IpcResponse, IpcStatus
 
@@ -227,6 +233,33 @@ class BackupStartProvider(Protocol):
     ) -> IpcResponse: ...
 
 
+class RunProgressProvider(Protocol):
+    def get_run_progress(
+        self,
+        *,
+        run_id: str,
+        after_sequence_no: int | None = None,
+    ) -> IpcResponse: ...
+
+
+class RunControlProvider(Protocol):
+    def pause_backup(
+        self,
+        *,
+        run_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse: ...
+
+    def resume_backup(
+        self,
+        *,
+        run_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse: ...
+
+
 class MediaSyncWindow(QMainWindow):
     def __init__(
         self,
@@ -260,6 +293,9 @@ class MediaSyncWindow(QMainWindow):
         self._start_request_id: str | None = None
         self._start_idempotency_key: str | None = None
         self._queued_backup_job_ids: set[str] = set()
+        self._active_run_id: str | None = None
+        self._run_control_pending = False
+        self._run_progress_state = empty_run_progress_state()
         self._setup_state = build_standard_backup_setup_state(self._setup_draft)
         self._backup_overview_state = empty_backup_overview_state()
         self._job_status_state = empty_backup_job_status_state()
@@ -360,6 +396,13 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_detail_plan_value: QLabel | None = None
         self._jobs_detail_target_rows: list[QLabel] = []
         self._jobs_start_backup_button: QPushButton | None = None
+        self._jobs_run_progress_title: QLabel | None = None
+        self._jobs_run_progress_state: QLabel | None = None
+        self._jobs_run_progress_bar: QProgressBar | None = None
+        self._jobs_run_progress_detail: QLabel | None = None
+        self._jobs_run_target_rows: list[QLabel] = []
+        self._jobs_pause_button: QPushButton | None = None
+        self._jobs_resume_button: QPushButton | None = None
         self._engine_title_label: QLabel | None = None
         self._engine_scope_label: QLabel | None = None
         self._engine_contract_label: QLabel | None = None
@@ -398,6 +441,9 @@ class MediaSyncWindow(QMainWindow):
         )
         self._selected_language_code = LanguageCode(self._user_preferences.language.value)
         self._language_actions: dict[str, QAction] = {}
+        self._run_progress_timer = QTimer(self)
+        self._run_progress_timer.setInterval(1000)
+        self._run_progress_timer.timeout.connect(self._poll_active_run_progress)
         self._show_component_gallery = (
             os.environ.get("MEDIASYNC_DEV_COMPONENT_GALLERY") == "1"
             if show_component_gallery is None
@@ -959,6 +1005,7 @@ class MediaSyncWindow(QMainWindow):
             "ACQUIRING_LEASE": ("Acquiring access", "Henter tilgang"),
             "REVALIDATING": ("Checking", "Kontrollerer"),
             "EXECUTING": ("Running", "Kjører"),
+            "PAUSED": ("Paused", "Pauset"),
             "WAITING_FOR_ENDPOINT": ("Waiting for target", "Venter på mål"),
             "NEEDS_REVIEW": ("Needs review", "Må vurderes"),
             "SUCCEEDED": ("Completed", "Fullført"),
@@ -1035,6 +1082,12 @@ class MediaSyncWindow(QMainWindow):
         if state.job_status is not None:
             self._job_status_state = state.job_status
             self._apply_job_status_state(state.job_status)
+        if state.active_run_id is not None:
+            self._set_active_run(state.active_run_id)
+            self._poll_active_run_progress()
+        elif self._run_progress_state.terminal:
+            self._active_run_id = None
+            self._run_progress_timer.stop()
         plan_id = state.latest_plan_id or self._job_detail_state.plan_id
         if plan_id is None:
             self.apply_plan_operation_preview(empty_plan_operation_preview_state())
@@ -1042,6 +1095,184 @@ class MediaSyncWindow(QMainWindow):
             self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
             return
         self._refresh_plan_previews(plan_id)
+
+    def _set_active_run(self, run_id: str) -> None:
+        if run_id != self._active_run_id:
+            self._active_run_id = run_id
+            self._run_progress_state = empty_run_progress_state()
+        if not self._run_progress_timer.isActive():
+            self._run_progress_timer.start()
+
+    def _poll_active_run_progress(self) -> None:
+        run_id = self._active_run_id
+        if (
+            run_id is None
+            or self._engine_client is None
+            or not hasattr(self._engine_client, "get_run_progress")
+        ):
+            self._run_progress_timer.stop()
+            return
+        provider = cast(RunProgressProvider, self._engine_client)
+        response = provider.get_run_progress(
+            run_id=run_id,
+            after_sequence_no=self._run_progress_state.sequence_no,
+        )
+        state = run_progress_from_response(
+            response,
+            previous=self._run_progress_state,
+        )
+        self._run_progress_state = state
+        self._apply_run_progress_state(state)
+        if not state.run_found:
+            return
+        if state.terminal:
+            self._run_progress_timer.stop()
+            self._active_run_id = None
+            if state.job_id is not None:
+                self._queued_backup_job_ids.discard(state.job_id)
+            self._refresh_backup_overview()
+            self._refresh_history_timeline()
+
+    def _apply_run_progress_state(self, state: RunProgressViewState) -> None:
+        visible = (
+            state.run_found
+            and state.job_id is not None
+            and state.job_id == self._job_detail_state.job_id
+        )
+        widgets = (
+            self._jobs_run_progress_title,
+            self._jobs_run_progress_state,
+            self._jobs_run_progress_bar,
+            self._jobs_run_progress_detail,
+        )
+        for widget in widgets:
+            if widget is not None:
+                widget.setVisible(visible)
+        if not visible:
+            for row in self._jobs_run_target_rows:
+                row.setVisible(False)
+            if self._jobs_pause_button is not None:
+                self._jobs_pause_button.setVisible(False)
+            if self._jobs_resume_button is not None:
+                self._jobs_resume_button.setVisible(False)
+            return
+        if state.active:
+            for start_button in (
+                self._start_backup_button,
+                self._jobs_start_backup_button,
+            ):
+                if start_button is not None:
+                    start_button.setVisible(False)
+                    start_button.setEnabled(False)
+
+        if self._jobs_run_progress_title is not None:
+            self._jobs_run_progress_title.setText(self._texts().run_progress)
+        if self._jobs_run_progress_state is not None:
+            self._jobs_run_progress_state.setText(
+                self._history_state_label(state.state or "CREATED")
+            )
+        if self._jobs_run_progress_bar is not None:
+            maximum = max(state.planned_operations, 1)
+            self._jobs_run_progress_bar.setRange(0, maximum)
+            self._jobs_run_progress_bar.setValue(
+                min(state.completed_operations, maximum)
+            )
+        if self._jobs_run_progress_detail is not None:
+            self._jobs_run_progress_detail.setText(
+                f"{state.completed_operations} / {state.planned_operations} "
+                f"{self._texts().operation_count} · "
+                f"{_format_bytes(state.completed_bytes)} / "
+                f"{_format_bytes(state.planned_bytes)}"
+            )
+        for index, row in enumerate(self._jobs_run_target_rows):
+            if index >= len(state.targets):
+                row.setText("")
+                row.setVisible(False)
+                continue
+            target = state.targets[index]
+            row.setText(
+                f"{target.endpoint_id} · {self._target_state_label(target.state)} · "
+                f"{target.completed_operations}/{target.planned_operations}"
+            )
+            row.setVisible(True)
+        pausable = state.state in {"CREATED", "QUEUED", "PREFLIGHT", "EXECUTING"}
+        resumable = state.state == "PAUSED"
+        if self._jobs_pause_button is not None:
+            self._jobs_pause_button.setText(self._texts().pause_backup)
+            self._jobs_pause_button.setToolTip(self._texts().pause_backup_tooltip)
+            self._jobs_pause_button.setVisible(pausable)
+            self._jobs_pause_button.setEnabled(
+                pausable
+                and not self._run_control_pending
+                and self._engine_client is not None
+                and hasattr(self._engine_client, "pause_backup")
+            )
+        if self._jobs_resume_button is not None:
+            self._jobs_resume_button.setText(self._texts().resume_backup)
+            self._jobs_resume_button.setToolTip(self._texts().resume_backup_tooltip)
+            self._jobs_resume_button.setVisible(resumable)
+            self._jobs_resume_button.setEnabled(
+                resumable
+                and not self._run_control_pending
+                and self._engine_client is not None
+                and hasattr(self._engine_client, "resume_backup")
+            )
+
+    def _pause_active_backup(self) -> None:
+        self._submit_run_control(pause=True)
+
+    def _resume_active_backup(self) -> None:
+        self._submit_run_control(pause=False)
+
+    def _submit_run_control(self, *, pause: bool) -> None:
+        run_id = self._active_run_id or self._run_progress_state.run_id
+        method_name = "pause_backup" if pause else "resume_backup"
+        if (
+            run_id is None
+            or self._engine_client is None
+            or not hasattr(self._engine_client, method_name)
+            or self._run_control_pending
+        ):
+            return
+        self._run_control_pending = True
+        self._apply_run_progress_state(self._run_progress_state)
+        provider = cast(RunControlProvider, self._engine_client)
+        request_id = str(uuid4())
+        idempotency_key = str(uuid4())
+        response = (
+            provider.pause_backup(
+                run_id=run_id,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+            )
+            if pause
+            else provider.resume_backup(
+                run_id=run_id,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+            )
+        )
+        self._run_control_pending = False
+        if response.status is IpcStatus.REJECTED:
+            codes = response.payload.get("validation_codes")
+            reason = (
+                str(codes[0])
+                if isinstance(codes, list) and codes
+                else response.reason.value
+                if response.reason is not None
+                else "UNKNOWN"
+            )
+            self.apply_engine_status(
+                replace(
+                    self._engine_status_state,
+                    detail=f"Run control failed: {reason}",
+                    status_kind="warning",
+                )
+            )
+            self._apply_run_progress_state(self._run_progress_state)
+            return
+        self._set_active_run(run_id)
+        self._poll_active_run_progress()
 
     def _refresh_plan_previews(self, plan_id: str) -> None:
         self._refresh_plan_operation_preview(plan_id)
@@ -1501,11 +1732,16 @@ class MediaSyncWindow(QMainWindow):
                 and state.plan_checksum is not None
             )
             queued = state.job_id in self._queued_backup_job_ids
-            start_button.setVisible(has_plan)
+            active_for_job = (
+                self._run_progress_state.active
+                and self._run_progress_state.job_id == state.job_id
+            )
+            start_button.setVisible(has_plan and not active_for_job)
             start_button.setEnabled(
                 has_plan
                 and state.plan_runnable
                 and not queued
+                and not active_for_job
                 and self._engine_client is not None
                 and hasattr(self._engine_client, "start_backup")
             )
@@ -1513,6 +1749,7 @@ class MediaSyncWindow(QMainWindow):
                 self._texts().backup_queued if queued else self._texts().start_backup
             )
             start_button.setToolTip(self._texts().start_backup_tooltip)
+        self._apply_run_progress_state(self._run_progress_state)
         self._refresh_dashboard_geometry()
 
     def _start_selected_backup(self) -> None:
@@ -1553,6 +1790,12 @@ class MediaSyncWindow(QMainWindow):
                 )
             )
             return
+        run_payload = response.payload.get("run")
+        run_id = (
+            run_payload.get("run_id")
+            if isinstance(run_payload, dict)
+            else None
+        )
         self._queued_backup_job_ids.add(state.job_id)
         self._start_request_id = None
         self._start_idempotency_key = None
@@ -1565,6 +1808,9 @@ class MediaSyncWindow(QMainWindow):
         )
         self._apply_backup_job_detail_state(state)
         self._refresh_activity_overview()
+        if isinstance(run_id, str) and run_id:
+            self._set_active_run(run_id)
+            self._poll_active_run_progress()
 
     def _apply_job_status_state(self, state: BackupJobStatusViewState) -> None:
         if self._activity_status_title is not None:
@@ -1928,13 +2174,77 @@ class MediaSyncWindow(QMainWindow):
             self._jobs_detail_target_rows.append(row)
             layout.addWidget(row, 6 + index, 1, 1, 2)
 
+        progress_title = QLabel(texts.run_progress)
+        progress_title.setObjectName("mutedLabel")
+        progress_title.setVisible(False)
+        self._jobs_run_progress_title = progress_title
+        layout.addWidget(progress_title, 9, 0)
+
+        progress_state = QLabel()
+        progress_state.setObjectName("jobsRunProgressState")
+        progress_state.setVisible(False)
+        _configure_responsive_label(progress_state)
+        self._jobs_run_progress_state = progress_state
+        layout.addWidget(progress_state, 9, 1, 1, 2)
+
+        progress_bar = QProgressBar()
+        progress_bar.setObjectName("jobsRunProgressBar")
+        progress_bar.setRange(0, 1)
+        progress_bar.setValue(0)
+        progress_bar.setTextVisible(False)
+        progress_bar.setFixedHeight(16)
+        progress_bar.setVisible(False)
+        self._jobs_run_progress_bar = progress_bar
+        layout.addWidget(progress_bar, 10, 0, 1, 3)
+
+        progress_detail = QLabel()
+        progress_detail.setObjectName("jobsRunProgressDetail")
+        progress_detail.setVisible(False)
+        _configure_responsive_label(progress_detail)
+        self._jobs_run_progress_detail = progress_detail
+        layout.addWidget(progress_detail, 11, 0, 1, 3)
+
+        for index in range(3):
+            row = QLabel()
+            row.setObjectName("jobsRunTargetRow")
+            row.setVisible(False)
+            _configure_responsive_label(row)
+            self._jobs_run_target_rows.append(row)
+            layout.addWidget(row, 12 + index, 0, 1, 3)
+
+        pause_button = QPushButton(texts.pause_backup)
+        pause_button.setObjectName("jobsPauseBackupButton")
+        pause_button.setToolTip(texts.pause_backup_tooltip)
+        pause_button.setVisible(False)
+        pause_button.clicked.connect(self._pause_active_backup)
+        self._jobs_pause_button = pause_button
+        layout.addWidget(
+            pause_button,
+            15,
+            1,
+            alignment=Qt.AlignmentFlag.AlignRight,
+        )
+
+        resume_button = QPushButton(texts.resume_backup)
+        resume_button.setObjectName("jobsResumeBackupButton")
+        resume_button.setToolTip(texts.resume_backup_tooltip)
+        resume_button.setVisible(False)
+        resume_button.clicked.connect(self._resume_active_backup)
+        self._jobs_resume_button = resume_button
+        layout.addWidget(
+            resume_button,
+            15,
+            2,
+            alignment=Qt.AlignmentFlag.AlignRight,
+        )
+
         start_backup = QPushButton(texts.start_backup)
         start_backup.setObjectName("jobsStartBackupButton")
         start_backup.setToolTip(texts.start_backup_tooltip)
         start_backup.setVisible(False)
         start_backup.clicked.connect(self._start_selected_backup)
         self._jobs_start_backup_button = start_backup
-        layout.addWidget(start_backup, 9, 2)
+        layout.addWidget(start_backup, 16, 2)
         layout.setColumnStretch(1, 1)
         return panel
 

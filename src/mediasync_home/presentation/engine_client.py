@@ -337,6 +337,53 @@ class EngineClient:
             )
         )
 
+    def pause_backup(
+        self,
+        *,
+        run_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        return self._submit_run_control(
+            RunCommandName.PAUSE_RUN,
+            run_id=run_id,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
+
+    def resume_backup(
+        self,
+        *,
+        run_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        return self._submit_run_control(
+            RunCommandName.RESUME_RUN,
+            run_id=run_id,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
+
+    def _submit_run_control(
+        self,
+        command_name: RunCommandName,
+        *,
+        run_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        payload: dict[str, object] = {"run_id": run_id}
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.submit_command(
+                command_name.value,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                payload_hash=canonical_command_payload_hash(payload),
+            )
+        )
+
     def _request_with_handshake_retry(
         self,
         request: Callable[[], IpcResponse],

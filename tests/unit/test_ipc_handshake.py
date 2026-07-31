@@ -584,6 +584,42 @@ class _InMemoryRunStore(RunStore, RunActivityReadModelStore):
         self.runs[run_id] = replace(run, targets=tuple(updated_targets))
         return recorded
 
+    def request_run_pause(self, run_id: str) -> StartedRun | None:
+        run = self.load_started_run(run_id)
+        if run is None or run.state not in {
+            RunState.CREATED,
+            RunState.QUEUED,
+            RunState.PREFLIGHT,
+            RunState.EXECUTING,
+        }:
+            return None
+        updated = replace(run, state=RunState.PAUSING)
+        self.runs[run_id] = updated
+        return updated
+
+    def resume_paused_run(self, run_id: str) -> StartedRun | None:
+        run = self.load_started_run(run_id)
+        if run is None or run.state is not RunState.PAUSED:
+            return None
+        updated = replace(
+            run,
+            state=RunState.QUEUED,
+            targets=tuple(
+                replace(
+                    target,
+                    state=RunTargetState.PENDING,
+                    last_lease_id=None,
+                    last_ownership_epoch=None,
+                    last_fencing_token=None,
+                )
+                if target.state is RunTargetState.PAUSED
+                else target
+                for target in run.targets
+            ),
+        )
+        self.runs[run_id] = updated
+        return updated
+
 
 class _InMemoryTriggerOccurrenceStore(TriggerOccurrenceStore):
     def __init__(self) -> None:
@@ -2207,6 +2243,84 @@ def test_enabled_start_run_persists_queued_run_and_succeeds_receipt() -> None:
     assert run is not None
     assert run.state is RunState.QUEUED
     assert id_factory.calls == 1
+
+
+def test_enabled_pause_and_resume_commands_are_durable_and_idempotent() -> None:
+    receipts = _InMemoryCommandReceiptStore()
+    runs = _InMemoryRunStore()
+    started = replace(
+        _started_run(),
+        state=RunState.EXECUTING,
+        targets=(
+            replace(
+                _started_run().targets[0],
+                state=RunTargetState.EXECUTING,
+                last_lease_id="lease-a",
+                last_ownership_epoch=1,
+                last_fencing_token=7,
+            ),
+        ),
+    )
+    runs.save_started_run(started)
+    service = _service(mutations_enabled=True)
+    service.command_receipt_store = receipts
+    service.run_control_store = runs
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    pause_payload = {"run_id": started.run_id}
+
+    pause = ipc_client.submit_command(
+        RunCommandName.PAUSE_RUN.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=pause_payload,
+        payload_hash=payload_hash(pause_payload),
+    )
+    replay = ipc_client.submit_command(
+        RunCommandName.PAUSE_RUN.value,
+        request_id=REQUEST_ID_B,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=pause_payload,
+        payload_hash=payload_hash(pause_payload),
+    )
+
+    assert pause.status is IpcStatus.ACCEPTED
+    assert pause.payload["run"]["state"] == RunState.PAUSING.value
+    assert replay.status is IpcStatus.ACCEPTED
+    assert replay.payload["idempotent_replay"] is True
+    assert len(receipts.receipts) == 1
+
+    pausing = runs.load_started_run(started.run_id)
+    assert pausing is not None
+    paused = replace(
+        pausing,
+        state=RunState.PAUSED,
+        targets=(
+            replace(
+                pausing.targets[0],
+                state=RunTargetState.PAUSED,
+                last_lease_id=None,
+                last_ownership_epoch=None,
+                last_fencing_token=None,
+            ),
+        ),
+    )
+    runs.runs[paused.run_id] = paused
+    resume_payload = {"run_id": paused.run_id}
+    resume = ipc_client.submit_command(
+        RunCommandName.RESUME_RUN.value,
+        request_id="11111111-2222-4333-8444-555555555555",
+        idempotency_key="99999999-8888-4777-8666-555555555555",
+        payload=resume_payload,
+        payload_hash=payload_hash(resume_payload),
+    )
+
+    resumed = runs.load_started_run(paused.run_id)
+    assert resume.status is IpcStatus.ACCEPTED
+    assert resume.payload["run"]["state"] == RunState.QUEUED.value
+    assert resumed is not None
+    assert resumed.targets[0].state is RunTargetState.PENDING
+    assert resumed.targets[0].last_lease_id is None
 
 
 def test_enabled_start_run_replay_returns_existing_success_receipt() -> None:

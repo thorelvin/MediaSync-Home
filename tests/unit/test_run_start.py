@@ -18,6 +18,7 @@ from mediasync_home.application.plans import (
 from mediasync_home.application.runs import (
     RunIdFactory,
     RunIds,
+    RunControlCommand,
     StartRunCommand,
     RunStartViolation,
     RunStore,
@@ -26,6 +27,9 @@ from mediasync_home.application.runs import (
     StartedRun,
     StartedRunTarget,
     parse_start_run_command,
+    parse_run_control_command,
+    request_run_pause,
+    resume_paused_run,
     start_run_from_sealed_plan,
 )
 
@@ -121,6 +125,42 @@ class InMemoryRunStore(RunStore):
         self.runs[run_id] = replace(run, targets=tuple(updated_targets))
         return recorded
 
+    def request_run_pause(self, run_id: str) -> StartedRun | None:
+        run = self.load_started_run(run_id)
+        if run is None or run.state not in {
+            RunState.CREATED,
+            RunState.QUEUED,
+            RunState.PREFLIGHT,
+            RunState.EXECUTING,
+        }:
+            return None
+        updated = replace(run, state=RunState.PAUSING)
+        self.runs[run_id] = updated
+        return updated
+
+    def resume_paused_run(self, run_id: str) -> StartedRun | None:
+        run = self.load_started_run(run_id)
+        if run is None or run.state is not RunState.PAUSED:
+            return None
+        updated = replace(
+            run,
+            state=RunState.QUEUED,
+            targets=tuple(
+                replace(
+                    target,
+                    state=RunTargetState.PENDING,
+                    last_lease_id=None,
+                    last_ownership_epoch=None,
+                    last_fencing_token=None,
+                )
+                if target.state is RunTargetState.PAUSED
+                else target
+                for target in run.targets
+            ),
+        )
+        self.runs[run_id] = updated
+        return updated
+
 
 class FixedRunIdFactory(RunIdFactory):
     def __init__(self) -> None:
@@ -144,6 +184,89 @@ def test_parse_start_run_command_requires_plan_id_and_checksum() -> None:
             idempotency_key="idempotency-a",
             payload={"plan_id": "plan-a", "plan_checksum": "not-a-checksum"},
         )
+
+
+def test_pause_request_waits_for_executor_boundary_and_resume_requeues_target() -> None:
+    plan = _sealed_plan()
+    runs = InMemoryRunStore()
+    started = start_run_from_sealed_plan(
+        command=_start_command(plan),
+        plans=InMemoryPlanStore(plan),
+        runs=runs,
+        id_factory=FixedRunIdFactory(),
+    ).run
+    assert started is not None
+    executing = replace(
+        started,
+        state=RunState.EXECUTING,
+        targets=(
+            replace(
+                started.targets[0],
+                state=RunTargetState.EXECUTING,
+                last_lease_id="lease-a",
+                last_ownership_epoch=1,
+                last_fencing_token=7,
+            ),
+        ),
+    )
+    runs.runs[executing.run_id] = executing
+    pause_command = RunControlCommand(
+        request_id="pause-request",
+        idempotency_key="pause-key",
+        run_id=executing.run_id,
+    )
+
+    pause = request_run_pause(command=pause_command, runs=runs)
+
+    assert pause.applied is True
+    assert pause.run is not None
+    assert pause.run.state is RunState.PAUSING
+    assert pause.run.targets[0].state is RunTargetState.EXECUTING
+
+    paused = replace(
+        pause.run,
+        state=RunState.PAUSED,
+        targets=(
+            replace(
+                pause.run.targets[0],
+                state=RunTargetState.PAUSED,
+                last_lease_id=None,
+                last_ownership_epoch=None,
+                last_fencing_token=None,
+            ),
+        ),
+    )
+    runs.runs[paused.run_id] = paused
+    resume = resume_paused_run(
+        command=RunControlCommand(
+            request_id="resume-request",
+            idempotency_key="resume-key",
+            run_id=paused.run_id,
+        ),
+        runs=runs,
+    )
+
+    assert resume.applied is True
+    assert resume.run is not None
+    assert resume.run.state is RunState.QUEUED
+    assert resume.run.targets[0].state is RunTargetState.PENDING
+    assert resume.run.targets[0].last_lease_id is None
+
+
+def test_run_control_parser_and_state_preconditions_fail_closed() -> None:
+    with pytest.raises(RunStartViolation, match="RUN_CONTROL_REQUIRES_RUN_ID"):
+        parse_run_control_command(
+            request_id="request-a",
+            idempotency_key="idempotency-a",
+            payload={},
+        )
+    runs = InMemoryRunStore()
+    missing = request_run_pause(
+        command=RunControlCommand("request-a", "idempotency-a", "missing"),
+        runs=runs,
+    )
+    assert missing.applied is False
+    assert missing.validation_codes == ("RUN_NOT_FOUND",)
 
 
 def test_start_run_from_sealed_plan_queues_checksum_bound_run() -> None:

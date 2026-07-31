@@ -398,6 +398,42 @@ QComboBox#historyJobFilter {{
     padding: 0 {tokens.space_3}px;
 }}
 
+QProgressBar#jobsRunProgressBar {{
+    border: {tokens.border_hairline}px solid {tokens.border};
+    border-radius: {tokens.radius_sm}px;
+    background: {tokens.surface_alt};
+}}
+
+QProgressBar#jobsRunProgressBar::chunk {{
+    border-radius: {tokens.radius_sm}px;
+    background: {tokens.accent};
+}}
+
+QPushButton#jobsPauseBackupButton,
+QPushButton#jobsResumeBackupButton {{
+    min-height: 32px;
+    border-radius: {tokens.radius_sm}px;
+    border: {tokens.border_hairline}px solid {tokens.border};
+    background: {tokens.surface_alt};
+    color: {tokens.text};
+    padding: 0 {tokens.space_4}px;
+}}
+
+QPushButton#jobsPauseBackupButton:hover,
+QPushButton#jobsResumeBackupButton:hover {{
+    border-color: {tokens.accent};
+}}
+
+QPushButton#jobsPauseBackupButton:focus,
+QPushButton#jobsResumeBackupButton:focus {{
+    border: {tokens.border_focus}px solid {tokens.focus};
+}}
+
+QPushButton#jobsPauseBackupButton:disabled,
+QPushButton#jobsResumeBackupButton:disabled {{
+    color: {tokens.text_muted};
+}}
+
 QPushButton#createBackupButton,
 QPushButton#startBackupButton,
 QPushButton#jobsStartBackupButton {{

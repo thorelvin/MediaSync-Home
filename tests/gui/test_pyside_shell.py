@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QFileDialog,
     QLabel,
     QListWidget,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -1283,6 +1284,58 @@ def test_start_backup_button_submits_sealed_plan_once(qapp) -> None:
         window.deleteLater()
 
 
+def test_jobs_page_shows_live_progress_and_pause_resume_controls(qapp) -> None:
+    provider = _FakeRunControlDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.show()
+        window.refresh_engine_status()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+        progress = window.findChild(QProgressBar, "jobsRunProgressBar")
+        detail = window.findChild(QLabel, "jobsRunProgressDetail")
+        pause = window.findChild(QPushButton, "jobsPauseBackupButton")
+        resume = window.findChild(QPushButton, "jobsResumeBackupButton")
+        start = window.findChild(QPushButton, "jobsStartBackupButton")
+
+        assert progress is not None
+        assert progress.isVisible()
+        assert progress.maximum() == 3
+        assert progress.value() == 1
+        assert detail is not None
+        assert detail.text().startswith("1 / 3 operasjoner")
+        assert pause is not None
+        assert pause.isVisible()
+        assert pause.isEnabled()
+        assert resume is not None
+        assert resume.isHidden()
+        assert start is not None
+        assert start.isHidden()
+
+        QTest.mouseClick(pause, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert provider.controls == ["pause"]
+        assert pause.isHidden()
+        assert resume.isVisible()
+        assert resume.isEnabled()
+
+        QTest.mouseClick(resume, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert provider.controls == ["pause", "resume"]
+        assert pause.isVisible()
+        assert resume.isHidden()
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def _ready_state() -> EngineStatusViewState:
     return engine_status_from_response(
         IpcResponse.accepted({"host_status": startup_status(ProcessRole.ENGINE_HOST).to_dict()})
@@ -1764,6 +1817,95 @@ class _FakeBackupStartDashboardEngineClient(_FakeDashboardEngineClient):
         self.calls.append("start_backup")
         self.started_plan = (plan_id, plan_checksum)
         return IpcResponse.accepted({"created": True, "run": {"run_id": "run-a"}})
+
+
+class _FakeRunControlDashboardEngineClient(_FakeBackupStartDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.run_state = "EXECUTING"
+        self.sequence_no = 1
+        self.controls: list[str] = []
+
+    def get_run_progress(
+        self,
+        *,
+        run_id: str,
+        after_sequence_no: int | None = None,
+    ) -> IpcResponse:
+        self.calls.append("get_run_progress")
+        assert run_id == "run-a"
+        snapshot = {
+            "run_id": "run-a",
+            "job_id": "job-a",
+            "state": self.run_state,
+            "terminal": False,
+            "sequence_no": self.sequence_no,
+            "planned_operations": 3,
+            "completed_operations": 1,
+            "planned_bytes": 3072,
+            "completed_bytes": 1024,
+            "warning_count": 0,
+            "error_count": 0,
+            "targets": [
+                {
+                    "endpoint_id": "target-a",
+                    "state": "PAUSED" if self.run_state == "PAUSED" else "EXECUTING",
+                    "planned_operations": 3,
+                    "completed_operations": 1,
+                    "planned_bytes": 3072,
+                    "completed_bytes": 1024,
+                    "warning_count": 0,
+                    "error_count": 0,
+                }
+            ],
+        }
+        return IpcResponse.accepted(
+            {
+                "run_progress": {
+                    "run_id": run_id,
+                    "read_model_available": True,
+                    "run_found": True,
+                    "changed": after_sequence_no != self.sequence_no,
+                    "snapshot": (
+                        None if after_sequence_no == self.sequence_no else snapshot
+                    ),
+                }
+            }
+        )
+
+    def pause_backup(
+        self,
+        *,
+        run_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        assert run_id == "run-a"
+        assert request_id
+        assert idempotency_key
+        self.controls.append("pause")
+        self.run_state = "PAUSED"
+        self.sequence_no += 1
+        return IpcResponse.accepted(
+            {"applied": True, "run": {"run_id": run_id, "state": "PAUSING"}}
+        )
+
+    def resume_backup(
+        self,
+        *,
+        run_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        assert run_id == "run-a"
+        assert request_id
+        assert idempotency_key
+        self.controls.append("resume")
+        self.run_state = "EXECUTING"
+        self.sequence_no += 1
+        return IpcResponse.accepted(
+            {"applied": True, "run": {"run_id": run_id, "state": "QUEUED"}}
+        )
 
 
 class _FakeMultiJobDashboardEngineClient(_FakeBackupStartDashboardEngineClient):

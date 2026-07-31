@@ -476,6 +476,38 @@ class _InMemoryRunStore(RunExecutorQueueStore):
             return None
         return self.run
 
+    def load_next_pausing_run(self) -> StartedRun | None:
+        if self.run is None or self.run.state is not RunState.PAUSING:
+            return None
+        return self.run
+
+    def finalize_requested_run_pause(self, run_id: str) -> StartedRun | None:
+        run = self.load_started_run(run_id)
+        if run is None or run.state is not RunState.PAUSING:
+            return None
+        self.run = replace(
+            run,
+            state=RunState.PAUSED,
+            targets=tuple(
+                replace(
+                    target,
+                    state=RunTargetState.PAUSED,
+                    last_lease_id=None,
+                    last_ownership_epoch=None,
+                    last_fencing_token=None,
+                )
+                if target.state
+                in {
+                    RunTargetState.ACQUIRING_LEASE,
+                    RunTargetState.REVALIDATING,
+                    RunTargetState.EXECUTING,
+                }
+                else target
+                for target in run.targets
+            ),
+        )
+        return self.run
+
     def load_next_revalidating_run_target_key(self) -> tuple[str, str] | None:
         if self.run is None or self.run.state not in {RunState.PREFLIGHT, RunState.EXECUTING}:
             return None

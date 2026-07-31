@@ -67,6 +67,33 @@ def test_engine_client_submits_checksum_bound_start_run() -> None:
     assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
 
 
+def test_engine_client_submits_pause_and_resume_run_controls() -> None:
+    ipc_client = _RecordingIpcClient()
+    client = EngineClient(ipc_client)  # type: ignore[arg-type]
+
+    pause = client.pause_backup(
+        run_id="run-a",
+        request_id="pause-request",
+        idempotency_key="pause-key",
+    )
+
+    assert pause.reason is None
+    assert ipc_client.command_name == RunCommandName.PAUSE_RUN.value
+    assert ipc_client.payload == {"run_id": "run-a"}
+    assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
+
+    resume = client.resume_backup(
+        run_id="run-a",
+        request_id="resume-request",
+        idempotency_key="resume-key",
+    )
+
+    assert resume.reason is None
+    assert ipc_client.command_name == RunCommandName.RESUME_RUN.value
+    assert ipc_client.payload == {"run_id": "run-a"}
+    assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
+
+
 def test_engine_client_returns_failed_reconnect_without_replaying_request() -> None:
     ipc_client = _RestartedHostIpcClient(
         handshake=IpcResponse.rejected(IpcReason.CLIENT_IDENTITY_MISMATCH)

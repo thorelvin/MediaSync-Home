@@ -108,6 +108,38 @@ class ShellText:
         return "Backup queued" if self.language_tooltip_prefix == "Language" else "Backup er lagt i kø"
 
     @property
+    def pause_backup(self) -> str:
+        return "Pause" if self.language_tooltip_prefix == "Language" else "Pause"
+
+    @property
+    def pause_backup_tooltip(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Pause after the current safe file operation"
+        return "Pause etter gjeldende sikre filoperasjon"
+
+    @property
+    def resume_backup(self) -> str:
+        return "Resume" if self.language_tooltip_prefix == "Language" else "Fortsett"
+
+    @property
+    def resume_backup_tooltip(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Resume with fresh target access checks"
+        return "Fortsett med ny kontroll av måltilgang"
+
+    @property
+    def run_progress(self) -> str:
+        return "Backup progress" if self.language_tooltip_prefix == "Language" else "Backupfremdrift"
+
+    @property
+    def operation_count(self) -> str:
+        return "operations" if self.language_tooltip_prefix == "Language" else "operasjoner"
+
+    @property
+    def pause_requested(self) -> str:
+        return "Pausing safely..." if self.language_tooltip_prefix == "Language" else "Pauser trygt..."
+
+    @property
     def history_activities(self) -> str:
         return "Activity history" if self.language_tooltip_prefix == "Language" else "Aktivitetshistorikk"
 

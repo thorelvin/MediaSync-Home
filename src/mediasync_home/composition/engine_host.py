@@ -1589,6 +1589,7 @@ def build_engine_host_runtime(
             plan_operation_read_store=plans,
             plan_endpoint_read_store=plans,
             run_store=runs,
+            run_control_store=runs,
             run_id_factory=UuidRunIdFactory(),
             history_timeline_read_store=history,
             run_activity_read_store=runs,

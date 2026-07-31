@@ -25,6 +25,8 @@ class RunStartViolation(ValueError):
 
 class RunCommandName(str, Enum):
     START_RUN = "START_RUN"
+    PAUSE_RUN = "PAUSE_RUN"
+    RESUME_RUN = "RESUME_RUN"
 
 
 class RunState(str, Enum):
@@ -71,6 +73,13 @@ class StartRunCommand:
     plan_checksum: str
     run_idempotency_key: str | None = None
     trigger_occurrence_id: str | None = None
+
+
+@dataclass(frozen=True)
+class RunControlCommand:
+    request_id: str
+    idempotency_key: str
+    run_id: str
 
 
 @dataclass(frozen=True)
@@ -148,6 +157,16 @@ class RunStartOutcome:
     created: bool
     idempotent_replay: bool
     readiness: RunStartReadiness
+    run: StartedRun | None = None
+
+
+@dataclass(frozen=True)
+class RunControlOutcome:
+    applied: bool
+    idempotent_replay: bool
+    run_id: str
+    validation_codes: tuple[str, ...]
+    next_action: str
     run: StartedRun | None = None
 
 
@@ -302,6 +321,14 @@ class RunStore(Protocol):
     ) -> StartedRun | None: ...
 
 
+class RunControlStore(Protocol):
+    def load_started_run(self, run_id: str) -> StartedRun | None: ...
+
+    def request_run_pause(self, run_id: str) -> StartedRun | None: ...
+
+    def resume_paused_run(self, run_id: str) -> StartedRun | None: ...
+
+
 class RunIdFactory(Protocol):
     def new_run_ids(self) -> RunIds: ...
 
@@ -323,6 +350,119 @@ def parse_start_run_command(
         idempotency_key=idempotency_key,
         plan_id=plan_id,
         plan_checksum=plan_checksum,
+    )
+
+
+def parse_run_control_command(
+    *,
+    request_id: str,
+    idempotency_key: str,
+    payload: dict[str, Any],
+) -> RunControlCommand:
+    run_id = payload.get("run_id")
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise RunStartViolation("RUN_CONTROL_REQUIRES_RUN_ID")
+    return RunControlCommand(
+        request_id=request_id,
+        idempotency_key=idempotency_key,
+        run_id=run_id.strip(),
+    )
+
+
+def request_run_pause(
+    *,
+    command: RunControlCommand,
+    runs: RunControlStore,
+) -> RunControlOutcome:
+    run = runs.load_started_run(command.run_id)
+    if run is None:
+        return _run_control_rejected(
+            command.run_id,
+            "RUN_NOT_FOUND",
+            "Refresh backup activity before pausing the run.",
+        )
+    if run.state in {RunState.PAUSING, RunState.PAUSED}:
+        return RunControlOutcome(
+            applied=True,
+            idempotent_replay=True,
+            run_id=run.run_id,
+            run=run,
+            validation_codes=(),
+            next_action=(
+                "The executor is pausing at the next safe boundary."
+                if run.state is RunState.PAUSING
+                else "The run is paused."
+            ),
+        )
+    if run.state not in {
+        RunState.CREATED,
+        RunState.QUEUED,
+        RunState.PREFLIGHT,
+        RunState.EXECUTING,
+    }:
+        return _run_control_rejected(
+            run.run_id,
+            "RUN_NOT_PAUSABLE",
+            "Only an active backup run can be paused.",
+            run=run,
+        )
+    updated = runs.request_run_pause(run.run_id)
+    if updated is None:
+        return _run_control_rejected(
+            run.run_id,
+            "RUN_PAUSE_STATE_CONFLICT",
+            "Refresh run progress and retry pause.",
+        )
+    return RunControlOutcome(
+        applied=True,
+        idempotent_replay=False,
+        run_id=updated.run_id,
+        run=updated,
+        validation_codes=(),
+        next_action="The executor will pause after its current safe operation boundary.",
+    )
+
+
+def resume_paused_run(
+    *,
+    command: RunControlCommand,
+    runs: RunControlStore,
+) -> RunControlOutcome:
+    run = runs.load_started_run(command.run_id)
+    if run is None:
+        return _run_control_rejected(
+            command.run_id,
+            "RUN_NOT_FOUND",
+            "Refresh backup activity before resuming the run.",
+        )
+    if run.state is RunState.PAUSING:
+        return _run_control_rejected(
+            run.run_id,
+            "RUN_PAUSE_BOUNDARY_PENDING",
+            "Wait until the run reaches its safe paused boundary.",
+            run=run,
+        )
+    if run.state is not RunState.PAUSED:
+        return _run_control_rejected(
+            run.run_id,
+            "RUN_NOT_RESUMABLE",
+            "Only a paused backup run can be resumed.",
+            run=run,
+        )
+    updated = runs.resume_paused_run(run.run_id)
+    if updated is None:
+        return _run_control_rejected(
+            run.run_id,
+            "RUN_RESUME_STATE_CONFLICT",
+            "Refresh run progress and retry resume.",
+        )
+    return RunControlOutcome(
+        applied=True,
+        idempotent_replay=False,
+        run_id=updated.run_id,
+        run=updated,
+        validation_codes=(),
+        next_action="The run is queued for endpoint lease reacquisition and revalidation.",
     )
 
 
@@ -1144,6 +1284,23 @@ def _exception_next_action(exc: RuntimeError, fallback: str) -> str:
     if isinstance(next_action, str) and next_action.strip():
         return next_action
     return fallback
+
+
+def _run_control_rejected(
+    run_id: str,
+    validation_code: str,
+    next_action: str,
+    *,
+    run: StartedRun | None = None,
+) -> RunControlOutcome:
+    return RunControlOutcome(
+        applied=False,
+        idempotent_replay=False,
+        run_id=run_id,
+        run=run,
+        validation_codes=(validation_code,),
+        next_action=next_action,
+    )
 
 
 def _started_run_target(run_id: str, endpoint: PlanEndpoint) -> StartedRunTarget:
