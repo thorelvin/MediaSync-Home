@@ -243,6 +243,7 @@ def _operation_to_dict(operation: PlanOperationReadModel) -> dict[str, object]:
         "target_precondition_kind": operation.target_precondition_kind.value,
         "reason_code": operation.reason_code,
         "risk_level": operation.risk_level.value,
+        "target_endpoint_id": operation.target_endpoint_id,
         "target_relative_path": operation.target_relative_path,
         "planned_bytes": operation.planned_bytes,
     }

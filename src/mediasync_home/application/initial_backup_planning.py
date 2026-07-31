@@ -136,102 +136,62 @@ def build_initial_backup_plan(
             "INITIAL_BACKUP_PLAN_REQUIRES_SINGLE_SOURCE",
             "Refresh the source snapshot before planning changes.",
         )
-    if len(targets) != 1:
+    if not targets:
         raise InitialBackupPlanningError(
-            "INITIAL_BACKUP_PLAN_REQUIRES_SINGLE_WRITABLE_TARGET",
-            "Use one writable target until operation-to-target plan bindings are available.",
+            "INITIAL_BACKUP_PLAN_REQUIRES_WRITABLE_TARGET",
+            "Add and register at least one writable target before planning changes.",
         )
-    target = targets[0]
-    if target.root_case_mode not in {"CASE_SENSITIVE", "CASE_INSENSITIVE"}:
-        raise InitialBackupPlanningError(
-            "INITIAL_BACKUP_PLAN_TARGET_CASE_CONTEXT_UNKNOWN",
-            "Refresh the target snapshot case evidence before planning changes.",
-        )
-    source_entries = _entries_by_comparison_key(
-        source.entries,
-        role="SOURCE",
-        target_case_mode=target.root_case_mode,
-    )
-    target_entries = _entries_by_comparison_key(
-        target.entries,
-        role="TARGET",
-        target_case_mode=target.root_case_mode,
-    )
-    target_descendant_counts = _descendant_counts(
-        target.entries,
-        target_case_mode=target.root_case_mode,
-    )
 
     operations: list[PlanOperation] = []
-    directory_operations: dict[str, str] = {}
-    for entry in sorted(
-        source.entries,
-        key=lambda item: (
-            0 if item.object_type == "directory" else 1,
-            item.relative_path.count("/"),
-            item.comparison_key,
-            item.relative_path,
+    dependencies: list[PlanDependency] = []
+    plan_endpoints: list[PlanEndpoint] = [_plan_endpoint(source)]
+    for target in sorted(
+        targets,
+        key=lambda endpoint: (
+            -1 if endpoint.target_ordinal is None else endpoint.target_ordinal,
+            endpoint.endpoint_id,
         ),
     ):
-        target_comparison_key = _target_comparison_key(
-            entry.relative_path,
-            target.root_case_mode,
-        )
-        target_entry = target_entries.get(target_comparison_key)
-        operation = _plan_entry(
+        target_operations, target_dependencies = _plan_target(
             plan_id=plan_id,
-            source_entry=entry,
-            target_entry=target_entry,
-            target_comparison_key=target_comparison_key,
-            target_descendant_count=target_descendant_counts.get(target_comparison_key, 0),
-            sequence_no=len(operations) + 1,
+            source=source,
+            target=target,
+            first_sequence_no=len(operations) + 1,
         )
-        if operation is None:
-            continue
-        operations.append(operation)
-        if (
-            operation.operation_type is PlanOperationType.CREATE_DIRECTORY
+        operations.extend(target_operations)
+        dependencies.extend(target_dependencies)
+        mutating_operations = tuple(
+            operation
+            for operation in target_operations
+            if operation.operation_type in MUTATING_OPERATION_TYPES
             and operation.risk_level is not PlanRiskLevel.BLOCKED
-        ):
-            directory_operations[target_comparison_key] = operation.operation_id
+        )
+        plan_endpoints.append(
+            _plan_endpoint(
+                target,
+                planned_operations=len(mutating_operations),
+                planned_bytes=sum(
+                    operation.planned_bytes for operation in mutating_operations
+                ),
+            )
+        )
 
     if not operations:
         return InitialBackupPlanBuild(
             plan=None,
             state="NO_CHANGES",
             reason_code="INITIAL_BACKUP_PLAN_NO_CHANGES",
-            next_action="The source and target directory structure require no changes.",
+            next_action="The source and target directory structures require no changes.",
         )
 
-    dependencies = _directory_dependencies(
-        source_entries=source_entries,
-        operations=tuple(operations),
-        directory_operations=directory_operations,
-        target_case_mode=target.root_case_mode,
-    )
-    mutating_operations = tuple(
-        operation
-        for operation in operations
-        if operation.operation_type in MUTATING_OPERATION_TYPES
-        and operation.risk_level is not PlanRiskLevel.BLOCKED
-    )
-    target_operation_count = len(mutating_operations)
-    target_planned_bytes = sum(operation.planned_bytes for operation in mutating_operations)
     plan = seal_plan(
         plan_id=plan_id,
         analysis_id=analysis_id,
         job_id=job_id,
         job_revision_id=job_revision_id,
-        endpoints=(
-            _plan_endpoint(source),
-            _plan_endpoint(
-                target,
-                planned_operations=target_operation_count,
-                planned_bytes=target_planned_bytes,
-            ),
-        ),
+        endpoints=tuple(plan_endpoints),
         operations=tuple(operations),
-        dependencies=dependencies,
+        dependencies=tuple(dependencies),
         execution_policy="MANUAL_REVIEW_REQUIRED",
     )
     blocked = plan.risk_summary.get("highest") == PlanRiskLevel.BLOCKED.value
@@ -264,6 +224,74 @@ def endpoint_capabilities_hash(payload: dict[str, object]) -> str:
 
 def initial_backup_plan_runnable(plan: SealedPlan) -> bool:
     return plan.risk_summary.get("highest") != PlanRiskLevel.BLOCKED.value
+
+
+def _plan_target(
+    *,
+    plan_id: str,
+    source: InitialBackupPlanningEndpoint,
+    target: InitialBackupPlanningEndpoint,
+    first_sequence_no: int,
+) -> tuple[tuple[PlanOperation, ...], tuple[PlanDependency, ...]]:
+    if target.root_case_mode not in {"CASE_SENSITIVE", "CASE_INSENSITIVE"}:
+        raise InitialBackupPlanningError(
+            "INITIAL_BACKUP_PLAN_TARGET_CASE_CONTEXT_UNKNOWN",
+            "Refresh the target snapshot case evidence before planning changes.",
+        )
+    source_entries = _entries_by_comparison_key(
+        source.entries,
+        role="SOURCE",
+        target_case_mode=target.root_case_mode,
+    )
+    target_entries = _entries_by_comparison_key(
+        target.entries,
+        role="TARGET",
+        target_case_mode=target.root_case_mode,
+    )
+    target_descendant_counts = _descendant_counts(
+        target.entries,
+        target_case_mode=target.root_case_mode,
+    )
+    operations: list[PlanOperation] = []
+    directory_operations: dict[str, str] = {}
+    for entry in sorted(
+        source.entries,
+        key=lambda item: (
+            0 if item.object_type == "directory" else 1,
+            item.relative_path.count("/"),
+            item.comparison_key,
+            item.relative_path,
+        ),
+    ):
+        target_comparison_key = _target_comparison_key(
+            entry.relative_path,
+            target.root_case_mode,
+        )
+        operation = _plan_entry(
+            plan_id=plan_id,
+            target_endpoint_id=target.endpoint_id,
+            target_ordinal=target.target_ordinal,
+            source_entry=entry,
+            target_entry=target_entries.get(target_comparison_key),
+            target_comparison_key=target_comparison_key,
+            target_descendant_count=target_descendant_counts.get(target_comparison_key, 0),
+            sequence_no=first_sequence_no + len(operations),
+        )
+        if operation is None:
+            continue
+        operations.append(operation)
+        if (
+            operation.operation_type is PlanOperationType.CREATE_DIRECTORY
+            and operation.risk_level is not PlanRiskLevel.BLOCKED
+        ):
+            directory_operations[target_comparison_key] = operation.operation_id
+    dependencies = _directory_dependencies(
+        source_entries=source_entries,
+        operations=tuple(operations),
+        directory_operations=directory_operations,
+        target_case_mode=target.root_case_mode,
+    )
+    return tuple(operations), dependencies
 
 
 def _single_endpoint(
@@ -320,6 +348,8 @@ def _descendant_counts(
 def _plan_entry(
     *,
     plan_id: str,
+    target_endpoint_id: str,
+    target_ordinal: int | None,
     source_entry: SnapshotFileEntry,
     target_entry: SnapshotFileEntry | None,
     target_comparison_key: str,
@@ -330,6 +360,8 @@ def _plan_entry(
         if target_entry is None:
             return _operation(
                 plan_id=plan_id,
+                target_endpoint_id=target_endpoint_id,
+                target_ordinal=target_ordinal,
                 entry=source_entry,
                 target_comparison_key=target_comparison_key,
                 sequence_no=sequence_no,
@@ -342,6 +374,8 @@ def _plan_entry(
             return None
         return _blocked_operation(
             plan_id=plan_id,
+            target_endpoint_id=target_endpoint_id,
+            target_ordinal=target_ordinal,
             entry=source_entry,
             target_comparison_key=target_comparison_key,
             sequence_no=sequence_no,
@@ -351,6 +385,8 @@ def _plan_entry(
     if source_entry.object_type != "file":
         return _blocked_operation(
             plan_id=plan_id,
+            target_endpoint_id=target_endpoint_id,
+            target_ordinal=target_ordinal,
             entry=source_entry,
             target_comparison_key=target_comparison_key,
             sequence_no=sequence_no,
@@ -359,6 +395,8 @@ def _plan_entry(
     if target_entry is None:
         return _operation(
             plan_id=plan_id,
+            target_endpoint_id=target_endpoint_id,
+            target_ordinal=target_ordinal,
             entry=source_entry,
             target_comparison_key=target_comparison_key,
             sequence_no=sequence_no,
@@ -371,6 +409,8 @@ def _plan_entry(
     if target_entry.object_type == "file":
         return _operation(
             plan_id=plan_id,
+            target_endpoint_id=target_endpoint_id,
+            target_ordinal=target_ordinal,
             entry=source_entry,
             target_comparison_key=target_comparison_key,
             sequence_no=sequence_no,
@@ -383,6 +423,8 @@ def _plan_entry(
     if target_entry.object_type == "directory" and target_descendant_count == 0:
         return _operation(
             plan_id=plan_id,
+            target_endpoint_id=target_endpoint_id,
+            target_ordinal=target_ordinal,
             entry=source_entry,
             target_comparison_key=target_comparison_key,
             sequence_no=sequence_no,
@@ -394,6 +436,8 @@ def _plan_entry(
         )
     return _blocked_operation(
         plan_id=plan_id,
+        target_endpoint_id=target_endpoint_id,
+        target_ordinal=target_ordinal,
         entry=source_entry,
         target_comparison_key=target_comparison_key,
         sequence_no=sequence_no,
@@ -404,6 +448,8 @@ def _plan_entry(
 def _operation(
     *,
     plan_id: str,
+    target_endpoint_id: str,
+    target_ordinal: int | None,
     entry: SnapshotFileEntry,
     target_comparison_key: str,
     sequence_no: int,
@@ -414,15 +460,25 @@ def _operation(
     planned_bytes: int = 0,
 ) -> PlanOperation:
     phase = 10 if operation_type is PlanOperationType.CREATE_DIRECTORY else 20
+    target_order = -1 if target_ordinal is None else target_ordinal
     return PlanOperation(
-        operation_id=_operation_id(plan_id, entry.relative_path, reason_code),
+        operation_id=_operation_id(
+            plan_id,
+            target_endpoint_id,
+            entry.relative_path,
+            reason_code,
+        ),
         operation_type=operation_type,
         sequence_no=sequence_no,
         execution_phase=phase,
-        stable_order_key=f"{phase:03d}:{target_comparison_key}:{entry.relative_path}",
+        stable_order_key=(
+            f"{phase:03d}:{target_order:04d}:{target_endpoint_id}:"
+            f"{target_comparison_key}:{entry.relative_path}"
+        ),
         target_precondition_kind=target_precondition_kind,
         reason_code=reason_code,
         risk_level=risk_level,
+        target_endpoint_id=target_endpoint_id,
         target_relative_path=entry.relative_path,
         planned_bytes=planned_bytes,
     )
@@ -431,6 +487,8 @@ def _operation(
 def _blocked_operation(
     *,
     plan_id: str,
+    target_endpoint_id: str,
+    target_ordinal: int | None,
     entry: SnapshotFileEntry,
     target_comparison_key: str,
     sequence_no: int,
@@ -438,6 +496,8 @@ def _blocked_operation(
 ) -> PlanOperation:
     return _operation(
         plan_id=plan_id,
+        target_endpoint_id=target_endpoint_id,
+        target_ordinal=target_ordinal,
         entry=entry,
         target_comparison_key=target_comparison_key,
         sequence_no=sequence_no,
@@ -448,9 +508,16 @@ def _blocked_operation(
     )
 
 
-def _operation_id(plan_id: str, relative_path: str, reason_code: str) -> str:
+def _operation_id(
+    plan_id: str,
+    target_endpoint_id: str,
+    relative_path: str,
+    reason_code: str,
+) -> str:
     digest = hashlib.sha256(
-        f"{plan_id}\0{relative_path}\0{reason_code}".encode("utf-8")
+        (
+            f"{plan_id}\0{target_endpoint_id}\0{relative_path}\0{reason_code}"
+        ).encode("utf-8")
     ).hexdigest()
     return f"op-{digest[:24]}"
 

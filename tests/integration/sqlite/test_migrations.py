@@ -34,7 +34,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 32
+        assert current_schema_version(connection, plan.store) == 33
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -72,10 +72,13 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 32
+        assert _row_count(connection, "schema_migrations") == 33
         assert _column_names(connection, "endpoint_revisions") >= {"generation"}
         assert _column_names(connection, "snapshots") >= {"endpoint_generation"}
         assert _column_names(connection, "plan_endpoints") >= {"endpoint_generation"}
+        assert _column_names(connection, "plan_operation_seal_details") >= {
+            "target_endpoint_id"
+        }
         assert _column_names(connection, "schema_migrations") >= {
             "store",
             "version",
@@ -844,7 +847,7 @@ def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> N
                 name,
                 migration_checksum
             )
-                    VALUES ('catalog', 33, 'future_migration', ?)
+                    VALUES ('catalog', 34, 'future_migration', ?)
             """,
             ("f" * 64,),
         )
@@ -951,8 +954,8 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
         preflight = inspect_sqlite_migration_state(connection, plan)
 
         assert preflight.initialized
-        assert preflight.current_version == 32
-        assert preflight.target_version == 32
+        assert preflight.current_version == 33
+        assert preflight.target_version == 33
         assert preflight.checksum_backfill_required
         assert "migration_checksum" not in _column_names(
             connection,
@@ -1296,6 +1299,149 @@ def test_catalog_endpoint_generation_migration_backfills_and_enforces_exact_bind
                 """
             )
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_catalog_operation_target_binding_migration_backfills_single_target_plans(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    plan = catalog_migration_plan()
+    version_32_plan = replace(plan, migrations=plan.migrations[:32])
+    with sqlite3.connect(database) as connection:
+        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_migrations(connection, version_32_plan)
+        _insert_catalog_parent_rows(connection)
+        connection.execute(
+            "INSERT INTO plans (id, analysis_id) VALUES ('plan-a', 'analysis-a')"
+        )
+        connection.execute(
+            """
+            INSERT INTO planned_operations (plan_id, id, operation_type)
+            VALUES ('plan-a', 'op-a', 'COPY_NEW')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO plan_endpoints (
+                plan_id,
+                analysis_id,
+                endpoint_id,
+                endpoint_revision_id,
+                endpoint_generation,
+                snapshot_id,
+                role,
+                target_ordinal,
+                capabilities_hash,
+                root_case_context_hash,
+                required_owner_installation_id,
+                required_ownership_epoch,
+                control_schema_version,
+                planned_operations,
+                planned_bytes
+            )
+            VALUES (
+                'plan-a',
+                'analysis-a',
+                'endpoint-a',
+                'endpoint-rev-a',
+                1,
+                'snapshot-a',
+                'TARGET_WRITABLE',
+                0,
+                'capabilities-a',
+                'case-a',
+                'owner-a',
+                1,
+                1,
+                1,
+                4
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO plan_operation_seal_details (
+                plan_id,
+                operation_id,
+                sequence_no,
+                execution_phase,
+                stable_order_key,
+                target_precondition_kind,
+                reason_code,
+                risk_level,
+                target_relative_path,
+                planned_bytes
+            )
+            VALUES (
+                'plan-a',
+                'op-a',
+                1,
+                20,
+                '020:A.txt',
+                'ABSENT',
+                'COPY_NEW',
+                'LOW',
+                'A.txt',
+                4
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO plan_seal_details (
+                plan_id,
+                analysis_id,
+                job_id,
+                job_revision_id,
+                planner_version,
+                plan_schema_version,
+                operation_schema_version,
+                execution_policy,
+                checksum_algorithm,
+                serializer_version,
+                plan_checksum,
+                risk_summary_json,
+                operation_count,
+                planned_bytes
+            )
+            VALUES (
+                'plan-a',
+                'analysis-a',
+                'job-a',
+                'job-rev-a',
+                'legacy',
+                1,
+                1,
+                'MANUAL_REVIEW_REQUIRED',
+                'SHA-256',
+                '0B-CANONICAL-JSON-V1',
+                ?,
+                '{"highest":"LOW"}',
+                1,
+                4
+            )
+            """,
+            ("a" * 64,),
+        )
+        connection.commit()
+
+        apply_sqlite_migrations(connection, plan)
+
+        assert connection.execute(
+            """
+            SELECT target_endpoint_id
+            FROM plan_operation_seal_details
+            WHERE plan_id = 'plan-a' AND operation_id = 'op-a'
+            """
+        ).fetchone() == ("endpoint-a",)
+        with pytest.raises(sqlite3.IntegrityError, match="PLAN_SEAL_IMMUTABLE"):
+            connection.execute(
+                """
+                UPDATE plan_operation_seal_details
+                SET target_endpoint_id = NULL
+                WHERE plan_id = 'plan-a' AND operation_id = 'op-a'
+                """
+            )
 
 
 def _insert_catalog_parent_rows(connection: sqlite3.Connection) -> None:

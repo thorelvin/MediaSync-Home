@@ -1173,6 +1173,14 @@ Progressbuffer kan coalesces. Recovery-, command- og auditmeldinger kan aldri dr
 
 ### 9.12 Uforanderlige revisjoner, cache og ugyldiggjøring
 
+Operation schema 2 binder hver muterende planoperasjon til én eksakt skrivbar
+`plan_endpoints.endpoint_id`, og bindingen inngår i den kanoniske planchecksumen.
+Fler-målsplanlegging sammenligner kilden separat mot hvert måls forseglede
+snapshot, lager mål-lokale operasjoner og avhengigheter, og summerer arbeid per
+mål. En run-target-worker kan bare materialisere operasjoner med samme
+`target_endpoint_id`; en lease for ett mål kan derfor ikke utføre arbeid som
+tilhører et annet mål.
+
 Jobbkonfigurasjon og endepunktbeskrivelser versjoneres. En plan peker på eksakte:
 
 ```text

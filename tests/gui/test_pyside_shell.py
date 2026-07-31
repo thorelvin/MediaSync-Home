@@ -289,11 +289,19 @@ def test_setup_primary_button_collects_local_preview_draft(qapp) -> None:
         window.deleteLater()
 
 
-def test_target_selection_reflows_without_horizontal_clipping(qapp) -> None:
+@pytest.mark.parametrize(
+    ("window_width", "window_height"),
+    ((900, 560), (1000, 650), (1120, 700)),
+)
+def test_target_selection_reflows_without_horizontal_clipping(
+    qapp,
+    window_width: int,
+    window_height: int,
+) -> None:
     window = build_main_window(initial_state=_ready_state(), theme_mode=ThemeMode.DARK)
 
     try:
-        window.resize(900, 560)
+        window.resize(window_width, window_height)
         window.show()
         qapp.processEvents()
         choices = [
@@ -318,12 +326,17 @@ def test_target_selection_reflows_without_horizontal_clipping(qapp) -> None:
         assert window._dashboard_detail_layout is not None
         assert window._dashboard_detail_layout.direction() is QBoxLayout.Direction.TopToBottom
         assert window._setup_stepper_layout is not None
-        assert [
+        positions = [
             window._setup_stepper_layout.getItemPosition(
                 window._setup_stepper_layout.indexOf(label)
             )[:2]
             for label in window._setup_step_labels
-        ] == [(0, 0), (0, 1), (1, 0), (1, 1)]
+        ]
+        assert positions == (
+            [(0, 0), (0, 1), (1, 0), (1, 1)]
+            if window_width < 1040
+            else [(0, 0), (0, 1), (0, 2), (0, 3)]
+        )
         assert dashboard_scroll.horizontalScrollBar().maximum() == 0
         assert activity_scroll.horizontalScrollBar().maximum() == 0
         assert dashboard_scroll.verticalScrollBar().maximum() > 0

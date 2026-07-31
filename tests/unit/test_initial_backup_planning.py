@@ -207,6 +207,72 @@ def test_file_only_initial_plan_is_runnable() -> None:
     assert initial_backup_plan_runnable(result.plan) is True
 
 
+def test_initial_backup_plan_builds_independent_operations_for_each_target() -> None:
+    source = _endpoint(
+        role=PlanEndpointRole.SOURCE,
+        endpoint_id="source-a",
+        entries=(
+            _entry("Photos", "photos", "directory"),
+            _entry("Photos/A.jpg", "photos/a.jpg", "file", size=9),
+        ),
+    )
+    target_a = _endpoint(
+        role=PlanEndpointRole.TARGET_WRITABLE,
+        endpoint_id="target-a",
+        target_ordinal=1,
+        entries=(_entry("Photos", "photos", "directory"),),
+    )
+    target_b = _endpoint(
+        role=PlanEndpointRole.TARGET_WRITABLE,
+        endpoint_id="target-b",
+        target_ordinal=2,
+        entries=(),
+    )
+
+    result = build_initial_backup_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(target_b, source, target_a),
+    )
+
+    assert result.plan is not None
+    assert [
+        (
+            operation.target_endpoint_id,
+            operation.operation_type,
+            operation.target_relative_path,
+        )
+        for operation in result.plan.operations
+    ] == [
+        ("target-a", PlanOperationType.COPY_NEW, "Photos/A.jpg"),
+        ("target-b", PlanOperationType.CREATE_DIRECTORY, "Photos"),
+        ("target-b", PlanOperationType.COPY_NEW, "Photos/A.jpg"),
+    ]
+    writable_endpoints = {
+        endpoint.endpoint_id: endpoint
+        for endpoint in result.plan.endpoints
+        if endpoint.role is PlanEndpointRole.TARGET_WRITABLE
+    }
+    assert writable_endpoints["target-a"].planned_operations == 1
+    assert writable_endpoints["target-a"].planned_bytes == 9
+    assert writable_endpoints["target-b"].planned_operations == 2
+    assert writable_endpoints["target-b"].planned_bytes == 9
+    assert len(result.plan.dependencies) == 1
+    before = result.plan.dependencies[0].before_operation_id
+    after = result.plan.dependencies[0].after_operation_id
+    operations = {
+        operation.operation_id: operation
+        for operation in result.plan.operations
+    }
+    assert operations[before].target_endpoint_id == "target-b"
+    assert operations[before].operation_type is PlanOperationType.CREATE_DIRECTORY
+    assert operations[after].target_endpoint_id == "target-b"
+    assert operations[after].operation_type is PlanOperationType.COPY_NEW
+    assert verify_plan_checksum(result.plan) is True
+
+
 def _endpoint(
     *,
     role: PlanEndpointRole,

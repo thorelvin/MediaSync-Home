@@ -92,6 +92,44 @@ def test_plan_checksum_changes_when_endpoint_binding_changes() -> None:
     assert changed.plan_checksum != base.plan_checksum
 
 
+def test_seal_plan_binds_operations_to_the_only_writable_target() -> None:
+    plan = seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(_target_endpoint(),),
+        operations=(_copy_operation(),),
+    )
+
+    assert plan.operations[0].target_endpoint_id == "target-a"
+    assert verify_plan_checksum(plan) is True
+
+
+def test_multi_target_mutating_operation_requires_explicit_target_binding() -> None:
+    with pytest.raises(
+        PlanSealViolation,
+        match="MUTATING_PLAN_OPERATION_REQUIRES_TARGET_ENDPOINT",
+    ):
+        seal_plan(
+            plan_id="plan-a",
+            analysis_id="analysis-a",
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            endpoints=(
+                _target_endpoint(),
+                replace(
+                    _target_endpoint(),
+                    endpoint_id="target-b",
+                    endpoint_revision_id="target-rev-b",
+                    snapshot_id="target-snapshot-b",
+                    target_ordinal=1,
+                ),
+            ),
+            operations=(_copy_operation(),),
+        )
+
+
 def test_plan_checksum_covers_seal_metadata() -> None:
     plan = seal_plan(
         plan_id="plan-a",

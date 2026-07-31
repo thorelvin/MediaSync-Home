@@ -3763,6 +3763,14 @@ Progressbuffer kan coalesces. Recovery-, command- og auditmeldinger kan aldri dr
 
 ### 9.12 Uforanderlige revisjoner, cache og ugyldiggjøring
 
+Operation schema 2 binder hver muterende planoperasjon til én eksakt skrivbar
+`plan_endpoints.endpoint_id`, og bindingen inngår i den kanoniske planchecksumen.
+Fler-målsplanlegging sammenligner kilden separat mot hvert måls forseglede
+snapshot, lager mål-lokale operasjoner og avhengigheter, og summerer arbeid per
+mål. En run-target-worker kan bare materialisere operasjoner med samme
+`target_endpoint_id`; en lease for ett mål kan derfor ikke utføre arbeid som
+tilhører et annet mål.
+
 Jobbkonfigurasjon og endepunktbeskrivelser versjoneres. En plan peker på eksakte:
 
 ```text
@@ -4972,6 +4980,13 @@ Muterende operasjoner skal alltid ha en eksplisitt target-precondition. `NONE` e
 Bruk eksplisitte avhengigheter bare når fase/dybde ikke er nok. Seal-valideringen må avvise syklus.
 
 #### `initial_backup_plan_materializations`
+
+Catalog migration 33 legger `target_endpoint_id` til de forseglede
+operasjonsdetaljene. Operation schema 2 tar bindingen med i planchecksumen.
+Muterende operasjoner i nye planer må peke på et skrivbart `plan_endpoints`-mål,
+og run-planlegging materialiserer bare operasjonene som tilhører det aktuelle
+run-målet. Eksisterende operation-schema-1-planer med nøyaktig ett skrivbart mål
+backfilles deterministisk uten å endre den historiske checksumtolkningen.
 
 Catalog migration 31 materialiserer utfallet av første standard-backupplan for én
 eksakt aktiv jobbrevisjon:

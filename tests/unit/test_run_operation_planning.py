@@ -66,6 +66,7 @@ def test_plan_run_target_recovery_operations_records_mutating_plan_operations() 
             "plan_checksum": _sealed_plan().plan_checksum,
             "plan_id": "plan-a",
             "sequence_no": 10,
+            "target_endpoint_id": "target-a",
         },
     )
 
@@ -202,7 +203,7 @@ def test_plan_run_target_recovery_operations_requires_matching_plan_checksum() -
     assert outcome.validation_codes == ("PLAN_CHECKSUM_MISMATCH",)
 
 
-def test_plan_run_target_recovery_operations_rejects_multi_target_plan_without_operation_binding() -> None:
+def test_plan_run_target_recovery_operations_selects_bound_multi_target_operations() -> None:
     plan = _multi_target_plan()
     outcome = plan_run_target_recovery_operations(
         permit=_permit(),
@@ -212,8 +213,13 @@ def test_plan_run_target_recovery_operations_rejects_multi_target_plan_without_o
         process_instance_id="host-a",
     )
 
-    assert outcome.planned is False
-    assert outcome.validation_codes == ("PLAN_OPERATION_PLANNING_REQUIRES_SINGLE_WRITABLE_TARGET",)
+    assert outcome.planned is True
+    assert outcome.validation_codes == ()
+    assert [operation.operation_id for operation in outcome.operations] == ["op-copy-a"]
+    assert all(
+        operation.target_endpoint_id == "target-a"
+        for operation in outcome.operations
+    )
 
 
 class _SingleRunStore(RunStore):
@@ -461,12 +467,26 @@ def _multi_target_plan() -> SealedPlan:
         ),
         operations=(
             PlanOperation(
-                operation_id="op-copy",
+                operation_id="op-copy-a",
                 operation_type=PlanOperationType.COPY_NEW,
                 sequence_no=10,
                 execution_phase=20,
-                stable_order_key="020:Pictures/A.jpg",
+                stable_order_key="020:0000:target-a:Pictures/A.jpg",
                 target_precondition_kind=TargetPreconditionKind.ABSENT,
+                target_endpoint_id="target-a",
+                target_relative_path="Pictures/A.jpg",
+                planned_bytes=128,
+                reason_code="COPY_NEW",
+                risk_level=PlanRiskLevel.LOW,
+            ),
+            PlanOperation(
+                operation_id="op-copy-b",
+                operation_type=PlanOperationType.COPY_NEW,
+                sequence_no=20,
+                execution_phase=20,
+                stable_order_key="020:0001:target-b:Pictures/A.jpg",
+                target_precondition_kind=TargetPreconditionKind.ABSENT,
+                target_endpoint_id="target-b",
                 target_relative_path="Pictures/A.jpg",
                 planned_bytes=128,
                 reason_code="COPY_NEW",

@@ -1,5 +1,23 @@
 # Kravsporbarhet
 
+Oppdatering 2026-07-31 for `SYNC-002`, `ARC-004`, `ARC-005` og `UX-003`:
+operation schema 2 og catalog migration 33 innfører checksumbundet
+`target_endpoint_id` per muterende planoperasjon. Førstegangsplanlegging og
+run-operasjonsmaterialisering er nå mål-lokal for opptil tre skrivbare mål, med
+legacy-backfill for schema-1-planer som hadde ett mål. IPC/read model og
+planpreview viser bindingen. GUI-høydereflow etter kilde-/målvalg verifiseres ved
+tre vindusstørrelser. Bevis:
+`src/mediasync_home/application/initial_backup_planning.py`,
+`src/mediasync_home/application/plans.py`,
+`src/mediasync_home/application/run_operation_planning.py`,
+`src/mediasync_home/adapters/sqlite/migrations.py`,
+`src/mediasync_home/presentation/main_window.py`,
+`tests/unit/test_initial_backup_planning.py`,
+`tests/unit/test_run_operation_planning.py`,
+`tests/integration/sqlite/test_initial_backup_plans.py`,
+`tests/integration/sqlite/test_sqlite_run_operation_planning.py` og
+`tests/gui/test_pyside_shell.py`.
+
 Dette er den operative matrisen. Ingen krav kan markeres som implementert uten konkret ADR/design, kontrakt der relevant, kode og bevisende test/gate.
 
 | Krav | Kort krav | Kanonisk kilde | ADR/design | Kontrakt | Implementasjon | Test/gate | Status |

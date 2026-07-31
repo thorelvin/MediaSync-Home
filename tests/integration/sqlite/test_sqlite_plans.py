@@ -49,6 +49,13 @@ def test_sqlite_plan_store_persists_sealed_plan(tmp_path: Path) -> None:
         assert _row_count(connection, "plan_endpoints") == 1
         assert _row_count(connection, "plan_seal_details") == 1
         assert _row_count(connection, "plan_operation_seal_details") == 2
+        assert connection.execute(
+            """
+            SELECT target_endpoint_id
+            FROM plan_operation_seal_details
+            WHERE plan_id = 'plan-a' AND operation_id = 'op-copy'
+            """
+        ).fetchone() == ("target-a",)
 
 
 def test_sqlite_plan_store_joins_and_rolls_back_with_outer_transaction(
@@ -81,6 +88,7 @@ def test_sqlite_plan_store_pages_operations_by_stable_order(tmp_path: Path) -> N
 
         assert [operation.operation_id for operation in first_page.operations] == ["op-a", "op-b"]
         assert [operation.sequence_no for operation in first_page.operations] == [30, 10]
+        assert [operation.target_endpoint_id for operation in first_page.operations] == [None, None]
         assert first_page.has_more is True
         assert first_page.next_cursor is not None
         assert first_page.next_cursor.execution_phase == 10

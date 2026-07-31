@@ -785,6 +785,13 @@ Bruk eksplisitte avhengigheter bare når fase/dybde ikke er nok. Seal-validering
 
 #### `initial_backup_plan_materializations`
 
+Catalog migration 33 legger `target_endpoint_id` til de forseglede
+operasjonsdetaljene. Operation schema 2 tar bindingen med i planchecksumen.
+Muterende operasjoner i nye planer må peke på et skrivbart `plan_endpoints`-mål,
+og run-planlegging materialiserer bare operasjonene som tilhører det aktuelle
+run-målet. Eksisterende operation-schema-1-planer med nøyaktig ett skrivbart mål
+backfilles deterministisk uten å endre den historiske checksumtolkningen.
+
 Catalog migration 31 materialiserer utfallet av første standard-backupplan for én
 eksakt aktiv jobbrevisjon:
 

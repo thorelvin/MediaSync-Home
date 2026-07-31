@@ -30,6 +30,7 @@ def test_plan_preview_view_model_renders_bounded_operation_rows() -> None:
                         "target_precondition_kind": "ABSENT",
                         "reason_code": "TARGET_DIRECTORY_MISSING",
                         "risk_level": "LOW",
+                        "target_endpoint_id": "target-a",
                         "target_relative_path": "Photos",
                         "planned_bytes": 0,
                     },
@@ -42,6 +43,7 @@ def test_plan_preview_view_model_renders_bounded_operation_rows() -> None:
                         "target_precondition_kind": "ABSENT",
                         "reason_code": "SOURCE_ONLY",
                         "risk_level": "LOW",
+                        "target_endpoint_id": "target-b",
                         "target_relative_path": "Photos/2026/a.jpg",
                         "planned_bytes": 2048,
                     },
@@ -57,10 +59,11 @@ def test_plan_preview_view_model_renders_bounded_operation_rows() -> None:
     assert state.has_more_operations is True
     assert state.summary_label == "2 operations from plan-a. More operations exist."
     assert [row.display_line for row in state.rows] == [
-        "Create folder: Photos",
-        "Copy new: Photos/2026/a.jpg - 2.0 KiB",
+        "Create folder: Photos -> target-a",
+        "Copy new: Photos/2026/a.jpg - 2.0 KiB -> target-b",
     ]
     assert [row.risk_label for row in state.rows] == ["Low", "Low"]
+    assert [row.target_endpoint_id for row in state.rows] == ["target-a", "target-b"]
 
 
 def test_plan_preview_view_model_handles_unavailable_read_model() -> None:

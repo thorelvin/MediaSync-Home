@@ -100,19 +100,12 @@ def plan_run_target_recovery_operations(
             next_action="Refresh analysis and approve a new sealed plan before execution.",
         )
 
-    writable_targets = _writable_target_endpoints(plan)
-    if len(writable_targets) != 1:
+    operation_binding_error = _operation_binding_validation_code(plan)
+    if operation_binding_error is not None:
         return _failed(
             permit=permit,
-            validation_code="PLAN_OPERATION_PLANNING_REQUIRES_SINGLE_WRITABLE_TARGET",
-            next_action="Add explicit operation-to-target bindings before executing multi-target plans.",
-        )
-    source_endpoint = _single_source_endpoint(plan)
-    if _has_copy_operation(plan) and source_endpoint is None:
-        return _failed(
-            permit=permit,
-            validation_code="PLAN_OPERATION_PLANNING_REQUIRES_SINGLE_SOURCE",
-            next_action="Add explicit source endpoint binding before executing copy operations.",
+            validation_code=operation_binding_error,
+            next_action="Refresh analysis to create explicit operation-to-target bindings.",
         )
     endpoint = _target_endpoint(plan=plan, target=target)
     if endpoint is None:
@@ -128,10 +121,22 @@ def plan_run_target_recovery_operations(
             next_action="Refresh analysis and reacquire the endpoint lease before planning operations.",
         )
 
+    target_operations = tuple(
+        operation
+        for operation in plan.operations
+        if operation.operation_type in MUTATING_OPERATION_TYPES
+        and operation.target_endpoint_id == endpoint.endpoint_id
+    )
+    source_endpoint = _single_source_endpoint(plan)
+    if _has_copy_operation(target_operations) and source_endpoint is None:
+        return _failed(
+            permit=permit,
+            validation_code="PLAN_OPERATION_PLANNING_REQUIRES_SINGLE_SOURCE",
+            next_action="Add explicit source endpoint binding before executing copy operations.",
+        )
+
     planned: list[RecoveryOperation] = []
-    for operation in plan.operations:
-        if operation.operation_type not in MUTATING_OPERATION_TYPES:
-            continue
+    for operation in target_operations:
         if operation.target_relative_path is None:
             return _failed(
                 permit=permit,
@@ -154,6 +159,7 @@ def plan_run_target_recovery_operations(
                     "plan_checksum": plan.plan_checksum,
                     "plan_id": plan.plan_id,
                     "sequence_no": operation.sequence_no,
+                    "target_endpoint_id": endpoint.endpoint_id,
                 },
             )
         except ValueError as exc:
@@ -281,8 +287,23 @@ def _single_source_endpoint(plan: SealedPlan) -> PlanEndpoint | None:
     return sources[0]
 
 
-def _has_copy_operation(plan: SealedPlan) -> bool:
-    return any(operation.operation_type is PlanOperationType.COPY_NEW for operation in plan.operations)
+def _operation_binding_validation_code(plan: SealedPlan) -> str | None:
+    writable_endpoint_ids = {
+        endpoint.endpoint_id
+        for endpoint in _writable_target_endpoints(plan)
+    }
+    for operation in plan.operations:
+        if operation.operation_type not in MUTATING_OPERATION_TYPES:
+            continue
+        if operation.target_endpoint_id is None:
+            return "PLAN_OPERATION_MISSING_TARGET_ENDPOINT"
+        if operation.target_endpoint_id not in writable_endpoint_ids:
+            return "PLAN_OPERATION_TARGET_ENDPOINT_NOT_FOUND"
+    return None
+
+
+def _has_copy_operation(operations: tuple[PlanOperation, ...]) -> bool:
+    return any(operation.operation_type is PlanOperationType.COPY_NEW for operation in operations)
 
 
 def _failed(

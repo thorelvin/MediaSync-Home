@@ -118,6 +118,19 @@ invariants:
       analysis_column: analysis_id
       plan_column: plan_id
     execution_requires_explicit_start: true
+  - id: SYNC-002_PLAN_OPERATION_TARGET_BINDING
+    requirement_id: SYNC-002
+    table: plan_operation_seal_details
+    assertion: >
+      Every operation-schema-v2 mutating plan operation in a plan with writable
+      endpoints is bound to one exact writable plan endpoint, and each run
+      target may materialize only the operations carrying its endpoint id.
+    target_column: target_endpoint_id
+    valid_target_table: plan_endpoints
+    valid_target_role: TARGET_WRITABLE
+    checksum_bound_from_operation_schema_version: 2
+    legacy_single_target_backfill: true
+    immutable_after_seal: true
   - id: DB-007_PARENT_SCOPE_COMPOSITE_KEYS
     requirement_id: DB-007
     assertion: Security-relevant child rows are bound to their parent scope with composite keys.

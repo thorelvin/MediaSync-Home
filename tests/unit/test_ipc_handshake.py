@@ -1068,6 +1068,7 @@ def test_plan_operations_query_returns_bounded_sealed_operation_page() -> None:
     assert first_page["operations"][0]["target_precondition_kind"] == (
         TargetPreconditionKind.ABSENT.value
     )
+    assert first_page["operations"][0]["target_endpoint_id"] == "target-a"
     assert second.status is IpcStatus.ACCEPTED
     assert second_page["has_more"] is False
     assert second_page["next_cursor"] is None
@@ -2633,6 +2634,7 @@ def _plan_operation_read_model(operation: PlanOperation) -> PlanOperationReadMod
         target_precondition_kind=operation.target_precondition_kind,
         reason_code=operation.reason_code,
         risk_level=operation.risk_level,
+        target_endpoint_id=operation.target_endpoint_id,
         target_relative_path=operation.target_relative_path,
         planned_bytes=operation.planned_bytes,
     )

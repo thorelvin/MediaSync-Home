@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Mapping, Protocol
 
 
 PLAN_SCHEMA_VERSION = 1
-OPERATION_SCHEMA_VERSION = 1
+OPERATION_SCHEMA_VERSION = 2
 PLANNER_VERSION = "0B-plan-sealer-skeleton"
 PLAN_CHECKSUM_ALGORITHM = "SHA-256"
 PLAN_SERIALIZER_VERSION = "0B-CANONICAL-JSON-V1"
@@ -64,6 +64,7 @@ class PlanOperation:
     target_precondition_kind: TargetPreconditionKind
     reason_code: str
     risk_level: PlanRiskLevel
+    target_endpoint_id: str | None = None
     target_relative_path: str | None = None
     planned_bytes: int = 0
 
@@ -156,6 +157,7 @@ class PlanOperationReadModel:
     risk_level: PlanRiskLevel
     target_relative_path: str | None
     planned_bytes: int
+    target_endpoint_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -233,7 +235,13 @@ def seal_plan(
             ),
         )
     )
-    ordered_operations = tuple(sorted(operations, key=lambda operation: operation.sequence_no))
+    bound_operations = _bind_single_target_operations(
+        operations=operations,
+        endpoints=ordered_endpoints,
+    )
+    ordered_operations = tuple(
+        sorted(bound_operations, key=lambda operation: operation.sequence_no)
+    )
     ordered_dependencies = tuple(
         sorted(
             dependencies,
@@ -244,7 +252,7 @@ def seal_plan(
         )
     )
     _validate_endpoints(ordered_endpoints)
-    _validate_operations(ordered_operations)
+    _validate_operations(ordered_operations, ordered_endpoints)
     _validate_dependencies(ordered_operations, ordered_dependencies)
     plan_risk_summary = dict(risk_summary or _risk_summary(ordered_operations))
     operation_count = len(ordered_operations)
@@ -366,9 +374,38 @@ def _validate_plan_identity(
             raise PlanSealViolation(f"PLAN_REQUIRES_{name.upper()}")
 
 
-def _validate_operations(operations: tuple[PlanOperation, ...]) -> None:
+def _bind_single_target_operations(
+    *,
+    operations: tuple[PlanOperation, ...],
+    endpoints: tuple[PlanEndpoint, ...],
+) -> tuple[PlanOperation, ...]:
+    writable_targets = tuple(
+        endpoint
+        for endpoint in endpoints
+        if endpoint.role is PlanEndpointRole.TARGET_WRITABLE
+    )
+    if len(writable_targets) != 1:
+        return operations
+    target_endpoint_id = writable_targets[0].endpoint_id
+    return tuple(
+        operation
+        if operation.target_endpoint_id is not None
+        else replace(operation, target_endpoint_id=target_endpoint_id)
+        for operation in operations
+    )
+
+
+def _validate_operations(
+    operations: tuple[PlanOperation, ...],
+    endpoints: tuple[PlanEndpoint, ...],
+) -> None:
     if not operations:
         raise PlanSealViolation("PLAN_REQUIRES_OPERATIONS")
+    writable_endpoint_ids = {
+        endpoint.endpoint_id
+        for endpoint in endpoints
+        if endpoint.role is PlanEndpointRole.TARGET_WRITABLE
+    }
     operation_ids: set[str] = set()
     sequence_numbers: set[int] = set()
     for operation in operations:
@@ -390,6 +427,13 @@ def _validate_operations(operations: tuple[PlanOperation, ...]) -> None:
             raise PlanSealViolation("PLAN_OPERATION_REQUIRES_REASON_CODE")
         if operation.planned_bytes < 0:
             raise PlanSealViolation("PLAN_OPERATION_BYTES_MUST_BE_NON_NEGATIVE")
+        if operation.target_endpoint_id is not None:
+            if not operation.target_endpoint_id.strip():
+                raise PlanSealViolation("PLAN_OPERATION_TARGET_ENDPOINT_MUST_NOT_BE_BLANK")
+            if operation.target_endpoint_id not in writable_endpoint_ids:
+                raise PlanSealViolation("PLAN_OPERATION_TARGET_ENDPOINT_NOT_WRITABLE")
+        elif operation.operation_type in MUTATING_OPERATION_TYPES and writable_endpoint_ids:
+            raise PlanSealViolation("MUTATING_PLAN_OPERATION_REQUIRES_TARGET_ENDPOINT")
         _validate_target_precondition(operation)
 
 
@@ -545,7 +589,13 @@ def _canonical_payload(
         "operation_count": operation_count,
         "operation_schema_version": operation_schema_version,
         "endpoints": [_endpoint_payload(endpoint) for endpoint in endpoints],
-        "operations": [_operation_payload(operation) for operation in operations],
+        "operations": [
+            _operation_payload(
+                operation,
+                include_target_endpoint=operation_schema_version >= 2,
+            )
+            for operation in operations
+        ],
         "parent_plan_id": parent_plan_id,
         "planned_bytes": planned_bytes,
         "plan_id": plan_id,
@@ -556,8 +606,12 @@ def _canonical_payload(
     }
 
 
-def _operation_payload(operation: PlanOperation) -> dict[str, object]:
-    return {
+def _operation_payload(
+    operation: PlanOperation,
+    *,
+    include_target_endpoint: bool,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "execution_phase": operation.execution_phase,
         "operation_id": operation.operation_id,
         "operation_type": operation.operation_type.value,
@@ -569,6 +623,9 @@ def _operation_payload(operation: PlanOperation) -> dict[str, object]:
         "target_precondition_kind": operation.target_precondition_kind.value,
         "target_relative_path": operation.target_relative_path,
     }
+    if include_target_endpoint:
+        payload["target_endpoint_id"] = operation.target_endpoint_id
+    return payload
 
 
 def _endpoint_payload(endpoint: PlanEndpoint) -> dict[str, object]:

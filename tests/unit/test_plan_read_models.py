@@ -95,9 +95,10 @@ def test_plan_operation_query_returns_bounded_serializable_page() -> None:
                 "execution_phase": 10,
                 "stable_order_key": "010:Pictures/op-a.jpg",
                 "target_precondition_kind": "ABSENT",
-                "reason_code": "COPY_NEW",
-                "risk_level": "LOW",
-                "target_relative_path": "Pictures/op-a.jpg",
+                    "reason_code": "COPY_NEW",
+                    "risk_level": "LOW",
+                    "target_endpoint_id": None,
+                    "target_relative_path": "Pictures/op-a.jpg",
                 "planned_bytes": 128,
             }
         ],

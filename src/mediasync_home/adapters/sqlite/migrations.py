@@ -198,6 +198,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_directory_effect_handoffs",
                 statements=CATALOG_DIRECTORY_EFFECT_HANDOFFS,
             ),
+            SqliteMigration(
+                version=33,
+                name="catalog_plan_operation_target_bindings",
+                statements=CATALOG_PLAN_OPERATION_TARGET_BINDINGS,
+            ),
         ),
     )
 
@@ -2361,6 +2366,87 @@ CATALOG_DIRECTORY_EFFECT_HANDOFFS = (
     """
     CREATE INDEX idx_final_file_catalog_handoffs_run_target
         ON final_file_catalog_handoffs (run_id, run_target_id)
+    """,
+)
+
+CATALOG_PLAN_OPERATION_TARGET_BINDINGS = (
+    """
+    DROP TRIGGER trg_plan_operation_seal_details_no_update
+    """,
+    """
+    ALTER TABLE plan_operation_seal_details
+        ADD COLUMN target_endpoint_id TEXT
+    """,
+    """
+    UPDATE plan_operation_seal_details
+    SET target_endpoint_id = (
+        SELECT endpoints.endpoint_id
+        FROM plan_endpoints AS endpoints
+        WHERE endpoints.plan_id = plan_operation_seal_details.plan_id
+            AND endpoints.role = 'TARGET_WRITABLE'
+    )
+    WHERE (
+        SELECT count(*)
+        FROM plan_endpoints AS endpoints
+        WHERE endpoints.plan_id = plan_operation_seal_details.plan_id
+            AND endpoints.role = 'TARGET_WRITABLE'
+    ) = 1
+    """,
+    """
+    CREATE TRIGGER trg_plan_operation_seal_details_no_update
+    BEFORE UPDATE ON plan_operation_seal_details
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_plan_operation_target_binding_valid_insert
+    BEFORE INSERT ON plan_operation_seal_details
+    WHEN NEW.target_endpoint_id IS NOT NULL
+        AND NOT EXISTS (
+            SELECT 1
+            FROM plan_endpoints AS endpoints
+            WHERE endpoints.plan_id = NEW.plan_id
+                AND endpoints.endpoint_id = NEW.target_endpoint_id
+                AND endpoints.role = 'TARGET_WRITABLE'
+        )
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_OPERATION_TARGET_ENDPOINT_NOT_WRITABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_plan_operation_v2_requires_target_binding
+    BEFORE INSERT ON plan_seal_details
+    WHEN NEW.operation_schema_version >= 2
+        AND EXISTS (
+            SELECT 1
+            FROM plan_endpoints AS endpoints
+            WHERE endpoints.plan_id = NEW.plan_id
+                AND endpoints.role = 'TARGET_WRITABLE'
+        )
+        AND EXISTS (
+            SELECT 1
+            FROM plan_operation_seal_details AS details
+            INNER JOIN planned_operations AS operations
+                ON operations.plan_id = details.plan_id
+                AND operations.id = details.operation_id
+            WHERE details.plan_id = NEW.plan_id
+                AND operations.operation_type IN ('COPY_NEW', 'CREATE_DIRECTORY')
+                AND details.target_endpoint_id IS NULL
+        )
+    BEGIN
+        SELECT RAISE(ABORT, 'MUTATING_PLAN_OPERATION_REQUIRES_TARGET_ENDPOINT');
+    END
+    """,
+    """
+    CREATE INDEX idx_plan_operation_details_plan_target_phase_key_id
+        ON plan_operation_seal_details (
+            plan_id,
+            target_endpoint_id,
+            execution_phase,
+            stable_order_key,
+            operation_id
+        )
     """,
 )
 

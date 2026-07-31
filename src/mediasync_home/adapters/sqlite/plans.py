@@ -126,10 +126,11 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
                         target_precondition_kind,
                         reason_code,
                         risk_level,
+                        target_endpoint_id,
                         target_relative_path,
                         planned_bytes
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         plan.plan_id,
@@ -140,6 +141,7 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
                         operation.target_precondition_kind.value,
                         operation.reason_code,
                         operation.risk_level.value,
+                        operation.target_endpoint_id,
                         operation.target_relative_path,
                         operation.planned_bytes,
                     ),
@@ -257,8 +259,9 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
                 target_precondition_kind=TargetPreconditionKind(str(row[5])),
                 reason_code=str(row[6]),
                 risk_level=PlanRiskLevel(str(row[7])),
-                target_relative_path=None if row[8] is None else str(row[8]),
-                planned_bytes=int(row[9]),
+                target_endpoint_id=None if row[8] is None else str(row[8]),
+                target_relative_path=None if row[9] is None else str(row[9]),
+                planned_bytes=int(row[10]),
             )
             for row in page_rows
         )
@@ -357,6 +360,7 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
                 details.target_precondition_kind,
                 details.reason_code,
                 details.risk_level,
+                details.target_endpoint_id,
                 details.target_relative_path,
                 details.planned_bytes
             FROM plan_operation_seal_details AS details
@@ -378,8 +382,9 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
                 target_precondition_kind=TargetPreconditionKind(str(row[5])),
                 reason_code=str(row[6]),
                 risk_level=PlanRiskLevel(str(row[7])),
-                target_relative_path=None if row[8] is None else str(row[8]),
-                planned_bytes=int(row[9]),
+                target_endpoint_id=None if row[8] is None else str(row[8]),
+                target_relative_path=None if row[9] is None else str(row[9]),
+                planned_bytes=int(row[10]),
             )
             for row in rows
         )
@@ -444,6 +449,7 @@ def _plan_operation_page_sql(after: PlanOperationCursor | None) -> str:
             details.target_precondition_kind,
             details.reason_code,
             details.risk_level,
+            details.target_endpoint_id,
             details.target_relative_path,
             details.planned_bytes
         FROM plan_operation_seal_details AS details

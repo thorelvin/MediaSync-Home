@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 from tests.support.sqlite_catalog import insert_default_filter_set_version
@@ -96,7 +97,7 @@ class FixedLiveLease:
         self.released = True
 
 
-def test_sqlite_run_operation_planning_records_recovery_operations(
+def test_sqlite_run_operation_planning_records_only_bound_target_operations(
     tmp_path: Path,
 ) -> None:
     catalog_database = tmp_path / "catalog.sqlite"
@@ -160,7 +161,9 @@ def test_sqlite_run_operation_planning_records_recovery_operations(
             assert outcome.validation_codes == ()
             assert loaded_run is not None
             assert loaded_run.state is RunState.EXECUTING
+            assert len(loaded_run.targets) == 2
             assert loaded_run.targets[0].state is RunTargetState.EXECUTING
+            assert loaded_run.targets[1].state is RunTargetState.PENDING
             assert operation is not None
             assert operation == outcome.operations[0]
             assert operation.phase is RecoveryOperationPhase.PLANNED
@@ -170,6 +173,10 @@ def test_sqlite_run_operation_planning_records_recovery_operations(
             assert operation.source_endpoint_id == "source-a"
             assert operation.source_endpoint_revision_id == "source-rev-a"
             assert operation.source_relative_path == "Pictures/A.jpg"
+            assert recovery_operations.load_operation(
+                run_id="run-a",
+                operation_id="op-copy-b",
+            ) is None
             assert _row_count(recovery_connection, "recovery_events") == 1
         finally:
             recovery_connection.close()
@@ -207,6 +214,7 @@ def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
         """
     )
     connection.execute("INSERT INTO endpoints (id) VALUES ('target-a')")
+    connection.execute("INSERT INTO endpoints (id) VALUES ('target-b')")
     connection.execute("INSERT INTO endpoints (id) VALUES ('source-a')")
     connection.execute(
         """
@@ -218,6 +226,12 @@ def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
         """
         INSERT INTO endpoint_revisions (endpoint_id, id, display_name, root_uri)
             VALUES ('target-a', 'target-rev-a', 'USB', 'file:///E:/Backup')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO endpoint_revisions (endpoint_id, id, display_name, root_uri)
+            VALUES ('target-b', 'target-rev-b', 'USB 2', 'file:///F:/Backup')
         """
     )
     connection.execute(
@@ -234,6 +248,12 @@ def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
+        INSERT INTO analysis_targets (analysis_id, endpoint_id, endpoint_revision_id)
+            VALUES ('analysis-a', 'target-b', 'target-rev-b')
+        """
+    )
+    connection.execute(
+        """
         INSERT INTO snapshots (id, analysis_id, endpoint_id, endpoint_revision_id)
             VALUES ('source-snapshot-a', 'analysis-a', 'source-a', 'source-rev-a')
         """
@@ -242,6 +262,12 @@ def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
         """
         INSERT INTO snapshots (id, analysis_id, endpoint_id, endpoint_revision_id)
             VALUES ('target-snapshot-a', 'analysis-a', 'target-a', 'target-rev-a')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO snapshots (id, analysis_id, endpoint_id, endpoint_revision_id)
+            VALUES ('target-snapshot-b', 'analysis-a', 'target-b', 'target-rev-b')
         """
     )
     connection.commit()
@@ -283,7 +309,17 @@ def _sealed_plan() -> SealedPlan:
         analysis_id="analysis-a",
         job_id="job-a",
         job_revision_id="job-rev-a",
-        endpoints=(_source_endpoint(), _target_endpoint()),
+        endpoints=(
+            _source_endpoint(),
+            _target_endpoint(),
+            replace(
+                _target_endpoint(),
+                endpoint_id="target-b",
+                endpoint_revision_id="target-rev-b",
+                snapshot_id="target-snapshot-b",
+                target_ordinal=1,
+            ),
+        ),
         operations=(
             PlanOperation(
                 operation_id="op-copy",
@@ -292,6 +328,20 @@ def _sealed_plan() -> SealedPlan:
                 execution_phase=20,
                 stable_order_key="020:Pictures/A.jpg",
                 target_precondition_kind=TargetPreconditionKind.ABSENT,
+                target_endpoint_id="target-a",
+                target_relative_path="Pictures/A.jpg",
+                planned_bytes=128,
+                reason_code="COPY_NEW",
+                risk_level=PlanRiskLevel.LOW,
+            ),
+            PlanOperation(
+                operation_id="op-copy-b",
+                operation_type=PlanOperationType.COPY_NEW,
+                sequence_no=20,
+                execution_phase=20,
+                stable_order_key="020:target-b:Pictures/A.jpg",
+                target_precondition_kind=TargetPreconditionKind.ABSENT,
+                target_endpoint_id="target-b",
                 target_relative_path="Pictures/A.jpg",
                 planned_bytes=128,
                 reason_code="COPY_NEW",

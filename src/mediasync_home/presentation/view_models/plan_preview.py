@@ -10,6 +10,7 @@ class PlanOperationPreviewRow:
     operation_id: str
     display_line: str
     risk_label: str
+    target_endpoint_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -73,12 +74,15 @@ def _preview_row(payload: dict[object, object]) -> PlanOperationPreviewRow:
     operation_type = _operation_label(payload.get("operation_type"))
     risk = _risk_label(payload.get("risk_level"))
     path = _required_text(payload.get("target_relative_path")) or _required_text(payload.get("reason_code")) or "item"
+    target_endpoint_id = _required_text(payload.get("target_endpoint_id"))
     planned_bytes = _non_negative_int(payload.get("planned_bytes"))
     suffix = f" - {_bytes_label(planned_bytes)}" if planned_bytes else ""
+    target_suffix = f" -> {target_endpoint_id}" if target_endpoint_id is not None else ""
     return PlanOperationPreviewRow(
         operation_id=operation_id,
-        display_line=f"{operation_type}: {path}{suffix}",
+        display_line=f"{operation_type}: {path}{suffix}{target_suffix}",
         risk_label=risk,
+        target_endpoint_id=target_endpoint_id,
     )
 
 

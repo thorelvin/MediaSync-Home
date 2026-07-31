@@ -1,5 +1,17 @@
 # Implementeringsstatus
 
+Oppdatering 2026-07-31: Operation schema 2 og catalog migration 33 binder hver
+muterende forseglet planoperasjon til ett eksakt skrivbart mål og inkluderer
+bindingen i planchecksumen. Førstegangsplanleggeren støtter nå opptil tre mål,
+beregner mål-lokale operasjoner, katalogrekkefølge, avhengigheter, bytes og
+operasjonstall, mens run-planlegging bare journalfører operasjonene for målet
+som eier den aktive leasen. Eldre schema-1-planer med ett mål backfilles uten å
+endre historisk checksumtolkning. IPC og planpreview eksponerer mål-ID-en.
+Dashboardet nullstiller og beregner deretter breddesensitive labelhøyder og
+sidens minimumshøyde på nytt; GUI-beviset dekker lange valgte kilde-/målstier ved
+900×560, 1000×650 og 1120×700 uten utilgjengelig eller horisontalt klippet
+innhold.
+
 | Arbeidspakke/milepæl | Status | Bevis/PR | Blockers | Neste eierhandling |
 |---|---|---|---|---|
 | 0A.0 — Miljøpreflight | passed | `docs/ARCHITECTURE_SPIKE_REPORT.md`; branch `spike/0a0-environment-preflight` | Ingen 0A.0-blocker | Gjennomgå rapporten og velg neste arbeidspakke |

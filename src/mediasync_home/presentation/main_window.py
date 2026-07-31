@@ -1492,6 +1492,7 @@ class MediaSyncWindow(QMainWindow):
             compact_steps == self._compact_dashboard_layout
             and stacked_details == self._stacked_dashboard_details
         ):
+            self._refresh_dashboard_geometry()
             return
         self._compact_dashboard_layout = compact_steps
         self._stacked_dashboard_details = stacked_details
@@ -1523,18 +1524,26 @@ class MediaSyncWindow(QMainWindow):
             return
         layout = page.layout()
         if layout is not None:
-            for _ in range(2):
-                layout.invalidate()
-                layout.activate()
-                for label in page.findChildren(QLabel):
-                    if not label.property("responsiveText"):
-                        continue
-                    required_height = (
-                        0
-                        if label.isHidden()
-                        else max(0, label.heightForWidth(max(1, label.width())))
-                    )
-                    label.setMinimumHeight(required_height)
+            responsive_labels = tuple(
+                label
+                for label in page.findChildren(QLabel)
+                if label.property("responsiveText")
+            )
+            page.setMinimumHeight(0)
+            for label in responsive_labels:
+                label.setMinimumHeight(0)
+            layout.invalidate()
+            layout.activate()
+            for label in responsive_labels:
+                required_height = (
+                    0
+                    if label.isHidden()
+                    else max(0, label.heightForWidth(max(1, label.width())))
+                )
+                label.setMinimumHeight(required_height)
+            layout.invalidate()
+            layout.activate()
+            page.setMinimumHeight(max(0, layout.minimumSize().height()))
         page.updateGeometry()
         if self._dashboard_scroll_area is not None:
             self._dashboard_scroll_area.updateGeometry()

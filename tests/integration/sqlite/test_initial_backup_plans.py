@@ -64,7 +64,11 @@ SOURCE_REVISION_ID = "bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb"
 TARGET_ENDPOINT_ID = "44444444-4444-4444-8444-444444444444"
 TARGET_REVISION_ID = "55555555-5555-4555-8555-555555555555"
 NEW_TARGET_REVISION_ID = "66666666-6666-4666-8666-666666666666"
+TARGET_B_ENDPOINT_ID = "44444444-4444-4444-8444-444444444445"
+TARGET_B_REVISION_ID = "55555555-5555-4555-8555-555555555556"
+NEW_TARGET_B_REVISION_ID = "66666666-6666-4666-8666-666666666667"
 CONTROL_AREA_ID = "77777777-7777-4777-8777-777777777777"
+CONTROL_AREA_B_ID = "77777777-7777-4777-8777-777777777778"
 INTENT_ID = "88888888-8888-4888-8888-888888888888"
 NEW_JOB_REVISION_ID = "99999999-9999-4999-8999-999999999999"
 
@@ -83,16 +87,19 @@ class _FixedRegistrationIds:
         self,
         candidates: tuple[WritableEndpointRegistrationCandidate, ...],
     ) -> WritableEndpointRegistrationIds:
-        assert len(candidates) == 1
+        assert len(candidates) in {1, 2}
+        revision_ids = (NEW_TARGET_REVISION_ID, NEW_TARGET_B_REVISION_ID)
+        control_area_ids = (CONTROL_AREA_ID, CONTROL_AREA_B_ID)
         return WritableEndpointRegistrationIds(
             intent_id=INTENT_ID,
             resulting_job_revision_id=NEW_JOB_REVISION_ID,
-            targets=(
+            targets=tuple(
                 WritableEndpointTargetIds(
-                    target_ordinal=1,
-                    endpoint_revision_id=NEW_TARGET_REVISION_ID,
-                    control_area_id=CONTROL_AREA_ID,
-                ),
+                    target_ordinal=candidate.target_ordinal,
+                    endpoint_revision_id=revision_ids[index],
+                    control_area_id=control_area_ids[index],
+                )
+                for index, candidate in enumerate(candidates)
             ),
         )
 
@@ -103,10 +110,14 @@ class _FixedSnapshotIds:
         *,
         snapshot_count: int,
     ) -> SnapshotMaterializationIds:
-        assert snapshot_count == 2
+        assert snapshot_count in {2, 3}
         return SnapshotMaterializationIds(
             analysis_id="analysis-a",
-            snapshot_ids=("snapshot-source", "snapshot-target"),
+            snapshot_ids=(
+                "snapshot-source",
+                "snapshot-target",
+                "snapshot-target-b",
+            )[:snapshot_count],
         )
 
 
@@ -250,18 +261,74 @@ def test_initial_plan_materializer_records_immutable_no_changes(
         assert connection.execute("SELECT count(*) FROM plans").fetchone() == (0,)
 
 
+def test_initial_plan_materializer_persists_operations_for_two_targets(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target_a = tmp_path / "target-a"
+    target_b = tmp_path / "target-b"
+    (source / "Photos").mkdir(parents=True)
+    (source / "Photos" / "A.jpg").write_bytes(b"photo")
+    (target_a / "Photos").mkdir(parents=True)
+    target_b.mkdir()
+
+    with sqlite3.connect(database) as connection:
+        _prepare_registered_snapshots(
+            connection,
+            database=database,
+            source=source,
+            target=target_a,
+            additional_target=target_b,
+        )
+        plans = SqlitePlanStore(connection)
+        report = SqliteInitialBackupPlanMaterializer(
+            connection,
+            plans=plans,
+            id_factory=_FixedPlanIds(),
+        ).refresh_initial_backup_plans(
+            observed_utc="2026-07-31T17:03:00Z",
+        )
+
+        assert report.sealed_plan_count == 1
+        plan = plans.load_sealed_plan("plan-1")
+        assert plan is not None
+        assert [
+            (
+                operation.target_endpoint_id,
+                operation.target_relative_path,
+            )
+            for operation in plan.operations
+        ] == [
+            (TARGET_ENDPOINT_ID, "Photos/A.jpg"),
+            (TARGET_B_ENDPOINT_ID, "Photos"),
+            (TARGET_B_ENDPOINT_ID, "Photos/A.jpg"),
+        ]
+        target_counts = {
+            endpoint.endpoint_id: endpoint.planned_operations
+            for endpoint in plan.endpoints
+            if endpoint.role.value == "TARGET_WRITABLE"
+        }
+        assert target_counts == {
+            TARGET_ENDPOINT_ID: 1,
+            TARGET_B_ENDPOINT_ID: 2,
+        }
+
+
 def _prepare_registered_snapshots(
     connection: sqlite3.Connection,
     *,
     database: Path,
     source: Path,
     target: Path,
+    additional_target: Path | None = None,
 ) -> None:
     _prepare_catalog(
         connection,
         database=database,
         source=source,
         target=target,
+        additional_target=additional_target,
     )
     refresher = SqliteEndpointClassificationRefresher(
         connection,
@@ -299,7 +366,7 @@ def _prepare_registered_snapshots(
         observed_utc="2026-07-31T15:02:30Z",
     )
     assert report.scanned_job_count == 1
-    assert report.sealed_snapshot_count == 2
+    assert report.sealed_snapshot_count == (3 if additional_target is not None else 2)
 
 
 def _prepare_catalog(
@@ -308,6 +375,7 @@ def _prepare_catalog(
     database: Path,
     source: Path,
     target: Path,
+    additional_target: Path | None = None,
 ) -> None:
     apply_sqlite_connection_policy(
         connection,
@@ -339,14 +407,23 @@ def _prepare_catalog(
         '"file_selection":"ALL_USER_FILES","performance":"AUTO",'
         '"retention":"THIRTY_DAYS","verification":"STANDARD"}'
     )
-    targets_json = json.dumps(
-        [
+    target_payloads = [
+        {
+            "independent_device_id": None,
+            "name": "Target",
+            "path_label": str(target),
+        }
+    ]
+    if additional_target is not None:
+        target_payloads.append(
             {
                 "independent_device_id": None,
-                "name": "Target",
-                "path_label": str(target),
+                "name": "Target B",
+                "path_label": str(additional_target),
             }
-        ],
+        )
+    targets_json = json.dumps(
+        target_payloads,
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -407,6 +484,15 @@ def _prepare_catalog(
         role="TARGET",
         ordinal=1,
     )
+    if additional_target is not None:
+        _insert_endpoint(
+            connection,
+            endpoint_id=TARGET_B_ENDPOINT_ID,
+            endpoint_revision_id=TARGET_B_REVISION_ID,
+            root=additional_target,
+            role="TARGET",
+            ordinal=2,
+        )
     connection.commit()
 
 
