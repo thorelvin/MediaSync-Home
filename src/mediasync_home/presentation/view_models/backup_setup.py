@@ -108,6 +108,7 @@ class TargetStatusViewState:
     freshness_label: str
     recommended_action: str
     independent_device_id: str | None = None
+    last_success_utc: str | None = None
 
 
 @dataclass(frozen=True)
@@ -289,6 +290,7 @@ def target_status(
     freshness: FreshnessState,
     recommended_action: str,
     independent_device_id: str | None = None,
+    last_success_utc: str | None = None,
 ) -> TargetStatusViewState:
     return TargetStatusViewState(
         name=name,
@@ -297,6 +299,7 @@ def target_status(
         freshness_label=_freshness_label(freshness),
         recommended_action=recommended_action,
         independent_device_id=independent_device_id,
+        last_success_utc=last_success_utc,
     )
 
 
@@ -792,14 +795,19 @@ def _activity_status_from_run_payload(payload: dict[object, object]) -> BackupJo
                 continue
             target_state = _run_target_state(item.get("state"))
             endpoint_id = _required_text(item.get("endpoint_id")) or "mål"
+            last_success_utc = _optional_text(item.get("last_success_utc"))
             targets.append(
                 target_status(
                     name=endpoint_id,
                     activity=_target_activity(target_state),
                     attention=_target_attention(target_state),
-                    freshness=_target_freshness(target_state),
+                    freshness=_target_freshness(
+                        target_state,
+                        has_last_success=last_success_utc is not None,
+                    ),
                     recommended_action=_target_next_action(target_state),
                     independent_device_id=endpoint_id,
+                    last_success_utc=last_success_utc,
                 )
             )
     run_id = _required_text(payload.get("run_id")) or "ukjent"
@@ -899,10 +907,14 @@ def _target_attention(state: RunTargetState) -> AttentionState:
     return AttentionState.NORMAL
 
 
-def _target_freshness(state: RunTargetState) -> FreshnessState:
+def _target_freshness(
+    state: RunTargetState,
+    *,
+    has_last_success: bool = False,
+) -> FreshnessState:
     if state is RunTargetState.SUCCEEDED:
         return FreshnessState.UP_TO_DATE
-    if state is RunTargetState.SUCCEEDED_WITH_WARNINGS:
+    if state is RunTargetState.SUCCEEDED_WITH_WARNINGS or has_last_success:
         return FreshnessState.LAST_BACKED_UP
     return FreshnessState.UNKNOWN
 

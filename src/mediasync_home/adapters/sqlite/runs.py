@@ -2157,19 +2157,34 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
         rows = self._connection.execute(
             """
             SELECT
-                id,
-                endpoint_id,
-                endpoint_revision_id,
-                state,
-                planned_operations,
-                completed_operations,
-                planned_bytes,
-                completed_bytes,
-                warning_count,
-                error_count
-            FROM run_targets
-            WHERE run_id = ?
-            ORDER BY id
+                current_target.id,
+                current_target.endpoint_id,
+                current_target.endpoint_revision_id,
+                current_target.state,
+                current_target.planned_operations,
+                current_target.completed_operations,
+                current_target.planned_bytes,
+                current_target.completed_bytes,
+                current_target.warning_count,
+                current_target.error_count,
+                (
+                    SELECT max(success_target.finished_utc)
+                    FROM runs AS success_run
+                    JOIN run_targets AS success_target
+                        ON success_target.run_id = success_run.id
+                    WHERE success_run.job_id = current_run.job_id
+                        AND success_target.endpoint_id = current_target.endpoint_id
+                        AND success_target.state IN (
+                            'SUCCEEDED',
+                            'SUCCEEDED_WITH_WARNINGS'
+                        )
+                        AND success_target.finished_utc IS NOT NULL
+                ) AS last_success_utc
+            FROM run_targets AS current_target
+            JOIN runs AS current_run
+                ON current_run.id = current_target.run_id
+            WHERE current_target.run_id = ?
+            ORDER BY current_target.id
             """,
             (run_id,),
         ).fetchall()
@@ -2185,6 +2200,7 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                 completed_bytes=int(row[7]),
                 warning_count=int(row[8]),
                 error_count=int(row[9]),
+                last_success_utc=None if row[10] is None else str(row[10]),
             )
             for row in rows
         )

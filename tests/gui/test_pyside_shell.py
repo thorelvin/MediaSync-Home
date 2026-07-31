@@ -1054,6 +1054,11 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert activity_title.text() == "Siste kjøring: run-a"
         assert activity_rows[0].text() == "Aktivitet: Kontrollerer"
         assert activity_rows[1].text() == "Oppmerksomhet: Venter"
+        assert activity_rows[2].text().startswith(
+            "Ferskhet per mål: target-a: Sist sikkerhetskopiert"
+        )
+        assert "Siste vellykkede:" in activity_rows[2].text()
+        assert "19.07.2026" in activity_rows[2].text()
         assert language is not None
         assert language.menu() is not None
         language.menu().actions()[1].trigger()
@@ -1084,6 +1089,11 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert activity_title.text() == "Latest run: run-a"
         assert activity_rows[0].text() == "Activity: Checking"
         assert activity_rows[1].text() == "Attention: Waiting"
+        assert activity_rows[2].text().startswith(
+            "Freshness per target: target-a: Last backed up"
+        )
+        assert "Last successful:" in activity_rows[2].text()
+        assert "2026-07-19" in activity_rows[2].text()
 
         language.menu().actions()[0].trigger()
 
@@ -1111,6 +1121,9 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert activity_title.text() == "Siste kjøring: run-a"
         assert activity_rows[0].text() == "Aktivitet: Kontrollerer"
         assert activity_rows[1].text() == "Oppmerksomhet: Venter"
+        assert activity_rows[2].text().startswith(
+            "Ferskhet per mål: target-a: Sist sikkerhetskopiert"
+        )
     finally:
         window.close()
         window.deleteLater()
@@ -1719,6 +1732,52 @@ def test_jobs_page_localizes_terminal_partial_failure_summary(qapp) -> None:
         window.deleteLater()
 
 
+def test_activity_bar_wraps_exact_freshness_for_three_targets(qapp) -> None:
+    provider = _FakeMultiTargetFreshnessDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window.refresh_engine_status()
+        qapp.processEvents()
+        activity_scroll = window.findChild(QScrollArea, "activityScrollArea")
+        rows = window.findChildren(QLabel, "activityDimensionLabel")
+        freshness = rows[2]
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert activity_scroll is not None
+        assert language is not None
+        assert activity_scroll.horizontalScrollBar().maximum() == 0
+        assert freshness.text().count("\n") == 2
+        assert "target-a: Sist sikkerhetskopiert" in freshness.text()
+        assert "target-b: Sist sikkerhetskopiert" in freshness.text()
+        assert "target-c: Ukjent · Ingen vellykket backup" in freshness.text()
+        assert "19.07.2026" in freshness.text()
+        assert "18.07.2026" in freshness.text()
+        assert freshness.height() >= freshness.heightForWidth(freshness.width())
+
+        assert language.menu() is not None
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+
+        assert activity_scroll.horizontalScrollBar().maximum() == 0
+        assert freshness.text().count("\n") == 2
+        assert "target-a: Last backed up" in freshness.text()
+        assert "target-b: Last backed up" in freshness.text()
+        assert "target-c: Unknown · No successful backup" in freshness.text()
+        assert "2026-07-19" in freshness.text()
+        assert "2026-07-18" in freshness.text()
+        assert freshness.height() >= freshness.heightForWidth(freshness.width())
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_jobs_page_wraps_endpoint_retry_diagnostics_without_clipping(qapp) -> None:
     provider = _FakeRunControlDashboardEngineClient()
     provider.target_waiting = True
@@ -2012,6 +2071,7 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                                     "completed_bytes": 0,
                                     "warning_count": 0,
                                     "error_count": 0,
+                                    "last_success_utc": "2026-07-19T12:05:00.000Z",
                                 }
                             ],
                         }
@@ -2485,6 +2545,12 @@ class _FakeTerminalRunDashboardEngineClient(_FakeBackupStartDashboardEngineClien
                                     "completed_bytes": self.completed_bytes,
                                     "warning_count": self.warning_count,
                                     "error_count": self.error_count,
+                                    "last_success_utc": (
+                                        "2026-07-20T12:01:00.000Z"
+                                        if self.run_state
+                                        in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
+                                        else "2026-07-19T12:05:00.000Z"
+                                    ),
                                 }
                             ],
                         }
@@ -2553,6 +2619,50 @@ class _FakeTerminalRunDashboardEngineClient(_FakeBackupStartDashboardEngineClien
                 }
             }
         )
+
+
+class _FakeMultiTargetFreshnessDashboardEngineClient(_FakeDashboardEngineClient):
+    def get_activity_overview(
+        self,
+        *,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        response = super().get_activity_overview(
+            job_id=job_id,
+            limit=limit,
+            offset=offset,
+        )
+        payload = dict(response.payload)
+        overview = dict(payload["activity_overview"])
+        runs = list(overview["runs"])
+        run = dict(runs[0])
+        targets = list(run["targets"])
+        first = dict(targets[0])
+        targets.extend(
+            (
+                {
+                    **first,
+                    "run_target_id": "run-a-target-0001",
+                    "endpoint_id": "target-b",
+                    "endpoint_revision_id": "target-rev-b",
+                    "last_success_utc": "2026-07-18T11:05:00.000Z",
+                },
+                {
+                    **first,
+                    "run_target_id": "run-a-target-0002",
+                    "endpoint_id": "target-c",
+                    "endpoint_revision_id": "target-rev-c",
+                    "last_success_utc": None,
+                },
+            )
+        )
+        run["targets"] = targets
+        runs[0] = run
+        overview["runs"] = runs
+        payload["activity_overview"] = overview
+        return IpcResponse.accepted(payload)
 
 
 class _FakeMultiJobDashboardEngineClient(_FakeBackupStartDashboardEngineClient):

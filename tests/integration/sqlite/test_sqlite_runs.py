@@ -1236,6 +1236,14 @@ def test_sqlite_run_store_lists_recent_run_activity_summaries(tmp_path: Path) ->
         connection.execute(
             """
             UPDATE run_targets
+            SET state = 'SUCCEEDED',
+                finished_utc = '2026-07-20T10:05:00.000Z'
+            WHERE id = 'run-a-target-0000'
+            """
+        )
+        connection.execute(
+            """
+            UPDATE run_targets
             SET completed_operations = 1,
                 completed_bytes = 128,
                 warning_count = 1
@@ -1253,6 +1261,9 @@ def test_sqlite_run_store_lists_recent_run_activity_summaries(tmp_path: Path) ->
         assert page[0].targets[0].completed_operations == 1
         assert page[0].targets[0].completed_bytes == 128
         assert page[0].targets[0].warning_count == 1
+        assert page[0].targets[0].last_success_utc == (
+            "2026-07-20T10:05:00.000Z"
+        )
 
 
 def test_sqlite_run_progress_snapshot_sequence_tracks_authoritative_changes(

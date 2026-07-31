@@ -26,6 +26,7 @@ class RunTargetActivitySummary:
     completed_bytes: int
     warning_count: int = 0
     error_count: int = 0
+    last_success_utc: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -39,6 +40,7 @@ class RunTargetActivitySummary:
             "completed_bytes": self.completed_bytes,
             "warning_count": self.warning_count,
             "error_count": self.error_count,
+            "last_success_utc": self.last_success_utc,
         }
 
 

@@ -23,6 +23,15 @@ lokalisert neste handling. Terminale resultater viser ikke aktiv fil,
 pause/stopp eller beregning av ETA. To ferske GUI-vinduer mot samme lagrede run,
 jobbskifte og norsk/engelsk delresultat er dekket av GUI-testene.
 
+Oppdatering 2026-07-31: Aktivitetens bounded run-read model beregner nå eksakt
+`last_success_utc` per jobb og mål fra terminale `SUCCEEDED`- og
+`SUCCEEDED_WITH_WARNINGS`-mål. En nyere aktiv, feilet eller avbrutt kjøring
+overskriver derfor ikke det siste vellykkede tidspunktet. Dashboardets
+**Ferskhet per mål** viser én wrapbar linje per mål med separat ferskhetstilstand
+og lokalisert dato/tid, eller eksplisitt **Ingen vellykket backup**. SQLite-
+integrasjonen beviser historisk suksess under en nyere revalidering, og GUI-
+dekningen beviser tre mål ved 900×560, språkbytte og null horisontal overflow.
+
 Oppdatering 2026-07-31: Catalog schema 40 materialiserer nå durable
 `run_attempts`, immutable `operation_attempts` og immutable
 `operation_outcomes` fra den hashkjedede recoveryjournalen. Hvert klassifisert

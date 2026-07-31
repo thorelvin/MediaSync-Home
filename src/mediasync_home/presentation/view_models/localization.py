@@ -194,6 +194,18 @@ class ShellText:
         return "Backup result" if self.language_tooltip_prefix == "Language" else "Backupresultat"
 
     @property
+    def last_successful_backup(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Last successful"
+        return "Siste vellykkede"
+
+    @property
+    def no_successful_backup(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "No successful backup"
+        return "Ingen vellykket backup"
+
+    @property
     def operation_count(self) -> str:
         return "operations" if self.language_tooltip_prefix == "Language" else "operasjoner"
 

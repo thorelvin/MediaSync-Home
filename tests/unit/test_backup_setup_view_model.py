@@ -374,6 +374,7 @@ def test_activity_overview_view_model_renders_latest_run_status() -> None:
                                 "completed_bytes": 0,
                                 "warning_count": 0,
                                 "error_count": 0,
+                                "last_success_utc": "2026-07-19T12:05:00.000Z",
                             }
                         ],
                     }
@@ -392,3 +393,9 @@ def test_activity_overview_view_model_renders_latest_run_status() -> None:
     assert state.job_status.activity_label == "Kontrollerer"
     assert state.job_status.attention_label == "Venter"
     assert state.job_status.target_statuses[0].activity_label == "Kontrollerer"
+    assert state.job_status.target_statuses[0].freshness_label == (
+        "Sist sikkerhetskopiert"
+    )
+    assert state.job_status.target_statuses[0].last_success_utc == (
+        "2026-07-19T12:05:00.000Z"
+    )

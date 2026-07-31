@@ -44,6 +44,9 @@ def test_activity_overview_query_returns_bounded_recent_runs() -> None:
     assert page.read_model_available is True
     assert page.job_id == "job-a"
     assert [run["run_id"] for run in page.to_dict()["runs"]] == ["run-a"]  # type: ignore[index]
+    assert page.to_dict()["runs"][0]["targets"][0]["last_success_utc"] == (  # type: ignore[index]
+        "2026-07-19T12:05:00.000Z"
+    )
 
 
 def test_activity_overview_query_reports_unavailable_without_store() -> None:
@@ -92,6 +95,7 @@ def _run(run_id: str, *, job_id: str) -> RunActivitySummary:
                 completed_operations=0,
                 planned_bytes=128,
                 completed_bytes=0,
+                last_success_utc="2026-07-19T12:05:00.000Z",
             ),
         ),
     )

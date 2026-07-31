@@ -61,6 +61,7 @@ from mediasync_home.presentation.view_models.backup_setup import (
     BackupJobDetailViewState,
     BackupJobStatusViewState,
     StandardBackupSetupViewState,
+    TargetStatusViewState,
     activity_overview_from_response,
     backup_job_detail_from_response,
     backup_overview_from_response,
@@ -483,6 +484,8 @@ class MediaSyncWindow(QMainWindow):
         self._activity_empty_label: QLabel | None = None
         self._activity_status_title: QLabel | None = None
         self._activity_dimension_rows: list[QLabel] = []
+        self._activity_content: QWidget | None = None
+        self._activity_scroll_area: QScrollArea | None = None
         self._plan_preview_title: QLabel | None = None
         self._plan_preview_summary: QLabel | None = None
         self._plan_preview_rows: list[QLabel] = []
@@ -2859,12 +2862,38 @@ class MediaSyncWindow(QMainWindow):
             (texts.attention, state.attention_label),
             (
                 texts.target_freshness,
-                "Ikke konfigurert" if not state.target_statuses else state.target_statuses[0].freshness_label,
+                self._format_target_freshness(state.target_statuses),
             ),
             (texts.next_action, state.recommended_action),
         )
         for row, (label, value) in zip(self._activity_dimension_rows, values, strict=False):
             row.setText(f"{label}: {self._display(value)}")
+        self._refresh_responsive_page_geometry(
+            self._activity_content,
+            self._activity_scroll_area,
+        )
+
+    def _format_target_freshness(
+        self,
+        targets: tuple[TargetStatusViewState, ...],
+    ) -> str:
+        if not targets:
+            return self._display("Not configured")
+        texts = self._texts()
+        lines = []
+        for target in targets:
+            if target.last_success_utc is None:
+                last_success = texts.no_successful_backup
+            else:
+                last_success = (
+                    f"{texts.last_successful_backup}: "
+                    f"{self._format_history_timestamp(target.last_success_utc)}"
+                )
+            lines.append(
+                f"{target.name}: {self._display(target.freshness_label)} · "
+                f"{last_success}"
+            )
+        return "\n".join(lines)
 
     def _apply_plan_operation_preview_state(self, state: PlanOperationPreviewState) -> None:
         if self._plan_preview_title is not None:
@@ -4106,6 +4135,7 @@ class MediaSyncWindow(QMainWindow):
 
         content = QWidget()
         content.setObjectName("activityContent")
+        self._activity_content = content
         layout = QVBoxLayout(content)
         layout.setContentsMargins(20, 24, 20, 24)
         layout.setSpacing(12)
@@ -4145,6 +4175,7 @@ class MediaSyncWindow(QMainWindow):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setWidget(content)
+        self._activity_scroll_area = scroll
         outer_layout.addWidget(scroll)
         return activity
 
@@ -4546,6 +4577,10 @@ class MediaSyncWindow(QMainWindow):
             self._settings_page,
             self._settings_scroll_area,
         )
+        self._refresh_responsive_page_geometry(
+            self._activity_content,
+            self._activity_scroll_area,
+        )
 
     def _refresh_responsive_page_geometry(
         self,
@@ -4713,6 +4748,8 @@ class MediaSyncWindow(QMainWindow):
         self._apply_cataloged_files_preview_state(self._cataloged_files_preview_state)
         self._apply_settings_localized_text()
         self._apply_settings_storage_state()
+        self._refresh_dashboard_geometry()
+        QTimer.singleShot(0, self._refresh_dashboard_geometry)
 
     def _apply_settings_localized_text(self) -> None:
         text = settings_text(self._selected_language_code)
