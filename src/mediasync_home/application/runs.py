@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Mapping, Protocol
 
 from mediasync_home.application.plans import (
+    MUTATING_OPERATION_TYPES,
     PlanEndpoint,
     PlanEndpointRole,
+    PlanOperation,
     PlanStore,
     SealedPlan,
     verify_plan_checksum,
+)
+from mediasync_home.application.operation_audit_read_models import (
+    OperationAuditReadModelStore,
 )
 from mediasync_home.domain.capabilities import MutationPermit
 
@@ -24,6 +29,8 @@ WAITABLE_ENDPOINT_LEASE_CODES = frozenset(
 )
 PLAN_CHECKSUM_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 MAX_RUN_TARGET_SCOPE = 32
+MAX_RUN_OPERATION_SCOPE = 100
+MAX_RUN_OPERATION_ID_LENGTH = 256
 
 
 class RunStartViolation(ValueError):
@@ -87,6 +94,9 @@ _RETRYABLE_RUN_TARGET_STATES = frozenset(
         RunTargetState.BLOCKED,
     }
 )
+_OPERATION_RETRYABLE_RUN_TARGET_STATES = frozenset(
+    {*_RETRYABLE_RUN_TARGET_STATES, RunTargetState.SUCCEEDED_WITH_WARNINGS}
+)
 
 
 class RunTriggerType(str, Enum):
@@ -103,6 +113,8 @@ class StartRunCommand:
     trigger_occurrence_id: str | None = None
     target_endpoint_ids: tuple[str, ...] = ()
     resumed_from_run_id: str | None = None
+    source_operation_ids: tuple[str, ...] = ()
+    selected_plan_operation_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -417,6 +429,7 @@ def parse_start_run_command(
         "plan_checksum",
         "target_endpoint_ids",
         "resumed_from_run_id",
+        "source_operation_ids",
     }
     if not set(payload).issubset(allowed_fields):
         raise RunStartViolation("START_RUN_PAYLOAD_INVALID")
@@ -431,8 +444,11 @@ def parse_start_run_command(
         raise RunStartViolation("START_RUN_REQUIRES_PLAN_CHECKSUM")
     target_endpoint_ids = _parse_target_endpoint_ids(payload)
     resumed_from_run_id = _parse_resumed_from_run_id(payload)
+    source_operation_ids = _parse_source_operation_ids(payload)
     if resumed_from_run_id is not None and not target_endpoint_ids:
         raise RunStartViolation("START_RUN_RETRY_REQUIRES_TARGET_SCOPE")
+    if source_operation_ids and resumed_from_run_id is None:
+        raise RunStartViolation("START_RUN_OPERATION_RETRY_REQUIRES_SOURCE_RUN")
     return StartRunCommand(
         request_id=request_id,
         idempotency_key=idempotency_key,
@@ -440,6 +456,7 @@ def parse_start_run_command(
         plan_checksum=plan_checksum,
         target_endpoint_ids=target_endpoint_ids,
         resumed_from_run_id=resumed_from_run_id,
+        source_operation_ids=source_operation_ids,
     )
 
 
@@ -625,6 +642,7 @@ def start_run_from_sealed_plan(
     plans: PlanStore,
     runs: RunStore,
     id_factory: RunIdFactory,
+    operation_audit_store: OperationAuditReadModelStore | None = None,
 ) -> RunStartOutcome:
     existing = runs.load_started_run_by_idempotency_key(
         _effective_run_idempotency_key(command)
@@ -645,32 +663,67 @@ def start_run_from_sealed_plan(
             readiness=_missing_plan(command.plan_id),
         )
 
-    readiness = _readiness_for_plan(command=command, plan=plan)
-    if not readiness.plan_runnable:
+    retry_source: StartedRun | None = None
+    effective_command = command
+    if command.source_operation_ids and command.resumed_from_run_id is None:
         return RunStartOutcome(
             created=False,
             idempotent_replay=False,
-            readiness=readiness,
+            readiness=_not_ready_to_queue(
+                _readiness_for_plan(command=command, plan=plan),
+                "RUN_RETRY_OPERATION_REQUIRES_SOURCE_RUN",
+                "Select a failed file from a terminal backup before retrying it.",
+            ),
         )
-
-    retry_source: StartedRun | None = None
     if command.resumed_from_run_id is not None:
         retry_source = runs.load_started_run(command.resumed_from_run_id)
         retry_error = _retry_source_validation_code(
             source=retry_source,
             plan=plan,
             target_endpoint_ids=command.target_endpoint_ids,
+            operation_retry=bool(command.source_operation_ids),
         )
         if retry_error is not None:
             return RunStartOutcome(
                 created=False,
                 idempotent_replay=False,
                 readiness=_not_ready_to_queue(
-                    readiness,
+                    _readiness_for_plan(command=command, plan=plan),
                     retry_error,
                     "Run a fresh control and select a failed target before retrying.",
                 ),
             )
+        selected_operation_ids, operation_scope_error = _retry_operation_scope(
+            source=retry_source,
+            fresh_plan=plan,
+            plans=plans,
+            operation_audits=operation_audit_store,
+            target_endpoint_ids=command.target_endpoint_ids,
+            source_operation_ids=command.source_operation_ids,
+        )
+        if operation_scope_error is not None:
+            return RunStartOutcome(
+                created=False,
+                idempotent_replay=False,
+                readiness=_not_ready_to_queue(
+                    _readiness_for_plan(command=command, plan=plan),
+                    operation_scope_error,
+                    "Run a fresh control and select an unfinished file that still needs work.",
+                ),
+            )
+        if selected_operation_ids:
+            effective_command = replace(
+                command,
+                selected_plan_operation_ids=selected_operation_ids,
+            )
+
+    readiness = _readiness_for_plan(command=effective_command, plan=plan)
+    if not readiness.plan_runnable:
+        return RunStartOutcome(
+            created=False,
+            idempotent_replay=False,
+            readiness=readiness,
+        )
 
     active = _load_active_run_for_job(runs=runs, job_id=plan.job_id)
     if active is not None:
@@ -682,7 +735,7 @@ def start_run_from_sealed_plan(
         )
 
     run = _started_run_from_plan(
-        command=command,
+        command=effective_command,
         plan=plan,
         ids=id_factory.new_run_ids(),
         retry_source=retry_source,
@@ -1497,6 +1550,13 @@ def _readiness_for_plan(
     target_scope_error = _target_scope_validation_code(command.target_endpoint_ids)
     if target_scope_error is not None:
         validation_codes.append(target_scope_error)
+    operation_scope_error = _operation_scope_validation_code(
+        command.selected_plan_operation_ids
+    )
+    if operation_scope_error is not None:
+        validation_codes.append(operation_scope_error)
+    if command.source_operation_ids and not command.selected_plan_operation_ids:
+        validation_codes.append("RUN_RETRY_OPERATION_SCOPE_UNRESOLVED")
     checksum_matches = plan.plan_checksum == command.plan_checksum
     checksum_valid = verify_plan_checksum(plan)
     if not checksum_matches:
@@ -1505,14 +1565,44 @@ def _readiness_for_plan(
         validation_codes.append("PLAN_CHECKSUM_INVALID")
     if not plan.immutable:
         validation_codes.append("PLAN_NOT_IMMUTABLE")
-    target_endpoints = _selected_target_endpoints(plan, command.target_endpoint_ids)
+    selected_operations = _selected_plan_operations(
+        plan,
+        command.selected_plan_operation_ids,
+    )
+    known_operation_ids = {operation.operation_id for operation in plan.operations}
+    if (
+        command.selected_plan_operation_ids
+        and set(command.selected_plan_operation_ids) - known_operation_ids
+    ):
+        validation_codes.append("PLAN_OPERATION_SCOPE_UNKNOWN")
+    if command.selected_plan_operation_ids and any(
+        operation.operation_type not in MUTATING_OPERATION_TYPES
+        for operation in selected_operations
+    ):
+        validation_codes.append("PLAN_OPERATION_SCOPE_NOT_MUTATING")
+    target_endpoints = _selected_target_endpoints(
+        plan,
+        command.target_endpoint_ids,
+        command.selected_plan_operation_ids,
+    )
     known_target_ids = {endpoint.endpoint_id for endpoint in _target_endpoints(plan)}
     if command.target_endpoint_ids and set(command.target_endpoint_ids) - known_target_ids:
         validation_codes.append("PLAN_TARGET_SCOPE_UNKNOWN")
-    if _selected_scope_is_blocked(plan, command.target_endpoint_ids):
+    if command.selected_plan_operation_ids and any(
+        operation.target_endpoint_id not in set(command.target_endpoint_ids)
+        for operation in selected_operations
+    ):
+        validation_codes.append("PLAN_OPERATION_SCOPE_TARGET_MISMATCH")
+    if _selected_scope_is_blocked(
+        plan,
+        command.target_endpoint_ids,
+        command.selected_plan_operation_ids,
+    ):
         validation_codes.append("PLAN_BLOCKED")
     selected_operation_count = (
-        plan.operation_count
+        len(selected_operations)
+        if command.selected_plan_operation_ids
+        else plan.operation_count
         if not command.target_endpoint_ids
         else sum(endpoint.planned_operations for endpoint in target_endpoints)
     )
@@ -1541,8 +1631,17 @@ def _started_run_from_plan(
     ids: RunIds,
     retry_source: StartedRun | None = None,
 ) -> StartedRun:
-    target_endpoints = _selected_target_endpoints(plan, command.target_endpoint_ids)
-    scoped = bool(command.target_endpoint_ids)
+    target_endpoints = _selected_target_endpoints(
+        plan,
+        command.target_endpoint_ids,
+        command.selected_plan_operation_ids,
+    )
+    selected_operations = _selected_plan_operations(
+        plan,
+        command.selected_plan_operation_ids,
+    )
+    operation_scoped = bool(command.selected_plan_operation_ids)
+    scoped = bool(command.target_endpoint_ids) or operation_scoped
     return StartedRun(
         run_id=ids.run_id,
         job_id=plan.job_id,
@@ -1561,24 +1660,38 @@ def _started_run_from_plan(
         app_version=APP_VERSION,
         plan_checksum=plan.plan_checksum,
         planned_operations=(
-            sum(endpoint.planned_operations for endpoint in target_endpoints)
+            len(selected_operations)
+            if operation_scoped
+            else sum(endpoint.planned_operations for endpoint in target_endpoints)
             if scoped
             else plan.operation_count
         ),
         planned_bytes=(
-            sum(endpoint.planned_bytes for endpoint in target_endpoints)
+            sum(operation.planned_bytes for operation in selected_operations)
+            if operation_scoped
+            else sum(endpoint.planned_bytes for endpoint in target_endpoints)
             if scoped
             else plan.planned_bytes
         ),
         trigger_occurrence_id=command.trigger_occurrence_id,
         resumed_from_run_id=command.resumed_from_run_id,
         targets=tuple(
-            _started_run_target(ids.run_id, endpoint)
+            _started_run_target(
+                ids.run_id,
+                endpoint,
+                operations=(selected_operations if operation_scoped else ()),
+            )
             for endpoint in target_endpoints
         ),
         summary={
             "executor_pending": True,
-            "scope": "TARGET_RETRY" if retry_source is not None else "0B_RUN_START_SKELETON",
+            "scope": (
+                "OPERATION_RETRY"
+                if command.source_operation_ids
+                else "TARGET_RETRY"
+                if retry_source is not None
+                else "0B_RUN_START_SKELETON"
+            ),
             **(
                 {"target_endpoint_ids": list(command.target_endpoint_ids)}
                 if scoped
@@ -1587,6 +1700,16 @@ def _started_run_from_plan(
             **(
                 {"resumed_from_run_id": command.resumed_from_run_id}
                 if command.resumed_from_run_id is not None
+                else {}
+            ),
+            **(
+                {"source_operation_ids": list(command.source_operation_ids)}
+                if command.source_operation_ids
+                else {}
+            ),
+            **(
+                {"operation_ids": list(command.selected_plan_operation_ids)}
+                if command.selected_plan_operation_ids
                 else {}
             ),
             **(
@@ -1617,8 +1740,22 @@ def _target_endpoints(plan: SealedPlan) -> tuple[PlanEndpoint, ...]:
 def _selected_target_endpoints(
     plan: SealedPlan,
     target_endpoint_ids: tuple[str, ...],
+    operation_ids: tuple[str, ...] = (),
 ) -> tuple[PlanEndpoint, ...]:
     endpoints = _target_endpoints(plan)
+    if operation_ids:
+        selected_operation_ids = set(operation_ids)
+        selected_endpoint_ids = {
+            operation.target_endpoint_id
+            for operation in plan.operations
+            if operation.operation_id in selected_operation_ids
+            and operation.target_endpoint_id is not None
+        }
+        return tuple(
+            endpoint
+            for endpoint in endpoints
+            if endpoint.endpoint_id in selected_endpoint_ids
+        )
     if not target_endpoint_ids:
         return endpoints
     selected = set(target_endpoint_ids)
@@ -1628,7 +1765,15 @@ def _selected_target_endpoints(
 def _selected_scope_is_blocked(
     plan: SealedPlan,
     target_endpoint_ids: tuple[str, ...],
+    operation_ids: tuple[str, ...] = (),
 ) -> bool:
+    if operation_ids:
+        selected = set(operation_ids)
+        return any(
+            operation.operation_id in selected
+            and operation.risk_level.value == "BLOCKED"
+            for operation in plan.operations
+        )
     if not target_endpoint_ids:
         return plan.risk_summary.get("highest") == "BLOCKED"
     selected = set(target_endpoint_ids)
@@ -1642,11 +1787,133 @@ def _selected_scope_is_blocked(
     )
 
 
+def _selected_plan_operations(
+    plan: SealedPlan,
+    operation_ids: tuple[str, ...],
+) -> tuple[PlanOperation, ...]:
+    if not operation_ids:
+        return plan.operations
+    selected = set(operation_ids)
+    return tuple(
+        operation
+        for operation in plan.operations
+        if operation.operation_id in selected
+    )
+
+
+def _retry_operation_scope(
+    *,
+    source: StartedRun | None,
+    fresh_plan: SealedPlan,
+    plans: PlanStore,
+    operation_audits: OperationAuditReadModelStore | None,
+    target_endpoint_ids: tuple[str, ...],
+    source_operation_ids: tuple[str, ...],
+) -> tuple[tuple[str, ...], str | None]:
+    if not source_operation_ids:
+        return (), None
+    if source is None:
+        return (), "RUN_RETRY_SOURCE_NOT_FOUND"
+    if operation_audits is None:
+        return (), "RUN_RETRY_OPERATION_AUDIT_UNAVAILABLE"
+    source_plan = plans.load_sealed_plan(source.plan_id)
+    if (
+        source_plan is None
+        or source_plan.plan_checksum != source.plan_checksum
+        or not source_plan.immutable
+        or not verify_plan_checksum(source_plan)
+    ):
+        return (), "RUN_RETRY_SOURCE_PLAN_INVALID"
+
+    source_operations = {
+        operation.operation_id: operation for operation in source_plan.operations
+    }
+    source_targets = {target.endpoint_id: target for target in source.targets}
+    selected_fresh_ids: set[str] = set()
+    for source_operation_id in source_operation_ids:
+        source_operation = source_operations.get(source_operation_id)
+        if source_operation is None:
+            return (), "RUN_RETRY_OPERATION_NOT_IN_SOURCE_PLAN"
+        endpoint_id = source_operation.target_endpoint_id
+        relative_path = source_operation.target_relative_path
+        source_target = source_targets.get(endpoint_id or "")
+        if (
+            endpoint_id is None
+            or endpoint_id not in target_endpoint_ids
+            or relative_path is None
+            or source_target is None
+        ):
+            return (), "RUN_RETRY_OPERATION_TARGET_MISMATCH"
+        try:
+            identity = operation_audits.load_operation_audit_identity(
+                run_id=source.run_id,
+                operation_id=source_operation_id,
+            )
+            outcome = operation_audits.load_operation_outcome_summary(
+                run_id=source.run_id,
+                operation_id=source_operation_id,
+            )
+        except (RuntimeError, ValueError):
+            return (), "RUN_RETRY_OPERATION_AUDIT_UNAVAILABLE"
+        if (
+            identity is None
+            or identity.run_target_id != source_target.run_target_id
+            or identity.target_relative_path != relative_path
+        ):
+            return (), "RUN_RETRY_OPERATION_AUDIT_MISMATCH"
+        if outcome is None:
+            return (), "RUN_RETRY_OPERATION_OUTCOME_NOT_FOUND"
+        if outcome.final_state == "SUCCEEDED":
+            return (), "RUN_RETRY_OPERATION_ALREADY_SUCCEEDED"
+        if outcome.final_state not in {"SKIPPED", "CANCELLED", "RECOVERY_REQUIRED"}:
+            return (), "RUN_RETRY_OPERATION_NOT_RETRYABLE"
+
+        matches = tuple(
+            operation
+            for operation in fresh_plan.operations
+            if operation.operation_type in MUTATING_OPERATION_TYPES
+            and operation.target_endpoint_id == endpoint_id
+            and operation.target_relative_path == relative_path
+        )
+        if len(matches) != 1:
+            return (), "RUN_RETRY_OPERATION_NOT_IN_FRESH_PLAN"
+        selected_fresh_ids.add(matches[0].operation_id)
+
+    dependency_map: dict[str, set[str]] = {}
+    for dependency in fresh_plan.dependencies:
+        dependency_map.setdefault(dependency.after_operation_id, set()).add(
+            dependency.before_operation_id
+        )
+    pending = list(selected_fresh_ids)
+    while pending:
+        operation_id = pending.pop()
+        for required_id in dependency_map.get(operation_id, set()):
+            if required_id not in selected_fresh_ids:
+                selected_fresh_ids.add(required_id)
+                pending.append(required_id)
+
+    selected_operations = tuple(
+        operation
+        for operation in fresh_plan.operations
+        if operation.operation_id in selected_fresh_ids
+    )
+    if len(selected_operations) != len(selected_fresh_ids):
+        return (), "RUN_RETRY_OPERATION_DEPENDENCY_NOT_FOUND"
+    if any(
+        operation.operation_type not in MUTATING_OPERATION_TYPES
+        or operation.target_endpoint_id not in target_endpoint_ids
+        for operation in selected_operations
+    ):
+        return (), "RUN_RETRY_OPERATION_DEPENDENCY_INVALID"
+    return tuple(operation.operation_id for operation in selected_operations), None
+
+
 def _retry_source_validation_code(
     *,
     source: StartedRun | None,
     plan: SealedPlan,
     target_endpoint_ids: tuple[str, ...],
+    operation_retry: bool = False,
 ) -> str | None:
     if source is None:
         return "RUN_RETRY_SOURCE_NOT_FOUND"
@@ -1657,11 +1924,16 @@ def _retry_source_validation_code(
     if source.job_id != plan.job_id:
         return "RUN_RETRY_SOURCE_JOB_MISMATCH"
     source_targets = {target.endpoint_id: target for target in source.targets}
+    retryable_states = (
+        _OPERATION_RETRYABLE_RUN_TARGET_STATES
+        if operation_retry
+        else _RETRYABLE_RUN_TARGET_STATES
+    )
     for endpoint_id in target_endpoint_ids:
         target = source_targets.get(endpoint_id)
         if target is None:
             return "RUN_RETRY_TARGET_NOT_IN_SOURCE"
-        if target.state not in _RETRYABLE_RUN_TARGET_STATES:
+        if target.state not in retryable_states:
             return "RUN_RETRY_TARGET_NOT_FAILED"
         if source.plan_id == plan.plan_id:
             return "RUN_RETRY_REQUIRES_FRESH_PLAN"
@@ -1722,6 +1994,46 @@ def _target_scope_validation_code(
     ):
         return "START_RUN_TARGET_SCOPE_INVALID"
     return None
+
+
+def _operation_scope_validation_code(
+    operation_ids: tuple[str, ...],
+) -> str | None:
+    if not operation_ids:
+        return None
+    if not 1 <= len(operation_ids) <= MAX_RUN_OPERATION_SCOPE:
+        return "START_RUN_OPERATION_SCOPE_INVALID"
+    if len(set(operation_ids)) != len(operation_ids):
+        return "START_RUN_OPERATION_SCOPE_DUPLICATE"
+    if any(
+        not operation_id.strip()
+        or len(operation_id) > MAX_RUN_OPERATION_ID_LENGTH
+        or operation_id != operation_id.strip()
+        for operation_id in operation_ids
+    ):
+        return "START_RUN_OPERATION_SCOPE_INVALID"
+    return None
+
+
+def _parse_source_operation_ids(payload: dict[str, Any]) -> tuple[str, ...]:
+    if "source_operation_ids" not in payload:
+        return ()
+    value = payload.get("source_operation_ids")
+    if not isinstance(value, list) or not 1 <= len(value) <= MAX_RUN_OPERATION_SCOPE:
+        raise RunStartViolation("START_RUN_OPERATION_SCOPE_INVALID")
+    normalized: list[str] = []
+    for item in value:
+        if (
+            not isinstance(item, str)
+            or not item.strip()
+            or len(item) > MAX_RUN_OPERATION_ID_LENGTH
+            or item != item.strip()
+        ):
+            raise RunStartViolation("START_RUN_OPERATION_SCOPE_INVALID")
+        normalized.append(item)
+    if len(set(normalized)) != len(normalized):
+        raise RunStartViolation("START_RUN_OPERATION_SCOPE_DUPLICATE")
+    return tuple(normalized)
 
 
 def _parse_resumed_from_run_id(payload: dict[str, Any]) -> str | None:
@@ -1794,8 +2106,18 @@ def _run_control_rejected(
     )
 
 
-def _started_run_target(run_id: str, endpoint: PlanEndpoint) -> StartedRunTarget:
+def _started_run_target(
+    run_id: str,
+    endpoint: PlanEndpoint,
+    *,
+    operations: tuple[PlanOperation, ...] = (),
+) -> StartedRunTarget:
     target_ordinal = 0 if endpoint.target_ordinal is None else endpoint.target_ordinal
+    scoped_operations = tuple(
+        operation
+        for operation in operations
+        if operation.target_endpoint_id == endpoint.endpoint_id
+    )
     return StartedRunTarget(
         run_target_id=f"{run_id}-target-{target_ordinal:04d}",
         endpoint_id=endpoint.endpoint_id,
@@ -1804,8 +2126,14 @@ def _started_run_target(run_id: str, endpoint: PlanEndpoint) -> StartedRunTarget
         required_owner_installation_id=endpoint.required_owner_installation_id,
         required_ownership_epoch=endpoint.required_ownership_epoch,
         lease_resource_key=f"endpoint:{endpoint.endpoint_id}",
-        planned_operations=endpoint.planned_operations,
-        planned_bytes=endpoint.planned_bytes,
+        planned_operations=(
+            len(scoped_operations) if operations else endpoint.planned_operations
+        ),
+        planned_bytes=(
+            sum(operation.planned_bytes for operation in scoped_operations)
+            if operations
+            else endpoint.planned_bytes
+        ),
     )
 
 

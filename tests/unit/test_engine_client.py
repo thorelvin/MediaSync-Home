@@ -78,6 +78,7 @@ def test_engine_client_submits_target_scoped_retry_lineage() -> None:
         idempotency_key="idempotency-retry",
         target_endpoint_ids=("target-b",),
         resumed_from_run_id="run-source",
+        source_operation_ids=("op-source-b",),
     )
 
     assert response.reason is None
@@ -87,6 +88,7 @@ def test_engine_client_submits_target_scoped_retry_lineage() -> None:
         "plan_checksum": "b" * 64,
         "target_endpoint_ids": ["target-b"],
         "resumed_from_run_id": "run-source",
+        "source_operation_ids": ["op-source-b"],
     }
     assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
 

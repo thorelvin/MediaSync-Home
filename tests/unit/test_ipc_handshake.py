@@ -53,6 +53,11 @@ from mediasync_home.application.job_read_models import (
 from mediasync_home.application.initial_backup_planning import (
     InitialBackupPlanRefreshReport,
 )
+from mediasync_home.application.operation_audit_read_models import (
+    OperationAttemptSummary,
+    OperationAuditIdentity,
+    OperationOutcomeSummary,
+)
 from mediasync_home.application.plans import (
     PlanEndpoint,
     PlanEndpointCursor,
@@ -363,16 +368,22 @@ class _FixedStandardBackupJobIdFactory(StandardBackupJobIdFactory):
 
 
 class _InMemoryPlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadModelStore):
-    def __init__(self, plan: SealedPlan | None = None) -> None:
-        self.plan = plan
+    def __init__(
+        self,
+        plan: SealedPlan | None = None,
+        *additional_plans: SealedPlan,
+    ) -> None:
+        self.plans = {
+            item.plan_id: item
+            for item in ((plan,) + additional_plans)
+            if item is not None
+        }
 
     def save_sealed_plan(self, plan: SealedPlan) -> None:
-        self.plan = plan
+        self.plans[plan.plan_id] = plan
 
     def load_sealed_plan(self, plan_id: str) -> SealedPlan | None:
-        if self.plan is not None and self.plan.plan_id == plan_id:
-            return self.plan
-        return None
+        return self.plans.get(plan_id)
 
     def page_plan_operations(self, query: PlanOperationPageQuery) -> PlanOperationPage:
         validate_plan_operation_page_query(query)
@@ -466,6 +477,53 @@ class _InMemoryPlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointRea
             else None,
             has_more=has_more,
         )
+
+
+class _FixedOperationAuditReadStore:
+    def __init__(
+        self,
+        *,
+        identity: OperationAuditIdentity,
+        outcome: OperationOutcomeSummary,
+    ) -> None:
+        self.identity = identity
+        self.outcome = outcome
+
+    def load_operation_audit_identity(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+    ) -> OperationAuditIdentity | None:
+        if (run_id, operation_id) == (
+            self.identity.run_id,
+            self.identity.operation_id,
+        ):
+            return self.identity
+        return None
+
+    def list_operation_attempt_summaries(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        limit: int,
+    ) -> tuple[OperationAttemptSummary, ...]:
+        del run_id, operation_id, limit
+        return ()
+
+    def load_operation_outcome_summary(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+    ) -> OperationOutcomeSummary | None:
+        if (run_id, operation_id) == (
+            self.identity.run_id,
+            self.identity.operation_id,
+        ):
+            return self.outcome
+        return None
 
 
 class _InMemoryScheduleStore(ScheduleStore):
@@ -2399,6 +2457,8 @@ def test_enabled_start_run_persists_queued_run_and_succeeds_receipt() -> None:
         "planned_operations": 1,
         "planned_bytes": 128,
         "target_endpoint_ids": ["target-a"],
+        "operation_ids": [],
+        "source_operation_ids": [],
     }
     assert response.payload["receipt"]["state"] == CommandReceiptState.SUCCEEDED.value
     assert response.payload["receipt"]["result_entity_type"] == "run"
@@ -2459,6 +2519,77 @@ def test_enabled_start_run_carries_failed_target_retry_scope_and_lineage() -> No
     assert retry is not None
     assert retry.resumed_from_run_id == "run-source"
     assert tuple(target.endpoint_id for target in retry.targets) == ("target-a",)
+
+
+def test_enabled_start_run_maps_failed_operation_retry_to_fresh_plan() -> None:
+    source_plan = _sealed_plan(plan_id="plan-source", operation_id="op-source")
+    plan = _sealed_plan(plan_id="plan-fresh", operation_id="op-fresh")
+    receipts = _InMemoryCommandReceiptStore()
+    runs = _InMemoryRunStore()
+    source = replace(
+        _started_run("run-source"),
+        job_revision_id=plan.job_revision_id,
+        plan_id=source_plan.plan_id,
+        plan_checksum=source_plan.plan_checksum,
+        logical_run_group_id="run-group-original",
+        state=RunState.COMPLETED_WITH_WARNINGS,
+        targets=(
+            replace(
+                _started_run("run-source").targets[0],
+                state=RunTargetState.SUCCEEDED_WITH_WARNINGS,
+            ),
+        ),
+    )
+    runs.save_started_run(source)
+    service = _service(mutations_enabled=True)
+    service.plan_store = _InMemoryPlanStore(source_plan, plan)
+    service.run_store = runs
+    service.run_id_factory = _FixedRunIdFactory()
+    service.command_receipt_store = receipts
+    service.operation_audit_read_store = _FixedOperationAuditReadStore(
+        identity=OperationAuditIdentity(
+            run_id=source.run_id,
+            run_target_id=source.targets[0].run_target_id,
+            operation_id="op-source",
+            target_relative_path="Pictures/A.jpg",
+        ),
+        outcome=OperationOutcomeSummary(
+            final_state="SKIPPED",
+            completed_utc="2026-07-31T12:00:00.000Z",
+            bytes_transferred=0,
+            transfer_state="NOT_TRANSFERRED",
+            assurance_level="NOT_RECORDED",
+            hash_evidence_kind=None,
+            durability_level="NOT_RECORDED",
+            verification_json=None,
+            error_code="LOCAL_IO_TRANSIENT",
+        ),
+    )
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    payload = {
+        "plan_id": plan.plan_id,
+        "plan_checksum": plan.plan_checksum,
+        "target_endpoint_ids": ["target-a"],
+        "resumed_from_run_id": source.run_id,
+        "source_operation_ids": ["op-source"],
+    }
+
+    response = ipc_client.submit_command(
+        RunCommandName.START_RUN.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=payload,
+        payload_hash=payload_hash(payload),
+    )
+
+    assert response.status is IpcStatus.ACCEPTED
+    assert response.payload["run"]["operation_ids"] == ["op-fresh"]
+    assert response.payload["run"]["source_operation_ids"] == ["op-source"]
+    retry = runs.load_started_run("run-a")
+    assert retry is not None
+    assert retry.summary["scope"] == "OPERATION_RETRY"
+    assert retry.planned_operations == 1
 
 
 def test_enabled_pause_and_resume_commands_are_durable_and_idempotent() -> None:
@@ -2848,16 +2979,20 @@ def test_frame_codec_enforces_json_object_and_size_limit() -> None:
         encode_frame({"payload": "x" * MAX_FRAME_BYTES})
 
 
-def _sealed_plan() -> SealedPlan:
+def _sealed_plan(
+    *,
+    plan_id: str = "plan-a",
+    operation_id: str = "op-copy",
+) -> SealedPlan:
     return seal_plan(
-        plan_id="plan-a",
+        plan_id=plan_id,
         analysis_id="analysis-a",
         job_id="job-a",
         job_revision_id="job-rev-a",
         endpoints=(_target_endpoint(),),
         operations=(
             PlanOperation(
-                operation_id="op-copy",
+                operation_id=operation_id,
                 operation_type=PlanOperationType.COPY_NEW,
                 sequence_no=10,
                 execution_phase=20,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol, cast
@@ -100,6 +100,7 @@ from mediasync_home.presentation.view_models.operation_audit import (
     operation_audit_from_response,
 )
 from mediasync_home.presentation.view_models.plan_preview import (
+    PlanOperationPreviewRow,
     PlanOperationPreviewState,
     empty_plan_operation_preview_state,
     plan_operation_preview_from_response,
@@ -141,6 +142,16 @@ _TERMINAL_RUN_STATES = frozenset(
         "RECOVERY_REQUIRED",
     }
 )
+_RETRYABLE_OPERATION_OUTCOMES = frozenset(
+    {"SKIPPED", "CANCELLED", "RECOVERY_REQUIRED"}
+)
+
+
+@dataclass(frozen=True)
+class _PendingRetry:
+    source_run_id: str
+    target_endpoint_ids: tuple[str, ...]
+    source_operation_ids: tuple[str, ...] = ()
 
 
 class BackupOverviewProvider(Protocol):
@@ -261,6 +272,7 @@ class BackupStartProvider(Protocol):
         idempotency_key: str,
         target_endpoint_ids: tuple[str, ...] = (),
         resumed_from_run_id: str | None = None,
+        source_operation_ids: tuple[str, ...] = (),
     ) -> IpcResponse: ...
 
 
@@ -344,7 +356,7 @@ class MediaSyncWindow(QMainWindow):
         self._start_idempotency_key: str | None = None
         self._analysis_request_id: str | None = None
         self._analysis_idempotency_key: str | None = None
-        self._retry_after_analysis: tuple[str, str] | None = None
+        self._retry_after_analysis: _PendingRetry | None = None
         self._latest_run_job_id: str | None = None
         self._latest_run_plan_id: str | None = None
         self._latest_run_state: str | None = None
@@ -421,6 +433,7 @@ class MediaSyncWindow(QMainWindow):
         self._history_operation_detail_title: QLabel | None = None
         self._history_operation_detail_labels: dict[str, QLabel] = {}
         self._history_operation_detail_values: dict[str, QLabel] = {}
+        self._history_retry_operation_button: QPushButton | None = None
         self._history_attempt_heading: QLabel | None = None
         self._history_attempt_list: QListWidget | None = None
         self._dashboard_detail_layout: QBoxLayout | None = None
@@ -1392,7 +1405,98 @@ class MediaSyncWindow(QMainWindow):
         attempt_list.setVisible(bool(state.attempts))
         if self._history_attempt_heading is not None:
             self._history_attempt_heading.setVisible(bool(state.attempts))
+        self._apply_history_operation_retry(state)
         self._refresh_dashboard_geometry()
+
+    def _apply_history_operation_retry(self, state: OperationAuditViewState) -> None:
+        button = self._history_retry_operation_button
+        if button is None:
+            return
+        row = self._selected_history_operation_row()
+        activity = self._selected_history_activity()
+        outcome = state.outcome
+        visible = (
+            state.found
+            and outcome is not None
+            and outcome.final_state in _RETRYABLE_OPERATION_OUTCOMES
+            and row is not None
+            and row.target_endpoint_id is not None
+            and activity is not None
+            and activity.run_id == state.run_id
+            and activity.state in _TERMINAL_RUN_STATES
+        )
+        texts = self._texts()
+        button.setText(
+            texts.checking_backup
+            if self._retry_after_analysis is not None
+            else texts.retry_files
+        )
+        button.setToolTip(texts.retry_files_tooltip)
+        button.setAccessibleName(texts.retry_files)
+        button.setVisible(visible)
+        button.setEnabled(
+            visible
+            and self._analysis_request_id is None
+            and self._retry_after_analysis is None
+            and self._engine_client is not None
+            and hasattr(self._engine_client, "check_backup")
+            and hasattr(self._engine_client, "start_backup")
+        )
+
+    def _selected_history_activity(self) -> HistoryActivityViewState | None:
+        return next(
+            (
+                activity
+                for activity in self._history_timeline_state.activities
+                if activity.selection_key == self._selected_history_activity_id
+            ),
+            None,
+        )
+
+    def _selected_history_operation_row(self) -> PlanOperationPreviewRow | None:
+        return next(
+            (
+                row
+                for row in self._history_operation_page_state.rows
+                if row.operation_id == self._selected_history_operation_id
+            ),
+            None,
+        )
+
+    def _retry_selected_history_operation(self) -> None:
+        activity = self._selected_history_activity()
+        row = self._selected_history_operation_row()
+        state = self._history_operation_audit_state
+        if (
+            activity is None
+            or activity.run_id is None
+            or row is None
+            or row.target_endpoint_id is None
+            or state.operation_id != row.operation_id
+            or state.outcome is None
+            or state.outcome.final_state not in _RETRYABLE_OPERATION_OUTCOMES
+            or self._analysis_request_id is not None
+        ):
+            return
+        self._start_request_id = None
+        self._start_idempotency_key = None
+        self._selected_job_id = activity.job_id
+        detail = self._refresh_backup_job_detail(activity.job_id)
+        if (
+            detail is None
+            or not detail.found
+            or self._analysis_request_id is not None
+        ):
+            return
+        self._retry_after_analysis = _PendingRetry(
+            source_run_id=activity.run_id,
+            target_endpoint_ids=(row.target_endpoint_id,),
+            source_operation_ids=(row.operation_id,),
+        )
+        self._check_selected_backup(start_when_safe=False)
+        if self._analysis_request_id is None:
+            self._retry_after_analysis = None
+        self._apply_history_operation_retry(state)
 
     def _show_previous_history_operation_page(self) -> None:
         if self._history_operation_page_index <= 0:
@@ -1440,6 +1544,7 @@ class MediaSyncWindow(QMainWindow):
     def _set_history_operation_detail_widgets_visible(self, visible: bool) -> None:
         widgets: tuple[QWidget | None, ...] = (
             self._history_operation_detail_title,
+            self._history_retry_operation_button,
             self._history_attempt_heading,
             self._history_attempt_list,
             *self._history_operation_detail_labels.values(),
@@ -3203,11 +3308,11 @@ class MediaSyncWindow(QMainWindow):
         self._refresh_activity_overview()
         self._refresh_history_timeline()
         if pending_retry is not None and terminal_state == "SUCCEEDED":
-            source_run_id, endpoint_id = pending_retry
             self._retry_after_analysis = None
             self._start_selected_backup(
-                target_endpoint_ids=(endpoint_id,),
-                resumed_from_run_id=source_run_id,
+                target_endpoint_ids=pending_retry.target_endpoint_ids,
+                resumed_from_run_id=pending_retry.source_run_id,
+                source_operation_ids=pending_retry.source_operation_ids,
             )
 
     def _start_selected_backup(
@@ -3215,6 +3320,7 @@ class MediaSyncWindow(QMainWindow):
         *,
         target_endpoint_ids: tuple[str, ...] = (),
         resumed_from_run_id: str | None = None,
+        source_operation_ids: tuple[str, ...] = (),
     ) -> None:
         state = self._job_detail_state
         if (
@@ -3236,6 +3342,7 @@ class MediaSyncWindow(QMainWindow):
             idempotency_key=self._start_idempotency_key,
             target_endpoint_ids=target_endpoint_ids,
             resumed_from_run_id=resumed_from_run_id,
+            source_operation_ids=source_operation_ids,
         )
         if response.status is IpcStatus.REJECTED:
             readiness = response.payload.get("readiness")
@@ -3294,7 +3401,10 @@ class MediaSyncWindow(QMainWindow):
             return
         self._start_request_id = None
         self._start_idempotency_key = None
-        self._retry_after_analysis = (source_run_id, endpoint_id)
+        self._retry_after_analysis = _PendingRetry(
+            source_run_id=source_run_id,
+            target_endpoint_ids=(endpoint_id,),
+        )
         self._check_selected_backup(start_when_safe=False)
         if self._analysis_request_id is None:
             self._retry_after_analysis = None
@@ -4183,10 +4293,19 @@ class MediaSyncWindow(QMainWindow):
             self._history_operation_detail_labels[key] = label
             self._history_operation_detail_values[key] = value
 
+        retry_operation = QPushButton(texts.retry_files)
+        retry_operation.setObjectName("historyRetryOperationButton")
+        retry_operation.setToolTip(texts.retry_files_tooltip)
+        retry_operation.setAccessibleName(texts.retry_files)
+        retry_operation.setVisible(False)
+        retry_operation.clicked.connect(self._retry_selected_history_operation)
+        self._history_retry_operation_button = retry_operation
+        layout.addWidget(retry_operation, 27, 2)
+
         attempt_heading = QLabel(texts.file_attempts)
         attempt_heading.setObjectName("mutedLabel")
         self._history_attempt_heading = attempt_heading
-        layout.addWidget(attempt_heading, 27, 0, 1, 3)
+        layout.addWidget(attempt_heading, 28, 0, 1, 3)
         attempt_list = QListWidget()
         attempt_list.setObjectName("historyAttemptList")
         attempt_list.setAccessibleName(texts.file_attempts)
@@ -4198,7 +4317,7 @@ class MediaSyncWindow(QMainWindow):
         attempt_list.setMinimumHeight(112)
         attempt_list.setMaximumHeight(190)
         self._history_attempt_list = attempt_list
-        layout.addWidget(attempt_list, 28, 0, 1, 3)
+        layout.addWidget(attempt_list, 29, 0, 1, 3)
         layout.setColumnStretch(1, 1)
         return panel
 

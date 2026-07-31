@@ -1512,6 +1512,62 @@ def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) 
         window.deleteLater()
 
 
+def test_history_rechecks_then_retries_only_selected_unfinished_file(qapp) -> None:
+    provider = _FakeHistoryOperationRetryEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window.refresh_engine_status()
+        window._select_navigation_row(2)
+        qapp.processEvents()
+        operation_list = window.findChild(QListWidget, "historyOperationList")
+        retry = window.findChild(QPushButton, "historyRetryOperationButton")
+        history_scroll = window.findChild(QScrollArea, "historyScrollArea")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert operation_list is not None and operation_list.count() == 2
+        assert retry is not None and retry.isHidden()
+        QTest.mouseClick(
+            operation_list.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=operation_list.visualItemRect(operation_list.item(1)).center(),
+        )
+        qapp.processEvents()
+
+        assert retry.isVisible() and retry.isEnabled()
+        assert retry.text() == "Prøv denne filen på nytt"
+        assert history_scroll is not None
+        assert history_scroll.horizontalScrollBar().maximum() == 0
+        assert language is not None and language.menu() is not None
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+        assert retry.text() == "Retry this file"
+
+        QTest.mouseClick(retry, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert provider.check_start_policies == [False]
+        assert retry.isEnabled() is False
+        assert retry.text() == "Checking changes..."
+
+        window._poll_backup_analysis()
+        qapp.processEvents()
+
+        assert provider.started_plan == ("plan-operation-refreshed", "c" * 64)
+        assert provider.started_scope == (("target-a",), "run-a")
+        assert provider.started_operation_ids == ("op-b",)
+        assert history_scroll.horizontalScrollBar().maximum() == 0
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_history_workspace_pages_with_bounded_offsets(qapp) -> None:
     provider = _FakePagedHistoryEngineClient()
     window = build_main_window(
@@ -2692,6 +2748,7 @@ class _FakeBackupStartDashboardEngineClient(_FakeDashboardEngineClient):
         super().__init__()
         self.started_plan: tuple[str, str] | None = None
         self.started_scope: tuple[tuple[str, ...], str | None] | None = None
+        self.started_operation_ids: tuple[str, ...] = ()
 
     def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
         response = super().get_backup_job_detail(job_id=job_id)
@@ -2714,12 +2771,14 @@ class _FakeBackupStartDashboardEngineClient(_FakeDashboardEngineClient):
         idempotency_key: str,
         target_endpoint_ids: tuple[str, ...] = (),
         resumed_from_run_id: str | None = None,
+        source_operation_ids: tuple[str, ...] = (),
     ) -> IpcResponse:
         assert request_id
         assert idempotency_key
         self.calls.append("start_backup")
         self.started_plan = (plan_id, plan_checksum)
         self.started_scope = (target_endpoint_ids, resumed_from_run_id)
+        self.started_operation_ids = source_operation_ids
         return IpcResponse.accepted({"created": True, "run": {"run_id": "run-a"}})
 
 
@@ -3435,6 +3494,169 @@ class _FakeHistoryEngineClient(_FakeDashboardEngineClient):
                     },
                 }
             }
+        )
+
+
+class _FakeHistoryOperationRetryEngineClient(_FakeHistoryEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.analysis_requested = False
+        self.check_start_policies: list[bool] = []
+        self.started_plan: tuple[str, str] | None = None
+        self.started_scope: tuple[tuple[str, ...], str | None] | None = None
+        self.started_operation_ids: tuple[str, ...] = ()
+
+    def get_history_timeline(
+        self,
+        *,
+        activity_filter: str | None = None,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        response = super().get_history_timeline(
+            activity_filter=activity_filter,
+            job_id=job_id,
+            limit=limit,
+            offset=offset,
+        )
+        payload = dict(response.payload)
+        timeline = dict(payload["history_timeline"])
+        activities = [dict(item) for item in timeline["activities"]]
+        for activity in activities:
+            if activity["activity_kind"] != "BACKUP":
+                continue
+            activity.update(
+                {
+                    "state": "COMPLETED_WITH_WARNINGS",
+                    "completed_operations": 1,
+                    "error_count": 1,
+                }
+            )
+            target = dict(activity["targets"][0])
+            target.update(
+                {
+                    "endpoint_id": "target-a",
+                    "state": "SUCCEEDED_WITH_WARNINGS",
+                    "completed_operations": 1,
+                    "error_count": 1,
+                }
+            )
+            activity["targets"] = [target]
+        timeline["activities"] = activities
+        payload["history_timeline"] = timeline
+        return IpcResponse.accepted(payload)
+
+    def get_operation_audit(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        limit: int | None = None,
+    ) -> IpcResponse:
+        response = super().get_operation_audit(
+            run_id=run_id,
+            operation_id=operation_id,
+            limit=limit,
+        )
+        if operation_id != "op-b":
+            return response
+        payload = dict(response.payload)
+        audit = dict(payload["operation_audit"])
+        outcome = dict(audit["outcome"])
+        outcome.update(
+            {
+                "final_state": "SKIPPED",
+                "bytes_transferred": 0,
+                "transfer_state": "NOT_TRANSFERRED",
+                "assurance_level": "NOT_RECORDED",
+                "hash_evidence_kind": None,
+                "durability_level": "NOT_RECORDED",
+                "error_code": "LOCAL_IO_TRANSIENT",
+            }
+        )
+        audit["outcome"] = outcome
+        payload["operation_audit"] = audit
+        return IpcResponse.accepted(payload)
+
+    def check_backup(
+        self,
+        *,
+        job_id: str,
+        request_id: str,
+        idempotency_key: str,
+        start_when_safe: bool = True,
+    ) -> IpcResponse:
+        assert job_id == "job-a"
+        assert request_id and idempotency_key
+        self.analysis_requested = True
+        self.check_start_policies.append(start_when_safe)
+        return IpcResponse.accepted(
+            {
+                "analysis_request": {
+                    "request_id": "analysis-operation-retry",
+                    "state": "QUEUED",
+                }
+            }
+        )
+
+    def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        response = super().get_backup_job_detail(job_id=job_id)
+        if not self.analysis_requested:
+            return response
+        payload = dict(response.payload)
+        detail = dict(payload["backup_job_detail"])
+        job = dict(detail["job"])
+        initial_plan = dict(job["initial_plan"])
+        initial_plan.update(
+            {
+                "analysis_id": "analysis-operation-refreshed",
+                "plan_id": "plan-operation-refreshed",
+                "plan_checksum": "c" * 64,
+                "operation_count": 1,
+                "planned_bytes": 2048,
+                "plan_runnable": True,
+            }
+        )
+        job["initial_plan"] = initial_plan
+        job["latest_analysis_request"] = {
+            "request_id": "analysis-operation-retry",
+            "job_id": "job-a",
+            "job_revision_id": "job-rev-a",
+            "state": "SUCCEEDED",
+            "requested_utc": "2026-07-31T12:00:00.000Z",
+            "started_utc": "2026-07-31T12:00:01.000Z",
+            "completed_utc": "2026-07-31T12:00:02.000Z",
+            "analysis_id": "analysis-operation-refreshed",
+            "plan_id": "plan-operation-refreshed",
+            "reason_code": "INITIAL_BACKUP_PLAN_READY_FOR_REVIEW",
+            "operation_count": 1,
+            "planned_bytes": 2048,
+            "start_when_safe": False,
+            "started_run_id": None,
+            "row_version": 2,
+        }
+        detail["job"] = job
+        payload["backup_job_detail"] = detail
+        return IpcResponse.accepted(payload)
+
+    def start_backup(
+        self,
+        *,
+        plan_id: str,
+        plan_checksum: str,
+        request_id: str,
+        idempotency_key: str,
+        target_endpoint_ids: tuple[str, ...] = (),
+        resumed_from_run_id: str | None = None,
+        source_operation_ids: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        assert request_id and idempotency_key
+        self.started_plan = (plan_id, plan_checksum)
+        self.started_scope = (target_endpoint_ids, resumed_from_run_id)
+        self.started_operation_ids = source_operation_ids
+        return IpcResponse.accepted(
+            {"created": True, "run": {"run_id": "run-operation-retry"}}
         )
 
 

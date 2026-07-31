@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from math import ceil
 from secrets import compare_digest
 from time import monotonic
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 from mediasync_home.application.activity_read_models import (
@@ -1483,6 +1483,7 @@ class EngineHostIpcService:
             plans=self.plan_store,
             runs=self.run_store,
             id_factory=self.run_id_factory,
+            operation_audit_store=self.operation_audit_read_store,
         )
         if outcome.run is None:
             receipt = transition_command_receipt(
@@ -2098,8 +2099,20 @@ def _start_run_response_payload(
             "planned_operations": run.planned_operations,
             "planned_bytes": run.planned_bytes,
             "target_endpoint_ids": [target.endpoint_id for target in run.targets],
+            "operation_ids": _run_summary_ids(run.summary, "operation_ids"),
+            "source_operation_ids": _run_summary_ids(
+                run.summary,
+                "source_operation_ids",
+            ),
         }
     return result
+
+
+def _run_summary_ids(summary: Mapping[str, object], key: str) -> list[str]:
+    value = summary.get(key)
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
 
 
 def _run_control_response_payload(

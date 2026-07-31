@@ -1,5 +1,19 @@
 # Implementeringsstatus
 
+Oppdatering 2026-07-31: **Historikk** kan nå prøve én valgt uferdig fil på
+nytt fra den bounded, paginerte filresultatvisningen. Handlingen vises bare
+for varige `SKIPPED`, `CANCELLED` eller `RECOVERY_REQUIRED`-outcomes, kjører
+alltid en ny kontroll uten automatisk start og sender source-run,
+source-operation og endpoint som eksplisitt retry-scope. Application-laget
+verifiserer terminal kilde, retrybart mål, source-plan/checksum og auditbinding,
+avviser vellykkede eller forsvunne operasjoner, mapper endpoint + relativ sti
+til nøyaktig én operasjon i den ferske planen og inkluderer bare nødvendige
+plandependenser. Runnen lagrer source- og fresh-operation-ID-er, scoped tall og
+opprinnelig lineage; executorplanlegging validerer og håndhever det varige
+scope-et før recovery-operasjoner opprettes. Norsk/engelsk, reell klikkflyt og
+900×560 uten horisontal overflow er dekket. Sammen med målretry fullfører dette
+begge scope-variantene i `AC-UX-15` for lokal Alpha.
+
 Oppdatering 2026-07-31: Et terminalt resultat i **Jobber** kan nå prøve ett
 mislykket, avbrutt eller blokkert mål på nytt uten å kjøre allerede vellykkede
 mål. Brukeren velger målet i en lokalisert resultatkontroll; GUI-et bestiller
@@ -10,7 +24,7 @@ kilder, beregner run-tall bare for valgt mål og gjenbruker opprinnelig
 `logical_run_group_id` med varig `resumed_from_run_id`. Et blokkert funn på et
 annet eksplisitt bundet mål blokkerer ikke det valgte trygge målet. Norsk,
 engelsk, reell klikkflyt og 900×560 uten horisontal overflow er dekket.
-Elementspesifikt manuelt retry gjenstår.
+Elementspesifikt manuelt retry er levert i oppdateringen over.
 
 Oppdatering 2026-07-31: **Jobber** har nå en egen, lokalisert
 **Endringer**-arbeidsflate for den valgte jobbens gjeldende forseglede plan.

@@ -19,7 +19,15 @@ from mediasync_home.application.recovery_operations import (
     RecoveryTargetPreconditionKind,
     planned_recovery_operation,
 )
-from mediasync_home.application.runs import RunState, RunStore, RunTargetState, StartedRunTarget
+from mediasync_home.application.runs import (
+    MAX_RUN_OPERATION_ID_LENGTH,
+    MAX_RUN_OPERATION_SCOPE,
+    RunState,
+    RunStore,
+    RunTargetState,
+    StartedRun,
+    StartedRunTarget,
+)
 from mediasync_home.application.source_preconditions import (
     SourceFilePrecondition,
     SourceFilePreconditionError,
@@ -125,12 +133,29 @@ def plan_run_target_recovery_operations(
             next_action="Refresh analysis and reacquire the endpoint lease before planning operations.",
         )
 
+    operation_scope, operation_scope_error = _operation_scope_from_run(
+        run=run,
+        plan=plan,
+    )
+    if operation_scope_error is not None:
+        return _failed(
+            permit=permit,
+            validation_code=operation_scope_error,
+            next_action="Reload the scoped run before planning recovery operations.",
+        )
     target_operations = tuple(
         operation
         for operation in plan.operations
         if operation.operation_type in MUTATING_OPERATION_TYPES
         and operation.target_endpoint_id == endpoint.endpoint_id
+        and (operation_scope is None or operation.operation_id in operation_scope)
     )
+    if len(target_operations) != target.planned_operations:
+        return _failed(
+            permit=permit,
+            validation_code="RUN_OPERATION_SCOPE_COUNT_MISMATCH",
+            next_action="Reload the scoped run before planning recovery operations.",
+        )
     source_endpoint = _single_source_endpoint(plan)
     if _has_copy_operation(target_operations) and source_endpoint is None:
         return _failed(
@@ -347,6 +372,42 @@ def _operation_binding_validation_code(plan: SealedPlan) -> str | None:
 
 def _has_copy_operation(operations: tuple[PlanOperation, ...]) -> bool:
     return any(operation.operation_type is PlanOperationType.COPY_NEW for operation in operations)
+
+
+def _operation_scope_from_run(
+    *,
+    run: StartedRun,
+    plan: SealedPlan,
+) -> tuple[set[str] | None, str | None]:
+    raw_scope = run.summary.get("operation_ids")
+    if raw_scope is None:
+        return None, None
+    if (
+        not isinstance(raw_scope, list)
+        or not 1 <= len(raw_scope) <= MAX_RUN_OPERATION_SCOPE
+        or any(
+            not isinstance(operation_id, str)
+            or not operation_id.strip()
+            or len(operation_id) > MAX_RUN_OPERATION_ID_LENGTH
+            or operation_id != operation_id.strip()
+            for operation_id in raw_scope
+        )
+    ):
+        return None, "RUN_OPERATION_SCOPE_INVALID"
+    operation_scope = set(raw_scope)
+    if len(operation_scope) != len(raw_scope):
+        return None, "RUN_OPERATION_SCOPE_INVALID"
+    scoped_operations = tuple(
+        operation
+        for operation in plan.operations
+        if operation.operation_id in operation_scope
+    )
+    if len(scoped_operations) != len(operation_scope) or any(
+        operation.operation_type not in MUTATING_OPERATION_TYPES
+        for operation in scoped_operations
+    ):
+        return None, "RUN_OPERATION_SCOPE_PLAN_MISMATCH"
+    return operation_scope, None
 
 
 def _failed(

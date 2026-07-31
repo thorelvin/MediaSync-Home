@@ -7,6 +7,7 @@ import pytest
 from tests.support.source_preconditions import source_precondition_json
 
 from mediasync_home.application.plans import (
+    PlanDependency,
     PlanEndpoint,
     PlanEndpointRole,
     PlanOperation,
@@ -16,6 +17,11 @@ from mediasync_home.application.plans import (
     SealedPlan,
     TargetPreconditionKind,
     seal_plan,
+)
+from mediasync_home.application.operation_audit_read_models import (
+    OperationAttemptSummary,
+    OperationAuditIdentity,
+    OperationOutcomeSummary,
 )
 from mediasync_home.application.runs import (
     RunIdFactory,
@@ -38,16 +44,22 @@ from mediasync_home.application.runs import (
 
 
 class InMemoryPlanStore(PlanStore):
-    def __init__(self, plan: SealedPlan | None = None) -> None:
-        self.plan = plan
+    def __init__(
+        self,
+        plan: SealedPlan | None = None,
+        *additional_plans: SealedPlan,
+    ) -> None:
+        self.plans = {
+            item.plan_id: item
+            for item in ((plan,) + additional_plans)
+            if item is not None
+        }
 
     def save_sealed_plan(self, plan: SealedPlan) -> None:
-        self.plan = plan
+        self.plans[plan.plan_id] = plan
 
     def load_sealed_plan(self, plan_id: str) -> SealedPlan | None:
-        if self.plan is None or self.plan.plan_id != plan_id:
-            return None
-        return self.plan
+        return self.plans.get(plan_id)
 
 
 class InMemoryRunStore(RunStore):
@@ -198,6 +210,53 @@ class FixedRunIdFactory(RunIdFactory):
         )
 
 
+class FixedOperationAuditStore:
+    def __init__(
+        self,
+        *,
+        identity: OperationAuditIdentity,
+        outcome: OperationOutcomeSummary,
+    ) -> None:
+        self.identity = identity
+        self.outcome = outcome
+
+    def load_operation_audit_identity(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+    ) -> OperationAuditIdentity | None:
+        if (run_id, operation_id) != (
+            self.identity.run_id,
+            self.identity.operation_id,
+        ):
+            return None
+        return self.identity
+
+    def list_operation_attempt_summaries(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        limit: int,
+    ) -> tuple[OperationAttemptSummary, ...]:
+        del run_id, operation_id, limit
+        return ()
+
+    def load_operation_outcome_summary(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+    ) -> OperationOutcomeSummary | None:
+        if (run_id, operation_id) != (
+            self.identity.run_id,
+            self.identity.operation_id,
+        ):
+            return None
+        return self.outcome
+
+
 def test_parse_start_run_command_requires_plan_id_and_checksum() -> None:
     with pytest.raises(RunStartViolation, match="START_RUN_REQUIRES_PLAN_ID"):
         parse_start_run_command(
@@ -227,6 +286,15 @@ def test_parse_start_run_command_validates_retry_target_scope() -> None:
             idempotency_key="idempotency-a",
             payload={**payload, "target_endpoint_ids": ["target-a", "target-a"]},
         )
+    with pytest.raises(
+        RunStartViolation,
+        match="START_RUN_OPERATION_RETRY_REQUIRES_SOURCE_RUN",
+    ):
+        parse_start_run_command(
+            request_id="request-a",
+            idempotency_key="idempotency-a",
+            payload={**payload, "source_operation_ids": ["op-a"]},
+        )
 
     parsed = parse_start_run_command(
         request_id="request-a",
@@ -235,11 +303,13 @@ def test_parse_start_run_command_validates_retry_target_scope() -> None:
             **payload,
             "target_endpoint_ids": ["target-b"],
             "resumed_from_run_id": "run-source",
+            "source_operation_ids": ["op-source"],
         },
     )
 
     assert parsed.target_endpoint_ids == ("target-b",)
     assert parsed.resumed_from_run_id == "run-source"
+    assert parsed.source_operation_ids == ("op-source",)
 
 
 def test_pause_request_waits_for_executor_boundary_and_resume_requeues_target() -> None:
@@ -471,6 +541,221 @@ def test_retry_run_queues_only_failed_target_with_original_lineage() -> None:
     assert tuple(target.endpoint_id for target in outcome.run.targets) == ("target-b",)
     assert outcome.run.summary["scope"] == "TARGET_RETRY"
     assert outcome.run.summary["target_endpoint_ids"] == ["target-b"]
+
+
+def test_target_retry_rejects_warning_target_without_operation_scope() -> None:
+    source_plan = _multi_target_plan("plan-source")
+    retry_plan = _multi_target_plan("plan-retry")
+    plans = InMemoryPlanStore(source_plan, retry_plan)
+    runs = InMemoryRunStore()
+    source = start_run_from_sealed_plan(
+        command=_start_command(source_plan),
+        plans=plans,
+        runs=runs,
+        id_factory=FixedRunIdFactory("run-source", "run-group-original"),
+    ).run
+    assert source is not None
+    source = replace(
+        source,
+        state=RunState.COMPLETED_WITH_WARNINGS,
+        targets=(
+            replace(source.targets[0], state=RunTargetState.SUCCEEDED),
+            replace(
+                source.targets[1],
+                state=RunTargetState.SUCCEEDED_WITH_WARNINGS,
+            ),
+        ),
+    )
+    runs.runs[source.run_id] = source
+
+    outcome = start_run_from_sealed_plan(
+        command=StartRunCommand(
+            request_id="request-target-retry",
+            idempotency_key="idempotency-target-retry",
+            plan_id=retry_plan.plan_id,
+            plan_checksum=retry_plan.plan_checksum,
+            target_endpoint_ids=("target-b",),
+            resumed_from_run_id=source.run_id,
+        ),
+        plans=plans,
+        runs=runs,
+        id_factory=FixedRunIdFactory("run-rejected", "run-group-unused"),
+    )
+
+    assert outcome.run is None
+    assert outcome.readiness.validation_codes == ("RUN_RETRY_TARGET_NOT_FAILED",)
+
+
+def test_retry_run_maps_one_failed_source_operation_to_fresh_plan() -> None:
+    source_plan = _multi_target_plan("plan-source")
+    retry_plan = _multi_target_plan("plan-retry")
+    plans = InMemoryPlanStore(source_plan, retry_plan)
+    runs = InMemoryRunStore()
+    source = start_run_from_sealed_plan(
+        command=_start_command(source_plan),
+        plans=plans,
+        runs=runs,
+        id_factory=FixedRunIdFactory("run-source", "run-group-original"),
+    ).run
+    assert source is not None
+    source = replace(
+        source,
+        state=RunState.COMPLETED_WITH_WARNINGS,
+        targets=(
+            replace(source.targets[0], state=RunTargetState.SUCCEEDED),
+            replace(
+                source.targets[1],
+                state=RunTargetState.SUCCEEDED_WITH_WARNINGS,
+            ),
+        ),
+    )
+    runs.runs[source.run_id] = source
+    source_operation = next(
+        operation
+        for operation in source_plan.operations
+        if operation.target_endpoint_id == "target-b"
+    )
+    fresh_operation = next(
+        operation
+        for operation in retry_plan.operations
+        if operation.target_endpoint_id == "target-b"
+    )
+    audit = FixedOperationAuditStore(
+        identity=OperationAuditIdentity(
+            run_id=source.run_id,
+            run_target_id=source.targets[1].run_target_id,
+            operation_id=source_operation.operation_id,
+            target_relative_path=source_operation.target_relative_path,
+        ),
+        outcome=OperationOutcomeSummary(
+            final_state="SKIPPED",
+            completed_utc="2026-07-31T12:00:00.000Z",
+            bytes_transferred=0,
+            transfer_state="NOT_TRANSFERRED",
+            assurance_level="NOT_RECORDED",
+            hash_evidence_kind=None,
+            durability_level="NOT_RECORDED",
+            verification_json=None,
+            error_code="LOCAL_IO_TRANSIENT",
+        ),
+    )
+    command = parse_start_run_command(
+        request_id="request-operation-retry",
+        idempotency_key="idempotency-operation-retry",
+        payload={
+            "plan_id": retry_plan.plan_id,
+            "plan_checksum": retry_plan.plan_checksum,
+            "target_endpoint_ids": ["target-b"],
+            "resumed_from_run_id": source.run_id,
+            "source_operation_ids": [source_operation.operation_id],
+        },
+    )
+
+    already_succeeded = start_run_from_sealed_plan(
+        command=command,
+        plans=plans,
+        runs=runs,
+        id_factory=FixedRunIdFactory("run-rejected", "run-group-unused"),
+        operation_audit_store=FixedOperationAuditStore(
+            identity=audit.identity,
+            outcome=replace(
+                audit.outcome,
+                final_state="SUCCEEDED",
+                error_code=None,
+            ),
+        ),
+    )
+
+    outcome = start_run_from_sealed_plan(
+        command=command,
+        plans=plans,
+        runs=runs,
+        id_factory=FixedRunIdFactory("run-retry", "run-group-unused"),
+        operation_audit_store=audit,
+    )
+
+    assert already_succeeded.run is None
+    assert already_succeeded.readiness.validation_codes == (
+        "RUN_RETRY_OPERATION_ALREADY_SUCCEEDED",
+    )
+    assert outcome.created is True
+    assert outcome.run is not None
+    assert outcome.run.planned_operations == 1
+    assert outcome.run.planned_bytes == fresh_operation.planned_bytes
+    assert outcome.run.targets[0].planned_operations == 1
+    assert outcome.run.summary["scope"] == "OPERATION_RETRY"
+    assert outcome.run.summary["source_operation_ids"] == [
+        source_operation.operation_id
+    ]
+    assert outcome.run.summary["operation_ids"] == [fresh_operation.operation_id]
+
+
+def test_retry_run_includes_fresh_plan_dependencies_for_selected_file() -> None:
+    source_plan = _dependency_plan("plan-source")
+    retry_plan = _dependency_plan("plan-retry")
+    plans = InMemoryPlanStore(source_plan, retry_plan)
+    runs = InMemoryRunStore()
+    source = start_run_from_sealed_plan(
+        command=_start_command(source_plan),
+        plans=plans,
+        runs=runs,
+        id_factory=FixedRunIdFactory("run-source", "run-group-original"),
+    ).run
+    assert source is not None
+    source = replace(
+        source,
+        state=RunState.FAILED,
+        targets=(replace(source.targets[0], state=RunTargetState.FAILED),),
+    )
+    runs.runs[source.run_id] = source
+    source_file = next(
+        operation
+        for operation in source_plan.operations
+        if operation.operation_type is PlanOperationType.COPY_NEW
+    )
+    audit = FixedOperationAuditStore(
+        identity=OperationAuditIdentity(
+            run_id=source.run_id,
+            run_target_id=source.targets[0].run_target_id,
+            operation_id=source_file.operation_id,
+            target_relative_path=source_file.target_relative_path,
+        ),
+        outcome=OperationOutcomeSummary(
+            final_state="CANCELLED",
+            completed_utc="2026-07-31T12:00:00.000Z",
+            bytes_transferred=0,
+            transfer_state="NOT_TRANSFERRED",
+            assurance_level="NOT_RECORDED",
+            hash_evidence_kind=None,
+            durability_level="NOT_RECORDED",
+            verification_json=None,
+            error_code="RUN_STOP_REQUESTED",
+        ),
+    )
+
+    outcome = start_run_from_sealed_plan(
+        command=StartRunCommand(
+            request_id="request-retry",
+            idempotency_key="idempotency-retry",
+            plan_id=retry_plan.plan_id,
+            plan_checksum=retry_plan.plan_checksum,
+            target_endpoint_ids=("target-a",),
+            resumed_from_run_id=source.run_id,
+            source_operation_ids=(source_file.operation_id,),
+        ),
+        plans=plans,
+        runs=runs,
+        id_factory=FixedRunIdFactory("run-retry"),
+        operation_audit_store=audit,
+    )
+
+    assert outcome.created is True
+    assert outcome.run is not None
+    assert outcome.run.planned_operations == 2
+    assert outcome.run.summary["operation_ids"] == [
+        f"op-directory-{retry_plan.plan_id}",
+        f"op-file-{retry_plan.plan_id}",
+    ]
 
 
 def test_retry_run_rejects_successful_target_and_stale_partial_plan() -> None:
@@ -810,6 +1095,51 @@ def _multi_target_plan(plan_id: str) -> SealedPlan:
                     size_bytes=256,
                 ),
                 planned_bytes=256,
+            ),
+        ),
+    )
+
+
+def _dependency_plan(plan_id: str) -> SealedPlan:
+    directory_id = f"op-directory-{plan_id}"
+    file_id = f"op-file-{plan_id}"
+    return seal_plan(
+        plan_id=plan_id,
+        analysis_id=f"analysis-{plan_id}",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(
+            replace(
+                _target_endpoint(),
+                planned_operations=2,
+                planned_bytes=128,
+            ),
+        ),
+        operations=(
+            PlanOperation(
+                operation_id=directory_id,
+                operation_type=PlanOperationType.CREATE_DIRECTORY,
+                sequence_no=10,
+                execution_phase=10,
+                stable_order_key="010:Pictures",
+                target_precondition_kind=TargetPreconditionKind.ABSENT,
+                reason_code="CREATE_MISSING_DIRECTORY",
+                risk_level=PlanRiskLevel.LOW,
+                target_endpoint_id="target-a",
+                target_relative_path="Pictures",
+            ),
+            replace(
+                _copy_operation(),
+                operation_id=file_id,
+                sequence_no=20,
+                stable_order_key="020:Pictures/A.jpg",
+                target_endpoint_id="target-a",
+            ),
+        ),
+        dependencies=(
+            PlanDependency(
+                before_operation_id=directory_id,
+                after_operation_id=file_id,
             ),
         ),
     )

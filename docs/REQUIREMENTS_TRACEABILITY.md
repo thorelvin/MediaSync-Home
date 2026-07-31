@@ -1,5 +1,30 @@
 # Kravsporbarhet
 
+Oppdatering 2026-07-31 for den resterende elementhalvdelen av `AC-UX-15`:
+Den paginerte filresultatvisningen i Historikk tilbyr nå et lokalisert retry
+for valgt operation når den varige auditen er `SKIPPED`, `CANCELLED` eller
+`RECOVERY_REQUIRED`. GUI-et kjører en fersk `CHECK_BACKUP` uten autostart og
+sender source-run, source-operation og endpoint til `START_RUN`. Application
+verifiserer source-plan/checksum, terminal run, retrybart mål, auditidentitet og
+ikke-vellykket outcome; source-operasjonen mappes med endpoint og relativ sti
+til nøyaktig én muterende fresh-plan-operasjon. Nødvendige plandependenser
+inkluderes transitivt, mens andre filer og mål utelates. Fresh-operation-scope,
+source-operation-scope og lineage lagres i run summary, scoped tall lagres på
+run/target, og recovery-operation-planneren avviser ugyldig eller utvidet scope.
+GUI-beviset bytter norsk/engelsk, klikker retry ved 900×560, verifiserer
+non-autostart recheck og sender bare `op-b`; backendbeviset dekker også
+parent-directory-dependency. Dette fullfører mål- og elementvariantene i
+`AC-UX-15` for lokal Alpha. Bevis:
+`src/mediasync_home/application/runs.py`,
+`src/mediasync_home/application/run_operation_planning.py`,
+`src/mediasync_home/ipc/server.py`,
+`src/mediasync_home/presentation/engine_client.py`,
+`src/mediasync_home/presentation/main_window.py`,
+`tests/unit/test_run_start.py`,
+`tests/unit/test_run_operation_planning.py`,
+`tests/unit/test_engine_client.py`, `tests/unit/test_ipc_handshake.py` og
+`tests/gui/test_pyside_shell.py`.
+
 Oppdatering 2026-07-31 for `UX-004`, `SYNC-002` og målhalvdelen av
 `AC-UX-15`: Terminale Jobs-resultater tilbyr nå en lokalisert velger for
 mislykkede, avbrutte eller blokkerte mål. Handlingen kjører først en fersk
@@ -11,7 +36,8 @@ samme plan som kilderunnen, ukjente eller vellykkede mål, ikke-terminal kilde
 og jobbmismatch; eksplisitt målscoping ignorerer blokkeringer som bare tilhører
 andre mål. GUI-beviset bytter norsk/engelsk, klikker retry, verifiserer at den
 ferske kontrollen ikke autostarter, og sender bare `target-c` ved 900×560 uten
-horisontal overflow. Elementspesifikt manuelt retry er fortsatt pending.
+horisontal overflow. Elementspesifikt manuelt retry er levert i oppdateringen
+over.
 Bevis: `src/mediasync_home/application/runs.py`,
 `src/mediasync_home/adapters/sqlite/runs.py`,
 `src/mediasync_home/ipc/server.py`,

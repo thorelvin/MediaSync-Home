@@ -355,6 +355,7 @@ class EngineClient:
         idempotency_key: str,
         target_endpoint_ids: tuple[str, ...] = (),
         resumed_from_run_id: str | None = None,
+        source_operation_ids: tuple[str, ...] = (),
     ) -> IpcResponse:
         payload: dict[str, object] = {
             "plan_id": plan_id,
@@ -364,6 +365,8 @@ class EngineClient:
             payload["target_endpoint_ids"] = list(target_endpoint_ids)
         if resumed_from_run_id is not None:
             payload["resumed_from_run_id"] = resumed_from_run_id
+        if source_operation_ids:
+            payload["source_operation_ids"] = list(source_operation_ids)
         return self._request_with_handshake_retry(
             lambda: self._ipc_client.submit_command(
                 RunCommandName.START_RUN.value,

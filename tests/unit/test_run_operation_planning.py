@@ -240,6 +240,30 @@ def test_plan_run_target_recovery_operations_selects_bound_multi_target_operatio
     )
 
 
+def test_plan_run_target_recovery_operations_enforces_persisted_operation_scope() -> None:
+    plan = _same_target_two_operation_plan()
+    run = replace(
+        _executing_run(),
+        plan_checksum=plan.plan_checksum,
+        summary={"operation_ids": ["op-copy-b"]},
+        targets=(replace(_target(), planned_operations=1, planned_bytes=256),),
+        planned_operations=1,
+        planned_bytes=256,
+    )
+
+    outcome = plan_run_target_recovery_operations(
+        permit=_permit(),
+        runs=_SingleRunStore(run),
+        plans=_SinglePlanStore(plan),
+        recovery_operations=_FakeRecoveryOperationStore(),
+        process_instance_id="host-a",
+    )
+
+    assert outcome.planned is True
+    assert [operation.operation_id for operation in outcome.operations] == ["op-copy-b"]
+    assert outcome.operations[0].final_relative_path == "Pictures/B.jpg"
+
+
 class _SingleRunStore(RunStore):
     def __init__(self, run: StartedRun | None) -> None:
         self._run = run
@@ -523,12 +547,52 @@ def _multi_target_plan() -> SealedPlan:
     )
 
 
-def _source_precondition(*, snapshot_id: str = "source-snapshot-a") -> str:
+def _same_target_two_operation_plan() -> SealedPlan:
+    base = _sealed_plan()
+    first = base.operations[0]
+    return seal_plan(
+        plan_id=base.plan_id,
+        analysis_id=base.analysis_id,
+        job_id=base.job_id,
+        job_revision_id=base.job_revision_id,
+        endpoints=(
+            base.endpoints[0],
+            replace(
+                base.endpoints[1],
+                planned_operations=2,
+                planned_bytes=384,
+            ),
+        ),
+        operations=(
+            first,
+            replace(
+                first,
+                operation_id="op-copy-b",
+                sequence_no=20,
+                stable_order_key="020:Pictures/B.jpg",
+                target_relative_path="Pictures/B.jpg",
+                source_relative_path="Pictures/B.jpg",
+                source_precondition_json=_source_precondition(
+                    relative_path="Pictures/B.jpg",
+                    size_bytes=256,
+                ),
+                planned_bytes=256,
+            ),
+        ),
+    )
+
+
+def _source_precondition(
+    *,
+    snapshot_id: str = "source-snapshot-a",
+    relative_path: str = "Pictures/A.jpg",
+    size_bytes: int = 128,
+) -> str:
     return SourceFilePrecondition(
         snapshot_id=snapshot_id,
-        snapshot_entry_id="source-entry-a",
-        relative_path="Pictures/A.jpg",
-        size_bytes=128,
+        snapshot_entry_id=f"source-entry-{relative_path}",
+        relative_path=relative_path,
+        size_bytes=size_bytes,
         identity_fingerprint_hash="a" * 64,
     ).to_json()
 
