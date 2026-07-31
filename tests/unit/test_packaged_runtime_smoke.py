@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import sqlite3
+from pathlib import Path
+
+from mediasync_home.adapters.sqlite.migrations import (
+    apply_sqlite_migrations,
+    catalog_migration_plan,
+)
 from tools.packaged_runtime_smoke import (
     CommandResult,
     _engine_host_reconciled_task,
+    _insert_plan_parent_rows,
     _gui_status_accepted,
     _parse_json_object_lines,
+    _prepare_packaged_scheduler_state,
     _source_trigger_routed,
 )
 
@@ -89,3 +98,39 @@ def test_packaged_runtime_smoke_requires_accepted_gui_status() -> None:
 
     assert _gui_status_accepted(accepted) is True
     assert _gui_status_accepted(rejected) is False
+
+
+def test_packaged_runtime_smoke_plan_fixture_matches_current_catalog_contract() -> None:
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        apply_sqlite_migrations(connection, catalog_migration_plan())
+
+        _insert_plan_parent_rows(connection)
+
+        binding = connection.execute(
+            """
+            SELECT filter_set_id, filter_set_version
+            FROM job_revision_filter_bindings
+            WHERE job_id = 'job-packaged-smoke'
+                AND job_revision_id = 'job-rev-packaged-smoke'
+            """
+        ).fetchone()
+
+    assert binding == ("filter-packaged-smoke", 1)
+
+
+def test_packaged_runtime_smoke_fixture_initializes_both_state_stores(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+
+    schedule = _prepare_packaged_scheduler_state(
+        state_root=state_root,
+        installation_id="packaged-smoke-test",
+        schedule_id="schedule-packaged-smoke",
+        executable_path=tmp_path / "MediaSyncHome0B.exe",
+    )
+
+    assert schedule.schedule_id == "schedule-packaged-smoke"
+    assert (state_root / "catalog.sqlite").is_file()
+    assert (state_root / "recovery.sqlite").is_file()

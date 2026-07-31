@@ -1,5 +1,24 @@
 # Kravsporbarhet
 
+Oppdatering 2026-07-31 for `ARC-004`, `ARC-005`, `SEC-001` og `UX-003`:
+produktinngangen uten argumenter koordinerer nå desktopoppstarten. Den adopterer
+en statusverifisert same-user Engine Host eller starter én frakoblet host med
+minimal environment, tom handle-arv, skjult vindu og ingen output-piper, og
+åpner deretter GUI-et i startprosessen. GUI-avslutning avslutter ikke Engine
+Host. Samtidig oppstart kan adoptere singleton-vinneren; inkompatibilitet,
+prosessfeil og timeout blir synlige feil. Bevis:
+`src/mediasync_home/bootstrap.py`,
+`src/mediasync_home/application/process_supervision.py`,
+`src/mediasync_home/adapters/process_supervisor.py`,
+`src/mediasync_home/composition/launcher.py`,
+`src/mediasync_home/presentation/app.py`,
+`tests/unit/test_bootstrap_roles.py`,
+`tests/unit/test_process_supervision.py` og
+`tests/unit/test_launcher_role.py`. Lokal usignert Windows-evidens ligger i
+`artifacts/0b/packaged-runtime-smoke-latest.json`; den dekker pakket
+trigger/host/GUI, to-store migrering og same-user Task Scheduler
+apply/load/in-sync/cleanup.
+
 Oppdatering 2026-07-31 for `SYNC-002`, `ARC-004`, `ARC-005` og `UX-003`:
 operation schema 2 og catalog migration 33 innfører checksumbundet
 `target_endpoint_id` per muterende planoperasjon. Førstegangsplanlegging og

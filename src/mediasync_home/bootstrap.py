@@ -30,11 +30,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None, *, emit: Emit | None = None) -> int:
     args, role_args = build_parser().parse_known_args(argv)
-    role = (
-        ProcessRole(args.role)
-        if args.role is not None
-        else _infer_protocol_entrypoint_role(role_args)
-    )
+    explicit_role = args.role is not None
+    role = ProcessRole(args.role) if explicit_role else _infer_protocol_entrypoint_role(role_args)
+    if not explicit_role and role is ProcessRole.LAUNCHER and not role_args:
+        role_args = ["--desktop"]
     return ROLE_ENTRYPOINTS[role](role_args, emit=emit)
 
 

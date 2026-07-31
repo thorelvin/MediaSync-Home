@@ -5,6 +5,8 @@ import json
 import os
 import sys
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from importlib import metadata
 from pathlib import Path
@@ -199,17 +201,25 @@ def _cleanup_task_scheduler_smoke(
     folder_deleted = False
     root_deleted = False
     try:
-        service = _connect_task_scheduler_service()
-        folder = _call_method(service, "GetFolder", f"\\MediaSync Home\\{installation_id}")
-        _call_method(folder, "DeleteTask", schedule_id, 0)
-        task_deleted = True
-        root = _call_method(service, "GetFolder", "\\MediaSync Home")
-        _call_method(root, "DeleteFolder", installation_id, 0)
-        folder_deleted = True
-        if delete_root_if_empty and _folder_is_empty(root):
-            scheduler_root = _call_method(service, "GetFolder", "\\")
-            _call_method(scheduler_root, "DeleteFolder", "MediaSync Home", 0)
-            root_deleted = True
+        with _task_scheduler_com_apartment():
+            service = _connect_task_scheduler_service()
+            folder = _call_method(
+                service,
+                "GetFolder",
+                f"\\MediaSync Home\\{installation_id}",
+            )
+            _call_method(folder, "DeleteTask", schedule_id, 0)
+            task_deleted = True
+            del folder
+            root = _call_method(service, "GetFolder", "\\MediaSync Home")
+            _call_method(root, "DeleteFolder", installation_id, 0)
+            folder_deleted = True
+            if delete_root_if_empty and _folder_is_empty(root):
+                scheduler_root = _call_method(service, "GetFolder", "\\")
+                _call_method(scheduler_root, "DeleteFolder", "MediaSync Home", 0)
+                root_deleted = True
+                del scheduler_root
+            del root, service
     except Exception:
         pass
     return task_deleted, folder_deleted, root_deleted
@@ -217,8 +227,10 @@ def _cleanup_task_scheduler_smoke(
 
 def _task_scheduler_folder_exists(folder_path: str) -> bool:
     try:
-        service = _connect_task_scheduler_service()
-        _call_method(service, "GetFolder", folder_path)
+        with _task_scheduler_com_apartment():
+            service = _connect_task_scheduler_service()
+            folder = _call_method(service, "GetFolder", folder_path)
+            del folder, service
         return True
     except Exception:
         return False
@@ -227,7 +239,21 @@ def _task_scheduler_folder_exists(folder_path: str) -> bool:
 def _folder_is_empty(folder: object) -> bool:
     folders = _call_method(folder, "GetFolders", 0)
     tasks = _call_method(folder, "GetTasks", 0)
-    return int(getattr(folders, "Count")) == 0 and int(getattr(tasks, "Count")) == 0
+    is_empty = int(getattr(folders, "Count")) == 0 and int(getattr(tasks, "Count")) == 0
+    del folders, tasks
+    return is_empty
+
+
+@contextmanager
+def _task_scheduler_com_apartment() -> Iterator[None]:
+    pythoncom = __import__("pythoncom")
+    co_initialize = cast(Callable[[], object], getattr(pythoncom, "CoInitialize"))
+    co_uninitialize = cast(Callable[[], object], getattr(pythoncom, "CoUninitialize"))
+    co_initialize()
+    try:
+        yield
+    finally:
+        co_uninitialize()
 
 
 def _connect_task_scheduler_service() -> object:

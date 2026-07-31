@@ -10,5 +10,8 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+artifacts/local-unsigned*/
+artifacts/*-state/
+artifacts/package-*.log
 Thumbs.db
 .DS_Store

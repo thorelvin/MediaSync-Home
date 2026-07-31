@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import sys
+import subprocess
 from pathlib import Path
 
 import pytest
 
+import mediasync_home.adapters.process_supervisor as process_supervisor_module
 from mediasync_home.adapters.process_supervisor import (
     LocalSubprocessSupervisor,
     Win32JobObjectTransferSupervisor,
     Win32ProcessHandles,
+    current_process_executable_path,
 )
 from mediasync_home.application.process_supervision import (
     ChildContainmentPolicy,
@@ -18,6 +21,7 @@ from mediasync_home.application.process_supervision import (
     ProcessLaunchViolation,
     WindowMode,
     build_internal_role_launch_plan,
+    build_product_role_launch_plan,
     build_transfer_child_launch_plan,
     validate_process_launch_plan,
 )
@@ -26,6 +30,13 @@ from mediasync_home.domain.process_roles import ProcessRole
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "scripts/run_role.py"
+
+
+def test_current_process_executable_path_resolves_running_module() -> None:
+    executable = current_process_executable_path()
+
+    assert executable.is_absolute()
+    assert executable.is_file()
 
 
 def test_internal_role_launch_plan_is_safe_by_default() -> None:
@@ -74,6 +85,29 @@ def test_internal_role_launch_plan_preserves_systemroot_case_insensitively() -> 
         "SystemRoot": "C:\\Windows",
         "TEMP": "C:\\Temp",
     }
+
+
+def test_packaged_product_role_launch_plan_invokes_same_executable() -> None:
+    executable = (ROOT / "dist" / "MediaSyncHome.exe").resolve()
+    application_root = executable.parent
+
+    plan = build_product_role_launch_plan(
+        role=ProcessRole.LAUNCHER,
+        executable=executable,
+        role_runner=None,
+        application_root=application_root,
+        extra_args=("--local-preview-host",),
+        environment={"PATH": "must-not-pass-through", "PYTHONUTF8": "1"},
+    )
+
+    assert plan.command_line_vector() == (
+        str(executable),
+        "--role",
+        "launcher",
+        "--local-preview-host",
+    )
+    assert plan.working_directory == application_root
+    assert dict(plan.environment) == {"PYTHONUTF8": "1"}
 
 
 @pytest.mark.parametrize(
@@ -145,6 +179,35 @@ def test_transfer_child_launch_plan_rejects_unsafe_transfer_policy(
 def test_local_subprocess_supervisor_rejects_transfer_child_plan_before_spawn() -> None:
     with pytest.raises(ProcessLaunchViolation, match="LOCAL_SUBPROCESS_TRANSFER_CHILD_FORBIDDEN"):
         LocalSubprocessSupervisor().start(_safe_transfer_plan())
+
+
+def test_local_subprocess_supervisor_detaches_without_output_pipes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 4321
+        returncode = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+    def fake_popen(command: object, **kwargs: object) -> FakeProcess:
+        captured["command"] = command
+        captured.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(process_supervisor_module.subprocess, "Popen", fake_popen)
+
+    process = LocalSubprocessSupervisor().start_detached(_safe_plan())
+
+    assert process.pid == 4321
+    assert captured["stdin"] is subprocess.DEVNULL
+    assert captured["stdout"] is subprocess.DEVNULL
+    assert captured["stderr"] is subprocess.DEVNULL
+    assert captured["shell"] is False
+    assert captured["close_fds"] is True
 
 
 def test_win32_transfer_supervisor_assigns_job_before_resume() -> None:

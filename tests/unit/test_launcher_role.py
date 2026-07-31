@@ -20,9 +20,13 @@ from mediasync_home.application.host_locator import (
 from mediasync_home.composition import engine_host as engine_host_module
 from mediasync_home.composition import launcher as launcher_module
 from mediasync_home.composition.launcher import (
+    DesktopHostProbeStatus,
+    DesktopLaunchError,
     build_local_preview_host_run,
+    build_local_preview_desktop_launch,
     build_local_preview_status_launch,
     run_launcher,
+    run_local_preview_desktop,
     run_local_preview_status,
 )
 from mediasync_home.domain.process_roles import ProcessRole
@@ -55,6 +59,214 @@ def test_local_preview_host_run_uses_long_running_published_descriptor(tmp_path:
         "--enable-local-mutations",
         "--run-executor-cycle-after-request",
     )
+
+
+def test_desktop_launch_builds_source_and_packaged_host_argv(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    descriptor = build_local_engine_host_descriptor(
+        installation_id="preview-a",
+        user_scope_hash="b" * 64,
+        state_root=state_root,
+    )
+    source = build_local_preview_desktop_launch(
+        host_descriptor=descriptor,
+        executable=Path(sys.executable).resolve(),
+        role_runner=Path(__file__).resolve().parents[2] / "scripts/run_role.py",
+        application_root=Path(__file__).resolve().parents[2],
+    )
+    packaged_executable = (tmp_path / "package" / "MediaSyncHome.exe").resolve()
+    packaged = build_local_preview_desktop_launch(
+        host_descriptor=descriptor,
+        executable=packaged_executable,
+        role_runner=None,
+        application_root=packaged_executable.parent,
+    )
+
+    expected_role_args = (
+        "--role",
+        "launcher",
+        "--local-preview-host",
+        "--installation-id",
+        "preview-a",
+        "--state-root",
+        str(state_root.resolve()),
+        "--run-executor-cycle-interval-ms",
+        "5000",
+        "--run-executor-cycle-max-interval-ms",
+        "60000",
+        "--run-executor-staging-backend",
+        "local-file",
+    )
+    assert source.engine_host.command_line_vector() == (
+        str(Path(sys.executable).resolve()),
+        str(Path(__file__).resolve().parents[2] / "scripts/run_role.py"),
+        *expected_role_args,
+    )
+    assert packaged.engine_host.command_line_vector() == (
+        str(packaged_executable),
+        *expected_role_args,
+    )
+
+
+def test_desktop_adopts_ready_host_without_starting_another(tmp_path: Path) -> None:
+    launch = _desktop_launch(tmp_path)
+    supervisor = _FakeDesktopSupervisor()
+    gui_calls: list[str] = []
+
+    exit_code = run_local_preview_desktop(
+        launch,
+        supervisor=supervisor,
+        probe_host=lambda: DesktopHostProbeStatus.READY,
+        run_gui=lambda: gui_calls.append("gui") or 0,
+        timeout_seconds=1.0,
+    )
+
+    assert exit_code == 0
+    assert supervisor.started == []
+    assert gui_calls == ["gui"]
+
+
+def test_desktop_starts_host_and_waits_for_readiness(tmp_path: Path) -> None:
+    launch = _desktop_launch(tmp_path)
+    supervisor = _FakeDesktopSupervisor()
+    statuses = iter(
+        (
+            DesktopHostProbeStatus.UNAVAILABLE,
+            DesktopHostProbeStatus.UNAVAILABLE,
+            DesktopHostProbeStatus.READY,
+        )
+    )
+    sleeps: list[float] = []
+
+    exit_code = run_local_preview_desktop(
+        launch,
+        supervisor=supervisor,
+        probe_host=lambda: next(statuses),
+        run_gui=lambda: 7,
+        timeout_seconds=2.0,
+        sleep=sleeps.append,
+    )
+
+    assert exit_code == 7
+    assert supervisor.started == [launch.engine_host]
+    assert supervisor.process.killed is False
+    assert sleeps == [0.1]
+
+
+def test_desktop_waits_for_winning_host_after_singleton_race(tmp_path: Path) -> None:
+    launch = _desktop_launch(tmp_path)
+    supervisor = _FakeDesktopSupervisor(process_exited=True)
+    statuses = iter(
+        (
+            DesktopHostProbeStatus.UNAVAILABLE,
+            DesktopHostProbeStatus.UNAVAILABLE,
+            DesktopHostProbeStatus.READY,
+        )
+    )
+
+    exit_code = run_local_preview_desktop(
+        launch,
+        supervisor=supervisor,
+        probe_host=lambda: next(statuses),
+        run_gui=lambda: 0,
+        timeout_seconds=2.0,
+        sleep=lambda _seconds: None,
+    )
+
+    assert exit_code == 0
+    assert supervisor.started == [launch.engine_host]
+
+
+def test_desktop_reports_host_process_start_failure(tmp_path: Path) -> None:
+    supervisor = _FailingDesktopSupervisor()
+
+    with pytest.raises(DesktopLaunchError, match="DESKTOP_ENGINE_HOST_START_FAILED"):
+        run_local_preview_desktop(
+            _desktop_launch(tmp_path),
+            supervisor=supervisor,
+            probe_host=lambda: DesktopHostProbeStatus.UNAVAILABLE,
+            run_gui=lambda: 0,
+            timeout_seconds=1.0,
+        )
+
+
+def test_desktop_kills_unready_owned_host_after_timeout(tmp_path: Path) -> None:
+    launch = _desktop_launch(tmp_path)
+    supervisor = _FakeDesktopSupervisor()
+    times = iter((0.0, 1.0))
+
+    with pytest.raises(DesktopLaunchError, match="DESKTOP_ENGINE_HOST_START_TIMEOUT"):
+        run_local_preview_desktop(
+            launch,
+            supervisor=supervisor,
+            probe_host=lambda: DesktopHostProbeStatus.UNAVAILABLE,
+            run_gui=lambda: 0,
+            timeout_seconds=0.5,
+            monotonic=lambda: next(times),
+        )
+
+    assert supervisor.process.killed is True
+
+
+def test_desktop_refuses_incompatible_existing_host(tmp_path: Path) -> None:
+    supervisor = _FakeDesktopSupervisor()
+
+    with pytest.raises(DesktopLaunchError, match="DESKTOP_ENGINE_HOST_INCOMPATIBLE"):
+        run_local_preview_desktop(
+            _desktop_launch(tmp_path),
+            supervisor=supervisor,
+            probe_host=lambda: DesktopHostProbeStatus.BLOCKED,
+            run_gui=lambda: 0,
+            timeout_seconds=1.0,
+        )
+
+    assert supervisor.started == []
+
+
+def test_run_launcher_desktop_delegates_to_desktop_composition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_desktop(args: object, *, emit: object | None = None) -> int:
+        captured["args"] = args
+        captured["emit"] = emit
+        return 41
+
+    monkeypatch.setattr(
+        launcher_module,
+        "_run_local_preview_desktop_from_args",
+        fake_desktop,
+    )
+    output: list[str] = []
+
+    exit_code = run_launcher(["--desktop", "--installation-id", "preview-a"], emit=output.append)
+
+    assert exit_code == 41
+    assert getattr(captured["args"], "installation_id") == "preview-a"
+    assert captured["emit"] == output.append
+
+
+def test_product_process_layout_uses_packaged_module_image(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    packaged_executable = tmp_path / "MediaSyncHome0B.exe"
+    packaged_executable.touch()
+    monkeypatch.setattr(
+        launcher_module,
+        "current_process_executable_path",
+        lambda: packaged_executable,
+    )
+    monkeypatch.setattr(launcher_module, "RUNNER", tmp_path / "missing-run-role.py")
+
+    executable, role_runner, application_root = (
+        launcher_module._current_product_process_layout()
+    )
+
+    assert executable == packaged_executable
+    assert role_runner is None
+    assert application_root == tmp_path
 
 
 def test_local_preview_host_run_can_enable_task_scheduler_startup_pump(
@@ -476,6 +688,53 @@ def test_local_preview_status_preserves_fresh_live_publication_during_startup_ra
     assert result.gui_response is not None
     assert result.gui_response["reason"] == IpcReason.ENGINE_HOST_UNAVAILABLE.value
     assert load_local_engine_host_publication(tmp_path / "state") == publication
+
+
+def _desktop_launch(tmp_path: Path):
+    descriptor = build_local_engine_host_descriptor(
+        installation_id="preview-a",
+        user_scope_hash="b" * 64,
+        state_root=tmp_path / "state",
+    )
+    return build_local_preview_desktop_launch(
+        host_descriptor=descriptor,
+        executable=Path(sys.executable).resolve(),
+        role_runner=Path(__file__).resolve().parents[2] / "scripts/run_role.py",
+        application_root=Path(__file__).resolve().parents[2],
+    )
+
+
+class _FakeDesktopProcess:
+    def __init__(self, *, exited: bool = False) -> None:
+        self.killed = False
+        self.exited = exited
+
+    @property
+    def pid(self) -> int:
+        return 4321
+
+    def poll(self) -> int | None:
+        return 1 if self.killed or self.exited else None
+
+    def kill(self) -> CompletedRoleProcess:
+        self.killed = True
+        return CompletedRoleProcess(returncode=1, stdout="", stderr="")
+
+
+class _FakeDesktopSupervisor:
+    def __init__(self, *, process_exited: bool = False) -> None:
+        self.started: list[object] = []
+        self.process = _FakeDesktopProcess(exited=process_exited)
+
+    def start_detached(self, plan: object) -> _FakeDesktopProcess:
+        self.started.append(plan)
+        return self.process
+
+
+class _FailingDesktopSupervisor:
+    def start_detached(self, plan: object) -> _FakeDesktopProcess:
+        del plan
+        raise OSError("process creation failed")
 
 
 class _SuccessfulPreviewSupervisor:

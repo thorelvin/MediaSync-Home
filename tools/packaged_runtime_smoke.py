@@ -32,8 +32,12 @@ from mediasync_home.adapters.sqlite.connection_policy import (  # noqa: E402
 from mediasync_home.adapters.sqlite.migrations import (  # noqa: E402
     apply_sqlite_migrations,
     catalog_migration_plan,
+    recovery_migration_plan,
 )
 from mediasync_home.adapters.sqlite.schedules import SqliteScheduleStore  # noqa: E402
+from mediasync_home.adapters.sqlite.state_migration import (  # noqa: E402
+    migrate_sqlite_state_stores,
+)
 from mediasync_home.adapters.task_scheduler import (  # noqa: E402
     Pywin32TaskSchedulerGateway,
     WindowsTaskSchedulerRegistry,
@@ -115,7 +119,7 @@ def run_packaged_runtime_smoke(
 ) -> PackagedRuntimeSmokeResult:
     installation_id = f"packaged-smoke-{uuid4().hex[:12]}"
     schedule_id = "schedule-packaged-smoke"
-    base_work_dir = work_dir or _default_work_dir()
+    base_work_dir = (work_dir or _default_work_dir()).resolve()
     state_root = base_work_dir / "state-root"
     root_existed_before = _task_scheduler_folder_exists("\\MediaSync Home") if os.name == "nt" else False
     python_path = python_executable or Path(sys.executable)
@@ -432,7 +436,15 @@ def _prepare_packaged_scheduler_state(
     executable_path: Path,
 ) -> ScheduleDefinition:
     layout = build_state_store_layout(state_root)
-    layout.root.mkdir(parents=True, exist_ok=True)
+    migration_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    migrate_sqlite_state_stores(
+        layout,
+        catalog_plan=catalog_migration_plan(),
+        recovery_plan=recovery_migration_plan(),
+        app_version="packaged-runtime-smoke",
+        started_utc=migration_utc,
+        completed_utc=migration_utc,
+    )
     with sqlite3.connect(layout.catalog) as connection:
         apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(layout.catalog))
         apply_sqlite_migrations(connection, catalog_migration_plan())
@@ -469,10 +481,32 @@ def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
     connection.execute(
         "INSERT INTO filter_sets (job_id, id) VALUES ('job-packaged-smoke', 'filter-packaged-smoke')"
     )
+    filter_rules_json = '{"preset":"ALL_USER_FILES","schema_version":1}'
     connection.execute(
         """
-        INSERT INTO job_revisions (job_id, id, filter_set_id)
-            VALUES ('job-packaged-smoke', 'job-rev-packaged-smoke', 'filter-packaged-smoke')
+        INSERT INTO filter_set_versions (
+            job_id,
+            filter_set_id,
+            version,
+            rules_hash,
+            rules_json
+        )
+        VALUES ('job-packaged-smoke', 'filter-packaged-smoke', 1, ?, ?)
+        """,
+        (
+            hashlib.sha256(filter_rules_json.encode("utf-8")).hexdigest(),
+            filter_rules_json,
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO job_revisions (job_id, id, filter_set_id, filter_set_version)
+            VALUES (
+                'job-packaged-smoke',
+                'job-rev-packaged-smoke',
+                'filter-packaged-smoke',
+                1
+            )
         """
     )
     connection.execute(

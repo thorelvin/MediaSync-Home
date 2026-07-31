@@ -62,11 +62,36 @@ def build_internal_role_launch_plan(
     extra_args: tuple[str, ...] = (),
     environment: dict[str, str] | None = None,
 ) -> ProcessLaunchPlan:
+    return build_product_role_launch_plan(
+        role=role,
+        executable=executable,
+        role_runner=role_runner,
+        application_root=repo_root,
+        extra_args=extra_args,
+        environment=environment,
+    )
+
+
+def build_product_role_launch_plan(
+    *,
+    role: ProcessRole,
+    executable: Path,
+    application_root: Path,
+    role_runner: Path | None = None,
+    extra_args: tuple[str, ...] = (),
+    environment: dict[str, str] | None = None,
+) -> ProcessLaunchPlan:
+    role_arguments = ("--role", role.value, *extra_args)
+    arguments = (
+        role_arguments
+        if role_runner is None
+        else (str(role_runner), *role_arguments)
+    )
     plan = ProcessLaunchPlan(
         role=role,
         executable=executable,
-        arguments=(str(role_runner), "--role", role.value, *extra_args),
-        working_directory=repo_root,
+        arguments=arguments,
+        working_directory=application_root,
         environment=_minimal_environment(environment or {}),
         shell=False,
         requires_elevation=False,
@@ -76,7 +101,7 @@ def build_internal_role_launch_plan(
         inherited_handles=(),
         containment_policy=ChildContainmentPolicy.ROLE_PROCESS_NO_TRANSFER_CHILD,
     )
-    validate_process_launch_plan(plan, repo_root=repo_root)
+    validate_process_launch_plan(plan, repo_root=application_root)
     return plan
 
 

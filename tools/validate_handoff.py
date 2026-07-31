@@ -28,6 +28,14 @@ IGNORED_SCAN_DIRS = {
     "__pycache__",
     "venv",
 }
+LOCAL_RUNTIME_ARTIFACT_DIR_PREFIXES = ("local-unsigned",)
+LOCAL_RUNTIME_ARTIFACT_DIR_NAMES = {
+    "package-desktop-final-state",
+    "package-host-direct-state",
+    "package-host-minimal-state",
+    "package-manual-state",
+    "source-desktop-check-state",
+}
 ADR_PATTERN = re.compile(r"ADR-\d{3}")
 REQ_PATTERN = re.compile(
     r"(?:SAF|REC|SYNC|DB|END|META|AUTO|PERF|ARC|DUR|SEC|OWN|CTRL|CASE|HASH|SRC|PATH|DUP|VER|TIME|LOCK|OPS|FILTER|PROC|DOC|UX|OBS)-\d{3}"
@@ -95,10 +103,30 @@ def iter_repo_files() -> list[Path]:
         if not path.is_file():
             continue
         relative_parts = path.relative_to(ROOT).parts
-        if any(part in IGNORED_SCAN_DIRS for part in relative_parts):
+        if _is_ignored_scan_path(relative_parts):
             continue
         result.append(path)
     return result
+
+
+def _is_ignored_scan_path(relative_parts: tuple[str, ...]) -> bool:
+    if any(part in IGNORED_SCAN_DIRS for part in relative_parts):
+        return True
+    if len(relative_parts) < 2 or relative_parts[0] != "artifacts":
+        return False
+    artifact_name = relative_parts[1]
+    if artifact_name in LOCAL_RUNTIME_ARTIFACT_DIR_NAMES:
+        return True
+    if any(
+        artifact_name.startswith(prefix)
+        for prefix in LOCAL_RUNTIME_ARTIFACT_DIR_PREFIXES
+    ):
+        return True
+    return (
+        len(relative_parts) == 2
+        and artifact_name.startswith("package-")
+        and artifact_name.endswith(".log")
+    )
 
 
 def check_text_hygiene() -> None:

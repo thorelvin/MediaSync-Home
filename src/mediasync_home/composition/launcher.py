@@ -5,20 +5,24 @@ import json
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from mediasync_home.adapters.process_supervisor import (
     CompletedRoleProcess,
     LocalSubprocessSupervisor,
     RunningRoleProcess,
+    current_process_executable_path,
 )
 from mediasync_home.composition._role_runner import Emit, run_role
 from mediasync_home.application.process_supervision import (
     ProcessLaunchPlan,
     build_internal_role_launch_plan,
+    build_product_role_launch_plan,
 )
 from mediasync_home.application.host_locator import (
     LocalEngineHostDescriptor,
@@ -38,12 +42,43 @@ class RoleProcessSupervisor(Protocol):
     def run(self, plan: ProcessLaunchPlan, *, timeout_seconds: float) -> CompletedRoleProcess: ...
 
 
+class DesktopHostProcess(Protocol):
+    @property
+    def pid(self) -> int: ...
+
+    def poll(self) -> int | None: ...
+
+    def kill(self) -> CompletedRoleProcess: ...
+
+
+class DesktopProcessSupervisor(Protocol):
+    def start_detached(self, plan: ProcessLaunchPlan) -> DesktopHostProcess: ...
+
+
+class DesktopHostProbeStatus(str, Enum):
+    READY = "READY"
+    UNAVAILABLE = "UNAVAILABLE"
+    BLOCKED = "BLOCKED"
+
+
+class DesktopLaunchError(RuntimeError):
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
 @dataclass(frozen=True)
 class LocalPreviewStatusLaunch:
     pipe_name: str
     engine_host: ProcessLaunchPlan
     gui_status: ProcessLaunchPlan
     host_descriptor: LocalEngineHostDescriptor | None = None
+
+
+@dataclass(frozen=True)
+class LocalPreviewDesktopLaunch:
+    host_descriptor: LocalEngineHostDescriptor
+    engine_host: ProcessLaunchPlan
 
 
 @dataclass(frozen=True)
@@ -129,6 +164,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MediaSync Home launcher role")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
+        "--desktop",
+        action="store_true",
+        help="open the desktop app and adopt or start its same-user Engine Host",
+    )
+    mode.add_argument(
         "--local-preview-status",
         action="store_true",
         help="start a bounded Engine Host and verify readiness through a GUI status query",
@@ -187,6 +227,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run_launcher(argv: Sequence[str] | None = None, *, emit: Emit | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.desktop:
+        return _run_local_preview_desktop_from_args(args, emit=emit)
     if args.local_preview_host:
         return _run_local_preview_host_from_args(args, emit=emit)
     if args.local_preview_status:
@@ -195,6 +237,111 @@ def run_launcher(argv: Sequence[str] | None = None, *, emit: Emit | None = None)
         output(json.dumps(result.to_dict(), sort_keys=True, separators=(",", ":")))
         return 0 if result.accepted else 2
     return run_role(ProcessRole.LAUNCHER, argv, emit=emit)
+
+
+def build_local_preview_desktop_launch(
+    *,
+    host_descriptor: LocalEngineHostDescriptor,
+    executable: Path,
+    application_root: Path,
+    role_runner: Path | None,
+    environment: dict[str, str] | None = None,
+    run_executor_cycle_interval_ms: int = 5000,
+    run_executor_cycle_max_interval_ms: int = 60_000,
+    run_executor_staging_backend: str = "local-file",
+    reconcile_task_scheduler_resources: bool = False,
+    task_scheduler_executable_path: Path | None = None,
+    task_scheduler_reconciliation_interval_ms: int = 300_000,
+    task_scheduler_reconciliation_max_interval_ms: int = 3_600_000,
+) -> LocalPreviewDesktopLaunch:
+    if host_descriptor.state_root is None:
+        raise ValueError("DESKTOP_STATE_ROOT_REQUIRED")
+    host_args = [
+        "--local-preview-host",
+        "--installation-id",
+        host_descriptor.installation_id,
+        "--state-root",
+        str(host_descriptor.state_root.resolve()),
+        "--run-executor-cycle-interval-ms",
+        str(run_executor_cycle_interval_ms),
+        "--run-executor-cycle-max-interval-ms",
+        str(run_executor_cycle_max_interval_ms),
+        "--run-executor-staging-backend",
+        run_executor_staging_backend,
+    ]
+    if reconcile_task_scheduler_resources:
+        if task_scheduler_executable_path is None:
+            raise ValueError("TASK_SCHEDULER_EXECUTABLE_PATH_REQUIRED")
+        host_args.extend(
+            (
+                "--reconcile-task-scheduler-resources",
+                "--task-scheduler-executable-path",
+                str(task_scheduler_executable_path.resolve()),
+                "--task-scheduler-reconciliation-interval-ms",
+                str(task_scheduler_reconciliation_interval_ms),
+                "--task-scheduler-reconciliation-max-interval-ms",
+                str(task_scheduler_reconciliation_max_interval_ms),
+            )
+        )
+    engine_host = build_product_role_launch_plan(
+        role=ProcessRole.LAUNCHER,
+        executable=executable,
+        role_runner=role_runner,
+        application_root=application_root,
+        extra_args=tuple(host_args),
+        environment=environment,
+    )
+    return LocalPreviewDesktopLaunch(
+        host_descriptor=host_descriptor,
+        engine_host=engine_host,
+    )
+
+
+def run_local_preview_desktop(
+    launch: LocalPreviewDesktopLaunch,
+    *,
+    supervisor: DesktopProcessSupervisor,
+    probe_host: Callable[[], DesktopHostProbeStatus],
+    run_gui: Callable[[], int],
+    timeout_seconds: float,
+    poll_interval_seconds: float = 0.1,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    if timeout_seconds <= 0:
+        raise ValueError("DESKTOP_TIMEOUT_MUST_BE_POSITIVE")
+    if poll_interval_seconds <= 0:
+        raise ValueError("DESKTOP_POLL_INTERVAL_MUST_BE_POSITIVE")
+
+    initial_status = probe_host()
+    if initial_status is DesktopHostProbeStatus.READY:
+        return run_gui()
+    if initial_status is DesktopHostProbeStatus.BLOCKED:
+        raise DesktopLaunchError("DESKTOP_ENGINE_HOST_INCOMPATIBLE")
+
+    try:
+        host = supervisor.start_detached(launch.engine_host)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise DesktopLaunchError("DESKTOP_ENGINE_HOST_START_FAILED") from exc
+    deadline = monotonic() + timeout_seconds
+    host_exited = False
+    while True:
+        status = probe_host()
+        if status is DesktopHostProbeStatus.READY:
+            return run_gui()
+        if status is DesktopHostProbeStatus.BLOCKED:
+            _kill_unready_desktop_host(host)
+            raise DesktopLaunchError("DESKTOP_ENGINE_HOST_INCOMPATIBLE")
+        host_exited = host_exited or host.poll() is not None
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            _kill_unready_desktop_host(host)
+            raise DesktopLaunchError(
+                "DESKTOP_ENGINE_HOST_EXITED"
+                if host_exited
+                else "DESKTOP_ENGINE_HOST_START_TIMEOUT"
+            )
+        sleep(min(poll_interval_seconds, remaining))
 
 
 def build_local_preview_host_run(
@@ -528,6 +675,153 @@ def _clear_stale_host_publication(
         return clear_unreachable_local_engine_host_publication(publication)
     except (OSError, ValueError):
         return False
+
+
+def _run_local_preview_desktop_from_args(
+    args: argparse.Namespace,
+    *,
+    emit: Emit | None = None,
+) -> int:
+    if os.name != "nt":
+        raise RuntimeError("desktop launcher mode is Windows-only")
+    if args.pipe_name is not None:
+        raise ValueError("DESKTOP_EXPLICIT_PIPE_UNSUPPORTED")
+
+    from mediasync_home.adapters.local_host_locator import (
+        build_local_engine_host_descriptor_for_user,
+    )
+    from mediasync_home.ipc.win32_named_pipe import current_process_identity
+
+    identity = current_process_identity()
+    descriptor = build_local_engine_host_descriptor_for_user(
+        installation_id=args.installation_id,
+        user_scope_hash=identity.user_sid_hash,
+        state_root=args.state_root,
+        environ=os.environ,
+    )
+    executable, role_runner, application_root = _current_product_process_layout()
+    launch = build_local_preview_desktop_launch(
+        host_descriptor=descriptor,
+        executable=executable,
+        role_runner=role_runner,
+        application_root=application_root,
+        environment=dict(os.environ),
+        run_executor_cycle_interval_ms=args.run_executor_cycle_interval_ms,
+        run_executor_cycle_max_interval_ms=args.run_executor_cycle_max_interval_ms,
+        run_executor_staging_backend=args.run_executor_staging_backend,
+        reconcile_task_scheduler_resources=args.reconcile_task_scheduler_resources,
+        task_scheduler_executable_path=args.task_scheduler_executable_path,
+        task_scheduler_reconciliation_interval_ms=(
+            args.task_scheduler_reconciliation_interval_ms
+        ),
+        task_scheduler_reconciliation_max_interval_ms=(
+            args.task_scheduler_reconciliation_max_interval_ms
+        ),
+    )
+
+    def run_gui() -> int:
+        from mediasync_home.composition.ui import run_ui
+
+        assert descriptor.state_root is not None
+        return run_ui(
+            (
+                "--qt-shell",
+                "--installation-id",
+                descriptor.installation_id,
+                "--state-root",
+                str(descriptor.state_root),
+                "--timeout-seconds",
+                str(args.timeout_seconds),
+            )
+        )
+
+    try:
+        return run_local_preview_desktop(
+            launch,
+            supervisor=LocalSubprocessSupervisor(),
+            probe_host=lambda: _probe_local_preview_desktop_host(
+                descriptor,
+                timeout_seconds=min(1.0, args.timeout_seconds),
+            ),
+            run_gui=run_gui,
+            timeout_seconds=args.timeout_seconds,
+        )
+    except DesktopLaunchError as exc:
+        if emit is not None:
+            emit(
+                json.dumps(
+                    {
+                        "event": "DESKTOP_LAUNCH_FAILED",
+                        "reason": exc.reason_code,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            return 2
+        from mediasync_home.presentation.app import show_startup_error
+
+        return show_startup_error(exc.reason_code)
+
+
+def _current_product_process_layout() -> tuple[Path, Path | None, Path]:
+    python_executable = Path(sys.executable).resolve()
+    source_runtime = RUNNER.is_file() and python_executable.name.lower() in {
+        "python",
+        "python.exe",
+        "pythonw",
+        "pythonw.exe",
+    }
+    if source_runtime:
+        return python_executable, RUNNER, ROOT
+    executable = current_process_executable_path()
+    return executable, None, executable.parent
+
+
+def _probe_local_preview_desktop_host(
+    descriptor: LocalEngineHostDescriptor,
+    *,
+    timeout_seconds: float,
+) -> DesktopHostProbeStatus:
+    publication = _load_matching_host_publication(descriptor)
+    if publication is None:
+        return DesktopHostProbeStatus.UNAVAILABLE
+    try:
+        from mediasync_home.ipc.win32_named_pipe import Win32NamedPipeClient
+        from mediasync_home.presentation.engine_client import EngineClient
+
+        client = EngineClient(
+            Win32NamedPipeClient(
+                pipe_name=publication.pipe_name,
+                role=ProcessRole.GUI,
+                timeout_ms=max(1, int(timeout_seconds * 1000)),
+            )
+        )
+        handshake = client.connect()
+        if handshake.status is IpcStatus.REJECTED:
+            return (
+                DesktopHostProbeStatus.UNAVAILABLE
+                if handshake.reason is IpcReason.ENGINE_HOST_UNAVAILABLE
+                else DesktopHostProbeStatus.BLOCKED
+            )
+        status = client.get_status()
+        if status.status is IpcStatus.ACCEPTED:
+            return DesktopHostProbeStatus.READY
+        return (
+            DesktopHostProbeStatus.UNAVAILABLE
+            if status.reason is IpcReason.ENGINE_HOST_UNAVAILABLE
+            else DesktopHostProbeStatus.BLOCKED
+        )
+    except (OSError, RuntimeError, ValueError):
+        return DesktopHostProbeStatus.UNAVAILABLE
+
+
+def _kill_unready_desktop_host(host: DesktopHostProcess) -> None:
+    if host.poll() is None:
+        try:
+            host.kill()
+        except (OSError, subprocess.SubprocessError):
+            pass
 
 
 def _run_local_preview_status_from_args(args: argparse.Namespace) -> LocalPreviewStatusResult:

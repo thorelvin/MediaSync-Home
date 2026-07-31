@@ -31,13 +31,26 @@ def test_bootstrap_dispatches_each_process_role(role: ProcessRole) -> None:
     assert isinstance(payload["runtime_policy"]["reasons"], list)
 
 
-def test_bootstrap_defaults_to_launcher_role() -> None:
+def test_bootstrap_without_arguments_routes_to_desktop_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_launcher_main(argv: object, *, emit: object | None = None) -> int:
+        captured["argv"] = argv
+        captured["emit"] = emit
+        return 31
+
+    monkeypatch.setitem(bootstrap.ROLE_ENTRYPOINTS, ProcessRole.LAUNCHER, fake_launcher_main)
     output: list[str] = []
 
     exit_code = bootstrap.main([], emit=output.append)
 
-    assert exit_code == 0
-    assert json.loads(output[0])["role"] == ProcessRole.LAUNCHER.value
+    assert exit_code == 31
+    assert captured == {
+        "argv": ["--desktop"],
+        "emit": output.append,
+    }
 
 
 def test_bootstrap_protocol_trigger_invocation_routes_to_trigger_client(

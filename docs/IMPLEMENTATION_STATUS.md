@@ -1,5 +1,19 @@
 # Implementeringsstatus
 
+Oppdatering 2026-07-31: Produktinngangen uten argumenter åpner nå den faktiske
+desktopapplikasjonen. Launcheren finner og validerer en kompatibel same-user
+Engine Host, eller starter én frakoblet lokal host og venter på en akseptert
+status før GUI-et åpnes. Kildekjøring og Nuitka-pakket kjøring bruker samme
+validerte rolleargumenter. Engine Host fortsetter etter at GUI-vinduet lukkes,
+slik at kø og kjøringer ikke eies av vinduets levetid. Samtidige oppstarter
+håndterer singleton-kappløpet ved å adoptere vinneren, mens inkompatibel host,
+prosessfeil og timeout gir en synlig oppstartsfeil. Enhetstester dekker adoption,
+ny host, kappløp, timeout, prosessfeil og pakket argv. Ekte Windows-smoke har
+verifisert adoption, oppstart fra tom isolert state, GUI-uavhengig hostlevetid
+og en lokal usignert Nuitka-pakke. Den komplette pakkesmoken verifiserer også
+pakket trigger/host/GUI, koordinert catalog/recovery-migrering og same-user
+Task Scheduler apply/load/cleanup.
+
 Oppdatering 2026-07-31: Navigasjonssiden **Innstillinger** er ikke lenger en
 placeholder. Tema (system/lys/mørk), tetthet, redusert bevegelse og språk brukes
 umiddelbart og lagres atomisk i en validert, versjonert JSON-fil under samme

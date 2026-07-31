@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import pytest
 
+import mediasync_home.adapters.task_scheduler as task_scheduler_module
 from mediasync_home.adapters.task_scheduler import (
     Pywin32TaskSchedulerGateway,
     TaskSchedulerAdapterError,
@@ -182,6 +183,33 @@ def test_pywin32_task_scheduler_gateway_wraps_custom_factory_in_requested_apartm
 
     assert observed == task
     assert events == ["enter", "exit", "enter", "exit"]
+
+
+def test_pywin32_task_scheduler_gateway_materializes_task_inside_com_apartment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _FakeTaskSchedulerService()
+    events: list[str] = []
+    original_materializer = task_scheduler_module._gateway_task_from_registered
+
+    def materialize(*args: object, **kwargs: object) -> TaskSchedulerGatewayTask:
+        assert events[-1] == "enter"
+        return original_materializer(*args, **kwargs)
+
+    monkeypatch.setattr(
+        task_scheduler_module,
+        "_gateway_task_from_registered",
+        materialize,
+    )
+    gateway = Pywin32TaskSchedulerGateway(
+        service_factory=_connected_factory(service),
+        com_apartment_factory=lambda: _RecordingComApartment(events),
+    )
+    task = _gateway_task(_definition())
+    gateway.apply_task(task)
+
+    assert gateway.load_task(task.task_path) == task
+    assert gateway.list_tasks(task.folder_path, limit=10) == (task,)
 
 
 def test_pywin32_task_scheduler_gateway_default_factory_initializes_com_apartment(

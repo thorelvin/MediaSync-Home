@@ -3,9 +3,11 @@ from __future__ import annotations
 import ctypes
 import os
 import subprocess
+import sys
 from contextlib import suppress
 from ctypes import wintypes
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 from mediasync_home.adapters.windows_argv import WindowsCommandLineError, build_windows_command_line
@@ -20,6 +22,8 @@ from mediasync_home.application.process_supervision import (
 
 
 _CREATE_SUSPENDED = 0x00000004
+_DETACHED_PROCESS = 0x00000008
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
 _CREATE_NO_WINDOW = 0x08000000
 _CREATE_UNICODE_ENVIRONMENT = 0x00000400
 _STARTF_USESHOWWINDOW = 0x00000001
@@ -31,6 +35,7 @@ _STILL_ACTIVE = 259
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _TRANSFER_CHILD_CONTAINMENT_FAILURE_EXIT_CODE = 99
+_WINDOWS_EXTENDED_PATH_BUFFER_CHARS = 32_768
 
 
 class _StartupInfoW(ctypes.Structure):
@@ -242,6 +247,22 @@ class LocalSubprocessSupervisor:
         )
         return RunningRoleProcess(process)
 
+    def start_detached(self, plan: ProcessLaunchPlan) -> RunningRoleProcess:
+        _assert_internal_role_plan_safe(plan)
+        process = subprocess.Popen(
+            list(plan.command_line_vector()),
+            cwd=str(plan.working_directory),
+            env=_process_environment(plan),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            shell=plan.shell,
+            close_fds=True,
+            creationflags=_detached_creation_flags(plan),
+        )
+        return RunningRoleProcess(process)
+
     def run(self, plan: ProcessLaunchPlan, *, timeout_seconds: float) -> CompletedRoleProcess:
         _assert_internal_role_plan_safe(plan)
         process = subprocess.run(
@@ -303,6 +324,32 @@ class Win32JobObjectTransferSupervisor:
             _process_handle=handles.process_handle,
             _job_handle=job_handle,
         )
+
+
+def current_process_executable_path() -> Path:
+    if os.name != "nt":
+        return Path(sys.executable).resolve()
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetModuleFileNameW.argtypes = [
+        wintypes.HMODULE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+    ]
+    kernel32.GetModuleFileNameW.restype = wintypes.DWORD
+    buffer = ctypes.create_unicode_buffer(_WINDOWS_EXTENDED_PATH_BUFFER_CHARS)
+    length = int(
+        kernel32.GetModuleFileNameW(
+            None,
+            buffer,
+            _WINDOWS_EXTENDED_PATH_BUFFER_CHARS,
+        )
+    )
+    if length == 0 or length >= _WINDOWS_EXTENDED_PATH_BUFFER_CHARS:
+        raise ProcessLaunchViolation("CURRENT_PROCESS_EXECUTABLE_UNAVAILABLE")
+    executable = Path(buffer.value).resolve()
+    if not executable.is_absolute() or not executable.is_file():
+        raise ProcessLaunchViolation("CURRENT_PROCESS_EXECUTABLE_INVALID")
+    return executable
 
 
 def _process_environment(plan: ProcessLaunchPlan) -> dict[str, str]:
@@ -371,6 +418,13 @@ def _creation_flags(plan: ProcessLaunchPlan) -> int:
     if os.name == "nt" and plan.window_mode is WindowMode.HIDDEN:
         return _CREATE_NO_WINDOW
     return 0
+
+
+def _detached_creation_flags(plan: ProcessLaunchPlan) -> int:
+    flags = _creation_flags(plan)
+    if os.name == "nt":
+        flags |= _DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP
+    return flags
 
 
 class _DefaultWin32ProcessApi:

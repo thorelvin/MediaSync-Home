@@ -146,15 +146,23 @@ class Pywin32TaskSchedulerGateway:
         folder_path, task_name = _split_task_path(task_path)
         try:
             with self._com_apartment_factory():
-                folder = _call_method(self._service_factory(), "GetFolder", folder_path)
+                service = self._service_factory()
+                folder = _call_method(service, "GetFolder", folder_path)
                 registered_task = _call_method(folder, "GetTask", task_name)
+                task = _gateway_task_from_registered(
+                    task_path,
+                    folder_path,
+                    task_name,
+                    registered_task,
+                )
+                del registered_task, folder, service
         except TaskSchedulerAdapterError:
             raise
         except Exception as exc:
             if _is_not_found_error(exc):
                 return None
             raise TaskSchedulerAdapterError("TASK_SCHEDULER_COM_LOAD_FAILED") from exc
-        return _gateway_task_from_registered(task_path, folder_path, task_name, registered_task)
+        return task
 
     def list_tasks(
         self,
@@ -170,26 +178,29 @@ class Pywin32TaskSchedulerGateway:
             _validate_task_name(after_task_name)
         try:
             with self._com_apartment_factory():
-                folder = _call_method(self._service_factory(), "GetFolder", folder_path)
+                service = self._service_factory()
+                folder = _call_method(service, "GetFolder", folder_path)
                 registered_tasks = _call_method(folder, "GetTasks", 0)
+                tasks: list[TaskSchedulerGatewayTask] = []
+                for index in range(1, _int_attr(registered_tasks, "Count") + 1):
+                    registered_task = _call_method(registered_tasks, "Item", index)
+                    task_name = _str_attr(registered_task, "Name")
+                    tasks.append(
+                        _gateway_task_from_registered(
+                            _join_task_path(folder_path, task_name),
+                            folder_path,
+                            task_name,
+                            registered_task,
+                        )
+                    )
+                    del registered_task
+                del registered_tasks, folder, service
         except TaskSchedulerAdapterError:
             raise
         except Exception as exc:
             if _is_not_found_error(exc):
                 return ()
             raise TaskSchedulerAdapterError("TASK_SCHEDULER_COM_LIST_FAILED") from exc
-        tasks: list[TaskSchedulerGatewayTask] = []
-        for index in range(1, _int_attr(registered_tasks, "Count") + 1):
-            registered_task = _call_method(registered_tasks, "Item", index)
-            task_name = _str_attr(registered_task, "Name")
-            tasks.append(
-                _gateway_task_from_registered(
-                    _join_task_path(folder_path, task_name),
-                    folder_path,
-                    task_name,
-                    registered_task,
-                )
-            )
         tasks.sort(key=lambda task: task.task_name)
         if after_task_name is not None:
             tasks = [task for task in tasks if task.task_name > after_task_name]
@@ -213,6 +224,7 @@ class Pywin32TaskSchedulerGateway:
                     _com_logon_type(task.task_logon_type),
                     None,
                 )
+                del task_definition, folder, service
         except TaskSchedulerAdapterError:
             raise
         except Exception as exc:
@@ -222,8 +234,10 @@ class Pywin32TaskSchedulerGateway:
         folder_path, task_name = _split_task_path(task_path)
         try:
             with self._com_apartment_factory():
-                folder = _call_method(self._service_factory(), "GetFolder", folder_path)
+                service = self._service_factory()
+                folder = _call_method(service, "GetFolder", folder_path)
                 _call_method(folder, "DeleteTask", task_name, 0)
+                del folder, service
         except TaskSchedulerAdapterError:
             raise
         except Exception as exc:

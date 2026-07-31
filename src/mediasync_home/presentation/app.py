@@ -6,7 +6,7 @@ from typing import cast
 
 from PySide6.QtCore import QUrl, Qt
 from PySide6.QtGui import QDesktopServices, QGuiApplication
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from mediasync_home.application.user_preferences import (
     AppearancePreference,
@@ -140,3 +140,29 @@ def _apply_preferences_theme(
 
 def _open_local_folder(path: Path) -> bool:
     return QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+
+def show_startup_error(reason_code: str) -> int:
+    app = ensure_qapplication([])
+    messages = {
+        "DESKTOP_ENGINE_HOST_EXITED": (
+            "The local backup engine stopped before MediaSync Home could connect."
+        ),
+        "DESKTOP_ENGINE_HOST_INCOMPATIBLE": (
+            "A different or incompatible MediaSync Home engine is already running."
+        ),
+        "DESKTOP_ENGINE_HOST_START_TIMEOUT": (
+            "The local backup engine did not become ready in time."
+        ),
+        "DESKTOP_ENGINE_HOST_START_FAILED": (
+            "Windows could not start the local backup engine."
+        ),
+    }
+    detail = messages.get(reason_code, "MediaSync Home could not start its local backup engine.")
+    QMessageBox.critical(
+        None,
+        "MediaSync Home",
+        f"{detail}\n\nRestart MediaSync Home. If this continues, open diagnostics.",
+    )
+    app.processEvents()
+    return 2

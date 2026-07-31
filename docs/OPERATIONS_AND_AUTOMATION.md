@@ -9,6 +9,13 @@ Task Scheduler, triggers, observabilitet, retry, recoverymodus og operasjonell f
 
 ## 18. Automatisering uten Windows-tjeneste
 
+Implementasjonsnotat 2026-07-31: Lokal preview har én desktopinngang uten
+argumenter. Den statusprober HostLocator-publikasjonen, adopterer en kompatibel
+same-user Engine Host eller starter en frakoblet host og åpner først GUI-et når
+hosten svarer. GUI-et kan lukkes uten å stoppe hostens executor. Denne
+previewflyten erstatter ikke den strengere planlagte trigger-bootstrapen under;
+logged-off og cross-session hosteierskap er fortsatt utsatt.
+
 ### 18.1 Arkitektur: trigger client, ikke separat syncmotor
 
 Windows Oppgaveplanlegging skal aldri starte en ny uavhengig syncmotor som skriver databaser og filer parallelt med GUI-et. Task Scheduler starter den interne **trigger client**-rollen:
