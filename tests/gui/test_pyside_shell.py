@@ -277,7 +277,7 @@ def test_setup_primary_button_collects_local_preview_draft(qapp) -> None:
         QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
         qapp.processEvents()
 
-        assert create_backup.text() == "Opprett og kontroller endringer"
+        assert create_backup.text() == "Opprett og registrer"
         assert create_backup.isEnabled() is True
 
         QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
@@ -395,7 +395,56 @@ def test_setup_primary_button_persists_reviewed_draft_through_engine(qapp) -> No
         assert provider.draft.source_path_label == "C:/Users/Ada/Pictures"
         assert provider.draft.targets[0].path_label == "E:/MediaSyncBackup"
         assert provider.draft.can_create() is True
-        assert engine_detail.text() == "Backupjobben ble opprettet og lagret."
+        assert engine_detail.text() == (
+            "Backupjobben og registreringen av skrivbart mål ble lagret."
+        )
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_failed_target_registration_keeps_review_and_retry_without_clipping(qapp) -> None:
+    provider = _FakeFailedRegistrationEngineClient()
+    window = build_main_window(
+        initial_state=_ready_state(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        qapp.processEvents()
+        choices = [
+            "C:/Users/Ada/A very long source folder for important files",
+            "E:/MediaSync/A very long target folder for the complete backup",
+        ]
+        window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
+        create_backup = window.findChild(QPushButton, "createBackupButton")
+        target = window.findChild(QLabel, "setupTargetValue")
+        engine_detail = window.findChild(QLabel, "engineDetailLabel")
+        dashboard_scroll = window.findChild(QScrollArea, "dashboardScrollArea")
+
+        assert create_backup is not None
+        assert target is not None
+        assert engine_detail is not None
+        assert dashboard_scroll is not None
+        for _ in range(4):
+            QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
+            qapp.processEvents()
+
+        assert create_backup.text() == "Prøv målregistrering igjen"
+        assert create_backup.isEnabled() is True
+        assert target.text().startswith("1 mål:")
+        assert "WRITABLE_ENDPOINT_PROBE_FAILED" in engine_detail.text()
+        assert dashboard_scroll.horizontalScrollBar().maximum() == 0
+
+        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert provider.calls.count("create_standard_backup_job") == 2
+        assert target.text().startswith("1 mål:")
+        assert dashboard_scroll.horizontalScrollBar().maximum() == 0
     finally:
         window.close()
         window.deleteLater()
@@ -512,7 +561,9 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert job_detail_defaults.text() == "Oppdater backup - Alle brukerfiler - Standard kontroll"
         assert job_detail_revision is not None
         assert job_detail_revision.text() == "Revisjon: job-rev-a - Filter: filter-a"
-        assert job_detail_rows[0].text() == "USB 1: E:/Backup"
+        assert job_detail_rows[0].text() == (
+            "USB 1: E:/Backup · Skrivbar og registrert"
+        )
         assert plan_preview_summary is not None
         assert plan_preview_summary.text() == "2 operasjoner fra plan-a."
         assert plan_preview_rows[0].text() == "Lav: Opprett mappe: Photos"
@@ -646,8 +697,36 @@ class _FakeBackupCreationEngineClient(_FakeEngineClient):
                     "job_revision_id": "job-rev-a",
                     "filter_set_id": "filter-a",
                 },
+                "writable_endpoint_registration": {
+                    "completed": True,
+                    "state": "COMMITTED",
+                    "registered_target_count": 1,
+                },
             }
         )
+
+
+class _FakeFailedRegistrationEngineClient(_FakeBackupCreationEngineClient):
+    def create_standard_backup_job(
+        self,
+        *,
+        draft: StandardBackupJobDraft,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        response = super().create_standard_backup_job(
+            draft=draft,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
+        payload = dict(response.payload)
+        payload["writable_endpoint_registration"] = {
+            "completed": False,
+            "state": "PREPARED",
+            "registered_target_count": 0,
+            "validation_codes": ["WRITABLE_ENDPOINT_PROBE_FAILED"],
+        }
+        return IpcResponse.accepted(payload)
 
 
 class _FakeDashboardEngineClient(_FakeEngineClient):
@@ -674,6 +753,10 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                                 "name": "USB 1",
                                 "path_label": "E:/Backup",
                                 "independent_device_id": "disk-a",
+                                "registration_state": "WRITABLE_READY",
+                                "registration_reason_code": (
+                                    "ENDPOINT_TARGET_WRITABLE_PROBE_VERIFIED"
+                                ),
                             }
                         ],
                     },
@@ -726,6 +809,10 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                                 "name": "USB 1",
                                 "path_label": "E:/Backup",
                                 "independent_device_id": "disk-a",
+                                "registration_state": "WRITABLE_READY",
+                                "registration_reason_code": (
+                                    "ENDPOINT_TARGET_WRITABLE_PROBE_VERIFIED"
+                                ),
                             }
                         ],
                     },

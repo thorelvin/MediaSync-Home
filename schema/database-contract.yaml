@@ -55,6 +55,7 @@ invariants:
       - job_revision_filter_bindings
       - job_revisions
       - standard_backup_job_revision_details
+      - writable_endpoint_registrations
     immutable_after_reference:
       table: filter_sets
       referenced_by_table: job_revisions
@@ -87,6 +88,22 @@ invariants:
         - table: plan_endpoints
           columns: [endpoint_id, endpoint_revision_id, endpoint_generation]
       runtime_capability: MutationPermit
+  - id: CTRL-001_WRITABLE_ENDPOINT_REGISTRATION
+    requirement_id: CTRL-001
+    assertion: >
+      Writable target registration is restartable, binds one verified control
+      marker and write probe to an exact new endpoint generation, and advances
+      the active job through a new immutable revision.
+    intent_table: writable_endpoint_registration_intents
+    evidence_table: writable_endpoint_registrations
+    intent_identity_immutable: true
+    terminal_states: [COMMITTED, BLOCKED]
+    evidence_immutable: true
+    endpoint_revision_binding:
+      columns: [endpoint_id, endpoint_revision_id, endpoint_generation]
+    active_heads_advanced:
+      - endpoint_heads
+      - job_heads
   - id: DB-007_PARENT_SCOPE_COMPOSITE_KEYS
     requirement_id: DB-007
     assertion: Security-relevant child rows are bound to their parent scope with composite keys.
@@ -115,6 +132,14 @@ invariants:
         child_columns: [job_id, filter_set_id, filter_set_version]
         parent_table: filter_set_versions
         parent_columns: [job_id, filter_set_id, version]
+      - child_table: writable_endpoint_registration_intents
+        child_columns: [job_id, source_job_revision_id]
+        parent_table: job_revisions
+        parent_columns: [job_id, id]
+      - child_table: writable_endpoint_registrations
+        child_columns: [endpoint_id, endpoint_revision_id]
+        parent_table: endpoint_revisions
+        parent_columns: [endpoint_id, id]
       - child_table: analyses
         child_columns: [job_id, job_revision_id]
         parent_table: job_revisions

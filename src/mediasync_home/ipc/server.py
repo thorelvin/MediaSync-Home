@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from math import ceil
 from secrets import compare_digest
 from time import monotonic
@@ -123,6 +124,10 @@ from mediasync_home.application.trigger_runs import (
     TriggerRunEnqueueOutcome,
     enqueue_trigger_occurrence_run,
 )
+from mediasync_home.application.writable_endpoint_registration import (
+    WritableEndpointRegistrationCoordinator,
+    WritableEndpointRegistrationError,
+)
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
 from mediasync_home.ipc.protocol import (
@@ -207,6 +212,8 @@ class EngineHostIpcService:
     endpoint_classification_refresh: (
         Callable[[], EndpointClassificationRefreshReport] | None
     ) = None
+    writable_endpoint_registration: WritableEndpointRegistrationCoordinator | None = None
+    writable_endpoint_registration_utc_now: Callable[[], str] | None = None
     job_snapshot_refresh: (
         Callable[[], SnapshotMaterializationRefreshReport] | None
     ) = None
@@ -1148,7 +1155,65 @@ class EngineHostIpcService:
             lambda: self._dispatch_create_standard_backup_job_in_transaction(envelope, identity, command)
         )
         response = self._refresh_endpoint_classification_after_job_command(response)
+        response = self._register_writable_targets_after_job_command(
+            response,
+            envelope=envelope,
+        )
+        response = self._refresh_endpoint_classification_after_job_command(response)
         return self._refresh_job_snapshots_after_job_command(response)
+
+    def _register_writable_targets_after_job_command(
+        self,
+        response: IpcResponse,
+        *,
+        envelope: IpcCommandEnvelope,
+    ) -> IpcResponse:
+        if (
+            response.status is not IpcStatus.ACCEPTED
+            or self.writable_endpoint_registration is None
+        ):
+            return response
+        payload = dict(response.payload)
+        job = payload.get("job")
+        if not isinstance(job, dict):
+            return response
+        job_id = job.get("job_id")
+        job_revision_id = job.get("job_revision_id")
+        if not isinstance(job_id, str) or not isinstance(job_revision_id, str):
+            return response
+        try:
+            report = self.writable_endpoint_registration.register_job_targets(
+                job_id=job_id,
+                job_revision_id=job_revision_id,
+                command_request_id=envelope.request_id,
+                command_idempotency_key=envelope.idempotency_key,
+                observed_utc=(
+                    self.writable_endpoint_registration_utc_now()
+                    if self.writable_endpoint_registration_utc_now is not None
+                    else _system_utc_now()
+                ),
+            )
+            payload["writable_endpoint_registration"] = report.to_dict()
+            if report.completed:
+                payload["job"] = {
+                    **job,
+                    "job_revision_id": report.active_job_revision_id,
+                }
+        except WritableEndpointRegistrationError as exc:
+            payload["writable_endpoint_registration"] = {
+                "job_id": job_id,
+                "source_job_revision_id": job_revision_id,
+                "active_job_revision_id": job_revision_id,
+                "intent_id": None,
+                "state": None,
+                "target_count": 0,
+                "registered_target_count": 0,
+                "idempotent_replay": False,
+                "completed": False,
+                "validation_codes": [exc.validation_code],
+                "next_action": exc.next_action,
+            }
+        return IpcResponse.accepted(payload)
 
     def _refresh_endpoint_classification_after_job_command(
         self,
@@ -1217,6 +1282,11 @@ class EngineHostIpcService:
             return None
         job_id = job.get("job_id")
         job_revision_id = job.get("job_revision_id")
+        registration = payload.get("writable_endpoint_registration")
+        if isinstance(registration, dict):
+            active_job_revision_id = registration.get("active_job_revision_id")
+            if isinstance(active_job_revision_id, str):
+                job_revision_id = active_job_revision_id
         if not isinstance(job_id, str) or not isinstance(job_revision_id, str):
             return None
         return self.standard_backup_job_endpoint_registrar.load_standard_backup_job_endpoint_set(
@@ -1625,6 +1695,10 @@ def _state_restore_response_payload(
     if restore_receipt is not None:
         result["restore_receipt"] = restore_receipt
     return result
+
+
+def _system_utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _receipt_rejection_reason(receipt: CommandReceipt) -> IpcReason:

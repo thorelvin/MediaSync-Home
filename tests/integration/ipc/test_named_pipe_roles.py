@@ -190,6 +190,9 @@ def test_gui_creates_durable_backup_job_through_local_writable_pipe(
                 revisions.root_uri,
                 bindings.registration_state
             FROM standard_backup_job_endpoint_bindings AS bindings
+            INNER JOIN job_heads AS heads
+                ON heads.job_id = bindings.job_id
+                AND heads.active_revision_id = bindings.job_revision_id
             INNER JOIN endpoint_revisions AS revisions
                 ON revisions.endpoint_id = bindings.endpoint_id
                 AND revisions.id = bindings.endpoint_revision_id
@@ -206,7 +209,8 @@ def test_gui_creates_durable_backup_job_through_local_writable_pipe(
     assert gui_response["payload"]["created"] is True
     endpoint_bindings = gui_response["payload"]["endpoint_bindings"]
     assert endpoint_bindings["source"]["registration_state"] == "READ_ONLY_READY"
-    assert endpoint_bindings["targets"][0]["registration_state"] == "REGISTRATION_PENDING"
+    assert endpoint_bindings["targets"][0]["registration_state"] == "WRITABLE_READY"
+    assert gui_response["payload"]["writable_endpoint_registration"]["completed"] is True
     assert gui_response["payload"]["endpoint_classification_refresh"]["completed"] is True
     assert host_events[0]["host_status"]["mutations_enabled"] is True
     assert host_events[-1]["served_requests"] == 2
@@ -225,13 +229,13 @@ def test_gui_creates_durable_backup_job_through_local_writable_pipe(
             "TARGET",
             1,
             endpoint_bindings["targets"][0]["root_uri"],
-            "REGISTRATION_PENDING",
+            "WRITABLE_READY",
         ),
     ]
     assert endpoint_count == (2,)
     assert root_claim_count == (2,)
     assert not (source_root / ".mediasync").exists()
-    assert not (target_root / ".mediasync").exists()
+    assert (target_root / ".mediasync" / "endpoint.json").is_file()
 
 
 def test_gui_can_disconnect_and_reconnect_without_stopping_engine_host() -> None:

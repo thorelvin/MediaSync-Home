@@ -826,6 +826,16 @@ Når brukeren aktiverer primærknappen:
 - **Opprett uten å kontrollere** lagrer jobben uten å starte kontroll og er sekundær, ikke konkurrerende, handling;
 - feil under første kontroll fører ikke brukeren tilbake til steg 1; valgene beholdes og riktig problem vises på jobben.
 
+0B-implementasjonsnote: Den nåværende lokale previewen bruker
+**Opprett og registrer** som review-handling. Den lagrer jobben varig og registrerer
+det valgte lokale målet som skrivbart ved å opprette bare `.mediasync`-kontrollmetadata
+og utføre en avgrenset write/read/delete-test; den kopierer ingen brukerfiler.
+Vellykket registrering vises som **Skrivbar og registrert** i jobbdeltaljen. Dersom
+registreringen ikke kan fullføres, beholdes hele det gjennomgåtte utkastet og knappen
+endres til **Prøv registrering på nytt**. Feilteksten brytes vertikalt i arbeidsflaten
+uten horisontal scrolling eller clipping. Første automatiske plan/kontroll etter
+registrering er neste slice og skal ikke påstås utført av denne handlingen ennå.
+
 Etter første vellykkede manuelle backup kan programmet vise én diskret anbefaling: `Vil du kjøre denne backupen automatisk?` med handlingen **Sett opp automatikk**. Den skal ikke avbryte fullføringsoppsummeringen.
 
 #### 8.8.6 Redigering av en etablert jobb

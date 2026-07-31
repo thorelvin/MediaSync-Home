@@ -27,13 +27,20 @@ class StandardBackupTargetSummary:
     name: str
     path_label: str
     independent_device_id: str | None = None
+    registration_state: str | None = None
+    registration_reason_code: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "name": self.name,
             "path_label": self.path_label,
             "independent_device_id": self.independent_device_id,
         }
+        if self.registration_state is not None:
+            payload["registration_state"] = self.registration_state
+        if self.registration_reason_code is not None:
+            payload["registration_reason_code"] = self.registration_reason_code
+        return payload
 
 
 @dataclass(frozen=True)

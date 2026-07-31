@@ -13,6 +13,15 @@ Bindende regler for writer-eierskap, `.mediasync`, takeover, lock/fencing, endep
 
 Et endepunkt en jobb kan skrive til, registreres eksplisitt med **Registrer som skrivbart MediaSync-endepunkt**. Registreringen oppretter produktmetadata, men kopierer, erstatter eller flytter ingen brukerfiler. En strengt skrivebeskyttet kilde i `multi_target_backup` kan identifiseres uten kontrollområde. I `pair_sync` må begge endepunkter som kan motta data være registrert.
 
+0B-implementasjonsnote: Standard-backupens review-handling **Opprett og registrer**
+utfører nå lokal førstegangsregistrering for et fraværende kontrollområde. En varig
+catalog-intent publiseres før filsystemarbeidet; provisioneren skriver schema-4-markør,
+epoch-1 ownership-record og namespaces gjennom en privat intentbundet stagingkatalog,
+og avslutter med en avgrenset write/read/delete-probe. Vellykket resultat appender ny
+endpoint-/jobrevisjon og blir `WRITABLE_READY`; pending intents gjenopptas ved startup.
+Fremmed eier, takeover, adoption av ukjent kontrollinnhold og kontrollmappemigrasjon er
+fortsatt separate, ikke-implementerte flyter.
+
 #### 4.1.1 Én writer-installasjon per skrivbart rotområde
 
 Første komplette hjemmeversjon bruker ikke distribuert multi-writer-koordinering. Den bindende modellen er:

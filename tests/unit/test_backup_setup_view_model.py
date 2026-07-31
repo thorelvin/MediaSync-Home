@@ -68,7 +68,7 @@ def test_standard_backup_setup_allows_review_with_one_to_three_targets() -> None
     assert state.max_targets == 3
     assert state.can_continue is True
     assert state.can_create is True
-    assert state.primary_action_label == "Opprett og kontroller endringer"
+    assert state.primary_action_label == "Opprett og registrer"
     assert state.review_lines[:2] == (
         "C:/Users/Ada/Pictures",
         "3 mål: USB 1, USB 2, NAS",

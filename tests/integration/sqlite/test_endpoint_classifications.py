@@ -191,6 +191,12 @@ def _prepare_catalog(connection: sqlite3.Connection, database: Path) -> None:
         VALUES ('job-a', 'revision-a', 'filter-a')
         """
     )
+    connection.execute(
+        """
+        INSERT INTO job_heads (job_id, active_revision_id)
+        VALUES ('job-a', 'revision-a')
+        """
+    )
 
 
 def _insert_job_and_endpoint(

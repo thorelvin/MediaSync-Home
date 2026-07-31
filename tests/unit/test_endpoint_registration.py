@@ -10,6 +10,7 @@ from mediasync_home.application.endpoint_classification import (
     EndpointMarkerEvidence,
 )
 from mediasync_home.application.endpoint_registration import (
+    EndpointRegistrationDecision,
     decide_endpoint_registration,
 )
 from mediasync_home.application.job_endpoints import (
@@ -162,6 +163,34 @@ def test_read_only_classification_never_grants_writable_ready() -> None:
     assert all(
         decision.state is not EndpointRegistrationState.WRITABLE_READY
         for decision in decisions
+    )
+
+
+def test_owned_target_requires_exact_persisted_writable_probe() -> None:
+    classification = _classification(
+        EndpointControlAreaState.VALID_OWNED,
+        marker=_marker(),
+    )
+
+    pending = decide_endpoint_registration(
+        role=JobEndpointRole.TARGET,
+        expected_endpoint_id="11111111-1111-4111-8111-111111111111",
+        classification=classification,
+    )
+    verified = decide_endpoint_registration(
+        role=JobEndpointRole.TARGET,
+        expected_endpoint_id="11111111-1111-4111-8111-111111111111",
+        classification=classification,
+        writable_probe_verified=True,
+    )
+
+    assert pending == EndpointRegistrationDecision(
+        EndpointRegistrationState.REGISTRATION_PENDING,
+        "ENDPOINT_TARGET_WRITABLE_PROBE_REQUIRED",
+    )
+    assert verified == EndpointRegistrationDecision(
+        EndpointRegistrationState.WRITABLE_READY,
+        "ENDPOINT_TARGET_WRITABLE_PROBE_VERIFIED",
     )
 
 

@@ -35,6 +35,9 @@ from mediasync_home.adapters.task_scheduler import (
     Pywin32TaskSchedulerGateway,
     WindowsTaskSchedulerRegistry,
 )
+from mediasync_home.adapters.writable_endpoint_registration import (
+    LocalWritableEndpointControlAreaProvisioner,
+)
 from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
 from mediasync_home.adapters.sqlite.command_receipts import SqliteCommandReceiptStore
 from mediasync_home.adapters.sqlite.connection_policy import (
@@ -98,6 +101,9 @@ from mediasync_home.adapters.sqlite.state_migration import (
 )
 from mediasync_home.adapters.sqlite.trigger_occurrences import SqliteTriggerOccurrenceStore
 from mediasync_home.adapters.sqlite.transactions import SqliteImmediateTransactionRunner
+from mediasync_home.adapters.sqlite.writable_endpoint_registrations import (
+    SqliteWritableEndpointRegistrationStore,
+)
 from mediasync_home.application.run_executor import (
     HeldRunTargetLeaseRegistry,
     MAX_RUN_EXECUTOR_PUMP_STEPS,
@@ -185,6 +191,12 @@ from mediasync_home.application.task_scheduler import (
     reconcile_task_scheduler_resources_bounded,
     stage_task_scheduler_desired_resource_page,
 )
+from mediasync_home.application.writable_endpoint_registration import (
+    WritableEndpointRegistrationCandidate,
+    WritableEndpointRegistrationCoordinator,
+    WritableEndpointRegistrationIds,
+    WritableEndpointTargetIds,
+)
 from mediasync_home.composition._role_runner import Emit, run_role
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.domain.capabilities import MutationPermit
@@ -229,6 +241,25 @@ class UuidEndpointIdFactory:
         return EndpointIds(
             endpoint_id=str(uuid4()),
             endpoint_revision_id=str(uuid4()),
+        )
+
+
+class UuidWritableEndpointRegistrationIdFactory:
+    def new_registration_ids(
+        self,
+        candidates: tuple[WritableEndpointRegistrationCandidate, ...],
+    ) -> WritableEndpointRegistrationIds:
+        return WritableEndpointRegistrationIds(
+            intent_id=str(uuid4()),
+            resulting_job_revision_id=str(uuid4()),
+            targets=tuple(
+                WritableEndpointTargetIds(
+                    target_ordinal=candidate.target_ordinal,
+                    endpoint_revision_id=str(uuid4()),
+                    control_area_id=str(uuid4()),
+                )
+                for candidate in candidates
+            ),
         )
 
 
@@ -1420,6 +1451,15 @@ def build_engine_host_runtime(
         )
         for existing_job in standard_backup_jobs.list_active_standard_backup_jobs():
             standard_backup_job_endpoints.register_standard_backup_job_endpoints(existing_job)
+        writable_endpoint_registration = WritableEndpointRegistrationCoordinator(
+            store=SqliteWritableEndpointRegistrationStore(catalog_connection),
+            provisioner=LocalWritableEndpointControlAreaProvisioner(),
+            id_factory=UuidWritableEndpointRegistrationIdFactory(),
+            owner_installation_id=installation_state.installation_id,
+        )
+        writable_endpoint_registration.reconcile_pending(
+            observed_utc=runtime_clock.utc_now(),
+        )
         endpoint_classification_refresher = SqliteEndpointClassificationRefresher(
             catalog_connection,
             classifier=LocalEndpointControlAreaClassifier(),
@@ -1500,6 +1540,8 @@ def build_engine_host_runtime(
             standard_backup_job_read_store=standard_backup_jobs,
             standard_backup_job_detail_store=standard_backup_jobs,
             standard_backup_job_endpoint_registrar=standard_backup_job_endpoints,
+            writable_endpoint_registration=writable_endpoint_registration,
+            writable_endpoint_registration_utc_now=runtime_clock.utc_now,
             endpoint_classification_refresh=lambda: (
                 endpoint_classification_refresher.refresh_endpoint_classifications(
                     observed_utc=runtime_clock.utc_now(),

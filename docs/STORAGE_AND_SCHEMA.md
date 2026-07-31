@@ -175,6 +175,57 @@ Lokal audit/read model for mål-side ownership-records. Den autoritative aktive 
 - sammensatt FK `(endpoint_id, endpoint_revision_id) REFERENCES endpoint_revisions(endpoint_id, id)`
 - unik `(endpoint_id, new_ownership_epoch)`
 
+#### `writable_endpoint_registration_intents`
+
+Restartbar catalog-intent for eksplisitt førstegangsregistrering av lokale skrivbare
+mål. Identitets- og prepared-target-feltene er immutable; bare state, feilstatus,
+timestamps og `row_version` kan flyttes gjennom den avgrensede sagaen.
+
+- `intent_id TEXT PRIMARY KEY`
+- `job_id TEXT NOT NULL`
+- `source_job_revision_id TEXT NOT NULL`
+- `resulting_job_revision_id TEXT NOT NULL UNIQUE`
+- `command_request_id TEXT NOT NULL`
+- `command_idempotency_key TEXT NOT NULL`
+- `state TEXT NOT NULL` — `PREPARED`, `FILESYSTEM_APPLIED`, `COMMITTED`, `BLOCKED`
+- `prepared_targets_json TEXT NOT NULL`
+- `last_error_code TEXT`
+- `last_next_action TEXT`
+- `created_utc TEXT NOT NULL`
+- `updated_utc TEXT NOT NULL`
+- `committed_utc TEXT`
+- `row_version INTEGER NOT NULL`
+- sammensatt FK `(job_id, source_job_revision_id) REFERENCES job_revisions(job_id, id)`
+- unik `(job_id, source_job_revision_id)`
+
+#### `writable_endpoint_registrations`
+
+Immutable bevis for en fullført kontrollert writable probe, bundet til den nye eksakte
+endpointrevisjonen og registreringsintenten.
+
+- `endpoint_id TEXT NOT NULL`
+- `endpoint_revision_id TEXT NOT NULL`
+- `endpoint_generation INTEGER NOT NULL`
+- `intent_id TEXT NOT NULL REFERENCES writable_endpoint_registration_intents(intent_id)`
+- `control_area_id TEXT NOT NULL`
+- `owner_installation_id TEXT NOT NULL`
+- `ownership_epoch INTEGER NOT NULL`
+- `root_identity_hash_algorithm TEXT NOT NULL`
+- `root_identity_hash TEXT NOT NULL`
+- `marker_checksum_algorithm TEXT NOT NULL`
+- `marker_checksum TEXT NOT NULL`
+- `probe_completed_utc TEXT NOT NULL`
+- `created_utc TEXT NOT NULL`
+- primærnøkkel og sammensatt FK `(endpoint_id, endpoint_revision_id)`
+- unik `(intent_id, endpoint_id)`
+
+0B-implementasjonsnote: Catalog migration 30 oppretter begge tabellene og låser
+intentidentitet, state-overganger og registreringsbevis med database-triggere. Etter
+filsystempublisering appender commit neste endpointgeneration og en ny jobbrevisjon,
+flytter endpoint-/job-heads med compare-and-swap og binder bare den nye aktive
+target-revisjonen til `WRITABLE_READY`. Historiske revisjoner og bindingsrader
+overskrives ikke.
+
 #### `jobs`
 
 Stabil jobbidentitet og livssyklus.

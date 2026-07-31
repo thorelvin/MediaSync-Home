@@ -126,6 +126,7 @@ class BackupJobDetailTargetViewState:
     name: str
     path_label: str
     independent_device_id: str | None = None
+    registration_state: str | None = None
 
 
 @dataclass(frozen=True)
@@ -194,7 +195,7 @@ def build_standard_backup_setup_state(
         max_targets=3,
         defaults=defaults,
         primary_action_label=(
-            "Opprett og kontroller endringer" if current_step is BackupSetupStep.REVIEW else "Fortsett"
+            "Opprett og registrer" if current_step is BackupSetupStep.REVIEW else "Fortsett"
         ),
         can_continue=can_continue,
         can_create=can_create,
@@ -545,7 +546,7 @@ def _job_detail_from_payload(payload: dict[object, object], *, job_id: str | Non
             f"{_count_label(independent_device_count, 'uavhengig enhet', 'uavhengige enheter')}"
         ),
         defaults_summary_label=_defaults_summary_from_payload(payload.get("defaults")),
-        target_lines=tuple(f"{target.name}: {target.path_label}" for target in targets),
+        target_lines=tuple(_target_detail_line(target) for target in targets),
         read_model_available=True,
         found=True,
     )
@@ -567,9 +568,21 @@ def _target_details_from_payload(payload: object) -> tuple[BackupJobDetailTarget
                 name=name,
                 path_label=path_label,
                 independent_device_id=_optional_text(item.get("independent_device_id")),
+                registration_state=_optional_text(item.get("registration_state")),
             )
         )
     return tuple(targets)
+
+
+def _target_detail_line(target: BackupJobDetailTargetViewState) -> str:
+    registration_label = {
+        "WRITABLE_READY": "Skrivbar og registrert",
+        "READ_ONLY_READY": "Skrivebeskyttet",
+        "REGISTRATION_PENDING": "Registrering venter",
+        "BLOCKED": "Blokkert",
+    }.get(target.registration_state or "")
+    base = f"{target.name}: {target.path_label}"
+    return base if registration_label is None else f"{base} · {registration_label}"
 
 
 def _revision_label(job_revision_id: str | None, filter_set_id: str | None) -> str:

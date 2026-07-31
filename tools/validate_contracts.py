@@ -77,6 +77,18 @@ REQUIRED_DATABASE_PARENT_SCOPE_FKS = {
         "filter_set_versions",
         ("job_id", "filter_set_id", "version"),
     ),
+    (
+        "writable_endpoint_registration_intents",
+        ("job_id", "source_job_revision_id"),
+        "job_revisions",
+        ("job_id", "id"),
+    ),
+    (
+        "writable_endpoint_registrations",
+        ("endpoint_id", "endpoint_revision_id"),
+        "endpoint_revisions",
+        ("endpoint_id", "id"),
+    ),
     ("analyses", ("job_id", "job_revision_id"), "job_revisions", ("job_id", "id")),
     (
         "analysis_targets",
@@ -468,6 +480,7 @@ def _validate_immutable_revision_invariant(invariant: dict[str, Any]) -> None:
         "job_revision_filter_bindings",
         "job_revisions",
         "standard_backup_job_revision_details",
+        "writable_endpoint_registrations",
     }
     if immutable_tables != expected_immutable_tables:
         fail("ARC-005 always immutable tables drifted")
@@ -572,6 +585,44 @@ def _validate_immutable_revision_invariant(invariant: dict[str, Any]) -> None:
         fail("ARC-005 endpoint generation runtime capability drifted")
 
 
+def _validate_writable_endpoint_registration_invariant(
+    invariant: dict[str, Any],
+) -> None:
+    if invariant.get("requirement_id") != "CTRL-001":
+        fail("writable endpoint registration invariant must reference CTRL-001")
+    if invariant.get("intent_table") != "writable_endpoint_registration_intents":
+        fail("CTRL-001 writable endpoint registration intent table drifted")
+    if invariant.get("evidence_table") != "writable_endpoint_registrations":
+        fail("CTRL-001 writable endpoint registration evidence table drifted")
+    if invariant.get("intent_identity_immutable") is not True:
+        fail("CTRL-001 registration intent identity must be immutable")
+    if invariant.get("evidence_immutable") is not True:
+        fail("CTRL-001 registration evidence must be immutable")
+    if set(
+        _column_tuple(
+            invariant.get("terminal_states"),
+            "CTRL-001 terminal_states",
+        )
+    ) != {"COMMITTED", "BLOCKED"}:
+        fail("CTRL-001 registration terminal states drifted")
+    endpoint_binding = require_mapping(
+        invariant.get("endpoint_revision_binding"),
+        "CTRL-001 endpoint_revision_binding",
+    )
+    if _column_tuple(
+        endpoint_binding.get("columns"),
+        "CTRL-001 endpoint_revision_binding.columns",
+    ) != ("endpoint_id", "endpoint_revision_id", "endpoint_generation"):
+        fail("CTRL-001 registration endpoint revision binding drifted")
+    if set(
+        _column_tuple(
+            invariant.get("active_heads_advanced"),
+            "CTRL-001 active_heads_advanced",
+        )
+    ) != {"endpoint_heads", "job_heads"}:
+        fail("CTRL-001 registration active heads drifted")
+
+
 def validate_state_machines(document: dict[str, Any]) -> int:
     if document.get("schema_version") != 1:
         fail("state-machines.yaml schema_version must be 1")
@@ -647,6 +698,7 @@ def validate_database_contract(document: dict[str, Any]) -> int:
     invariant_by_id = _indexed_mappings(invariants, "database-contract.yaml invariants")
     required_ids = {
         "ARC-005_IMMUTABLE_REVISION_GUARDS",
+        "CTRL-001_WRITABLE_ENDPOINT_REGISTRATION",
         "DB-001_FILE_ENTRIES_COMPARISON_KEY_IS_NON_UNIQUE",
         "DB-006_ENDPOINT_HEADS_ARE_SEPARATE",
         "DB-006_JOB_HEADS_ARE_SEPARATE",
@@ -677,6 +729,9 @@ def validate_database_contract(document: dict[str, Any]) -> int:
     )
     _validate_immutable_revision_invariant(
         invariant_by_id["ARC-005_IMMUTABLE_REVISION_GUARDS"]
+    )
+    _validate_writable_endpoint_registration_invariant(
+        invariant_by_id["CTRL-001_WRITABLE_ENDPOINT_REGISTRATION"]
     )
     _validate_parent_scope_invariant(invariant_by_id["DB-007_PARENT_SCOPE_COMPOSITE_KEYS"])
     return len(invariants)

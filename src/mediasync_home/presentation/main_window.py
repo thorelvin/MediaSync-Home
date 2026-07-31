@@ -633,22 +633,56 @@ class MediaSyncWindow(QMainWindow):
             )
             return
 
-        success_detail = "Backup job was created and saved."
-        if isinstance(response.payload.get("endpoint_bindings"), dict):
-            success_detail = "Backup job was saved. Endpoint safety setup is pending."
+        registration = response.payload.get("writable_endpoint_registration")
+        registration_incomplete = (
+            isinstance(registration, dict)
+            and registration.get("completed") is not True
+        )
+        success_detail = "Backup job and writable target registration were saved."
+        success_kind = "ready"
+        if registration_incomplete:
+            assert isinstance(registration, dict)
+            codes = registration.get("validation_codes")
+            reason = (
+                str(codes[0])
+                if isinstance(codes, list) and codes and isinstance(codes[0], str)
+                else "WRITABLE_ENDPOINT_REGISTRATION_INCOMPLETE"
+            )
+            success_detail = (
+                f"{self._display('Backup job was saved, but target registration needs attention.')} "
+                f"{reason}"
+            )
+            success_kind = "warning"
+            if self._setup_primary_button is not None:
+                self._setup_primary_button.setText(
+                    self._display("Prøv målregistrering igjen")
+                )
         self.apply_engine_status(
             replace(
                 self._engine_status_state,
                 detail=success_detail,
-                status_kind="ready",
+                status_kind=success_kind,
             )
         )
+        if registration_incomplete:
+            self._refresh_backup_job_detail_from_response(response)
+            self._refresh_activity_overview()
+            self._refresh_dashboard_geometry()
+            return
         self._setup_draft = BackupSetupDraft.empty()
         self._setup_draft_id = None
         self._setup_request_id = None
         self._setup_idempotency_key = None
         self._refresh_backup_overview()
         self._refresh_activity_overview()
+
+    def _refresh_backup_job_detail_from_response(self, response: IpcResponse) -> None:
+        job = response.payload.get("job")
+        if not isinstance(job, dict):
+            return
+        job_id = job.get("job_id")
+        if isinstance(job_id, str):
+            self._refresh_backup_job_detail(job_id)
 
     def _choose_directory(self, title: str) -> str | None:
         dialog = self._build_directory_picker(title)

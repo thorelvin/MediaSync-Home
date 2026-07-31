@@ -183,6 +183,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_endpoint_generation_bindings",
                 statements=CATALOG_ENDPOINT_GENERATION_BINDINGS,
             ),
+            SqliteMigration(
+                version=30,
+                name="catalog_writable_endpoint_registrations",
+                statements=CATALOG_WRITABLE_ENDPOINT_REGISTRATIONS,
+            ),
         ),
     )
 
@@ -2071,6 +2076,120 @@ CATALOG_ENDPOINT_GENERATION_BINDINGS = (
     WHEN EXISTS (SELECT 1 FROM plan_seal_details WHERE plan_id = OLD.plan_id)
     BEGIN
         SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
+    END
+    """,
+)
+
+
+CATALOG_WRITABLE_ENDPOINT_REGISTRATIONS = (
+    """
+    CREATE TABLE writable_endpoint_registration_intents (
+        intent_id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        source_job_revision_id TEXT NOT NULL,
+        resulting_job_revision_id TEXT NOT NULL UNIQUE,
+        command_request_id TEXT NOT NULL,
+        command_idempotency_key TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (
+            state IN ('PREPARED', 'FILESYSTEM_APPLIED', 'COMMITTED', 'BLOCKED')
+        ),
+        prepared_targets_json TEXT NOT NULL,
+        last_error_code TEXT,
+        last_next_action TEXT,
+        created_utc TEXT NOT NULL,
+        updated_utc TEXT NOT NULL,
+        committed_utc TEXT,
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+        UNIQUE (job_id, source_job_revision_id),
+        FOREIGN KEY (job_id, source_job_revision_id)
+            REFERENCES job_revisions (job_id, id)
+            ON DELETE RESTRICT,
+        CHECK (
+            (state = 'COMMITTED' AND committed_utc IS NOT NULL)
+            OR (state <> 'COMMITTED' AND committed_utc IS NULL)
+        ),
+        CHECK (
+            (last_error_code IS NULL AND last_next_action IS NULL)
+            OR (last_error_code IS NOT NULL AND last_next_action IS NOT NULL)
+        )
+    )
+    """,
+    """
+    CREATE INDEX idx_writable_endpoint_registration_intents_recovery
+        ON writable_endpoint_registration_intents (state, created_utc, intent_id)
+    """,
+    """
+    CREATE TABLE writable_endpoint_registrations (
+        endpoint_id TEXT NOT NULL,
+        endpoint_revision_id TEXT NOT NULL,
+        endpoint_generation INTEGER NOT NULL CHECK (endpoint_generation >= 1),
+        intent_id TEXT NOT NULL,
+        control_area_id TEXT NOT NULL,
+        owner_installation_id TEXT NOT NULL,
+        ownership_epoch INTEGER NOT NULL CHECK (ownership_epoch >= 1),
+        root_identity_hash_algorithm TEXT NOT NULL,
+        root_identity_hash TEXT NOT NULL CHECK (length(root_identity_hash) = 64),
+        marker_checksum_algorithm TEXT NOT NULL,
+        marker_checksum TEXT NOT NULL CHECK (length(marker_checksum) = 64),
+        probe_completed_utc TEXT NOT NULL,
+        created_utc TEXT NOT NULL,
+        PRIMARY KEY (endpoint_id, endpoint_revision_id),
+        UNIQUE (intent_id, endpoint_id),
+        FOREIGN KEY (endpoint_id, endpoint_revision_id)
+            REFERENCES endpoint_revisions (endpoint_id, id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (intent_id)
+            REFERENCES writable_endpoint_registration_intents (intent_id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TRIGGER trg_writable_endpoint_registration_intents_identity_immutable
+    BEFORE UPDATE ON writable_endpoint_registration_intents
+    WHEN
+        NEW.intent_id IS NOT OLD.intent_id
+        OR NEW.job_id IS NOT OLD.job_id
+        OR NEW.source_job_revision_id IS NOT OLD.source_job_revision_id
+        OR NEW.resulting_job_revision_id IS NOT OLD.resulting_job_revision_id
+        OR NEW.command_request_id IS NOT OLD.command_request_id
+        OR NEW.command_idempotency_key IS NOT OLD.command_idempotency_key
+        OR NEW.prepared_targets_json IS NOT OLD.prepared_targets_json
+        OR NEW.created_utc IS NOT OLD.created_utc
+    BEGIN
+        SELECT RAISE(ABORT, 'WRITABLE_ENDPOINT_REGISTRATION_INTENT_IDENTITY_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_writable_endpoint_registration_intents_transition
+    BEFORE UPDATE OF state ON writable_endpoint_registration_intents
+    WHEN NOT (
+        NEW.state = OLD.state
+        OR (OLD.state = 'PREPARED' AND NEW.state IN ('FILESYSTEM_APPLIED', 'BLOCKED'))
+        OR (OLD.state = 'FILESYSTEM_APPLIED' AND NEW.state IN ('COMMITTED', 'BLOCKED'))
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'WRITABLE_ENDPOINT_REGISTRATION_TRANSITION_INVALID');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_writable_endpoint_registration_intents_no_delete
+    BEFORE DELETE ON writable_endpoint_registration_intents
+    BEGIN
+        SELECT RAISE(ABORT, 'WRITABLE_ENDPOINT_REGISTRATION_INTENT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_writable_endpoint_registrations_no_update
+    BEFORE UPDATE ON writable_endpoint_registrations
+    BEGIN
+        SELECT RAISE(ABORT, 'WRITABLE_ENDPOINT_REGISTRATION_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_writable_endpoint_registrations_no_delete
+    BEFORE DELETE ON writable_endpoint_registrations
+    BEGIN
+        SELECT RAISE(ABORT, 'WRITABLE_ENDPOINT_REGISTRATION_IMMUTABLE');
     END
     """,
 )

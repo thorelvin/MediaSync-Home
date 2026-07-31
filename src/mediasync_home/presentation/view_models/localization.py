@@ -62,7 +62,9 @@ NB_TEXT = ShellText(
     defaults="Standard",
     retention="Bevaring",
     revision="Revisjon",
-    create_backup_tooltip="Opprett backup når kilde og minst ett mål er valgt",
+    create_backup_tooltip=(
+        "Opprett jobb og registrer valgte mål som skrivbare MediaSync-endepunkter"
+    ),
     job_detail_targets_heading="Målsteder",
     engine_host="Engine Host",
     scope="Scope",
@@ -97,7 +99,9 @@ EN_TEXT = ShellText(
     defaults="Defaults",
     retention="Retention",
     revision="Revision",
-    create_backup_tooltip="Create backup when source and at least one target are selected",
+    create_backup_tooltip=(
+        "Create the job and register selected targets as writable MediaSync endpoints"
+    ),
     job_detail_targets_heading="Target locations",
     engine_host="Engine Host",
     scope="Scope",
@@ -175,7 +179,8 @@ _NB_TO_EN = {
     "Oppdater backup": "Update backup",
     "Opprett backup når kilde og mål er klare.": "Create backup when source and target are ready.",
     "Opprett eller velg en backupjobb.": "Create or select a backup job.",
-    "Opprett og kontroller endringer": "Create and check changes",
+    "Opprett og registrer": "Create and register",
+    "Prøv målregistrering igjen": "Retry target registration",
     "Opprett mappe": "Create folder",
     "Pauset": "Paused",
     "Planforhåndsvisning": "Plan preview",
@@ -185,11 +190,13 @@ _NB_TO_EN = {
     "Protokoll utilgjengelig": "Protocol unavailable",
     "Protokoll venter": "Protocol pending",
     "Revisjon": "Revision",
+    "Registrering venter": "Registration pending",
     "Se gjennom blokkeringen før ny kjøring.": "Review the block before a new run.",
     "Se gjennom målfeilen.": "Review the target error.",
     "Sist sikkerhetskopiert": "Last backed up",
     "Skrivebeskyttet lokal forhåndsvisning": "Read-only local preview",
     "Skrivebeskyttet målendepunkt": "Read-only target endpoint",
+    "Skrivbar og registrert": "Writable and registered",
     "Snapshothelse": "Snapshot health",
     "Snapshothelsevisningen er ikke tilgjengelig.": "Snapshot health read model is not available.",
     "Standard": "Defaults",
@@ -256,6 +263,12 @@ _EN_TO_NB.update(
         "Backup job was created and saved.": "Backupjobben ble opprettet og lagret.",
         "Backup job was saved. Endpoint safety setup is pending.": (
             "Backupjobben ble lagret. Sikkerhetsoppsett for endepunkter venter."
+        ),
+        "Backup job and writable target registration were saved.": (
+            "Backupjobben og registreringen av skrivbart mål ble lagret."
+        ),
+        "Backup job was saved, but target registration needs attention.": (
+            "Backupjobben ble lagret, men målregistreringen trenger oppfølging."
         ),
         "Connected Engine Host does not support backup creation.": (
             "Tilkoblet Engine Host stÃ¸tter ikke oppretting av backup."

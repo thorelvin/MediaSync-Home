@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from dataclasses import replace
 from typing import Any
 
 from mediasync_home.application.job_creation import (
@@ -275,7 +276,36 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
         ).fetchone()
         if row is None:
             return None
-        return _job_detail_from_row(row)
+        detail = _job_detail_from_row(row)
+        registration_rows = self._connection.execute(
+            """
+            SELECT ordinal, registration_state, registration_reason_code
+            FROM standard_backup_job_endpoint_bindings
+            WHERE job_id = ?
+                AND job_revision_id = ?
+                AND role = 'TARGET'
+            ORDER BY ordinal
+            """,
+            (detail.job_id, detail.job_revision_id),
+        ).fetchall()
+        registrations = {
+            int(registration_row[0]): (
+                str(registration_row[1]),
+                str(registration_row[2]),
+            )
+            for registration_row in registration_rows
+        }
+        return replace(
+            detail,
+            targets=tuple(
+                replace(
+                    target,
+                    registration_state=registrations.get(index, (None, None))[0],
+                    registration_reason_code=registrations.get(index, (None, None))[1],
+                )
+                for index, target in enumerate(detail.targets, start=1)
+            ),
+        )
 
     def _load_many(
         self,

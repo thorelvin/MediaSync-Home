@@ -90,6 +90,9 @@ class SqliteEndpointClassificationRefresher:
                 bindings.endpoint_revision_id,
                 revisions.root_uri
             FROM standard_backup_job_endpoint_bindings AS bindings
+            INNER JOIN job_heads AS heads
+                ON heads.job_id = bindings.job_id
+                AND heads.active_revision_id = bindings.job_revision_id
             INNER JOIN endpoint_revisions AS revisions
                 ON revisions.endpoint_id = bindings.endpoint_id
                 AND revisions.id = bindings.endpoint_revision_id
@@ -216,6 +219,10 @@ class SqliteEndpointClassificationRefresher:
                 role=role,
                 expected_endpoint_id=endpoint.endpoint_id,
                 classification=classification,
+                writable_probe_verified=(
+                    role is JobEndpointRole.TARGET
+                    and self._writable_probe_matches(endpoint, classification)
+                ),
             )
             self._connection.execute(
                 """
@@ -236,6 +243,47 @@ class SqliteEndpointClassificationRefresher:
                 ),
             )
 
+    def _writable_probe_matches(
+        self,
+        endpoint: _RegisteredEndpointRevision,
+        classification: EndpointControlAreaClassification,
+    ) -> bool:
+        marker = classification.marker
+        if marker is None:
+            return False
+        row = self._connection.execute(
+            """
+            SELECT
+                registrations.control_area_id,
+                registrations.owner_installation_id,
+                registrations.ownership_epoch,
+                registrations.root_identity_hash_algorithm,
+                registrations.root_identity_hash,
+                registrations.marker_checksum_algorithm,
+                registrations.marker_checksum,
+                revisions.generation
+            FROM writable_endpoint_registrations AS registrations
+            INNER JOIN endpoint_revisions AS revisions
+                ON revisions.endpoint_id = registrations.endpoint_id
+                AND revisions.id = registrations.endpoint_revision_id
+            WHERE registrations.endpoint_id = ?
+                AND registrations.endpoint_revision_id = ?
+            """,
+            (endpoint.endpoint_id, endpoint.endpoint_revision_id),
+        ).fetchone()
+        if row is None:
+            return False
+        return (
+            str(row[0]) == marker.control_area_id
+            and str(row[1]) == marker.owner_installation_id
+            and int(row[2]) == marker.ownership_epoch
+            and str(row[3]) == marker.root_identity_hash_algorithm
+            and str(row[4]) == marker.root_identity_hash
+            and str(row[5]) == marker.marker_checksum_algorithm
+            and str(row[6]) == marker.marker_checksum
+            and int(row[7]) >= 1
+        )
+
     def _build_report(
         self,
         candidates: tuple[_ClassificationCandidate, ...],
@@ -245,7 +293,10 @@ class SqliteEndpointClassificationRefresher:
             for row in self._connection.execute(
                 """
                 SELECT registration_state, count(*)
-                FROM standard_backup_job_endpoint_bindings
+                FROM standard_backup_job_endpoint_bindings AS bindings
+                INNER JOIN job_heads AS heads
+                    ON heads.job_id = bindings.job_id
+                    AND heads.active_revision_id = bindings.job_revision_id
                 GROUP BY registration_state
                 """
             ).fetchall()

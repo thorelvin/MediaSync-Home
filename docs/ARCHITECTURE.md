@@ -152,6 +152,20 @@ CORRUPT_MARKER
 
 Standardfilteret ekskluderer `.mediasync/**` bare når `VALID_OWNED`, `VALID_FOREIGN` eller `VALID_READ_ONLY_NEWER_SCHEMA` beviser et faktisk MediaSync-kontrollområde. På en ren kilde er en ukjent mappe med dette navnet vanlig brukerdata eller et synlig, blokkerende avvik — den forsvinner aldri stille.
 
+0B-implementasjonsnote: Den lokale standard-backupflyten registrerer et valgt mål
+bare etter den eksplisitte review-handlingen **Opprett og registrer**. Engine Host
+publiserer først en restartbar catalog-intent og godtar deretter bare et fraværende
+kontrollområde eller en eksakt, intentbundet partial staging fra samme forsøk.
+Provisioneren oppretter en checksummet schema-4-markør, immutable ownership-record,
+påkrevde globale og installasjonsspesifikke namespaces, og utfører en avgrenset
+write/read/delete-probe. Vellykket commit appender ny immutable endpointrevisjon med
+neste generation og ny immutable jobbrevisjon, før begge heads flyttes atomisk og den
+aktive target-bindingen blir `WRITABLE_READY`. Pending intents avstemmes ved startup
+før ordinær klassifisering. Fremmed, korrupt, nyere, ukjent eller endret kontrollstate
+blokkeres uten automatisk takeover, reparasjon eller sletting. En varig opprettet jobb
+kan derfor eksistere mens registreringen er retrybar; GUI beholder review-utkastet og
+viser retryhandlingen eksplisitt.
+
 #### 4.1.5 Kontrollert overtakelse
 
 Overtakelse av `VALID_FOREIGN` er en eksplisitt saga:

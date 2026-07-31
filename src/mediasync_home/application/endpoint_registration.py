@@ -52,6 +52,7 @@ def decide_endpoint_registration(
     role: JobEndpointRole,
     expected_endpoint_id: str,
     classification: EndpointControlAreaClassification,
+    writable_probe_verified: bool = False,
 ) -> EndpointRegistrationDecision:
     state = classification.state
     if state is EndpointControlAreaState.ABSENT:
@@ -91,6 +92,11 @@ def decide_endpoint_registration(
             "ENDPOINT_SOURCE_CONTROL_AREA_VALID_READ_ONLY",
         )
     if state is EndpointControlAreaState.VALID_OWNED:
+        if writable_probe_verified:
+            return EndpointRegistrationDecision(
+                EndpointRegistrationState.WRITABLE_READY,
+                "ENDPOINT_TARGET_WRITABLE_PROBE_VERIFIED",
+            )
         return EndpointRegistrationDecision(
             EndpointRegistrationState.REGISTRATION_PENDING,
             "ENDPOINT_TARGET_WRITABLE_PROBE_REQUIRED",

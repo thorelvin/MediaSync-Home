@@ -632,6 +632,20 @@ CORRUPT_MARKER
 
 Standardfilteret ekskluderer `.mediasync/**` bare når `VALID_OWNED`, `VALID_FOREIGN` eller `VALID_READ_ONLY_NEWER_SCHEMA` beviser et faktisk MediaSync-kontrollområde. På en ren kilde er en ukjent mappe med dette navnet vanlig brukerdata eller et synlig, blokkerende avvik — den forsvinner aldri stille.
 
+0B-implementasjonsnote: Den lokale standard-backupflyten registrerer et valgt mål
+bare etter den eksplisitte review-handlingen **Opprett og registrer**. Engine Host
+publiserer først en restartbar catalog-intent og godtar deretter bare et fraværende
+kontrollområde eller en eksakt, intentbundet partial staging fra samme forsøk.
+Provisioneren oppretter en checksummet schema-4-markør, immutable ownership-record,
+påkrevde globale og installasjonsspesifikke namespaces, og utfører en avgrenset
+write/read/delete-probe. Vellykket commit appender ny immutable endpointrevisjon med
+neste generation og ny immutable jobbrevisjon, før begge heads flyttes atomisk og den
+aktive target-bindingen blir `WRITABLE_READY`. Pending intents avstemmes ved startup
+før ordinær klassifisering. Fremmed, korrupt, nyere, ukjent eller endret kontrollstate
+blokkeres uten automatisk takeover, reparasjon eller sletting. En varig opprettet jobb
+kan derfor eksistere mens registreringen er retrybar; GUI beholder review-utkastet og
+viser retryhandlingen eksplisitt.
+
 #### 4.1.5 Kontrollert overtakelse
 
 Overtakelse av `VALID_FOREIGN` er en eksplisitt saga:
@@ -2136,6 +2150,16 @@ Når brukeren aktiverer primærknappen:
 - avbrutt kontroll lar jobben stå som `Første kontroll ikke fullført` og oppdaterer ingen ferskhetsstatus;
 - **Opprett uten å kontrollere** lagrer jobben uten å starte kontroll og er sekundær, ikke konkurrerende, handling;
 - feil under første kontroll fører ikke brukeren tilbake til steg 1; valgene beholdes og riktig problem vises på jobben.
+
+0B-implementasjonsnote: Den nåværende lokale previewen bruker
+**Opprett og registrer** som review-handling. Den lagrer jobben varig og registrerer
+det valgte lokale målet som skrivbart ved å opprette bare `.mediasync`-kontrollmetadata
+og utføre en avgrenset write/read/delete-test; den kopierer ingen brukerfiler.
+Vellykket registrering vises som **Skrivbar og registrert** i jobbdeltaljen. Dersom
+registreringen ikke kan fullføres, beholdes hele det gjennomgåtte utkastet og knappen
+endres til **Prøv registrering på nytt**. Feilteksten brytes vertikalt i arbeidsflaten
+uten horisontal scrolling eller clipping. Første automatiske plan/kontroll etter
+registrering er neste slice og skal ikke påstås utført av denne handlingen ennå.
 
 Etter første vellykkede manuelle backup kan programmet vise én diskret anbefaling: `Vil du kjøre denne backupen automatisk?` med handlingen **Sett opp automatikk**. Den skal ikke avbryte fullføringsoppsummeringen.
 
@@ -4311,6 +4335,57 @@ Lokal audit/read model for mål-side ownership-records. Den autoritative aktive 
 - `created_utc TEXT NOT NULL`
 - sammensatt FK `(endpoint_id, endpoint_revision_id) REFERENCES endpoint_revisions(endpoint_id, id)`
 - unik `(endpoint_id, new_ownership_epoch)`
+
+#### `writable_endpoint_registration_intents`
+
+Restartbar catalog-intent for eksplisitt førstegangsregistrering av lokale skrivbare
+mål. Identitets- og prepared-target-feltene er immutable; bare state, feilstatus,
+timestamps og `row_version` kan flyttes gjennom den avgrensede sagaen.
+
+- `intent_id TEXT PRIMARY KEY`
+- `job_id TEXT NOT NULL`
+- `source_job_revision_id TEXT NOT NULL`
+- `resulting_job_revision_id TEXT NOT NULL UNIQUE`
+- `command_request_id TEXT NOT NULL`
+- `command_idempotency_key TEXT NOT NULL`
+- `state TEXT NOT NULL` — `PREPARED`, `FILESYSTEM_APPLIED`, `COMMITTED`, `BLOCKED`
+- `prepared_targets_json TEXT NOT NULL`
+- `last_error_code TEXT`
+- `last_next_action TEXT`
+- `created_utc TEXT NOT NULL`
+- `updated_utc TEXT NOT NULL`
+- `committed_utc TEXT`
+- `row_version INTEGER NOT NULL`
+- sammensatt FK `(job_id, source_job_revision_id) REFERENCES job_revisions(job_id, id)`
+- unik `(job_id, source_job_revision_id)`
+
+#### `writable_endpoint_registrations`
+
+Immutable bevis for en fullført kontrollert writable probe, bundet til den nye eksakte
+endpointrevisjonen og registreringsintenten.
+
+- `endpoint_id TEXT NOT NULL`
+- `endpoint_revision_id TEXT NOT NULL`
+- `endpoint_generation INTEGER NOT NULL`
+- `intent_id TEXT NOT NULL REFERENCES writable_endpoint_registration_intents(intent_id)`
+- `control_area_id TEXT NOT NULL`
+- `owner_installation_id TEXT NOT NULL`
+- `ownership_epoch INTEGER NOT NULL`
+- `root_identity_hash_algorithm TEXT NOT NULL`
+- `root_identity_hash TEXT NOT NULL`
+- `marker_checksum_algorithm TEXT NOT NULL`
+- `marker_checksum TEXT NOT NULL`
+- `probe_completed_utc TEXT NOT NULL`
+- `created_utc TEXT NOT NULL`
+- primærnøkkel og sammensatt FK `(endpoint_id, endpoint_revision_id)`
+- unik `(intent_id, endpoint_id)`
+
+0B-implementasjonsnote: Catalog migration 30 oppretter begge tabellene og låser
+intentidentitet, state-overganger og registreringsbevis med database-triggere. Etter
+filsystempublisering appender commit neste endpointgeneration og en ny jobbrevisjon,
+flytter endpoint-/job-heads med compare-and-swap og binder bare den nye aktive
+target-revisjonen til `WRITABLE_READY`. Historiske revisjoner og bindingsrader
+overskrives ikke.
 
 #### `jobs`
 
@@ -7890,6 +7965,14 @@ python -m importlinter
 - Implementer fri plass, maksimal fil-/navn-/stilengde, safe no-overwrite, source guard, durability- og lockkapabiliteter.
 - Implementer immutable historiske root claims og atomisk aktiv claim-kontroll.
 - Implementer GUI-read models/dialoger for kontrollområde, fremmed eier, overtakelse og endepunktdiagnostikk.
+
+0B-evidence 2026-07-31: Lokal førstegangsregistrering av ett valgt skrivbart mål
+er implementert gjennom en eksplisitt GUI-handling, restartbar catalog-intent,
+checksummet schema-4-markør, immutable ownership-record, installasjonsspesifikke
+namespaces, kontrollert writable probe og append-only endpoint-/jobbrevisjoner.
+Startup-resume og fail-closed avvisning av ukjent/fremmed/korrupt kontrollstate er
+dekket. Dette fullfører ikke Milepæl 2: takeover, bred endpointvelger/kapabiliteter,
+pre-migration-30 pending-jobbreparasjon og SMB-bevis gjenstår.
 
 #### Kvalitetsport
 

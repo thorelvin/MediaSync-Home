@@ -924,7 +924,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.recovery_connection is not None
         assert runtime.installation_state is not None
         assert runtime.installation_state.product_channel == "local-preview"
-        assert runtime.installation_state.catalog_schema_version == 29
+        assert runtime.installation_state.catalog_schema_version == 30
         assert runtime.installation_state.recovery_schema_version == 5
         assert runtime.installation_state.ipc_protocol_major == 1
         assert runtime.snapshot_materialization_refresh is not None
@@ -959,7 +959,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
             runtime.run_executor_recovery_object_cleanup_port
             is runtime.run_executor_final_commit_port
         )
-        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 29
+        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 30
         assert current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY) == 5
         assert runtime.startup_reconciliation is not None
         assert runtime.startup_reconciliation.reconciler_instance_id == "host-new"
@@ -1144,6 +1144,9 @@ def test_local_writable_runtime_creates_job_from_inline_gui_draft(tmp_path: Path
             payload_hash=canonical_command_payload_hash(payload),
         )
         overview = ipc_client.query_backup_overview(draft_id="draft-a")
+        detail = ipc_client.query_backup_job_detail(
+            job_id=str(response.payload["job"]["job_id"])
+        )
 
         assert response.status is IpcStatus.ACCEPTED
         assert response.payload["created"] is True
@@ -1154,18 +1157,23 @@ def test_local_writable_runtime_creates_job_from_inline_gui_draft(tmp_path: Path
             "ENDPOINT_SOURCE_READ_ONLY_WITHOUT_CONTROL_AREA"
         )
         assert endpoint_bindings["targets"][0]["root_uri"] == target_root.as_uri()
-        assert endpoint_bindings["targets"][0]["registration_state"] == "REGISTRATION_PENDING"
+        assert endpoint_bindings["targets"][0]["registration_state"] == "WRITABLE_READY"
         assert endpoint_bindings["targets"][0]["registration_reason_code"] == (
-            "ENDPOINT_TARGET_REGISTRATION_REQUIRED"
+            "ENDPOINT_TARGET_WRITABLE_PROBE_VERIFIED"
         )
+        registration = response.payload["writable_endpoint_registration"]
+        assert registration["completed"] is True
+        assert registration["state"] == "COMMITTED"
+        assert registration["registered_target_count"] == 1
+        assert (target_root / ".mediasync" / "endpoint.json").is_file()
         assert response.payload["endpoint_classification_refresh"] == {
             "completed": True,
             "report": {
                 "classified_endpoint_count": 2,
                 "failed_endpoint_count": 0,
-                "pending_binding_count": 1,
+                "pending_binding_count": 0,
                 "read_only_ready_binding_count": 1,
-                "writable_ready_binding_count": 0,
+                "writable_ready_binding_count": 1,
                 "blocked_binding_count": 0,
             },
         }
@@ -1182,6 +1190,11 @@ def test_local_writable_runtime_creates_job_from_inline_gui_draft(tmp_path: Path
         assert len(snapshot_report["results"][0]["snapshot_ids"]) == 2
         assert overview.payload["backup_overview"]["draft"]["source_name"] == "Pictures"
         assert overview.payload["backup_overview"]["jobs"][0]["source_name"] == "Pictures"
+        detail_target = detail.payload["backup_job_detail"]["job"]["targets"][0]
+        assert detail_target["registration_state"] == "WRITABLE_READY"
+        assert detail_target["registration_reason_code"] == (
+            "ENDPOINT_TARGET_WRITABLE_PROBE_VERIFIED"
+        )
         assert runtime.catalog_connection is not None
         endpoint_count = runtime.catalog_connection.execute(
             "SELECT count(*) FROM endpoints"
@@ -1204,11 +1217,11 @@ def test_local_writable_runtime_creates_job_from_inline_gui_draft(tmp_path: Path
             """
         ).fetchone()
         assert endpoint_count == (2,)
-        assert binding_count == (2,)
+        assert binding_count == (4,)
         assert snapshot_materialization == ("SEALED", 2, 2)
         assert sealed_snapshot_count == (2,)
         assert not (source_root / ".mediasync").exists()
-        assert not (target_root / ".mediasync").exists()
+        assert (target_root / ".mediasync" / "endpoint.json").is_file()
     finally:
         runtime.close()
 

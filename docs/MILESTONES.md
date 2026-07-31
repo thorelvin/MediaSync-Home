@@ -204,6 +204,14 @@ python -m importlinter
 - Implementer immutable historiske root claims og atomisk aktiv claim-kontroll.
 - Implementer GUI-read models/dialoger for kontrollområde, fremmed eier, overtakelse og endepunktdiagnostikk.
 
+0B-evidence 2026-07-31: Lokal førstegangsregistrering av ett valgt skrivbart mål
+er implementert gjennom en eksplisitt GUI-handling, restartbar catalog-intent,
+checksummet schema-4-markør, immutable ownership-record, installasjonsspesifikke
+namespaces, kontrollert writable probe og append-only endpoint-/jobbrevisjoner.
+Startup-resume og fail-closed avvisning av ukjent/fremmed/korrupt kontrollstate er
+dekket. Dette fullfører ikke Milepæl 2: takeover, bred endpointvelger/kapabiliteter,
+pre-migration-30 pending-jobbreparasjon og SMB-bevis gjenstår.
+
 #### Kvalitetsport
 
 - Ingen test kan skrive utenfor eksplisitt testrot eller validert kontrollområde.
