@@ -13,6 +13,12 @@ PACKAGE = ROOT / "src/mediasync_home"
 TESTS = ROOT / "tests"
 FORBIDDEN_ROBOCOPY_FLAGS = {"/MIR", "/MOV", "/MOVE", "/PURGE"}
 DYNAMIC_CODE_BUILTINS = {"__import__", "compile", "eval", "exec"}
+SQLITE_CONNECTION_SAFETY_HOOKS = {
+    "enable_load_extension",
+    "enable_shared_cache",
+    "load_extension",
+    "set_authorizer",
+}
 
 
 def _python_files(relative: str) -> Iterable[Path]:
@@ -191,6 +197,28 @@ def test_production_code_does_not_call_dynamic_python_execution() -> None:
                 continue
             if isinstance(node.func, ast.Name) and node.func.id in DYNAMIC_CODE_BUILTINS:
                 offenders.append(f"{_relative_path(path)}:{node.lineno}:{node.func.id}")
+
+    assert offenders == []
+
+
+def test_sqlite_connection_safety_hooks_are_centralized() -> None:
+    allowed_path = PACKAGE / "adapters/sqlite/connection_policy.py"
+    offenders: list[str] = []
+    for path in _production_package_files():
+        if path == allowed_path:
+            continue
+        for node in ast.walk(_syntax_tree(path)):
+            if not isinstance(node, ast.Call):
+                continue
+            hook_name = (
+                node.func.attr
+                if isinstance(node.func, ast.Attribute)
+                else node.func.id
+                if isinstance(node.func, ast.Name)
+                else None
+            )
+            if hook_name in SQLITE_CONNECTION_SAFETY_HOOKS:
+                offenders.append(f"{_relative_path(path)}:{node.lineno}:{hook_name}")
 
     assert offenders == []
 

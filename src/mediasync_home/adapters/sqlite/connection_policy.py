@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -67,6 +69,30 @@ class SqliteConnectionPolicy:
 
     def pragma_statements(self) -> tuple[str, ...]:
         return tuple(pragma.statement() for pragma in self.pragmas)
+
+
+_BOOLEAN_PRAGMAS = {
+    "defer_foreign_keys",
+    "foreign_keys",
+    "ignore_check_constraints",
+    "legacy_alter_table",
+    "query_only",
+    "recursive_triggers",
+    "trusted_schema",
+    "writable_schema",
+}
+_INTEGER_PRAGMAS = {
+    "busy_timeout",
+    "cache_size",
+    "wal_autocheckpoint",
+}
+_SENSITIVE_PRAGMA_DEFAULTS: dict[str, str | int] = {
+    "defer_foreign_keys": "OFF",
+    "ignore_check_constraints": "OFF",
+    "legacy_alter_table": "OFF",
+    "recursive_triggers": "OFF",
+    "writable_schema": "OFF",
+}
 
 
 def build_state_store_layout(root: Path) -> StateStoreLayout:
@@ -208,8 +234,23 @@ def apply_sqlite_connection_policy(
         pass
     except sqlite3.NotSupportedError:
         pass
+    _enable_defensive_mode_when_supported(connection)
     for statement in policy.pragma_statements():
         connection.execute(statement)
+    verify_applied_sqlite_connection_policy(connection, policy)
+    connection.set_authorizer(_policy_authorizer(policy))
+
+
+def verify_applied_sqlite_connection_policy(
+    connection: sqlite3.Connection,
+    policy: SqliteConnectionPolicy,
+) -> None:
+    validate_sqlite_connection_policy(policy)
+    _verify_database_binding(connection, policy)
+    for name, expected in _guarded_pragma_values(policy).items():
+        actual = _read_pragma(connection, name)
+        if _canonical_pragma_value(name, actual) != _canonical_pragma_value(name, expected):
+            raise SqlitePolicyViolation(f"SQLITE_PRAGMA_DRIFT_{name.upper()}")
 
 
 def classify_sqlite_error(error: sqlite3.Error) -> SqliteFailureKind:
@@ -299,6 +340,109 @@ def _require_pragma(
 ) -> None:
     if pragmas.get(name) != expected:
         raise SqlitePolicyViolation(reason)
+
+
+def _enable_defensive_mode_when_supported(connection: sqlite3.Connection) -> None:
+    setconfig = getattr(connection, "setconfig", None)
+    defensive_option = getattr(sqlite3, "SQLITE_DBCONFIG_DEFENSIVE", None)
+    if callable(setconfig) and isinstance(defensive_option, int):
+        setconfig(defensive_option, True)
+
+
+def _guarded_pragma_values(policy: SqliteConnectionPolicy) -> dict[str, str | int]:
+    expected = dict(_SENSITIVE_PRAGMA_DEFAULTS)
+    expected.update(policy.pragma_map())
+    expected["query_only"] = "OFF" if policy.writable else "ON"
+    return expected
+
+
+def _policy_authorizer(
+    policy: SqliteConnectionPolicy,
+) -> Callable[[int, str | None, str | None, str | None, str | None], int]:
+    guarded_values = _guarded_pragma_values(policy)
+
+    def authorize(
+        action_code: int,
+        argument_1: str | None,
+        argument_2: str | None,
+        database_name: str | None,
+        trigger_or_view: str | None,
+    ) -> int:
+        del database_name, trigger_or_view
+        if action_code in {sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH}:
+            return sqlite3.SQLITE_DENY
+        if action_code != sqlite3.SQLITE_PRAGMA or argument_1 is None:
+            return sqlite3.SQLITE_OK
+        name = argument_1.lower()
+        if argument_2 is None or name not in guarded_values:
+            return sqlite3.SQLITE_OK
+        if _canonical_pragma_value(name, argument_2) == _canonical_pragma_value(
+            name,
+            guarded_values[name],
+        ):
+            return sqlite3.SQLITE_OK
+        return sqlite3.SQLITE_DENY
+
+    return authorize
+
+
+def _verify_database_binding(
+    connection: sqlite3.Connection,
+    policy: SqliteConnectionPolicy,
+) -> None:
+    rows = connection.execute("PRAGMA database_list").fetchall()
+    attached = [str(row[1]) for row in rows if str(row[1]) not in {"main", "temp"}]
+    if attached:
+        raise SqlitePolicyViolation("SQLITE_ATTACHED_DATABASE_FORBIDDEN")
+    main_rows = [row for row in rows if str(row[1]) == "main"]
+    if len(main_rows) != 1:
+        raise SqlitePolicyViolation("SQLITE_MAIN_DATABASE_MISSING")
+    actual_path = str(main_rows[0][2])
+    if not actual_path:
+        raise SqlitePolicyViolation("SQLITE_DATABASE_PATH_MISMATCH")
+    actual = os.path.normcase(str(Path(actual_path).resolve()))
+    expected = os.path.normcase(str(policy.database_path.resolve()))
+    if actual != expected:
+        raise SqlitePolicyViolation("SQLITE_DATABASE_PATH_MISMATCH")
+
+
+def _read_pragma(connection: sqlite3.Connection, name: str) -> object:
+    row = connection.execute(f"PRAGMA {name}").fetchone()
+    if row is None:
+        raise SqlitePolicyViolation(f"SQLITE_PRAGMA_UNAVAILABLE_{name.upper()}")
+    return row[0]
+
+
+def _canonical_pragma_value(name: str, value: object) -> object:
+    normalized_name = name.lower()
+    if normalized_name == "journal_mode":
+        return str(value).lower()
+    if normalized_name == "synchronous":
+        synchronous_values = {
+            "OFF": 0,
+            "NORMAL": 1,
+            "FULL": 2,
+            "EXTRA": 3,
+        }
+        normalized = str(value).upper()
+        return synchronous_values.get(normalized, _integer_or_string(value))
+    if normalized_name in _BOOLEAN_PRAGMAS:
+        normalized = str(value).upper()
+        if normalized in {"ON", "TRUE", "YES"}:
+            return 1
+        if normalized in {"OFF", "FALSE", "NO"}:
+            return 0
+        return _integer_or_string(value)
+    if normalized_name in _INTEGER_PRAGMAS:
+        return _integer_or_string(value)
+    return str(value)
+
+
+def _integer_or_string(value: object) -> object:
+    try:
+        return int(str(value))
+    except ValueError:
+        return str(value).upper()
 
 
 def _is_unc_path(path: Path) -> bool:

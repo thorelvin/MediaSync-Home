@@ -5563,6 +5563,15 @@ Krav:
 - online backup tas før ikke-triviell migrasjon og periodisk etter terminal avstemming, med retention og high-water manifest;
 - integritetsfeil blokkerer muterende kommandoer. Programmet skal ikke «reparere» en autoritativ database ved å ignorere rader.
 
+0B-runtime verifiserer etter policyanvendelse at forbindelsen faktisk peker på den
+forventede lokale databasefilen, at ingen ekstra database er attached, og at alle
+avtalte PRAGMA-verdier er aktive. Deretter låser en SQLite-authorizer
+forbindelsen mot `ATTACH`/`DETACH` og mot senere endring av durability,
+foreign-key-, trusted-schema-, query-only-, checkpoint- og andre defensive
+PRAGMA-er. Extension loading er deaktivert, og `SQLITE_DBCONFIG_DEFENSIVE`
+aktiveres når Python/SQLite-runtime eksponerer innstillingen. Arkitekturgaten
+reserverer extension-/authorizer-hookene for den sentrale policyadapteren.
+
 ### 11.4 Migrasjons- og kompatibilitetsprotokoll
 
 Migrasjon av det autoritative state-settet er en restartbar epoch. Flyten under viser kandidatdesignet med to databaser; dersom ADR-003 velger én database, beholdes epoch, backup, checksums og recoveryporten, mens pair-/handoffsteg som ikke er relevante utgår:
