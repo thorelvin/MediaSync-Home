@@ -1,5 +1,19 @@
 # Implementeringsstatus
 
+Oppdatering 2026-07-31: En etablert backup kan nå kontrolleres på nytt uten å
+gjenbruke den forseglede førstegangsplanen. `CHECK_BACKUP` lagrer en durable,
+idempotent køforespørsel i catalog schema 35 og returnerer før filskanning
+starter. Etter-IPC-/vedlikeholdspumpen klassifiserer endepunktene på nytt,
+oppretter nye immutable snapshots for bare valgt jobb og materialiserer et nytt
+immutable planresultat. Avbrutt `RUNNING`-analyse køes på nytt ved primær
+Engine Host-start, mens aktiv run blokkerer ny analyse. Jobbdeltaljen og
+Historikk eksponerer kø-, kjøre- og terminaltilstand. GUI-ens ene
+primærhandling skifter fra **Start backup** til **Kjør backup** etter at en plan
+allerede er kjørt, viser **Kontrollerer endringer...** mens Engine Host arbeider
+og poller uten å utføre skanning i GUI-tråden. Runtime-integrasjonen oppretter
+en tom jobb, legger til en ny kildefil, køer kontrollen og beviser at et nytt
+én-operasjonsplan blir gjeldende.
+
 Oppdatering 2026-07-31: Produktinngangen uten argumenter åpner nå den faktiske
 desktopapplikasjonen. Launcheren finner og validerer en kompatibel same-user
 Engine Host, eller starter én frakoblet lokal host og venter på en akseptert

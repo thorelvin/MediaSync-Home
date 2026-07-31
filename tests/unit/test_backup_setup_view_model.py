@@ -266,6 +266,15 @@ def test_backup_job_detail_view_model_renders_exact_job_revision() -> None:
                         "plan_runnable": False,
                         "next_action": "Review the plan.",
                     },
+                    "latest_analysis_request": {
+                        "request_id": "request-a",
+                        "state": "RUNNING",
+                        "requested_utc": "2026-07-31T10:00:00Z",
+                        "reason_code": None,
+                        "analysis_id": None,
+                        "plan_id": None,
+                        "row_version": 2,
+                    },
                 },
             }
         }
@@ -285,6 +294,9 @@ def test_backup_job_detail_view_model_renders_exact_job_revision() -> None:
     assert state.plan_id == "plan-a"
     assert state.plan_checksum == "a" * 64
     assert state.plan_state == "SEALED"
+    assert state.analysis_id == "analysis-a"
+    assert state.analysis_request_id == "request-a"
+    assert state.analysis_request_state == "RUNNING"
     assert state.plan_summary_label == (
         "3 operasjoner fra plan-a. · 256 B · Kun forhåndsvisning"
     )

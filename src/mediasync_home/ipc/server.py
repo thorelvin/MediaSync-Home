@@ -20,6 +20,15 @@ from mediasync_home.application.catalog_read_models import (
     CatalogedFilesQueryError,
     query_cataloged_files,
 )
+from mediasync_home.application.backup_analysis import (
+    BackupAnalysisCommandName,
+    BackupAnalysisPayloadError,
+    BackupAnalysisRequest,
+    BackupAnalysisRequestState,
+    BackupAnalysisRequestStore,
+    CheckBackupCommand,
+    parse_check_backup_command,
+)
 from mediasync_home.application.command_receipts import (
     CommandEffectStorageFailure,
     CommandReceipt,
@@ -244,6 +253,7 @@ class EngineHostIpcService:
     snapshot_coverage_read_store: SnapshotCoverageReadModelStore | None = None
     snapshot_issue_read_store: SnapshotIssueReadModelStore | None = None
     cataloged_file_read_store: CatalogedFileReadModelStore | None = None
+    backup_analysis_request_store: BackupAnalysisRequestStore | None = None
     standard_backup_job_id_factory: StandardBackupJobIdFactory | None = None
     plan_store: PlanStore | None = None
     run_store: RunStore | None = None
@@ -602,6 +612,8 @@ class EngineHostIpcService:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         if command.command_name == JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value:
             return self._handle_create_standard_backup_job(command, identity)
+        if command.command_name == BackupAnalysisCommandName.CHECK_BACKUP.value:
+            return self._handle_check_backup(command, identity)
         if command.command_name == RunCommandName.START_RUN.value:
             return self._handle_start_run(command, identity)
         if command.command_name in {
@@ -1062,6 +1074,173 @@ class EngineHostIpcService:
                 plans=self.plan_store,
             ).to_dict()
         return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, response_payload)
+
+    def _handle_check_backup(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+    ) -> IpcResponse:
+        try:
+            command = parse_check_backup_command(
+                request_id=envelope.request_id,
+                idempotency_key=envelope.idempotency_key,
+                payload=envelope.payload,
+            )
+        except BackupAnalysisPayloadError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+
+        if self.status.mutations_enabled:
+            return self._run_command_effect_transaction(
+                lambda: self._dispatch_check_backup_in_transaction(
+                    envelope,
+                    identity,
+                    command,
+                )
+            )
+
+        receipt_response = self._record_terminal_rejected_receipt(
+            envelope,
+            identity,
+            rejection_reason=IpcReason.MUTATING_COMMANDS_DISABLED.value,
+        )
+        if receipt_response is not None:
+            return receipt_response
+        payload = _backup_analysis_response_payload(
+            envelope=envelope,
+            job_id=command.job_id,
+            mutations_enabled=False,
+            recognized=True,
+            request=None,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, payload)
+
+    def _dispatch_check_backup_in_transaction(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: CheckBackupCommand,
+    ) -> IpcResponse:
+        if (
+            self.command_receipt_store is None
+            or self.backup_analysis_request_store is None
+            or self.standard_backup_job_detail_store is None
+            or self.run_store is None
+        ):
+            return self._reject_config_missing_check_backup(
+                envelope,
+                identity,
+                command,
+            )
+
+        receipt, conflict_response = self._record_received_receipt(envelope, identity)
+        if conflict_response is not None:
+            return conflict_response
+        if receipt is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+        if receipt.state is not CommandReceiptState.RECEIVED:
+            request = (
+                None
+                if receipt.result_entity_id is None
+                else self.backup_analysis_request_store.load_backup_analysis_request(
+                    receipt.result_entity_id
+                )
+            )
+            payload = _backup_analysis_response_payload(
+                envelope=envelope,
+                job_id=command.job_id,
+                mutations_enabled=True,
+                recognized=True,
+                request=request,
+            )
+            payload["idempotent_replay"] = True
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            if receipt.state is CommandReceiptState.REJECTED:
+                return IpcResponse.rejected(_receipt_rejection_reason(receipt), payload)
+            return IpcResponse.accepted(payload)
+
+        job = self.standard_backup_job_detail_store.load_standard_backup_job_detail(
+            command.job_id
+        )
+        if job is None or self.run_store.load_active_run_for_job(command.job_id) is not None:
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.REJECTED,
+                rejection_reason=IpcReason.COMMAND_PRECONDITION_FAILED.value,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+            payload = _backup_analysis_response_payload(
+                envelope=envelope,
+                job_id=command.job_id,
+                mutations_enabled=True,
+                recognized=True,
+                request=None,
+            )
+            payload["reason_code"] = (
+                "BACKUP_ANALYSIS_JOB_NOT_FOUND"
+                if job is None
+                else "BACKUP_ANALYSIS_ACTIVE_RUN"
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(IpcReason.COMMAND_PRECONDITION_FAILED, payload)
+
+        receipt = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        request = self.backup_analysis_request_store.enqueue_backup_analysis(
+            BackupAnalysisRequest(
+                request_id=envelope.request_id,
+                command_idempotency_key=envelope.idempotency_key,
+                job_id=job.job_id,
+                job_revision_id=job.job_revision_id,
+                state=BackupAnalysisRequestState.QUEUED,
+                requested_utc=_system_utc_now(),
+            )
+        )
+        receipt = transition_command_receipt(
+            receipt,
+            CommandReceiptState.EFFECT_PREPARED,
+            result_entity_type="backup_analysis_request",
+            result_entity_id=request.request_id,
+        )
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.ACCEPTED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.SUCCEEDED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        self._enqueue_command_effect_outbox(receipt)
+
+        payload = _backup_analysis_response_payload(
+            envelope=envelope,
+            job_id=command.job_id,
+            mutations_enabled=True,
+            recognized=True,
+            request=request,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.accepted(payload)
+
+    def _reject_config_missing_check_backup(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: CheckBackupCommand,
+    ) -> IpcResponse:
+        receipt_response = self._record_terminal_rejected_receipt(
+            envelope,
+            identity,
+            rejection_reason=IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED.value,
+        )
+        if receipt_response is not None:
+            return receipt_response
+        payload = _backup_analysis_response_payload(
+            envelope=envelope,
+            job_id=command.job_id,
+            mutations_enabled=True,
+            recognized=True,
+            request=None,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload)
 
     def _handle_run_control(
         self,
@@ -1833,6 +2012,24 @@ def _create_standard_backup_job_response_payload(
     if endpoint_set is not None:
         result["endpoint_bindings"] = endpoint_set.to_dict()
     return result
+
+
+def _backup_analysis_response_payload(
+    *,
+    envelope: IpcCommandEnvelope,
+    job_id: str,
+    mutations_enabled: bool,
+    recognized: bool,
+    request: BackupAnalysisRequest | None,
+) -> dict[str, Any]:
+    return {
+        "command_name": envelope.command_name,
+        "job_id": job_id,
+        "mutations_enabled": mutations_enabled,
+        "recognized": recognized,
+        "queued": request is not None,
+        "analysis_request": None if request is None else request.to_dict(),
+    }
 
 
 def _start_run_response_payload(

@@ -4,6 +4,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
+from mediasync_home.application.backup_analysis import BackupAnalysisCommandName
 from mediasync_home.application.job_creation import JobCreationCommandName
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
 from mediasync_home.application.runs import RunCommandName
@@ -330,6 +331,24 @@ class EngineClient:
         return self._request_with_handshake_retry(
             lambda: self._ipc_client.submit_command(
                 RunCommandName.START_RUN.value,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                payload_hash=canonical_command_payload_hash(payload),
+            )
+        )
+
+    def check_backup(
+        self,
+        *,
+        job_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        payload: dict[str, object] = {"job_id": job_id}
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.submit_command(
+                BackupAnalysisCommandName.CHECK_BACKUP.value,
                 request_id=request_id,
                 idempotency_key=idempotency_key,
                 payload=payload,

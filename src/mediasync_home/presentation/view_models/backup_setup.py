@@ -145,6 +145,10 @@ class BackupJobDetailViewState:
     plan_checksum: str | None = None
     plan_state: str | None = None
     plan_runnable: bool = False
+    analysis_id: str | None = None
+    analysis_request_id: str | None = None
+    analysis_request_state: str | None = None
+    analysis_request_reason_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -629,6 +633,12 @@ def _job_detail_from_payload(payload: dict[object, object], *, job_id: str | Non
     filter_set_id = _required_text(payload.get("filter_set_id"))
     initial_plan = payload.get("initial_plan")
     plan_payload = initial_plan if isinstance(initial_plan, dict) else {}
+    latest_analysis_request = payload.get("latest_analysis_request")
+    request_payload = (
+        latest_analysis_request
+        if isinstance(latest_analysis_request, dict)
+        else {}
+    )
     return BackupJobDetailViewState(
         job_id=_required_text(payload.get("job_id")) or job_id,
         title=(
@@ -655,6 +665,12 @@ def _job_detail_from_payload(payload: dict[object, object], *, job_id: str | Non
         plan_checksum=_optional_text(plan_payload.get("plan_checksum")),
         plan_state=_optional_text(plan_payload.get("state")),
         plan_runnable=plan_payload.get("plan_runnable") is True,
+        analysis_id=_optional_text(plan_payload.get("analysis_id")),
+        analysis_request_id=_optional_text(request_payload.get("request_id")),
+        analysis_request_state=_optional_text(request_payload.get("state")),
+        analysis_request_reason_code=_optional_text(
+            request_payload.get("reason_code")
+        ),
     )
 
 

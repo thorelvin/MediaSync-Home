@@ -39,6 +39,9 @@ from mediasync_home.adapters.writable_endpoint_registration import (
     LocalWritableEndpointControlAreaProvisioner,
 )
 from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
+from mediasync_home.adapters.sqlite.backup_analysis import (
+    SqliteBackupAnalysisRequestStore,
+)
 from mediasync_home.adapters.sqlite.command_receipts import SqliteCommandReceiptStore
 from mediasync_home.adapters.sqlite.connection_policy import (
     SqliteFailureKind,
@@ -120,6 +123,11 @@ from mediasync_home.application.run_executor import (
     RunTargetLeaseRegistry,
     execute_bounded_run_executor_preflight_pump,
     execute_one_run_target_execution_start_step,
+)
+from mediasync_home.application.backup_analysis import (
+    BackupAnalysisRequest,
+    BackupAnalysisRequestStore,
+    execute_next_backup_analysis,
 )
 from mediasync_home.application.clocks import ClockPort
 from mediasync_home.application.run_executor_cycle import (
@@ -375,6 +383,10 @@ class EngineHostRuntime:
     run_executor_old_target_preservation_port: OldTargetPreservationPort | None = None
     run_executor_recovery_object_cleanup_port: RecoveryObjectCleanupPort | None = None
     run_executor_process_instance_id: str | None = None
+    backup_analysis_request_store: BackupAnalysisRequestStore | None = None
+    backup_analysis_endpoint_refresher: SqliteEndpointClassificationRefresher | None = None
+    backup_analysis_snapshot_refresher: SqliteJobSnapshotMaterializer | None = None
+    backup_analysis_plan_refresher: SqliteInitialBackupPlanMaterializer | None = None
     catalog_connection: sqlite3.Connection | None = None
     recovery_connection: sqlite3.Connection | None = None
 
@@ -397,6 +409,29 @@ class EngineHostRuntime:
             target_layout,
             restore_epoch_id=restore_epoch_id,
             started_utc=started_utc,
+        )
+
+    def run_backup_analysis_cycle(self) -> BackupAnalysisRequest | None:
+        if (
+            self.backup_analysis_request_store is None
+            or self.backup_analysis_endpoint_refresher is None
+            or self.backup_analysis_snapshot_refresher is None
+            or self.backup_analysis_plan_refresher is None
+            or self.run_executor_queue_store is None
+        ):
+            return None
+        endpoint_refresher = self.backup_analysis_endpoint_refresher
+        return execute_next_backup_analysis(
+            requests=self.backup_analysis_request_store,
+            runs=self.run_executor_queue_store,
+            refresh_endpoint_classifications=lambda: (
+                endpoint_refresher.refresh_endpoint_classifications(
+                    observed_utc=self.clock.utc_now(),
+                )
+            ),
+            snapshots=self.backup_analysis_snapshot_refresher,
+            plans=self.backup_analysis_plan_refresher,
+            utc_now=self.clock.utc_now,
         )
 
     def compact_state_stores(
@@ -784,6 +819,7 @@ class ExecutorMaintenanceLoop:
             runtime = self._runtime_factory()
             while not self._stop_event.wait(next_interval_ms / 1000):
                 try:
+                    _run_backup_analysis_cycle_if_configured(runtime)
                     outcome = runtime.run_executor_cycle(max_steps=self._max_steps)
                 except Exception as exc:
                     next_interval_ms = self._backed_off_interval(next_interval_ms)
@@ -1386,6 +1422,7 @@ def build_engine_host_runtime(
     state_capacity_policy: StateCapacityPolicy | None = None,
     state_capacity_probe: StateCapacityProbe | None = None,
     clock: ClockPort | None = None,
+    recover_interrupted_analyses: bool = True,
 ) -> EngineHostRuntime:
     runtime_clock = clock or SystemClock()
     if state_root is None:
@@ -1511,6 +1548,11 @@ def build_engine_host_runtime(
             )
         )
         runs = SqliteRunStore(catalog_connection)
+        backup_analysis_requests = SqliteBackupAnalysisRequestStore(
+            catalog_connection
+        )
+        if recover_interrupted_analyses:
+            backup_analysis_requests.requeue_interrupted_backup_analyses()
         history = SqliteHistoryReadModelStore(catalog_connection)
         schedules = SqliteScheduleStore(catalog_connection)
         trigger_occurrences = SqliteTriggerOccurrenceStore(catalog_connection)
@@ -1603,6 +1645,7 @@ def build_engine_host_runtime(
             trigger_occurrence_store=trigger_occurrences,
             external_resource_state_store=external_resource_state,
             cataloged_file_read_store=catalog_handoffs,
+            backup_analysis_request_store=backup_analysis_requests,
             command_receipt_store=command_receipts,
             command_effect_transaction=SqliteImmediateTransactionRunner(
                 catalog_connection,
@@ -1646,6 +1689,10 @@ def build_engine_host_runtime(
         run_executor_old_target_preservation_port=run_executor_final_commit_port,
         run_executor_recovery_object_cleanup_port=run_executor_final_commit_port,
         run_executor_process_instance_id=reconciler_instance_id,
+        backup_analysis_request_store=backup_analysis_requests,
+        backup_analysis_endpoint_refresher=endpoint_classification_refresher,
+        backup_analysis_snapshot_refresher=job_snapshot_materializer,
+        backup_analysis_plan_refresher=initial_backup_plan_materializer,
         catalog_connection=catalog_connection,
         recovery_connection=recovery_connection,
     )
@@ -1790,6 +1837,7 @@ def _build_after_request_executor_cycle(
     pipe_name: str,
 ) -> Callable[[], None]:
     def run_cycle() -> None:
+        _run_backup_analysis_cycle_if_configured(runtime)
         outcome = runtime.run_executor_cycle(max_steps=max_steps)
         _emit_run_executor_cycle_event(
             output=output,
@@ -1799,6 +1847,12 @@ def _build_after_request_executor_cycle(
         )
 
     return run_cycle
+
+
+def _run_backup_analysis_cycle_if_configured(runtime: EngineHostRuntime) -> None:
+    cycle = getattr(runtime, "run_backup_analysis_cycle", None)
+    if callable(cycle):
+        cycle()
 
 
 def _build_executor_maintenance_loop(
@@ -1819,6 +1873,7 @@ def _build_executor_maintenance_loop(
             state_root=args.state_root,
             reconciler_instance_id=f"{args.installation_id}-executor-maintenance",
             run_executor_staging_backend=args.run_executor_staging_backend,
+            recover_interrupted_analyses=False,
         )
 
     return ExecutorMaintenanceLoop(
@@ -1850,6 +1905,7 @@ def _build_task_scheduler_maintenance_loop(
             state_root=args.state_root,
             reconciler_instance_id=f"{args.installation_id}-task-scheduler-maintenance",
             run_executor_staging_backend=args.run_executor_staging_backend,
+            recover_interrupted_analyses=False,
         )
 
     return TaskSchedulerMaintenanceLoop(

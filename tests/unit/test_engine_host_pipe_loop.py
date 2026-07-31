@@ -41,6 +41,7 @@ from mediasync_home.adapters.sqlite.state_backup import (
 )
 from mediasync_home.application.external_resources import ExternalResourceState, ExternalResourceType
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
+from mediasync_home.application.backup_analysis import BackupAnalysisCommandName
 from mediasync_home.application.host_locator import build_local_engine_host_publication
 from mediasync_home.application.job_creation import JobCreationCommandName
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
@@ -924,7 +925,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.recovery_connection is not None
         assert runtime.installation_state is not None
         assert runtime.installation_state.product_channel == "local-preview"
-        assert runtime.installation_state.catalog_schema_version == 34
+        assert runtime.installation_state.catalog_schema_version == 35
         assert runtime.installation_state.recovery_schema_version == 7
         assert runtime.installation_state.ipc_protocol_major == 1
         assert runtime.snapshot_materialization_refresh is not None
@@ -963,7 +964,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
             runtime.run_executor_recovery_object_cleanup_port
             is runtime.run_executor_final_commit_port
         )
-        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 34
+        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 35
         assert current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY) == 7
         assert runtime.startup_reconciliation is not None
         assert runtime.startup_reconciliation.reconciler_instance_id == "host-new"
@@ -1204,6 +1205,28 @@ def test_local_writable_runtime_creates_job_from_inline_gui_draft(tmp_path: Path
         assert detail_target["registration_reason_code"] == (
             "ENDPOINT_TARGET_WRITABLE_PROBE_VERIFIED"
         )
+        (source_root / "new.txt").write_text("new", encoding="utf-8")
+        check_payload = {"job_id": str(response.payload["job"]["job_id"])}
+        check = ipc_client.submit_command(
+            BackupAnalysisCommandName.CHECK_BACKUP.value,
+            request_id="77777777-7777-4777-8777-777777777777",
+            idempotency_key="88888888-8888-4888-8888-888888888888",
+            payload=check_payload,
+            payload_hash=canonical_command_payload_hash(check_payload),
+        )
+        checked = runtime.run_backup_analysis_cycle()
+        refreshed_detail = ipc_client.query_backup_job_detail(
+            job_id=str(response.payload["job"]["job_id"])
+        )
+
+        assert check.status is IpcStatus.ACCEPTED
+        assert check.payload["analysis_request"]["state"] == "QUEUED"
+        assert checked is not None
+        assert checked.state.value == "SUCCEEDED"
+        refreshed_job = refreshed_detail.payload["backup_job_detail"]["job"]
+        assert refreshed_job["latest_analysis_request"]["state"] == "SUCCEEDED"
+        assert refreshed_job["initial_plan"]["state"] == "SEALED"
+        assert refreshed_job["initial_plan"]["operation_count"] == 1
         assert runtime.catalog_connection is not None
         endpoint_count = runtime.catalog_connection.execute(
             "SELECT count(*) FROM endpoints"
@@ -1228,7 +1251,7 @@ def test_local_writable_runtime_creates_job_from_inline_gui_draft(tmp_path: Path
         assert endpoint_count == (2,)
         assert binding_count == (4,)
         assert snapshot_materialization == ("SEALED", 2, 2)
-        assert sealed_snapshot_count == (2,)
+        assert sealed_snapshot_count == (4,)
         assert not (source_root / ".mediasync").exists()
         assert (target_root / ".mediasync" / "endpoint.json").is_file()
     finally:

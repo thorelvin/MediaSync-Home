@@ -67,6 +67,24 @@ def test_engine_client_submits_checksum_bound_start_run() -> None:
     assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
 
 
+def test_engine_client_queues_backup_check() -> None:
+    ipc_client = _RecordingIpcClient()
+    client = EngineClient(ipc_client)  # type: ignore[arg-type]
+
+    response = client.check_backup(
+        job_id="job-a",
+        request_id="request-a",
+        idempotency_key="idempotency-a",
+    )
+
+    assert response.reason is None
+    assert ipc_client.command_name == "CHECK_BACKUP"
+    assert ipc_client.request_id == "request-a"
+    assert ipc_client.idempotency_key == "idempotency-a"
+    assert ipc_client.payload == {"job_id": "job-a"}
+    assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
+
+
 def test_engine_client_submits_pause_and_resume_run_controls() -> None:
     ipc_client = _RecordingIpcClient()
     client = EngineClient(ipc_client)  # type: ignore[arg-type]

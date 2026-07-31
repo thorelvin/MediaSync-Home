@@ -97,14 +97,21 @@ class SqliteJobSnapshotMaterializer:
         self,
         *,
         observed_utc: str,
+        job_id: str | None = None,
+        force: bool = False,
     ) -> SnapshotMaterializationRefreshReport:
         if self._connection.in_transaction:
             raise SqliteJobSnapshotMaterializationError(
                 "JOB_SNAPSHOT_REFRESH_REQUIRES_IDLE_CONNECTION"
             )
         results: list[JobSnapshotMaterializationResult] = []
-        for candidate in self._active_job_candidates():
-            reused = self._load_reusable_result(candidate)
+        candidates = self._active_job_candidates()
+        if job_id is not None:
+            candidates = tuple(
+                candidate for candidate in candidates if candidate.job_id == job_id
+            )
+        for candidate in candidates:
+            reused = None if force else self._load_reusable_result(candidate)
             if reused is not None:
                 results.append(reused)
                 continue

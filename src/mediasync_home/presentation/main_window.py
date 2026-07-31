@@ -233,6 +233,16 @@ class BackupStartProvider(Protocol):
     ) -> IpcResponse: ...
 
 
+class BackupCheckProvider(Protocol):
+    def check_backup(
+        self,
+        *,
+        job_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse: ...
+
+
 class RunProgressProvider(Protocol):
     def get_run_progress(
         self,
@@ -300,6 +310,11 @@ class MediaSyncWindow(QMainWindow):
         self._setup_idempotency_key: str | None = None
         self._start_request_id: str | None = None
         self._start_idempotency_key: str | None = None
+        self._analysis_request_id: str | None = None
+        self._analysis_idempotency_key: str | None = None
+        self._latest_run_job_id: str | None = None
+        self._latest_run_plan_id: str | None = None
+        self._latest_run_state: str | None = None
         self._queued_backup_job_ids: set[str] = set()
         self._active_run_id: str | None = None
         self._run_control_pending = False
@@ -454,6 +469,9 @@ class MediaSyncWindow(QMainWindow):
         self._run_progress_timer = QTimer(self)
         self._run_progress_timer.setInterval(1000)
         self._run_progress_timer.timeout.connect(self._poll_active_run_progress)
+        self._analysis_timer = QTimer(self)
+        self._analysis_timer.setInterval(750)
+        self._analysis_timer.timeout.connect(self._poll_backup_analysis)
         self._show_component_gallery = (
             os.environ.get("MEDIASYNC_DEV_COMPONENT_GALLERY") == "1"
             if show_component_gallery is None
@@ -612,6 +630,13 @@ class MediaSyncWindow(QMainWindow):
         state = backup_job_detail_from_response(
             provider.get_backup_job_detail(job_id=job_id)
         )
+        if (
+            state.analysis_request_id is not None
+            and state.analysis_request_state in {"QUEUED", "RUNNING"}
+        ):
+            self._analysis_request_id = state.analysis_request_id
+            if not self._analysis_timer.isActive():
+                self._analysis_timer.start()
         self.apply_backup_job_detail(state)
         return state
 
@@ -682,6 +707,9 @@ class MediaSyncWindow(QMainWindow):
         if job_id != self._selected_job_id:
             self._start_request_id = None
             self._start_idempotency_key = None
+            self._analysis_request_id = None
+            self._analysis_idempotency_key = None
+            self._analysis_timer.stop()
         self._selected_job_id = job_id
         state = self._refresh_backup_job_detail(job_id)
         if state is None or state.plan_id is None:
@@ -1104,6 +1132,10 @@ class MediaSyncWindow(QMainWindow):
                 "Job creation control",
                 "Kontroll ved jobboppretting",
             ),
+            "MANUAL_BACKUP_CHECK": (
+                "Manual backup check",
+                "Manuell backupkontroll",
+            ),
         }
         pair = labels.get(
             trigger_type,
@@ -1115,7 +1147,12 @@ class MediaSyncWindow(QMainWindow):
         if self._engine_client is None or not hasattr(self._engine_client, "get_activity_overview"):
             return
         provider = cast(ActivityOverviewProvider, self._engine_client)
-        state = activity_overview_from_response(provider.get_activity_overview())
+        state = activity_overview_from_response(
+            provider.get_activity_overview(job_id=self._selected_job_id)
+        )
+        self._latest_run_job_id = state.latest_job_id
+        self._latest_run_plan_id = state.latest_plan_id
+        self._latest_run_state = state.latest_run_state
         if state.job_status is not None:
             self._job_status_state = state.job_status
             self._apply_job_status_state(state.job_status)
@@ -1126,6 +1163,7 @@ class MediaSyncWindow(QMainWindow):
             self._active_run_id = None
             self._run_progress_timer.stop()
         plan_id = state.latest_plan_id or self._job_detail_state.plan_id
+        self._apply_backup_job_detail_state(self._job_detail_state)
         if plan_id is None:
             self.apply_plan_operation_preview(empty_plan_operation_preview_state())
             self.apply_plan_endpoint_preview(empty_plan_endpoint_preview_state())
@@ -1168,6 +1206,7 @@ class MediaSyncWindow(QMainWindow):
             if state.job_id is not None:
                 self._queued_backup_job_ids.discard(state.job_id)
             self._refresh_backup_overview()
+            self._refresh_activity_overview()
             self._refresh_history_timeline()
 
     def _apply_run_progress_state(self, state: RunProgressViewState) -> None:
@@ -1839,6 +1878,31 @@ class MediaSyncWindow(QMainWindow):
                 else:
                     row.setText("")
                     row.setVisible(False)
+        analysis_pending = state.analysis_request_state in {"QUEUED", "RUNNING"}
+        completed_plan_already_run = (
+            state.job_id is not None
+            and state.job_id == self._latest_run_job_id
+            and state.plan_id is not None
+            and state.plan_id == self._latest_run_plan_id
+            and self._latest_run_state
+            in {
+                "COMPLETED",
+                "COMPLETED_WITH_WARNINGS",
+                "PARTIAL_FAILURE",
+                "FAILED",
+                "CANCELLED",
+                "BLOCKED_BY_SAFETY",
+                "RECOVERY_REQUIRED",
+            }
+        )
+        check_mode = (
+            state.found
+            and (
+                state.plan_id is None
+                or state.plan_state != "SEALED"
+                or completed_plan_already_run
+            )
+        )
         for start_button in (
             self._start_backup_button,
             self._jobs_start_backup_button,
@@ -1856,21 +1920,175 @@ class MediaSyncWindow(QMainWindow):
                 self._run_progress_state.active
                 and self._run_progress_state.job_id == state.job_id
             )
-            start_button.setVisible(has_plan and not active_for_job)
+            start_button.setVisible(
+                state.found and not active_for_job and (has_plan or check_mode)
+            )
             start_button.setEnabled(
-                has_plan
-                and state.plan_runnable
+                not analysis_pending
                 and not queued
                 and not active_for_job
                 and self._engine_client is not None
-                and hasattr(self._engine_client, "start_backup")
+                and (
+                    hasattr(self._engine_client, "check_backup")
+                    if check_mode
+                    else (
+                        has_plan
+                        and state.plan_runnable
+                        and hasattr(self._engine_client, "start_backup")
+                    )
+                )
             )
-            start_button.setText(
-                self._texts().backup_queued if queued else self._texts().start_backup
-            )
-            start_button.setToolTip(self._texts().start_backup_tooltip)
+            if analysis_pending:
+                start_button.setText(self._texts().checking_backup)
+                start_button.setToolTip(self._texts().checking_backup_tooltip)
+            elif queued:
+                start_button.setText(self._texts().backup_queued)
+                start_button.setToolTip(self._texts().start_backup_tooltip)
+            elif check_mode:
+                start_button.setText(self._texts().run_backup)
+                start_button.setToolTip(self._texts().run_backup_tooltip)
+            else:
+                start_button.setText(self._texts().start_backup)
+                start_button.setToolTip(self._texts().start_backup_tooltip)
         self._apply_run_progress_state(self._run_progress_state)
         self._refresh_dashboard_geometry()
+
+    def _invoke_primary_backup_action(self) -> None:
+        state = self._job_detail_state
+        completed_plan_already_run = (
+            state.job_id is not None
+            and state.job_id == self._latest_run_job_id
+            and state.plan_id is not None
+            and state.plan_id == self._latest_run_plan_id
+            and self._latest_run_state
+            in {
+                "COMPLETED",
+                "COMPLETED_WITH_WARNINGS",
+                "PARTIAL_FAILURE",
+                "FAILED",
+                "CANCELLED",
+                "BLOCKED_BY_SAFETY",
+                "RECOVERY_REQUIRED",
+            }
+        )
+        if (
+            state.found
+            and (
+                state.plan_id is None
+                or state.plan_state != "SEALED"
+                or completed_plan_already_run
+            )
+        ):
+            self._check_selected_backup()
+            return
+        self._start_selected_backup()
+
+    def _check_selected_backup(self) -> None:
+        state = self._job_detail_state
+        if (
+            self._engine_client is None
+            or not hasattr(self._engine_client, "check_backup")
+            or state.job_id is None
+            or self._analysis_request_id is not None
+        ):
+            return
+        request_id = str(uuid4())
+        idempotency_key = str(uuid4())
+        provider = cast(BackupCheckProvider, self._engine_client)
+        response = provider.check_backup(
+            job_id=state.job_id,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
+        if response.status is IpcStatus.REJECTED:
+            reason = (
+                str(response.payload.get("reason_code"))
+                if response.payload.get("reason_code") is not None
+                else response.reason.value
+                if response.reason is not None
+                else "UNKNOWN"
+            )
+            self.apply_engine_status(
+                replace(
+                    self._engine_status_state,
+                    detail=f"Backup check failed: {reason}",
+                    status_kind="warning",
+                )
+            )
+            return
+        request_payload = response.payload.get("analysis_request")
+        accepted_request_id = (
+            request_payload.get("request_id")
+            if isinstance(request_payload, dict)
+            else None
+        )
+        if not isinstance(accepted_request_id, str) or not accepted_request_id:
+            return
+        self._analysis_request_id = accepted_request_id
+        self._analysis_idempotency_key = idempotency_key
+        self._job_detail_state = replace(
+            state,
+            analysis_request_id=accepted_request_id,
+            analysis_request_state="QUEUED",
+        )
+        self._apply_backup_job_detail_state(self._job_detail_state)
+        self.apply_engine_status(
+            replace(
+                self._engine_status_state,
+                detail=self._texts().checking_backup,
+                status_kind="ready",
+            )
+        )
+        self._analysis_timer.start()
+
+    def _poll_backup_analysis(self) -> None:
+        request_id = self._analysis_request_id
+        job_id = self._selected_job_id
+        if (
+            request_id is None
+            or job_id is None
+            or self._engine_client is None
+            or not hasattr(self._engine_client, "get_backup_job_detail")
+        ):
+            self._analysis_timer.stop()
+            return
+        provider = cast(BackupJobDetailProvider, self._engine_client)
+        response = provider.get_backup_job_detail(job_id=job_id)
+        if response.status is IpcStatus.REJECTED:
+            return
+        state = backup_job_detail_from_response(response)
+        if state.analysis_request_id != request_id:
+            return
+        self.apply_backup_job_detail(state)
+        if state.analysis_request_state in {"QUEUED", "RUNNING"}:
+            return
+        self._analysis_timer.stop()
+        self._analysis_request_id = None
+        self._analysis_idempotency_key = None
+        terminal_state = state.analysis_request_state or "FAILED"
+        if terminal_state in {"SUCCEEDED", "NO_CHANGES"}:
+            detail = (
+                self._texts().no_backup_changes
+                if terminal_state == "NO_CHANGES"
+                else self._texts().backup_check_complete
+            )
+            status_kind = "ready"
+        else:
+            detail = (
+                state.analysis_request_reason_code
+                or self._texts().backup_check_failed
+            )
+            status_kind = "warning"
+        self.apply_engine_status(
+            replace(
+                self._engine_status_state,
+                detail=detail,
+                status_kind=status_kind,
+            )
+        )
+        self._refresh_backup_overview()
+        self._refresh_activity_overview()
+        self._refresh_history_timeline()
 
     def _start_selected_backup(self) -> None:
         state = self._job_detail_state
@@ -2382,7 +2600,7 @@ class MediaSyncWindow(QMainWindow):
         start_backup.setObjectName("jobsStartBackupButton")
         start_backup.setToolTip(texts.start_backup_tooltip)
         start_backup.setVisible(False)
-        start_backup.clicked.connect(self._start_selected_backup)
+        start_backup.clicked.connect(self._invoke_primary_backup_action)
         self._jobs_start_backup_button = start_backup
         layout.addWidget(start_backup, 17, 2)
         layout.setColumnStretch(1, 1)
@@ -3012,7 +3230,7 @@ class MediaSyncWindow(QMainWindow):
         start_backup.setObjectName("startBackupButton")
         start_backup.setToolTip(texts.start_backup_tooltip)
         start_backup.setVisible(False)
-        start_backup.clicked.connect(self._start_selected_backup)
+        start_backup.clicked.connect(self._invoke_primary_backup_action)
         self._start_backup_button = start_backup
         layout.addWidget(start_backup, 9, 2)
 

@@ -208,6 +208,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_run_stop_requests",
                 statements=CATALOG_RUN_STOP_REQUESTS,
             ),
+            SqliteMigration(
+                version=35,
+                name="catalog_backup_analysis_requests",
+                statements=CATALOG_BACKUP_ANALYSIS_REQUESTS,
+            ),
         ),
     )
 
@@ -1230,6 +1235,179 @@ CATALOG_RUN_STOP_REQUESTS = (
     """
     CREATE INDEX idx_run_stop_requests_state
         ON run_stop_requests (state, requested_utc, run_id)
+    """,
+)
+
+CATALOG_BACKUP_ANALYSIS_REQUESTS = (
+    """
+    DROP TRIGGER trg_initial_backup_plan_materializations_terminal_immutable
+    """,
+    """
+    DROP TRIGGER trg_initial_backup_plan_materializations_no_delete
+    """,
+    """
+    ALTER TABLE initial_backup_plan_materializations
+        RENAME TO initial_backup_plan_materializations_v34
+    """,
+    """
+    CREATE TABLE initial_backup_plan_materializations (
+        materialization_id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        job_revision_id TEXT NOT NULL,
+        analysis_id TEXT,
+        plan_id TEXT UNIQUE,
+        state TEXT NOT NULL CHECK (
+            state IN ('SEALED', 'NO_CHANGES', 'BLOCKED', 'FAILED')
+        ),
+        reason_code TEXT NOT NULL CHECK (length(trim(reason_code)) > 0),
+        operation_count INTEGER NOT NULL DEFAULT 0 CHECK (operation_count >= 0),
+        planned_bytes INTEGER NOT NULL DEFAULT 0 CHECK (planned_bytes >= 0),
+        plan_runnable INTEGER NOT NULL DEFAULT 0 CHECK (plan_runnable IN (0, 1)),
+        next_action TEXT NOT NULL CHECK (length(trim(next_action)) > 0),
+        started_utc TEXT NOT NULL,
+        completed_utc TEXT NOT NULL,
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+        FOREIGN KEY (job_id, job_revision_id)
+            REFERENCES job_revisions (job_id, id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (analysis_id)
+            REFERENCES analyses (id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (plan_id)
+            REFERENCES plan_seal_details (plan_id)
+            ON DELETE RESTRICT,
+        CHECK (
+            (state = 'SEALED' AND analysis_id IS NOT NULL AND plan_id IS NOT NULL)
+            OR (
+                state = 'NO_CHANGES'
+                AND analysis_id IS NOT NULL
+                AND plan_id IS NULL
+                AND operation_count = 0
+                AND planned_bytes = 0
+                AND plan_runnable = 0
+            )
+            OR (state IN ('BLOCKED', 'FAILED') AND plan_id IS NULL)
+        )
+    )
+    """,
+    """
+    INSERT INTO initial_backup_plan_materializations (
+        materialization_id,
+        job_id,
+        job_revision_id,
+        analysis_id,
+        plan_id,
+        state,
+        reason_code,
+        operation_count,
+        planned_bytes,
+        plan_runnable,
+        next_action,
+        started_utc,
+        completed_utc,
+        row_version
+    )
+    SELECT
+        'legacy:' || job_id || ':' || job_revision_id,
+        job_id,
+        job_revision_id,
+        analysis_id,
+        plan_id,
+        state,
+        reason_code,
+        operation_count,
+        planned_bytes,
+        plan_runnable,
+        next_action,
+        started_utc,
+        completed_utc,
+        row_version
+    FROM initial_backup_plan_materializations_v34
+    """,
+    """
+    DROP TABLE initial_backup_plan_materializations_v34
+    """,
+    """
+    CREATE INDEX idx_initial_backup_plan_materializations_state
+        ON initial_backup_plan_materializations (
+            state,
+            completed_utc,
+            job_id,
+            job_revision_id
+        )
+    """,
+    """
+    CREATE INDEX idx_initial_backup_plan_materializations_job_latest
+        ON initial_backup_plan_materializations (
+            job_id,
+            job_revision_id,
+            completed_utc DESC,
+            materialization_id DESC
+        )
+    """,
+    """
+    CREATE TRIGGER trg_initial_backup_plan_materializations_no_update
+    BEFORE UPDATE ON initial_backup_plan_materializations
+    BEGIN
+        SELECT RAISE(ABORT, 'INITIAL_BACKUP_PLAN_MATERIALIZATION_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_initial_backup_plan_materializations_no_delete
+    BEFORE DELETE ON initial_backup_plan_materializations
+    BEGIN
+        SELECT RAISE(ABORT, 'INITIAL_BACKUP_PLAN_MATERIALIZATION_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TABLE backup_analysis_requests (
+        request_id TEXT PRIMARY KEY,
+        command_idempotency_key TEXT NOT NULL UNIQUE,
+        job_id TEXT NOT NULL,
+        job_revision_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (
+            state IN (
+                'QUEUED',
+                'RUNNING',
+                'SUCCEEDED',
+                'NO_CHANGES',
+                'BLOCKED',
+                'FAILED'
+            )
+        ),
+        requested_utc TEXT NOT NULL,
+        started_utc TEXT,
+        completed_utc TEXT,
+        analysis_id TEXT,
+        plan_id TEXT,
+        reason_code TEXT,
+        operation_count INTEGER NOT NULL DEFAULT 0 CHECK (operation_count >= 0),
+        planned_bytes INTEGER NOT NULL DEFAULT 0 CHECK (planned_bytes >= 0),
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+        FOREIGN KEY (job_id, job_revision_id)
+            REFERENCES job_revisions (job_id, id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (analysis_id) REFERENCES analyses (id) ON DELETE RESTRICT,
+        FOREIGN KEY (plan_id) REFERENCES plans (id) ON DELETE RESTRICT,
+        CHECK (
+            (state = 'QUEUED' AND started_utc IS NULL AND completed_utc IS NULL)
+            OR (state = 'RUNNING' AND started_utc IS NOT NULL AND completed_utc IS NULL)
+            OR (
+                state IN ('SUCCEEDED', 'NO_CHANGES', 'BLOCKED', 'FAILED')
+                AND started_utc IS NOT NULL
+                AND completed_utc IS NOT NULL
+                AND reason_code IS NOT NULL
+            )
+        )
+    )
+    """,
+    """
+    CREATE INDEX idx_backup_analysis_requests_queue
+        ON backup_analysis_requests (state, requested_utc, request_id)
+    """,
+    """
+    CREATE INDEX idx_backup_analysis_requests_job
+        ON backup_analysis_requests (job_id, requested_utc DESC, request_id DESC)
     """,
 )
 

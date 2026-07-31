@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -48,14 +49,25 @@ class SqliteInitialBackupPlanMaterializer:
         self,
         *,
         observed_utc: str,
+        job_id: str | None = None,
+        force: bool = False,
     ) -> InitialBackupPlanRefreshReport:
         if self._connection.in_transaction:
             raise SqliteInitialBackupPlanMaterializationError(
                 "INITIAL_BACKUP_PLAN_REFRESH_REQUIRES_IDLE_CONNECTION"
             )
+        candidates = self._active_candidates()
+        if job_id is not None:
+            candidates = tuple(
+                candidate for candidate in candidates if candidate.job_id == job_id
+            )
         results = tuple(
-            self._refresh_candidate(candidate, observed_utc=observed_utc)
-            for candidate in self._active_candidates()
+            self._refresh_candidate(
+                candidate,
+                observed_utc=observed_utc,
+                force=force,
+            )
+            for candidate in candidates
         )
         return InitialBackupPlanRefreshReport(
             sealed_plan_count=sum(
@@ -107,10 +119,15 @@ class SqliteInitialBackupPlanMaterializer:
         candidate: _JobCandidate,
         *,
         observed_utc: str,
+        force: bool,
     ) -> InitialBackupPlanMaterializationResult:
-        existing = self._load_terminal_result(
-            job_id=candidate.job_id,
-            job_revision_id=candidate.job_revision_id,
+        existing = (
+            None
+            if force
+            else self._load_terminal_result(
+                job_id=candidate.job_id,
+                job_revision_id=candidate.job_revision_id,
+            )
         )
         if existing is not None:
             return existing
@@ -166,6 +183,7 @@ class SqliteInitialBackupPlanMaterializer:
             self._connection.execute(
                 """
                 INSERT INTO initial_backup_plan_materializations (
+                    materialization_id,
                     job_id,
                     job_revision_id,
                     analysis_id,
@@ -179,22 +197,17 @@ class SqliteInitialBackupPlanMaterializer:
                     started_utc,
                     completed_utc
                 )
-                VALUES (?, ?, ?, ?, 'SEALED', ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (job_id, job_revision_id)
-                DO UPDATE SET
-                    analysis_id = excluded.analysis_id,
-                    plan_id = excluded.plan_id,
-                    state = excluded.state,
-                    reason_code = excluded.reason_code,
-                    operation_count = excluded.operation_count,
-                    planned_bytes = excluded.planned_bytes,
-                    plan_runnable = excluded.plan_runnable,
-                    next_action = excluded.next_action,
-                    started_utc = excluded.started_utc,
-                    completed_utc = excluded.completed_utc,
-                    row_version = initial_backup_plan_materializations.row_version + 1
+                VALUES (?, ?, ?, ?, ?, 'SEALED', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    _materialization_id(
+                        candidate,
+                        analysis_id=candidate.analysis_id,
+                        plan_id=plan.plan_id,
+                        state="SEALED",
+                        reason_code=build.reason_code,
+                        observed_utc=observed_utc,
+                    ),
                     candidate.job_id,
                     candidate.job_revision_id,
                     candidate.analysis_id,
@@ -499,6 +512,7 @@ class SqliteInitialBackupPlanMaterializer:
             self._connection.execute(
                 """
                 INSERT INTO initial_backup_plan_materializations (
+                    materialization_id,
                     job_id,
                     job_revision_id,
                     analysis_id,
@@ -512,22 +526,17 @@ class SqliteInitialBackupPlanMaterializer:
                     started_utc,
                     completed_utc
                 )
-                VALUES (?, ?, ?, NULL, ?, ?, 0, 0, 0, ?, ?, ?)
-                ON CONFLICT (job_id, job_revision_id)
-                DO UPDATE SET
-                    analysis_id = excluded.analysis_id,
-                    plan_id = NULL,
-                    state = excluded.state,
-                    reason_code = excluded.reason_code,
-                    operation_count = 0,
-                    planned_bytes = 0,
-                    plan_runnable = 0,
-                    next_action = excluded.next_action,
-                    started_utc = excluded.started_utc,
-                    completed_utc = excluded.completed_utc,
-                    row_version = initial_backup_plan_materializations.row_version + 1
+                VALUES (?, ?, ?, ?, NULL, ?, ?, 0, 0, 0, ?, ?, ?)
                 """,
                 (
+                    _materialization_id(
+                        candidate,
+                        analysis_id=candidate.analysis_id,
+                        plan_id=None,
+                        state=state,
+                        reason_code=reason_code,
+                        observed_utc=observed_utc,
+                    ),
                     candidate.job_id,
                     candidate.job_revision_id,
                     candidate.analysis_id,
@@ -583,6 +592,10 @@ class SqliteInitialBackupPlanMaterializer:
             WHERE materializations.job_id = ?
                 AND materializations.job_revision_id = ?
                 AND materializations.state IN ('SEALED', 'NO_CHANGES')
+            ORDER BY
+                materializations.completed_utc DESC,
+                materializations.materialization_id DESC
+            LIMIT 1
             """,
             (job_id, job_revision_id),
         ).fetchone()
@@ -677,3 +690,28 @@ def _catalog_int(value: object, *, minimum: int) -> int:
             "Refresh catalog endpoint evidence before planning changes.",
         )
     return value
+
+
+def _materialization_id(
+    candidate: _JobCandidate,
+    *,
+    analysis_id: str | None,
+    plan_id: str | None,
+    state: str,
+    reason_code: str,
+    observed_utc: str,
+) -> str:
+    digest = hashlib.sha256(
+        "\0".join(
+            (
+                candidate.job_id,
+                candidate.job_revision_id,
+                analysis_id or "",
+                plan_id or "",
+                state,
+                reason_code,
+                observed_utc,
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"plan-materialization:{digest[:32]}"

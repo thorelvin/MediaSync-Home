@@ -163,6 +163,11 @@ def test_initial_plan_materializer_seals_exact_registered_snapshots_and_replays(
         replay = materializer.refresh_initial_backup_plans(
             observed_utc="2026-07-31T15:04:00Z",
         )
+        forced = materializer.refresh_initial_backup_plans(
+            observed_utc="2026-07-31T15:05:00Z",
+            job_id=JOB_ID,
+            force=True,
+        )
 
         assert first.sealed_plan_count == 1
         assert first.reused_plan_count == 0
@@ -175,7 +180,10 @@ def test_initial_plan_materializer_seals_exact_registered_snapshots_and_replays(
         assert replay.sealed_plan_count == 0
         assert replay.reused_plan_count == 1
         assert replay.results[0].idempotent_replay is True
-        assert plan_ids.calls == 1
+        assert forced.sealed_plan_count == 1
+        assert forced.results[0].plan_id == "plan-2"
+        assert forced.results[0].idempotent_replay is False
+        assert plan_ids.calls == 2
 
         plan = plans.load_sealed_plan("plan-1")
         assert plan is not None
@@ -193,23 +201,21 @@ def test_initial_plan_materializer_seals_exact_registered_snapshots_and_replays(
             SELECT state, analysis_id, plan_id, operation_count, planned_bytes,
                    plan_runnable, row_version
             FROM initial_backup_plan_materializations
+            ORDER BY completed_utc, materialization_id
             """
-        ).fetchone() == (
-            "SEALED",
-            "analysis-a",
-            "plan-1",
-            3,
-            15,
-                1,
-            1,
-        )
+        ).fetchall() == [
+            ("SEALED", "analysis-a", "plan-1", 3, 15, 1, 1),
+            ("SEALED", "analysis-a", "plan-2", 3, 15, 1, 1),
+        ]
         detail = SqliteStandardBackupJobCatalog(
             connection
         ).load_standard_backup_job_detail(JOB_ID)
         assert detail is not None
         assert detail.initial_plan is not None
-        assert detail.initial_plan.plan_id == "plan-1"
-        assert detail.initial_plan.plan_checksum == plan.plan_checksum
+        assert detail.initial_plan.plan_id == "plan-2"
+        forced_plan = plans.load_sealed_plan("plan-2")
+        assert forced_plan is not None
+        assert detail.initial_plan.plan_checksum == forced_plan.plan_checksum
         assert detail.initial_plan.plan_runnable is True
         with pytest.raises(
             sqlite3.IntegrityError,

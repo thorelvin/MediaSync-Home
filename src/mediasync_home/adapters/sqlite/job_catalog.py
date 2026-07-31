@@ -22,6 +22,7 @@ from mediasync_home.application.job_drafts import (
     draft_path_labels_overlap,
 )
 from mediasync_home.application.job_read_models import (
+    BackupAnalysisRequestSummary,
     InitialBackupPlanSummary,
     StandardBackupJobDetail,
     StandardBackupJobSummary,
@@ -313,6 +314,28 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                 ON seals.plan_id = materializations.plan_id
             WHERE materializations.job_id = ?
                 AND materializations.job_revision_id = ?
+            ORDER BY
+                materializations.completed_utc DESC,
+                materializations.materialization_id DESC
+            LIMIT 1
+            """,
+            (detail.job_id, detail.job_revision_id),
+        ).fetchone()
+        analysis_request_row = self._connection.execute(
+            """
+            SELECT
+                request_id,
+                state,
+                requested_utc,
+                reason_code,
+                analysis_id,
+                plan_id,
+                row_version
+            FROM backup_analysis_requests
+            WHERE job_id = ?
+                AND job_revision_id = ?
+            ORDER BY requested_utc DESC, request_id DESC
+            LIMIT 1
             """,
             (detail.job_id, detail.job_revision_id),
         ).fetchone()
@@ -330,6 +353,31 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                 None
                 if initial_plan_row is None
                 else _initial_plan_summary_from_row(initial_plan_row)
+            ),
+            latest_analysis_request=(
+                None
+                if analysis_request_row is None
+                else BackupAnalysisRequestSummary(
+                    request_id=str(analysis_request_row[0]),
+                    state=str(analysis_request_row[1]),
+                    requested_utc=str(analysis_request_row[2]),
+                    reason_code=(
+                        None
+                        if analysis_request_row[3] is None
+                        else str(analysis_request_row[3])
+                    ),
+                    analysis_id=(
+                        None
+                        if analysis_request_row[4] is None
+                        else str(analysis_request_row[4])
+                    ),
+                    plan_id=(
+                        None
+                        if analysis_request_row[5] is None
+                        else str(analysis_request_row[5])
+                    ),
+                    row_version=_required_int(analysis_request_row[6]),
+                )
             ),
         )
 

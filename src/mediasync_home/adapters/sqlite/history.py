@@ -99,6 +99,50 @@ class SqliteHistoryReadModelStore(HistoryTimelineReadModelStore):
                 JOIN standard_backup_job_revision_details AS details
                     ON details.job_id = materializations.job_id
                     AND details.job_revision_id = materializations.job_revision_id
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM backup_analysis_requests AS requests
+                    WHERE requests.analysis_id IS NOT NULL
+                        AND requests.analysis_id = materializations.analysis_id
+                )
+
+                UNION ALL
+
+                SELECT
+                    'CONTROL' AS activity_kind,
+                    requests.request_id AS activity_id,
+                    requests.job_id AS job_id,
+                    requests.job_revision_id AS job_revision_id,
+                    details.source_name AS job_title,
+                    NULL AS run_id,
+                    requests.analysis_id AS analysis_id,
+                    requests.plan_id AS plan_id,
+                    requests.state AS state,
+                    COALESCE(requests.started_utc, requests.requested_utc) AS started_utc,
+                    requests.completed_utc AS finished_utc,
+                    requests.operation_count AS planned_operations,
+                    requests.planned_bytes AS planned_bytes,
+                    COALESCE((
+                        SELECT count(*)
+                        FROM snapshot_issues AS issues
+                        JOIN snapshots
+                            ON snapshots.id = issues.snapshot_id
+                        WHERE snapshots.analysis_id = requests.analysis_id
+                            AND issues.blocks_destructive_actions = 0
+                    ), 0) AS warning_count,
+                    COALESCE((
+                        SELECT count(*)
+                        FROM snapshot_issues AS issues
+                        JOIN snapshots
+                            ON snapshots.id = issues.snapshot_id
+                        WHERE snapshots.analysis_id = requests.analysis_id
+                            AND issues.blocks_destructive_actions = 1
+                    ), 0) AS error_count,
+                    'MANUAL_BACKUP_CHECK' AS trigger_type
+                FROM backup_analysis_requests AS requests
+                JOIN standard_backup_job_revision_details AS details
+                    ON details.job_id = requests.job_id
+                    AND details.job_revision_id = requests.job_revision_id
 
                 UNION ALL
 

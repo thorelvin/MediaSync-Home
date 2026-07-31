@@ -98,6 +98,28 @@ class InitialBackupPlanSummary:
 
 
 @dataclass(frozen=True)
+class BackupAnalysisRequestSummary:
+    request_id: str
+    state: str
+    requested_utc: str
+    row_version: int
+    reason_code: str | None = None
+    analysis_id: str | None = None
+    plan_id: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "state": self.state,
+            "requested_utc": self.requested_utc,
+            "reason_code": self.reason_code,
+            "analysis_id": self.analysis_id,
+            "plan_id": self.plan_id,
+            "row_version": self.row_version,
+        }
+
+
+@dataclass(frozen=True)
 class StandardBackupJobDetail:
     job_id: str
     job_revision_id: str
@@ -108,6 +130,7 @@ class StandardBackupJobDetail:
     defaults: StandardBackupDefaults
     filter_set_version: int = 1
     initial_plan: InitialBackupPlanSummary | None = None
+    latest_analysis_request: BackupAnalysisRequestSummary | None = None
 
     def to_dict(self) -> dict[str, object]:
         independent_device_ids = {
@@ -128,6 +151,11 @@ class StandardBackupJobDetail:
         }
         payload["initial_plan"] = (
             None if self.initial_plan is None else self.initial_plan.to_dict()
+        )
+        payload["latest_analysis_request"] = (
+            None
+            if self.latest_analysis_request is None
+            else self.latest_analysis_request.to_dict()
         )
         return payload
 

@@ -104,6 +104,46 @@ class ShellText:
         return "Start den forseglede backupplanen"
 
     @property
+    def run_backup(self) -> str:
+        return "Run backup" if self.language_tooltip_prefix == "Language" else "Kjør backup"
+
+    @property
+    def run_backup_tooltip(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Check for changes, then run safe changes"
+        return "Kontroller endringer, og kjør deretter trygge endringer"
+
+    @property
+    def checking_backup(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Checking changes..."
+        return "Kontrollerer endringer..."
+
+    @property
+    def checking_backup_tooltip(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "The Engine Host is checking this backup"
+        return "Engine Host kontrollerer denne backupen"
+
+    @property
+    def backup_check_complete(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Changes are ready"
+        return "Endringene er klare"
+
+    @property
+    def no_backup_changes(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "No backup changes found"
+        return "Ingen backupendringer funnet"
+
+    @property
+    def backup_check_failed(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Backup check failed"
+        return "Backupkontrollen mislyktes"
+
+    @property
     def backup_queued(self) -> str:
         return "Backup queued" if self.language_tooltip_prefix == "Language" else "Backup er lagt i kø"
 

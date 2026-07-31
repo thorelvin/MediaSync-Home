@@ -16,6 +16,10 @@ from mediasync_home.application.catalog_read_models import (
     CatalogedFileReadModel,
     CatalogedFileReadModelStore,
 )
+from mediasync_home.application.backup_analysis import (
+    BackupAnalysisCommandName,
+    BackupAnalysisRequest,
+)
 from mediasync_home.application.command_receipts import (
     CommandEffectStorageFailure,
     CommandReceipt,
@@ -34,7 +38,11 @@ from mediasync_home.application.job_creation import (
     StandardBackupJobIdFactory,
     StandardBackupJobIds,
 )
-from mediasync_home.application.job_drafts import JobDraftStore, StandardBackupJobDraft
+from mediasync_home.application.job_drafts import (
+    JobDraftStore,
+    StandardBackupDefaults,
+    StandardBackupJobDraft,
+)
 from mediasync_home.application.job_read_models import (
     StandardBackupJobDetail,
     StandardBackupJobSummary,
@@ -300,6 +308,42 @@ class _InMemoryStandardBackupJobCatalog(StandardBackupJobCatalog):
                 )
                 for target in job.targets
             ),
+        )
+
+
+class _InMemoryBackupAnalysisRequestStore:
+    def __init__(self) -> None:
+        self.requests: dict[str, BackupAnalysisRequest] = {}
+
+    def enqueue_backup_analysis(
+        self,
+        request: BackupAnalysisRequest,
+    ) -> BackupAnalysisRequest:
+        self.requests.setdefault(request.request_id, request)
+        return self.requests[request.request_id]
+
+    def load_backup_analysis_request(
+        self,
+        request_id: str,
+    ) -> BackupAnalysisRequest | None:
+        return self.requests.get(request_id)
+
+
+class _BackupJobDetailStore:
+    def load_standard_backup_job_detail(
+        self,
+        job_id: str,
+    ) -> StandardBackupJobDetail | None:
+        if job_id != "job-a":
+            return None
+        return StandardBackupJobDetail(
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            filter_set_id="filter-a",
+            source_name="Pictures",
+            source_path_label="C:/Pictures",
+            targets=(),
+            defaults=StandardBackupDefaults(),
         )
 
 
@@ -2182,6 +2226,45 @@ def test_enabled_create_standard_backup_job_requires_dispatcher_dependencies() -
     assert response.reason is IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED
     assert response.payload["recognized"] is True
     assert response.payload["mutations_enabled"] is True
+
+
+def test_enabled_check_backup_queues_durable_idempotent_request() -> None:
+    receipts = _InMemoryCommandReceiptStore()
+    requests = _InMemoryBackupAnalysisRequestStore()
+    service = _service(mutations_enabled=True)
+    service.command_receipt_store = receipts
+    service.backup_analysis_request_store = requests  # type: ignore[assignment]
+    service.standard_backup_job_detail_store = _BackupJobDetailStore()
+    service.run_store = _InMemoryRunStore()
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    command_payload = {"job_id": "job-a"}
+
+    first = ipc_client.submit_command(
+        BackupAnalysisCommandName.CHECK_BACKUP.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=command_payload,
+        payload_hash=payload_hash(command_payload),
+    )
+    replay = ipc_client.submit_command(
+        BackupAnalysisCommandName.CHECK_BACKUP.value,
+        request_id=REQUEST_ID_B,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=command_payload,
+        payload_hash=payload_hash(command_payload),
+    )
+
+    assert first.status is IpcStatus.ACCEPTED
+    assert first.payload["queued"] is True
+    assert first.payload["analysis_request"]["state"] == "QUEUED"
+    assert replay.status is IpcStatus.ACCEPTED
+    assert replay.payload["idempotent_replay"] is True
+    assert len(requests.requests) == 1
+    receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
+    assert receipt is not None
+    assert receipt.result_entity_type == "backup_analysis_request"
+    assert receipt.state is CommandReceiptState.SUCCEEDED
 
 
 def test_start_run_command_is_recognized_but_rejected_when_mutations_disabled() -> None:

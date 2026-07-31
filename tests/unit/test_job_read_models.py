@@ -119,8 +119,9 @@ def test_backup_job_detail_query_returns_exact_job_revision_payload() -> None:
                 "extra_files": "KEEP_ON_TARGET",
                     "performance": "AUTO",
                 },
-                "initial_plan": None,
-                "targets": [
+                    "initial_plan": None,
+                    "latest_analysis_request": None,
+                    "targets": [
                 {
                     "name": "USB",
                     "path_label": "E:/Backup/job-a",

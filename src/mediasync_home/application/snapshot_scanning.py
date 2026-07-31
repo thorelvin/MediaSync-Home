@@ -109,4 +109,6 @@ class JobSnapshotMaterializationRefresher(Protocol):
         self,
         *,
         observed_utc: str,
+        job_id: str | None = None,
+        force: bool = False,
     ) -> SnapshotMaterializationRefreshReport: ...
