@@ -37,7 +37,9 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         payload: Mapping[str, object] | None = None,
     ) -> RecoveryOperation:
         if operation.phase is not RecoveryOperationPhase.PLANNED:
-            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_REQUIRES_PLANNED_PHASE")
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_REQUIRES_PLANNED_PHASE"
+            )
         _validate_process_instance_id(process_instance_id)
         validate_recovery_operation(operation)
 
@@ -51,7 +53,9 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
             )
             if existing is not None:
                 if existing != operation:
-                    raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_IDEMPOTENCY_CONFLICT")
+                    raise SqliteRecoveryOperationStoreError(
+                        "RECOVERY_OPERATION_IDEMPOTENCY_CONFLICT"
+                    )
                 if not outer_transaction:
                     self._connection.execute("COMMIT")
                 return existing
@@ -66,9 +70,13 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                 process_instance_id=process_instance_id,
                 payload=payload,
             )
-            planned = self.load_operation(run_id=operation.run_id, operation_id=operation.operation_id)
+            planned = self.load_operation(
+                run_id=operation.run_id, operation_id=operation.operation_id
+            )
             if planned is None:
-                raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_LOAD_FAILED")
+                raise SqliteRecoveryOperationStoreError(
+                    "RECOVERY_OPERATION_LOAD_FAILED"
+                )
             if not outer_transaction:
                 self._connection.execute("COMMIT")
             return planned
@@ -79,11 +87,15 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         except sqlite3.IntegrityError as exc:
             if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
-            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_PERSISTENCE_CONFLICT") from exc
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_PERSISTENCE_CONFLICT"
+            ) from exc
         except sqlite3.Error as exc:
             if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
-            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_PERSISTENCE_FAILED") from exc
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_PERSISTENCE_FAILED"
+            ) from exc
 
     def record_operation_phase_transition(
         self,
@@ -192,7 +204,9 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
             )
             loaded = self.load_operation(run_id=run_id, operation_id=operation_id)
             if loaded is None:
-                raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_LOAD_FAILED")
+                raise SqliteRecoveryOperationStoreError(
+                    "RECOVERY_OPERATION_LOAD_FAILED"
+                )
             if not outer_transaction:
                 self._connection.execute("COMMIT")
             return loaded
@@ -203,11 +217,137 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         except sqlite3.IntegrityError as exc:
             if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
-            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_PERSISTENCE_CONFLICT") from exc
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_PERSISTENCE_CONFLICT"
+            ) from exc
         except sqlite3.Error as exc:
             if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
-            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_PERSISTENCE_FAILED") from exc
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_PERSISTENCE_FAILED"
+            ) from exc
+
+    def record_staging_failure(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        expected_phase: RecoveryOperationPhase,
+        expected_failure_count: int,
+        next_phase: RecoveryOperationPhase,
+        error_code: str,
+        process_instance_id: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> RecoveryOperation | None:
+        _validate_process_instance_id(process_instance_id)
+        normalized_error_code = error_code.strip()
+        if expected_failure_count < 0:
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_REQUIRES_NONNEGATIVE_FAILURE_COUNT"
+            )
+        if not normalized_error_code:
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_REQUIRES_ERROR_CODE"
+            )
+        if expected_phase not in PRE_COMMIT_LEASE_REBIND_PHASES:
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_STAGING_FAILURE_PHASE_UNSUPPORTED"
+            )
+        if next_phase not in {expected_phase, RecoveryOperationPhase.SKIPPED}:
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_STAGING_FAILURE_TRANSITION_UNSUPPORTED"
+            )
+
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            operation = self.load_operation(run_id=run_id, operation_id=operation_id)
+            if (
+                operation is None
+                or operation.phase is not expected_phase
+                or operation.staging_failure_count != expected_failure_count
+            ):
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+
+            failure_count = expected_failure_count + 1
+            updated = replace(
+                operation,
+                phase=next_phase,
+                last_error_code=normalized_error_code,
+                staging_failure_count=failure_count,
+            )
+            validate_recovery_operation(updated)
+            self._require_active_matching_lease(updated)
+            cursor = self._connection.execute(
+                """
+                UPDATE recovery_operations
+                SET
+                    phase = ?,
+                    last_error_code = ?,
+                    staging_failure_count = ?,
+                    updated_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE run_id = ?
+                    AND operation_id = ?
+                    AND phase = ?
+                    AND staging_failure_count = ?
+                """,
+                (
+                    next_phase.value,
+                    normalized_error_code,
+                    failure_count,
+                    run_id,
+                    operation_id,
+                    expected_phase.value,
+                    expected_failure_count,
+                ),
+            )
+            if cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+
+            event_payload = {
+                **({} if payload is None else payload),
+                "attempt_number": failure_count,
+                "error_code": normalized_error_code,
+                "event_kind": "STAGING_ATTEMPT_FAILED",
+                "retry_scheduled": next_phase is expected_phase,
+            }
+            self._append_event(
+                run_id=run_id,
+                operation_id=operation_id,
+                from_phase=expected_phase,
+                to_phase=next_phase,
+                process_instance_id=process_instance_id,
+                payload=event_payload,
+            )
+            loaded = self.load_operation(run_id=run_id, operation_id=operation_id)
+            if loaded is None:
+                raise SqliteRecoveryOperationStoreError(
+                    "RECOVERY_OPERATION_LOAD_FAILED"
+                )
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return loaded
+        except SqliteRecoveryOperationStoreError:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        except sqlite3.IntegrityError as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_PERSISTENCE_CONFLICT"
+            ) from exc
+        except sqlite3.Error as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_PERSISTENCE_FAILED"
+            ) from exc
 
     def record_operation_lease_rebound(
         self,
@@ -303,7 +443,9 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
             )
             loaded = self.load_operation(run_id=run_id, operation_id=operation_id)
             if loaded is None:
-                raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_LOAD_FAILED")
+                raise SqliteRecoveryOperationStoreError(
+                    "RECOVERY_OPERATION_LOAD_FAILED"
+                )
             if not outer_transaction:
                 self._connection.execute("COMMIT")
             return loaded
@@ -314,11 +456,15 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         except sqlite3.IntegrityError as exc:
             if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
-            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_PERSISTENCE_CONFLICT") from exc
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_PERSISTENCE_CONFLICT"
+            ) from exc
         except sqlite3.Error as exc:
             if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
-            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_PERSISTENCE_FAILED") from exc
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_PERSISTENCE_FAILED"
+            ) from exc
 
     def record_commit_intent_refreshed(
         self,
@@ -344,7 +490,10 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
             if not outer_transaction:
                 self._connection.execute("BEGIN IMMEDIATE")
             operation = self.load_operation(run_id=run_id, operation_id=operation_id)
-            if operation is None or operation.phase is not RecoveryOperationPhase.COMMIT_INTENT_RECORDED:
+            if (
+                operation is None
+                or operation.phase is not RecoveryOperationPhase.COMMIT_INTENT_RECORDED
+            ):
                 if not outer_transaction:
                     self._connection.execute("ROLLBACK")
                 return None
@@ -417,7 +566,9 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
             )
             loaded = self.load_operation(run_id=run_id, operation_id=operation_id)
             if loaded is None:
-                raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_LOAD_FAILED")
+                raise SqliteRecoveryOperationStoreError(
+                    "RECOVERY_OPERATION_LOAD_FAILED"
+                )
             if not outer_transaction:
                 self._connection.execute("COMMIT")
             return loaded
@@ -428,11 +579,15 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         except sqlite3.IntegrityError as exc:
             if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
-            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_PERSISTENCE_CONFLICT") from exc
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_PERSISTENCE_CONFLICT"
+            ) from exc
         except sqlite3.Error as exc:
             if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
-            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_PERSISTENCE_FAILED") from exc
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_PERSISTENCE_FAILED"
+            ) from exc
 
     def record_old_target_preserved_commit_intent_refreshed(
         self,
@@ -458,7 +613,10 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
             if not outer_transaction:
                 self._connection.execute("BEGIN IMMEDIATE")
             operation = self.load_operation(run_id=run_id, operation_id=operation_id)
-            if operation is None or operation.phase is not RecoveryOperationPhase.OLD_TARGET_PRESERVED:
+            if (
+                operation is None
+                or operation.phase is not RecoveryOperationPhase.OLD_TARGET_PRESERVED
+            ):
                 if not outer_transaction:
                     self._connection.execute("ROLLBACK")
                 return None
@@ -531,7 +689,9 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
             )
             loaded = self.load_operation(run_id=run_id, operation_id=operation_id)
             if loaded is None:
-                raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_LOAD_FAILED")
+                raise SqliteRecoveryOperationStoreError(
+                    "RECOVERY_OPERATION_LOAD_FAILED"
+                )
             if not outer_transaction:
                 self._connection.execute("COMMIT")
             return loaded
@@ -542,13 +702,19 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         except sqlite3.IntegrityError as exc:
             if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
-            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_PERSISTENCE_CONFLICT") from exc
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_PERSISTENCE_CONFLICT"
+            ) from exc
         except sqlite3.Error as exc:
             if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
-            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_PERSISTENCE_FAILED") from exc
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_PERSISTENCE_FAILED"
+            ) from exc
 
-    def load_operation(self, *, run_id: str, operation_id: str) -> RecoveryOperation | None:
+    def load_operation(
+        self, *, run_id: str, operation_id: str
+    ) -> RecoveryOperation | None:
         row = self._connection.execute(
             f"""
             SELECT
@@ -570,7 +736,9 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         limit: int,
     ) -> tuple[RecoveryOperation, ...]:
         if limit < 1:
-            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_REQUIRES_POSITIVE_LIMIT")
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_REQUIRES_POSITIVE_LIMIT"
+            )
         rows = self._connection.execute(
             f"""
             SELECT
@@ -593,7 +761,9 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         limit: int,
     ) -> tuple[RecoveryOperation, ...]:
         if limit < 1:
-            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_REQUIRES_POSITIVE_LIMIT")
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_REQUIRES_POSITIVE_LIMIT"
+            )
         rows = self._connection.execute(
             f"""
             SELECT
@@ -616,7 +786,9 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         limit: int,
     ) -> tuple[RecoveryOperation, ...]:
         if limit < 1:
-            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_REQUIRES_POSITIVE_LIMIT")
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_REQUIRES_POSITIVE_LIMIT"
+            )
         terminal_values = tuple(phase.value for phase in TERMINAL_PHASES)
         placeholders = ", ".join("?" for _ in terminal_values)
         rows = self._connection.execute(
@@ -642,7 +814,9 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         limit: int,
     ) -> tuple[RecoveryOperation, ...]:
         if limit < 1:
-            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_REQUIRES_POSITIVE_LIMIT")
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_REQUIRES_POSITIVE_LIMIT"
+            )
         exclusion = "" if exclude_operation_id is None else "AND operation_id <> ?"
         parameters: tuple[object, ...] = (
             (run_id, limit)
@@ -703,9 +877,13 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
     ) -> RecoveryOperation:
         if next_phase is RecoveryOperationPhase.COMMIT_INTENT_RECORDED:
             if intent_segment_id is None or intent_ordinal is None:
-                raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_REQUIRES_INTENT_SEGMENT")
+                raise SqliteRecoveryOperationStoreError(
+                    "RECOVERY_OPERATION_REQUIRES_INTENT_SEGMENT"
+                )
             if catalog_handoff_id is not None:
-                raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_UNEXPECTED_CATALOG_HANDOFF")
+                raise SqliteRecoveryOperationStoreError(
+                    "RECOVERY_OPERATION_UNEXPECTED_CATALOG_HANDOFF"
+                )
             updated = replace(
                 operation,
                 phase=next_phase,
@@ -714,9 +892,13 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
             )
         elif next_phase is RecoveryOperationPhase.CATALOG_RECORDED:
             if intent_segment_id is not None or intent_ordinal is not None:
-                raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_UNEXPECTED_INTENT_SEGMENT")
+                raise SqliteRecoveryOperationStoreError(
+                    "RECOVERY_OPERATION_UNEXPECTED_INTENT_SEGMENT"
+                )
             if catalog_handoff_id is None or not catalog_handoff_id.strip():
-                raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_REQUIRES_CATALOG_HANDOFF")
+                raise SqliteRecoveryOperationStoreError(
+                    "RECOVERY_OPERATION_REQUIRES_CATALOG_HANDOFF"
+                )
             updated = replace(
                 operation,
                 phase=next_phase,
@@ -724,9 +906,13 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
             )
         else:
             if intent_segment_id is not None or intent_ordinal is not None:
-                raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_UNEXPECTED_INTENT_SEGMENT")
+                raise SqliteRecoveryOperationStoreError(
+                    "RECOVERY_OPERATION_UNEXPECTED_INTENT_SEGMENT"
+                )
             if catalog_handoff_id is not None:
-                raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_UNEXPECTED_CATALOG_HANDOFF")
+                raise SqliteRecoveryOperationStoreError(
+                    "RECOVERY_OPERATION_UNEXPECTED_CATALOG_HANDOFF"
+                )
             updated = replace(operation, phase=next_phase)
         updated = _apply_operation_metadata(updated, operation_metadata)
         validate_recovery_operation(updated)
@@ -780,7 +966,9 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
             (operation.intent_segment_id,),
         ).fetchone()
         if row is None:
-            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_INTENT_SEGMENT_MISMATCH")
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_INTENT_SEGMENT_MISMATCH"
+            )
         if (
             str(row[0]) != operation.run_id
             or str(row[1]) != operation.run_target_id
@@ -794,7 +982,9 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
             or str(row[9]) != "DURABLE"
             or str(row[10]) != "DURABLE"
         ):
-            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_INTENT_SEGMENT_MISMATCH")
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_INTENT_SEGMENT_MISMATCH"
+            )
 
     def _insert_operation(self, operation: RecoveryOperation) -> None:
         self._connection.execute(
@@ -919,9 +1109,12 @@ RECOVERY_OPERATION_COLUMN_NAMES = (
     "catalog_handoff_id",
     "last_error_code",
     "planned_bytes",
+    "staging_failure_count",
 )
 RECOVERY_OPERATION_COLUMNS = ", ".join(RECOVERY_OPERATION_COLUMN_NAMES)
-RECOVERY_OPERATION_PLACEHOLDERS = ", ".join("?" for _ in RECOVERY_OPERATION_COLUMN_NAMES)
+RECOVERY_OPERATION_PLACEHOLDERS = ", ".join(
+    "?" for _ in RECOVERY_OPERATION_COLUMN_NAMES
+)
 
 
 def _operation_values(operation: RecoveryOperation) -> tuple[object, ...]:
@@ -971,6 +1164,7 @@ def _operation_values(operation: RecoveryOperation) -> tuple[object, ...]:
         operation.catalog_handoff_id,
         operation.last_error_code,
         operation.planned_bytes,
+        operation.staging_failure_count,
     )
 
 
@@ -1021,6 +1215,7 @@ def _operation_from_row(row: sqlite3.Row | tuple[Any, ...]) -> RecoveryOperation
         catalog_handoff_id=None if row[42] is None else str(row[42]),
         last_error_code=None if row[43] is None else str(row[43]),
         planned_bytes=int(row[44]),
+        staging_failure_count=int(row[45]),
     )
 
 
@@ -1082,7 +1277,9 @@ def _apply_operation_metadata(
 
 def _validate_process_instance_id(process_instance_id: str) -> None:
     if not process_instance_id.strip():
-        raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_REQUIRES_PROCESS_INSTANCE")
+        raise SqliteRecoveryOperationStoreError(
+            "RECOVERY_OPERATION_REQUIRES_PROCESS_INSTANCE"
+        )
 
 
 def _event_hash(

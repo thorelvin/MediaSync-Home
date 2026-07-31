@@ -271,6 +271,11 @@ def recovery_migration_plan() -> SqliteMigrationPlan:
                 name="recovery_source_file_preconditions",
                 statements=RECOVERY_SOURCE_FILE_PRECONDITIONS,
             ),
+            SqliteMigration(
+                version=9,
+                name="recovery_staging_failure_count",
+                statements=RECOVERY_STAGING_FAILURE_COUNT,
+            ),
         ),
     )
 
@@ -294,7 +299,9 @@ def validate_migration_plan(plan: SqliteMigrationPlan) -> None:
         expected_version += 1
 
 
-def apply_sqlite_migrations(connection: sqlite3.Connection, plan: SqliteMigrationPlan) -> None:
+def apply_sqlite_migrations(
+    connection: sqlite3.Connection, plan: SqliteMigrationPlan
+) -> None:
     validate_migration_plan(plan)
     _ensure_migration_metadata(connection, plan)
     applied_versions = _verified_applied_versions(connection, plan)
@@ -441,7 +448,9 @@ def _ensure_migration_metadata(
         "INSERT OR IGNORE INTO store_identity (singleton, store) VALUES (1, ?)",
         (store.value,),
     )
-    row = connection.execute("SELECT store FROM store_identity WHERE singleton = 1").fetchone()
+    row = connection.execute(
+        "SELECT store FROM store_identity WHERE singleton = 1"
+    ).fetchone()
     if row is None or row[0] != store.value:
         raise SqliteMigrationViolation("MIGRATION_STORE_IDENTITY_MISMATCH")
     connection.commit()
@@ -3553,5 +3562,13 @@ RECOVERY_SOURCE_FILE_PRECONDITIONS = (
     """
     ALTER TABLE recovery_operations
         ADD COLUMN source_precondition_json TEXT
+    """,
+)
+
+RECOVERY_STAGING_FAILURE_COUNT = (
+    """
+    ALTER TABLE recovery_operations
+        ADD COLUMN staging_failure_count INTEGER NOT NULL DEFAULT 0
+            CHECK (staging_failure_count >= 0)
     """,
 )

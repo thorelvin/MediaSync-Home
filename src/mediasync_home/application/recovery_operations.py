@@ -82,6 +82,7 @@ class RecoveryOperation:
     final_durability_state: str | None = None
     catalog_handoff_id: str | None = None
     last_error_code: str | None = None
+    staging_failure_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -180,20 +181,30 @@ class RecoveryOperationStore(Protocol):
         payload: Mapping[str, object] | None = None,
     ) -> RecoveryOperation | None: ...
 
-    def load_operation(self, *, run_id: str, operation_id: str) -> RecoveryOperation | None: ...
+    def load_operation(
+        self, *, run_id: str, operation_id: str
+    ) -> RecoveryOperation | None: ...
 
 
-SUCCESS_TRANSITIONS: Mapping[RecoveryOperationPhase, tuple[RecoveryOperationPhase, ...]] = {
+SUCCESS_TRANSITIONS: Mapping[
+    RecoveryOperationPhase, tuple[RecoveryOperationPhase, ...]
+] = {
     RecoveryOperationPhase.PLANNED: (RecoveryOperationPhase.SOURCE_VALIDATED,),
-    RecoveryOperationPhase.SOURCE_VALIDATED: (RecoveryOperationPhase.SOURCE_STABILITY_BOUND,),
+    RecoveryOperationPhase.SOURCE_VALIDATED: (
+        RecoveryOperationPhase.SOURCE_STABILITY_BOUND,
+    ),
     RecoveryOperationPhase.SOURCE_STABILITY_BOUND: (
         RecoveryOperationPhase.TARGET_PRECONDITION_VALIDATED,
     ),
-    RecoveryOperationPhase.TARGET_PRECONDITION_VALIDATED: (RecoveryOperationPhase.STAGING_ALLOCATED,),
+    RecoveryOperationPhase.TARGET_PRECONDITION_VALIDATED: (
+        RecoveryOperationPhase.STAGING_ALLOCATED,
+    ),
     RecoveryOperationPhase.STAGING_ALLOCATED: (RecoveryOperationPhase.TRANSFERRED,),
     RecoveryOperationPhase.TRANSFERRED: (RecoveryOperationPhase.STAGING_DURABLE,),
     RecoveryOperationPhase.STAGING_DURABLE: (RecoveryOperationPhase.STAGING_VERIFIED,),
-    RecoveryOperationPhase.STAGING_VERIFIED: (RecoveryOperationPhase.COMMIT_INTENT_RECORDED,),
+    RecoveryOperationPhase.STAGING_VERIFIED: (
+        RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
+    ),
     RecoveryOperationPhase.COMMIT_INTENT_RECORDED: (
         RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
     ),
@@ -201,7 +212,9 @@ SUCCESS_TRANSITIONS: Mapping[RecoveryOperationPhase, tuple[RecoveryOperationPhas
         RecoveryOperationPhase.OLD_TARGET_PRESERVED,
         RecoveryOperationPhase.FILESYSTEM_APPLIED,
     ),
-    RecoveryOperationPhase.OLD_TARGET_PRESERVED: (RecoveryOperationPhase.FILESYSTEM_APPLIED,),
+    RecoveryOperationPhase.OLD_TARGET_PRESERVED: (
+        RecoveryOperationPhase.FILESYSTEM_APPLIED,
+    ),
     RecoveryOperationPhase.FILESYSTEM_APPLIED: (RecoveryOperationPhase.FINAL_DURABLE,),
     RecoveryOperationPhase.FINAL_DURABLE: (RecoveryOperationPhase.FINAL_VERIFIED,),
     RecoveryOperationPhase.FINAL_VERIFIED: (RecoveryOperationPhase.CATALOG_RECORDED,),
@@ -303,15 +316,27 @@ def validate_recovery_operation(operation: RecoveryOperation) -> None:
     ):
         raise RecoveryOperationViolation("RECOVERY_OPERATION_REQUIRES_POSITIVE_NUMBERS")
     if operation.plan_sequence_no < 0:
-        raise RecoveryOperationViolation("RECOVERY_OPERATION_REQUIRES_NONNEGATIVE_PLAN_SEQUENCE")
+        raise RecoveryOperationViolation(
+            "RECOVERY_OPERATION_REQUIRES_NONNEGATIVE_PLAN_SEQUENCE"
+        )
     if operation.planned_bytes < 0:
-        raise RecoveryOperationViolation("RECOVERY_OPERATION_REQUIRES_NONNEGATIVE_PLANNED_BYTES")
+        raise RecoveryOperationViolation(
+            "RECOVERY_OPERATION_REQUIRES_NONNEGATIVE_PLANNED_BYTES"
+        )
+    if operation.staging_failure_count < 0:
+        raise RecoveryOperationViolation(
+            "RECOVERY_OPERATION_REQUIRES_NONNEGATIVE_FAILURE_COUNT"
+        )
     if not _valid_relative_path(operation.final_relative_path):
-        raise RecoveryOperationViolation("RECOVERY_OPERATION_REQUIRES_RELATIVE_FINAL_PATH")
+        raise RecoveryOperationViolation(
+            "RECOVERY_OPERATION_REQUIRES_RELATIVE_FINAL_PATH"
+        )
     if operation.source_relative_path is not None and not _valid_relative_path(
         operation.source_relative_path
     ):
-        raise RecoveryOperationViolation("RECOVERY_OPERATION_REQUIRES_RELATIVE_SOURCE_PATH")
+        raise RecoveryOperationViolation(
+            "RECOVERY_OPERATION_REQUIRES_RELATIVE_SOURCE_PATH"
+        )
     if operation.source_precondition_json is not None:
         try:
             source_precondition = SourceFilePrecondition.from_json(
@@ -323,18 +348,34 @@ def validate_recovery_operation(operation: RecoveryOperation) -> None:
             raise RecoveryOperationViolation(
                 "RECOVERY_OPERATION_SOURCE_PRECONDITION_MISMATCH"
             )
-    _validate_hash("RECOVERY_OPERATION_REQUIRES_SOURCE_GUARD_HASH", operation.source_guard_evidence_hash)
-    _validate_hash("RECOVERY_OPERATION_REQUIRES_SOURCE_PATH_CHAIN_HASH", operation.source_path_chain_hash)
-    _validate_hash("RECOVERY_OPERATION_REQUIRES_SOURCE_CASE_CONTEXT_HASH", operation.source_case_context_hash)
+    _validate_hash(
+        "RECOVERY_OPERATION_REQUIRES_SOURCE_GUARD_HASH",
+        operation.source_guard_evidence_hash,
+    )
+    _validate_hash(
+        "RECOVERY_OPERATION_REQUIRES_SOURCE_PATH_CHAIN_HASH",
+        operation.source_path_chain_hash,
+    )
+    _validate_hash(
+        "RECOVERY_OPERATION_REQUIRES_SOURCE_CASE_CONTEXT_HASH",
+        operation.source_case_context_hash,
+    )
     _validate_hash(
         "RECOVERY_OPERATION_REQUIRES_TARGET_PATH_CHAIN_HASH",
         operation.expected_target_path_chain_hash,
     )
     if operation.phase in PHASES_REQUIRING_INTENT:
-        if operation.intent_segment_id is None or not operation.intent_segment_id.strip():
-            raise RecoveryOperationViolation("RECOVERY_OPERATION_REQUIRES_INTENT_SEGMENT")
+        if (
+            operation.intent_segment_id is None
+            or not operation.intent_segment_id.strip()
+        ):
+            raise RecoveryOperationViolation(
+                "RECOVERY_OPERATION_REQUIRES_INTENT_SEGMENT"
+            )
         if operation.intent_ordinal is None or operation.intent_ordinal < 0:
-            raise RecoveryOperationViolation("RECOVERY_OPERATION_REQUIRES_INTENT_ORDINAL")
+            raise RecoveryOperationViolation(
+                "RECOVERY_OPERATION_REQUIRES_INTENT_ORDINAL"
+            )
     if operation.phase in PHASES_REQUIRING_CATALOG_HANDOFF and (
         operation.catalog_handoff_id is None or not operation.catalog_handoff_id.strip()
     ):
@@ -346,7 +387,9 @@ def validate_recovery_phase_transition(
     to_phase: RecoveryOperationPhase,
 ) -> None:
     if from_phase in TERMINAL_PHASES:
-        raise RecoveryOperationViolation("RECOVERY_OPERATION_TERMINAL_PHASE_CANNOT_TRANSITION")
+        raise RecoveryOperationViolation(
+            "RECOVERY_OPERATION_TERMINAL_PHASE_CANNOT_TRANSITION"
+        )
     if to_phase in TERMINAL_PHASES:
         return
     if to_phase not in SUCCESS_TRANSITIONS.get(from_phase, ()):

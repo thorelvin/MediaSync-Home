@@ -3,17 +3,22 @@ from __future__ import annotations
 import json
 from typing import Protocol
 
-from mediasync_home.application.recovery_operations import RecoveryOperation, RecoveryOperationPhase
+from mediasync_home.application.recovery_operations import (
+    RecoveryOperation,
+    RecoveryOperationPhase,
+)
 from mediasync_home.application.runs import (
     RunState,
     RunStore,
     RunTargetCompletionOutcome,
     RunTargetState,
+    RunWarningCompletionStore,
     StartedRun,
     StartedRunTarget,
     complete_run_target_cancelled,
     complete_run_target_recovery_required,
     complete_run_target_success,
+    complete_run_target_with_warnings,
 )
 from mediasync_home.domain.capabilities import MutationPermit
 
@@ -105,7 +110,9 @@ def complete_run_target_after_catalog_handoffs(
             next_action="Reconcile recovery operations before completing target work.",
         )
 
-    completed_bytes = sum(_operation_byte_count(operation) for operation in cataloged_operations)
+    completed_bytes = sum(
+        _operation_byte_count(operation) for operation in cataloged_operations
+    )
     return complete_run_target_success(
         run_id=permit.run_id,
         run_target_id=permit.run_target_id,
@@ -118,7 +125,7 @@ def complete_run_target_after_catalog_handoffs(
 def complete_run_target_after_terminal_recovery(
     *,
     permit: MutationPermit,
-    runs: RunStore,
+    runs: RunWarningCompletionStore,
     recovery_operations: RunTargetCompletionOperationStore,
 ) -> RunTargetCompletionOutcome:
     run = runs.load_started_run(permit.run_id)
@@ -195,6 +202,67 @@ def complete_run_target_after_terminal_recovery(
             ),
         )
 
+    skipped_operations = _terminal_operations(
+        permit=permit,
+        target=target,
+        recovery_operations=recovery_operations,
+        phase=RecoveryOperationPhase.SKIPPED,
+    )
+    mismatch = _terminal_operation_mismatch(
+        operations=skipped_operations,
+        permit=permit,
+        phase=RecoveryOperationPhase.SKIPPED,
+    )
+    if mismatch is not None:
+        return _failed(
+            permit=permit,
+            run=run,
+            target=target,
+            validation_code="RUN_TARGET_TERMINAL_RECOVERY_OPERATION_PERMIT_MISMATCH",
+            next_action="Reconcile skipped recovery operations before completing target work.",
+        )
+    cataloged_operations = _cataloged_operations(
+        permit=permit,
+        target=target,
+        recovery_operations=recovery_operations,
+    )
+    catalog_mismatch = next(
+        (
+            operation
+            for operation in cataloged_operations
+            if not _operation_matches_permit(operation=operation, permit=permit)
+        ),
+        None,
+    )
+    if catalog_mismatch is not None:
+        return _failed(
+            permit=permit,
+            run=run,
+            target=target,
+            validation_code="RUN_TARGET_COMPLETION_OPERATION_PERMIT_MISMATCH",
+            next_action="Reconcile completed recovery operations before completing target work.",
+        )
+    if skipped_operations and (
+        len(skipped_operations) + len(cataloged_operations) >= target.planned_operations
+    ):
+        return complete_run_target_with_warnings(
+            run_id=permit.run_id,
+            run_target_id=permit.run_target_id,
+            runs=runs,
+            completed_operations=len(cataloged_operations),
+            completed_bytes=sum(
+                _operation_byte_count(operation) for operation in cataloged_operations
+            ),
+            skipped_operations=len(skipped_operations),
+            skipped_bytes=sum(
+                operation.planned_bytes for operation in skipped_operations
+            ),
+            last_error_code=_first_error_code(
+                skipped_operations,
+                fallback="RUN_TARGET_STAGING_ATTEMPTS_EXHAUSTED",
+            ),
+        )
+
     cancelled_operations = _terminal_operations(
         permit=permit,
         target=target,
@@ -227,11 +295,6 @@ def complete_run_target_after_terminal_recovery(
             validation_code="RUN_TARGET_TERMINAL_RECOVERY_CANCEL_REASON_UNSUPPORTED",
             next_action="Review the cancelled recovery operations before terminalizing the target.",
         )
-    cataloged_operations = _cataloged_operations(
-        permit=permit,
-        target=target,
-        recovery_operations=recovery_operations,
-    )
     if restored_old_target_cancellations and (
         len(restored_old_target_cancellations) + len(cataloged_operations)
         >= target.planned_operations
@@ -272,7 +335,9 @@ def _cataloged_operations(
         phase=RecoveryOperationPhase.CLEANED,
         limit=target.planned_operations + 1,
     )
-    return tuple(sorted((*cataloged, *cleaned), key=lambda operation: operation.operation_id))
+    return tuple(
+        sorted((*cataloged, *cleaned), key=lambda operation: operation.operation_id)
+    )
 
 
 def _terminal_operations(
@@ -292,7 +357,9 @@ def _terminal_operations(
     )
 
 
-def _target_permit_mismatch(*, target: StartedRunTarget, permit: MutationPermit) -> bool:
+def _target_permit_mismatch(
+    *, target: StartedRunTarget, permit: MutationPermit
+) -> bool:
     return (
         target.endpoint_id != permit.endpoint_id
         or target.endpoint_revision_id != permit.endpoint_revision_id
@@ -300,7 +367,8 @@ def _target_permit_mismatch(*, target: StartedRunTarget, permit: MutationPermit)
         or target.last_lease_id != permit.lease_id
         or target.last_ownership_epoch != permit.ownership_epoch
         or target.last_fencing_token != permit.fencing_token
-        or target.required_owner_installation_id not in (None, permit.owner_installation_id)
+        or target.required_owner_installation_id
+        not in (None, permit.owner_installation_id)
         or target.required_ownership_epoch not in (None, permit.ownership_epoch)
     )
 
@@ -325,9 +393,12 @@ def _terminal_operation_mismatch(
     )
 
 
-def _operation_matches_permit(*, operation: RecoveryOperation, permit: MutationPermit) -> bool:
+def _operation_matches_permit(
+    *, operation: RecoveryOperation, permit: MutationPermit
+) -> bool:
     return (
-        operation.phase in {RecoveryOperationPhase.CATALOG_RECORDED, RecoveryOperationPhase.CLEANED}
+        operation.phase
+        in {RecoveryOperationPhase.CATALOG_RECORDED, RecoveryOperationPhase.CLEANED}
         and operation.run_id == permit.run_id
         and operation.run_target_id == permit.run_target_id
         and operation.target_endpoint_id == permit.endpoint_id
@@ -389,7 +460,10 @@ def _operation_byte_count(operation: RecoveryOperation) -> int:
 
 
 def _target_by_id(run: StartedRun, run_target_id: str) -> StartedRunTarget | None:
-    return next((target for target in run.targets if target.run_target_id == run_target_id), None)
+    return next(
+        (target for target in run.targets if target.run_target_id == run_target_id),
+        None,
+    )
 
 
 def _failed(

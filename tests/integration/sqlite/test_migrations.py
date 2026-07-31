@@ -25,10 +25,14 @@ FILTER_RULES_JSON = '{"preset":"ALL_USER_FILES","schema_version":1}'
 FILTER_RULES_HASH = "5b551f66adfe79a9e025a369c44e76ece00928588f965a93fe6cdcfbdb1e4a9b"
 
 
-def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path: Path) -> None:
+def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
         plan = catalog_migration_plan()
 
         apply_sqlite_migrations(connection, plan)
@@ -70,9 +74,9 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "runs",
             "run_targets",
             "run_stop_requests",
-                "backup_analysis_requests",
-                "current_read_hash_evidence",
-                "schema_migrations",
+            "backup_analysis_requests",
+            "current_read_hash_evidence",
+            "schema_migrations",
             "store_identity",
         }
         assert _row_count(connection, "schema_migrations") == 37
@@ -270,82 +274,143 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             ("plan_id",),
             ("plan_id",),
         )
-        assert _index_is_unique(connection, "file_entries", ("snapshot_id", "comparison_key")) is False
-        assert _index_is_unique(
-            connection,
-            "file_entries",
-            ("snapshot_id", "comparison_key", "relative_path", "id"),
-        ) is False
-        assert _index_is_unique(
-            connection,
-            "directory_coverage",
-            ("snapshot_id", "comparison_key", "relative_path"),
-        ) is False
-        assert _index_is_unique(
-            connection,
-            "directory_coverage",
-            ("snapshot_id", "coverage_state", "comparison_key", "relative_path"),
-        ) is False
-        assert _index_is_unique(
-            connection,
-            "snapshot_issues",
-            ("snapshot_id", "relative_path", "issue_type", "id"),
-        ) is False
-        assert _index_is_unique(
-            connection,
-            "snapshot_issues",
-            ("snapshot_id", "blocks_destructive_actions", "relative_path", "issue_type", "id"),
-        ) is False
-        assert _index_is_unique(
-            connection,
-            "plan_operation_seal_details",
-            ("plan_id", "execution_phase", "stable_order_key", "operation_id"),
-        ) is False
-        assert _index_is_unique(
-            connection,
-            "plan_endpoints",
-            ("plan_id", "role", "target_ordinal", "endpoint_id"),
-        ) is False
-        assert _index_is_unique(
-            connection,
-            "case_collision_groups",
-            ("snapshot_id", "comparison_key"),
-        ) is True
+        assert (
+            _index_is_unique(
+                connection, "file_entries", ("snapshot_id", "comparison_key")
+            )
+            is False
+        )
+        assert (
+            _index_is_unique(
+                connection,
+                "file_entries",
+                ("snapshot_id", "comparison_key", "relative_path", "id"),
+            )
+            is False
+        )
+        assert (
+            _index_is_unique(
+                connection,
+                "directory_coverage",
+                ("snapshot_id", "comparison_key", "relative_path"),
+            )
+            is False
+        )
+        assert (
+            _index_is_unique(
+                connection,
+                "directory_coverage",
+                ("snapshot_id", "coverage_state", "comparison_key", "relative_path"),
+            )
+            is False
+        )
+        assert (
+            _index_is_unique(
+                connection,
+                "snapshot_issues",
+                ("snapshot_id", "relative_path", "issue_type", "id"),
+            )
+            is False
+        )
+        assert (
+            _index_is_unique(
+                connection,
+                "snapshot_issues",
+                (
+                    "snapshot_id",
+                    "blocks_destructive_actions",
+                    "relative_path",
+                    "issue_type",
+                    "id",
+                ),
+            )
+            is False
+        )
+        assert (
+            _index_is_unique(
+                connection,
+                "plan_operation_seal_details",
+                ("plan_id", "execution_phase", "stable_order_key", "operation_id"),
+            )
+            is False
+        )
+        assert (
+            _index_is_unique(
+                connection,
+                "plan_endpoints",
+                ("plan_id", "role", "target_ordinal", "endpoint_id"),
+            )
+            is False
+        )
+        assert (
+            _index_is_unique(
+                connection,
+                "case_collision_groups",
+                ("snapshot_id", "comparison_key"),
+            )
+            is True
+        )
         assert _index_is_unique(connection, "command_receipts", ("state",)) is False
         assert _index_is_unique(connection, "runs", ("state",)) is False
         assert _index_is_unique(connection, "runs", ("started_utc", "id")) is False
-        assert _index_is_unique(connection, "runs", ("job_id", "started_utc", "id")) is False
-        assert _index_is_unique(connection, "outbox_messages", ("state", "next_attempt_utc")) is False
-        assert _index_is_unique(
-            connection,
-            "outbox_messages",
-            ("state", "claim_owner_instance_id", "claim_started_utc", "id"),
-        ) is False
-        assert _index_is_unique(
-            connection,
-            "trigger_occurrences",
-            ("job_id", "received_utc"),
-        ) is False
-        assert _index_is_unique(
-            connection,
-            "schedules",
-            ("job_id", "enabled"),
-        ) is False
-        assert _index_is_unique(
-            connection,
-            "external_resource_state",
-            ("resource_type", "state", "resource_id"),
-        ) is False
-        assert _index_is_unique(
-            connection,
-            "standard_backup_job_endpoint_bindings",
-            ("endpoint_id", "endpoint_revision_id"),
-        ) is False
-        assert _index_is_unique(
-            connection,
-            "final_file_catalog_handoffs",
-            ("run_id", "operation_id"),
-        ) is True
+        assert (
+            _index_is_unique(connection, "runs", ("job_id", "started_utc", "id"))
+            is False
+        )
+        assert (
+            _index_is_unique(
+                connection, "outbox_messages", ("state", "next_attempt_utc")
+            )
+            is False
+        )
+        assert (
+            _index_is_unique(
+                connection,
+                "outbox_messages",
+                ("state", "claim_owner_instance_id", "claim_started_utc", "id"),
+            )
+            is False
+        )
+        assert (
+            _index_is_unique(
+                connection,
+                "trigger_occurrences",
+                ("job_id", "received_utc"),
+            )
+            is False
+        )
+        assert (
+            _index_is_unique(
+                connection,
+                "schedules",
+                ("job_id", "enabled"),
+            )
+            is False
+        )
+        assert (
+            _index_is_unique(
+                connection,
+                "external_resource_state",
+                ("resource_type", "state", "resource_id"),
+            )
+            is False
+        )
+        assert (
+            _index_is_unique(
+                connection,
+                "standard_backup_job_endpoint_bindings",
+                ("endpoint_id", "endpoint_revision_id"),
+            )
+            is False
+        )
+        assert (
+            _index_is_unique(
+                connection,
+                "final_file_catalog_handoffs",
+                ("run_id", "operation_id"),
+            )
+            is True
+        )
         assert _trigger_names(connection) >= {
             "trg_plans_no_update_after_seal",
             "trg_planned_operations_no_insert_after_seal",
@@ -420,10 +485,14 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         }
 
 
-def test_catalog_revision_rows_are_immutable_but_heads_can_advance(tmp_path: Path) -> None:
+def test_catalog_revision_rows_are_immutable_but_heads_can_advance(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
         apply_sqlite_migrations(connection, catalog_migration_plan())
         _insert_immutable_revision_rows(connection)
 
@@ -469,7 +538,9 @@ def test_catalog_revision_rows_are_immutable_but_heads_can_advance(tmp_path: Pat
             connection.execute(
                 "DELETE FROM filter_sets WHERE job_id = 'job-a' AND id = 'filter-a'"
             )
-        with pytest.raises(sqlite3.IntegrityError, match="FILTER_SET_VERSION_IMMUTABLE"):
+        with pytest.raises(
+            sqlite3.IntegrityError, match="FILTER_SET_VERSION_IMMUTABLE"
+        ):
             connection.execute(
                 """
                 UPDATE filter_set_versions
@@ -479,7 +550,9 @@ def test_catalog_revision_rows_are_immutable_but_heads_can_advance(tmp_path: Pat
                     AND version = 1
                 """
             )
-        with pytest.raises(sqlite3.IntegrityError, match="FILTER_SET_VERSION_IMMUTABLE"):
+        with pytest.raises(
+            sqlite3.IntegrityError, match="FILTER_SET_VERSION_IMMUTABLE"
+        ):
             connection.execute(
                 """
                 DELETE FROM filter_set_versions
@@ -529,7 +602,9 @@ def test_catalog_revision_rows_are_immutable_but_heads_can_advance(tmp_path: Pat
             job_id="job-b",
             filter_set_id="filter-without-version",
         )
-        with pytest.raises(sqlite3.IntegrityError, match="FILTER_SET_VERSION_NOT_FOUND"):
+        with pytest.raises(
+            sqlite3.IntegrityError, match="FILTER_SET_VERSION_NOT_FOUND"
+        ):
             connection.execute(
                 """
                 INSERT INTO job_revisions (
@@ -570,7 +645,9 @@ def test_catalog_revision_details_keep_only_registration_status_mutable(
 ) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
         apply_sqlite_migrations(connection, catalog_migration_plan())
         _insert_immutable_revision_rows(connection)
 
@@ -647,7 +724,9 @@ def test_catalog_classification_observation_requires_coherent_status(
 ) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
         apply_sqlite_migrations(connection, catalog_migration_plan())
         connection.execute("INSERT INTO endpoints (id) VALUES ('endpoint-a')")
         connection.execute(
@@ -691,7 +770,9 @@ def test_catalog_classification_observation_requires_coherent_status(
 def test_catalog_migration_preserves_case_collision_entries(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
         apply_sqlite_migrations(connection, catalog_migration_plan())
 
         _insert_catalog_parent_rows(connection)
@@ -732,10 +813,14 @@ def test_catalog_migration_preserves_case_collision_entries(tmp_path: Path) -> N
         assert _row_count(connection, "case_collision_members") == 2
 
 
-def test_catalog_migration_rejects_malformed_snapshot_seal_checksum(tmp_path: Path) -> None:
+def test_catalog_migration_rejects_malformed_snapshot_seal_checksum(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
         apply_sqlite_migrations(connection, catalog_migration_plan())
         _insert_catalog_parent_rows(connection)
 
@@ -756,9 +841,13 @@ def test_catalog_migration_rejects_malformed_snapshot_seal_checksum(tmp_path: Pa
 def test_catalog_migration_enforces_composite_head_foreign_key(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
         apply_sqlite_migrations(connection, catalog_migration_plan())
-        connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')")
+        connection.execute(
+            "INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')"
+        )
 
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
@@ -766,7 +855,9 @@ def test_catalog_migration_enforces_composite_head_foreign_key(tmp_path: Path) -
             )
 
 
-def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(tmp_path: Path) -> None:
+def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "recovery.sqlite"
     with sqlite3.connect(database) as connection:
         apply_sqlite_connection_policy(connection, recovery_writer_policy(database))
@@ -774,7 +865,7 @@ def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(tmp_path
 
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 8
+        assert current_schema_version(connection, plan.store) == 9
         assert _table_names(connection) >= {
             "lease_counters",
             "resource_leases",
@@ -794,8 +885,14 @@ def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(tmp_path
                     VALUES ('missing-epoch', 'intent-a', 'corr-a', 'PREPARED')
                 """
             )
-        assert "trg_recovery_intent_segments_immutable_after_durable" in _trigger_names(connection)
+        assert "trg_recovery_intent_segments_immutable_after_durable" in _trigger_names(
+            connection
+        )
         assert "source_precondition_json" in _column_names(
+            connection,
+            "recovery_operations",
+        )
+        assert "staging_failure_count" in _column_names(
             connection,
             "recovery_operations",
         )
@@ -804,17 +901,23 @@ def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(tmp_path
 def test_migration_runner_rejects_wrong_store_identity(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
         apply_sqlite_migrations(connection, catalog_migration_plan())
 
-        with pytest.raises(SqliteMigrationViolation, match="MIGRATION_STORE_IDENTITY_MISMATCH"):
+        with pytest.raises(
+            SqliteMigrationViolation, match="MIGRATION_STORE_IDENTITY_MISMATCH"
+        ):
             apply_sqlite_migrations(connection, recovery_migration_plan())
 
 
 def test_migration_history_is_immutable_after_recording(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
         apply_sqlite_migrations(connection, catalog_migration_plan())
 
         with pytest.raises(sqlite3.IntegrityError, match="history is immutable"):
@@ -828,7 +931,9 @@ def test_migration_history_is_immutable_after_recording(tmp_path: Path) -> None:
 def test_migration_runner_rejects_changed_historical_sql(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
         plan = catalog_migration_plan()
         apply_sqlite_migrations(connection, plan)
         first = plan.migrations[0]
@@ -850,7 +955,9 @@ def test_migration_runner_rejects_changed_historical_sql(tmp_path: Path) -> None
 def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
         plan = catalog_migration_plan()
         apply_sqlite_migrations(connection, plan)
         connection.execute(
@@ -879,7 +986,9 @@ def test_migration_runner_rejects_legacy_history_gap_without_backfill(
 ) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
         plan = catalog_migration_plan()
         connection.execute(
             """
@@ -933,7 +1042,9 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
 ) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
         plan = catalog_migration_plan()
         apply_sqlite_migrations(connection, plan)
         for trigger_name in (
@@ -942,7 +1053,9 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
             "trg_schema_migrations_immutable_delete",
         ):
             connection.execute(f"DROP TRIGGER {trigger_name}")
-        connection.execute("ALTER TABLE schema_migrations RENAME TO schema_migrations_current")
+        connection.execute(
+            "ALTER TABLE schema_migrations RENAME TO schema_migrations_current"
+        )
         connection.execute(
             """
             CREATE TABLE schema_migrations (
@@ -1016,7 +1129,9 @@ def test_catalog_filter_version_migration_backfills_existing_revisions(
     plan = catalog_migration_plan()
     version_27_plan = replace(plan, migrations=plan.migrations[:27])
     with sqlite3.connect(database) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
         apply_sqlite_migrations(connection, version_27_plan)
         connection.execute(
             "INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')"
@@ -1068,7 +1183,9 @@ def test_catalog_endpoint_generation_migration_backfills_and_enforces_exact_bind
     plan = catalog_migration_plan()
     version_28_plan = replace(plan, migrations=plan.migrations[:28])
     with sqlite3.connect(database) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
         apply_sqlite_migrations(connection, version_28_plan)
         connection.execute("INSERT INTO endpoints (id) VALUES ('endpoint-a')")
         connection.executemany(
@@ -1245,7 +1362,9 @@ def test_catalog_endpoint_generation_migration_backfills_and_enforces_exact_bind
             VALUES ('analysis-b', 'endpoint-a', 'endpoint-rev-b')
             """
         )
-        with pytest.raises(sqlite3.IntegrityError, match="ENDPOINT_GENERATION_MISMATCH"):
+        with pytest.raises(
+            sqlite3.IntegrityError, match="ENDPOINT_GENERATION_MISMATCH"
+        ):
             connection.execute(
                 """
                 INSERT INTO snapshots (
@@ -1285,7 +1404,9 @@ def test_catalog_endpoint_generation_migration_backfills_and_enforces_exact_bind
         connection.execute(
             "INSERT INTO plans (id, analysis_id) VALUES ('plan-b', 'analysis-b')"
         )
-        with pytest.raises(sqlite3.IntegrityError, match="ENDPOINT_GENERATION_MISMATCH"):
+        with pytest.raises(
+            sqlite3.IntegrityError, match="ENDPOINT_GENERATION_MISMATCH"
+        ):
             connection.execute(
                 """
                 INSERT INTO plan_endpoints (
@@ -1322,7 +1443,9 @@ def test_catalog_operation_target_binding_migration_backfills_single_target_plan
     plan = catalog_migration_plan()
     version_32_plan = replace(plan, migrations=plan.migrations[:32])
     with sqlite3.connect(database) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
         apply_sqlite_migrations(connection, version_32_plan)
         _insert_catalog_parent_rows(connection)
         connection.execute(
@@ -1472,8 +1595,12 @@ def _insert_catalog_parent_rows(connection: sqlite3.Connection) -> None:
             VALUES ('endpoint-a', 'endpoint-rev-a')
         """
     )
-    connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')")
-    connection.execute("INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')")
+    connection.execute(
+        "INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')"
+    )
+    connection.execute(
+        "INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')"
+    )
     _insert_filter_version(connection, job_id="job-a", filter_set_id="filter-a")
     connection.execute(
         """
@@ -1528,7 +1655,9 @@ def _insert_immutable_revision_rows(connection: sqlite3.Connection) -> None:
         VALUES ('endpoint-a', 'endpoint-rev-a')
         """
     )
-    connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')")
+    connection.execute(
+        "INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')"
+    )
     connection.executemany(
         """
         INSERT INTO filter_sets (job_id, id, description)
@@ -1688,9 +1817,10 @@ def _foreign_key(
         ordered = sorted(rows, key=lambda row: int(row[1]))
         if str(ordered[0][2]) != parent_table:
             continue
-        if tuple(str(row[3]) for row in ordered) == child_columns and tuple(
-            str(row[4]) for row in ordered
-        ) == parent_columns:
+        if (
+            tuple(str(row[3]) for row in ordered) == child_columns
+            and tuple(str(row[4]) for row in ordered) == parent_columns
+        ):
             return True
     return False
 
@@ -1703,7 +1833,8 @@ def _index_is_unique(
     for index_row in connection.execute(f"PRAGMA index_list({table})"):
         index_name = str(index_row[1])
         index_columns = tuple(
-            str(column_row[2]) for column_row in connection.execute(f"PRAGMA index_info({index_name})")
+            str(column_row[2])
+            for column_row in connection.execute(f"PRAGMA index_info({index_name})")
         )
         if index_columns == columns:
             return bool(index_row[2])

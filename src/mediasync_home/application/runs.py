@@ -233,7 +233,9 @@ class EndpointLeaseAttempt:
 
 
 class EndpointLeaseAuthority(Protocol):
-    def acquire_endpoint_lease(self, request: EndpointLeaseRequest) -> EndpointLeaseAttempt: ...
+    def acquire_endpoint_lease(
+        self, request: EndpointLeaseRequest
+    ) -> EndpointLeaseAttempt: ...
 
 
 @dataclass(frozen=True)
@@ -275,7 +277,9 @@ class RunStore(Protocol):
 
     def load_started_run(self, run_id: str) -> StartedRun | None: ...
 
-    def load_started_run_by_idempotency_key(self, idempotency_key: str) -> StartedRun | None: ...
+    def load_started_run_by_idempotency_key(
+        self, idempotency_key: str
+    ) -> StartedRun | None: ...
 
     def load_active_run_for_job(self, job_id: str) -> StartedRun | None: ...
 
@@ -336,6 +340,20 @@ class RunStore(Protocol):
     ) -> StartedRun | None: ...
 
 
+class RunWarningCompletionStore(RunStore, Protocol):
+    def record_run_target_succeeded_with_warnings(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        completed_operations: int,
+        completed_bytes: int,
+        skipped_operations: int,
+        skipped_bytes: int,
+        last_error_code: str,
+    ) -> StartedRun | None: ...
+
+
 class RunControlStore(Protocol):
     def load_started_run(self, run_id: str) -> StartedRun | None: ...
 
@@ -360,7 +378,10 @@ def parse_start_run_command(
     if not isinstance(plan_id, str) or not plan_id.strip():
         raise RunStartViolation("START_RUN_REQUIRES_PLAN_ID")
     plan_checksum = payload.get("plan_checksum")
-    if not isinstance(plan_checksum, str) or PLAN_CHECKSUM_PATTERN.fullmatch(plan_checksum) is None:
+    if (
+        not isinstance(plan_checksum, str)
+        or PLAN_CHECKSUM_PATTERN.fullmatch(plan_checksum) is None
+    ):
         raise RunStartViolation("START_RUN_REQUIRES_PLAN_CHECKSUM")
     return StartRunCommand(
         request_id=request_id,
@@ -553,7 +574,9 @@ def start_run_from_sealed_plan(
     runs: RunStore,
     id_factory: RunIdFactory,
 ) -> RunStartOutcome:
-    existing = runs.load_started_run_by_idempotency_key(_effective_run_idempotency_key(command))
+    existing = runs.load_started_run_by_idempotency_key(
+        _effective_run_idempotency_key(command)
+    )
     if existing is not None:
         return RunStartOutcome(
             created=False,
@@ -748,7 +771,8 @@ def acquire_run_target_lease(
             run_target_id=run_target_id,
             target=target,
             lease=None,
-            validation_codes=attempt.validation_codes or ("RUN_TARGET_ENDPOINT_LEASE_UNAVAILABLE",),
+            validation_codes=attempt.validation_codes
+            or ("RUN_TARGET_ENDPOINT_LEASE_UNAVAILABLE",),
             next_action=attempt.next_action,
         )
     lease = attempt.lease
@@ -1038,7 +1062,128 @@ def complete_run_target_success(
         run=updated_run,
         target=updated_target,
         validation_codes=(),
-        next_action="Target succeeded; run is complete." if updated_run.state is RunState.COMPLETED else "Target succeeded; remaining targets continue.",
+        next_action="Target succeeded; run is complete."
+        if updated_run.state is RunState.COMPLETED
+        else "Target succeeded; remaining targets continue.",
+    )
+
+
+def complete_run_target_with_warnings(
+    *,
+    run_id: str,
+    run_target_id: str,
+    runs: RunWarningCompletionStore,
+    completed_operations: int,
+    completed_bytes: int,
+    skipped_operations: int,
+    skipped_bytes: int,
+    last_error_code: str,
+) -> RunTargetCompletionOutcome:
+    normalized_error_code = _normalized_error_code(last_error_code)
+    if (
+        completed_operations < 0
+        or completed_bytes < 0
+        or skipped_operations < 1
+        or skipped_bytes < 0
+        or normalized_error_code is None
+    ):
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=None,
+            target=None,
+            validation_codes=("RUN_TARGET_WARNING_COMPLETION_REQUIRES_VALID_COUNTS",),
+            next_action="Retry warning completion with valid completed and skipped counts.",
+        )
+
+    run = runs.load_started_run(run_id)
+    if run is None:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=None,
+            target=None,
+            validation_codes=("RUN_NOT_FOUND",),
+            next_action="Create and execute a run before completing target work.",
+        )
+    if run.state is not RunState.EXECUTING:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=run,
+            target=None,
+            validation_codes=("RUN_NOT_EXECUTING",),
+            next_action="Only executing runs can complete target work.",
+        )
+    target = _target_by_id(run, run_target_id)
+    if target is None or target.state is not RunTargetState.EXECUTING:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=run,
+            target=target,
+            validation_codes=("RUN_TARGET_NOT_EXECUTING",),
+            next_action="Only executing targets can complete with warnings.",
+        )
+    if (
+        completed_operations + skipped_operations != target.planned_operations
+        or completed_bytes + skipped_bytes != target.planned_bytes
+    ):
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=run,
+            target=target,
+            validation_codes=("RUN_TARGET_COMPLETION_COUNTS_MISMATCH",),
+            next_action="Account for every completed or skipped file before finishing the target.",
+        )
+
+    updated_run = runs.record_run_target_succeeded_with_warnings(
+        run_id=run_id,
+        run_target_id=run_target_id,
+        completed_operations=completed_operations,
+        completed_bytes=completed_bytes,
+        skipped_operations=skipped_operations,
+        skipped_bytes=skipped_bytes,
+        last_error_code=normalized_error_code,
+    )
+    if updated_run is None:
+        return RunTargetCompletionOutcome(
+            completed=False,
+            run_completed=False,
+            run_id=run_id,
+            run_target_id=run_target_id,
+            run=None,
+            target=None,
+            validation_codes=("RUN_TARGET_WARNING_COMPLETION_CONFLICT",),
+            next_action="Reload run state before retrying warning completion.",
+        )
+    updated_target = _target_by_id(updated_run, run_target_id)
+    if updated_target is None:
+        raise RunStartViolation("RUN_TARGET_WARNING_COMPLETION_LOAD_FAILED")
+    return RunTargetCompletionOutcome(
+        completed=True,
+        run_completed=updated_run.state is not RunState.EXECUTING,
+        run_id=run_id,
+        run_target_id=run_target_id,
+        run=updated_run,
+        target=updated_target,
+        validation_codes=(),
+        next_action=(
+            "Target completed with skipped files; run is complete with warnings."
+            if updated_run.state is RunState.COMPLETED_WITH_WARNINGS
+            else "Target completed with skipped files; remaining targets continue."
+        ),
     )
 
 
@@ -1152,7 +1297,8 @@ def complete_run_target_cancelled(
         raise RunStartViolation("RUN_TARGET_TERMINAL_RECOVERY_LOAD_FAILED")
     return RunTargetCompletionOutcome(
         completed=True,
-        run_completed=updated_run.state in {RunState.CANCELLED, RunState.PARTIAL_FAILURE},
+        run_completed=updated_run.state
+        in {RunState.CANCELLED, RunState.PARTIAL_FAILURE},
         run_id=run_id,
         run_target_id=run_target_id,
         run=updated_run,
@@ -1238,7 +1384,9 @@ def _normalized_error_code(value: str) -> str | None:
     return normalized
 
 
-def _readiness_for_plan(*, command: StartRunCommand, plan: SealedPlan) -> RunStartReadiness:
+def _readiness_for_plan(
+    *, command: StartRunCommand, plan: SealedPlan
+) -> RunStartReadiness:
     validation_codes: list[str] = []
     checksum_matches = plan.plan_checksum == command.plan_checksum
     checksum_valid = verify_plan_checksum(plan)
@@ -1290,7 +1438,10 @@ def _started_run_from_plan(
         planned_operations=plan.operation_count,
         planned_bytes=plan.planned_bytes,
         trigger_occurrence_id=command.trigger_occurrence_id,
-        targets=tuple(_started_run_target(ids.run_id, endpoint) for endpoint in _target_endpoints(plan)),
+        targets=tuple(
+            _started_run_target(ids.run_id, endpoint)
+            for endpoint in _target_endpoints(plan)
+        ),
         summary={
             "executor_pending": True,
             "scope": "0B_RUN_START_SKELETON",
@@ -1320,7 +1471,10 @@ def _target_endpoints(plan: SealedPlan) -> tuple[PlanEndpoint, ...]:
 
 
 def _target_by_id(run: StartedRun, run_target_id: str) -> StartedRunTarget | None:
-    return next((target for target in run.targets if target.run_target_id == run_target_id), None)
+    return next(
+        (target for target in run.targets if target.run_target_id == run_target_id),
+        None,
+    )
 
 
 def _permit_matches_run_target(

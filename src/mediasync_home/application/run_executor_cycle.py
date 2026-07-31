@@ -16,7 +16,9 @@ from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
     RecoveryOperationPhase,
 )
-from mediasync_home.application.run_catalog_handoffs import record_next_run_target_catalog_handoff
+from mediasync_home.application.run_catalog_handoffs import (
+    record_next_run_target_catalog_handoff,
+)
 from mediasync_home.application.run_completion import (
     complete_run_target_after_catalog_handoffs,
     complete_run_target_after_terminal_recovery,
@@ -34,12 +36,18 @@ from mediasync_home.application.run_executor import (
     execute_one_executing_run_target_lease_reacquire_step,
     execute_one_run_target_execution_start_step,
 )
-from mediasync_home.application.run_final_commits import commit_next_run_target_verified_artifact
-from mediasync_home.application.run_intent_segments import publish_run_target_recovery_intent_segment
+from mediasync_home.application.run_final_commits import (
+    commit_next_run_target_verified_artifact,
+)
+from mediasync_home.application.run_intent_segments import (
+    publish_run_target_recovery_intent_segment,
+)
 from mediasync_home.application.run_operation_lease_rebind import (
     rebind_next_run_target_recovery_operation_lease,
 )
-from mediasync_home.application.run_operation_planning import plan_run_target_recovery_operations
+from mediasync_home.application.run_operation_planning import (
+    plan_run_target_recovery_operations,
+)
 from mediasync_home.application.run_preserved_commit_refresh import (
     refresh_next_run_target_preserved_commit_intent_for_fresh_lease,
 )
@@ -47,6 +55,7 @@ from mediasync_home.application.run_recovery_object_cleanup import (
     cleanup_next_run_target_recovery_object,
 )
 from mediasync_home.application.run_staging import (
+    RunTargetStagingOperationStore,
     RunTargetStagingPort,
     execute_next_run_target_staging_step,
 )
@@ -58,6 +67,7 @@ from mediasync_home.application.runs import (
     EndpointLeaseAuthority,
     RunState,
     RunTargetState,
+    RunWarningCompletionStore,
     StartedRun,
     StartedRunTarget,
 )
@@ -110,6 +120,7 @@ class RunExecutorCyclePumpOutcome:
 
 class RunExecutorCycleRecoveryOperationStore(
     RunStopRecoveryOperationStore,
+    RunTargetStagingOperationStore,
     Protocol,
 ):
     def list_operations_for_run_target_in_phase(
@@ -120,6 +131,12 @@ class RunExecutorCycleRecoveryOperationStore(
         phase: RecoveryOperationPhase,
         limit: int,
     ) -> tuple[RecoveryOperation, ...]: ...
+
+
+class RunExecutorCycleRunStore(
+    RunExecutorQueueStore, RunWarningCompletionStore, Protocol
+):
+    pass
 
 
 EARLY_OPERATION_PHASES = (
@@ -135,7 +152,7 @@ EARLY_OPERATION_PHASES = (
 
 def execute_bounded_run_executor_cycle(
     *,
-    runs: RunExecutorQueueStore,
+    runs: RunExecutorCycleRunStore,
     leases: EndpointLeaseAuthority,
     lease_registry: RunTargetLeaseRegistry,
     plans: PlanStore,
@@ -198,7 +215,7 @@ def execute_bounded_run_executor_cycle(
 
 def execute_one_run_executor_cycle(
     *,
-    runs: RunExecutorQueueStore,
+    runs: RunExecutorCycleRunStore,
     leases: EndpointLeaseAuthority,
     lease_registry: RunTargetLeaseRegistry,
     plans: PlanStore,
@@ -379,7 +396,9 @@ def execute_one_run_executor_cycle(
         )
     return _blocked(
         run_id=None if preflight.last_step is None else preflight.last_step.run_id,
-        run_target_id=None if preflight.last_step is None else preflight.last_step.run_target_id,
+        run_target_id=None
+        if preflight.last_step is None
+        else preflight.last_step.run_target_id,
         validation_codes=preflight.validation_codes,
         next_action=preflight.next_action,
     )
@@ -394,7 +413,7 @@ class _RetainedTarget:
 
 def _advance_retained_target(
     *,
-    runs: RunExecutorQueueStore,
+    runs: RunExecutorCycleRunStore,
     lease_registry: RunTargetLeaseRegistry,
     plans: PlanStore,
     recovery_operations: RunExecutorCycleRecoveryOperationStore,
@@ -470,12 +489,14 @@ def _advance_retained_target(
         phase=RecoveryOperationPhase.OLD_TARGET_PRESERVED,
         limit=target.planned_operations + 1,
     ):
-        preserved_refresh_outcome = refresh_next_run_target_preserved_commit_intent_for_fresh_lease(
-            permit=permit,
-            recovery_operations=recovery_operations,
-            intent_segments=intent_segments,
-            process_instance_id=process_instance_id,
-            max_operations=target.planned_operations + 1,
+        preserved_refresh_outcome = (
+            refresh_next_run_target_preserved_commit_intent_for_fresh_lease(
+                permit=permit,
+                recovery_operations=recovery_operations,
+                intent_segments=intent_segments,
+                process_instance_id=process_instance_id,
+                max_operations=target.planned_operations + 1,
+            )
         )
         if not preserved_refresh_outcome.idle:
             if preserved_refresh_outcome.refreshed:
@@ -704,11 +725,42 @@ def _advance_retained_target(
                 next_action=cleanup_outcome.next_action,
             )
 
-    if _catalog_recorded_count(
+    if _skipped_recovery_ready(
         recovery_operations=recovery_operations,
         permit=permit,
         target=target,
-    ) >= target.planned_operations:
+    ):
+        completion_outcome = complete_run_target_after_terminal_recovery(
+            permit=permit,
+            runs=runs,
+            recovery_operations=recovery_operations,
+        )
+        if completion_outcome.completed:
+            lease_registry.release_retained_run_target_lease(
+                run_id=permit.run_id,
+                run_target_id=permit.run_target_id,
+            )
+            return _advanced(
+                action=RunExecutorCycleAction.TARGET_COMPLETED,
+                run_id=completion_outcome.run_id,
+                run_target_id=completion_outcome.run_target_id,
+                next_action=completion_outcome.next_action,
+            )
+        return _blocked(
+            run_id=completion_outcome.run_id,
+            run_target_id=completion_outcome.run_target_id,
+            validation_codes=completion_outcome.validation_codes,
+            next_action=completion_outcome.next_action,
+        )
+
+    if (
+        _catalog_recorded_count(
+            recovery_operations=recovery_operations,
+            permit=permit,
+            target=target,
+        )
+        >= target.planned_operations
+    ):
         completion_outcome = complete_run_target_after_catalog_handoffs(
             permit=permit,
             runs=runs,
@@ -791,7 +843,9 @@ def _next_retained_executing_target(
                 run_target_id=run_target_id,
             )
             continue
-        target = next((item for item in run.targets if item.run_target_id == run_target_id), None)
+        target = next(
+            (item for item in run.targets if item.run_target_id == run_target_id), None
+        )
         if target is None or target.state is not RunTargetState.EXECUTING:
             if target is not None and target.state is RunTargetState.SUCCEEDED:
                 lease_registry.release_retained_run_target_lease(
@@ -852,6 +906,7 @@ def _has_any_operation(
         RecoveryOperationPhase.FINAL_VERIFIED,
         RecoveryOperationPhase.CATALOG_RECORDED,
         RecoveryOperationPhase.CLEANED,
+        RecoveryOperationPhase.SKIPPED,
     ):
         if _has_phase(
             recovery_operations=recovery_operations,
@@ -886,6 +941,31 @@ def _terminal_recovery_ready(
         return False
     return (
         cancelled_count
+        + _catalog_recorded_count(
+            recovery_operations=recovery_operations,
+            permit=permit,
+            target=target,
+        )
+        >= target.planned_operations
+    )
+
+
+def _skipped_recovery_ready(
+    *,
+    recovery_operations: RunExecutorCycleRecoveryOperationStore,
+    permit: MutationPermit,
+    target: StartedRunTarget,
+) -> bool:
+    skipped_count = _phase_count(
+        recovery_operations=recovery_operations,
+        permit=permit,
+        phase=RecoveryOperationPhase.SKIPPED,
+        limit=target.planned_operations + 1,
+    )
+    if skipped_count == 0:
+        return False
+    return (
+        skipped_count
         + _catalog_recorded_count(
             recovery_operations=recovery_operations,
             permit=permit,

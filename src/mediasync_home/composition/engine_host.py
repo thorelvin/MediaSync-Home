@@ -19,7 +19,9 @@ from mediasync_home.adapters.endpoint_leases import (
     MutationPermitIssueError,
 )
 from mediasync_home.adapters.final_commit import LocalResolvingFinalCommitAdapter
-from mediasync_home.adapters.final_verification import LocalFinalArtifactVerificationAdapter
+from mediasync_home.adapters.final_verification import (
+    LocalFinalArtifactVerificationAdapter,
+)
 from mediasync_home.adapters.local_endpoint_classifier import (
     LocalEndpointControlAreaClassifier,
 )
@@ -38,7 +40,9 @@ from mediasync_home.adapters.task_scheduler import (
 from mediasync_home.adapters.writable_endpoint_registration import (
     LocalWritableEndpointControlAreaProvisioner,
 )
-from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
+from mediasync_home.adapters.sqlite.catalog_handoffs import (
+    SqliteFinalFileCatalogHandoffStore,
+)
 from mediasync_home.adapters.sqlite.backup_analysis import (
     SqliteBackupAnalysisRequestStore,
 )
@@ -53,7 +57,9 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     classify_sqlite_exception,
     recovery_writer_policy,
 )
-from mediasync_home.adapters.sqlite.installation_state import SqliteInstallationStateStore
+from mediasync_home.adapters.sqlite.installation_state import (
+    SqliteInstallationStateStore,
+)
 from mediasync_home.adapters.sqlite.initial_backup_plans import (
     SqliteInitialBackupPlanMaterializer,
 )
@@ -61,7 +67,9 @@ from mediasync_home.adapters.sqlite.endpoint_roots import SqliteEndpointRootReso
 from mediasync_home.adapters.sqlite.endpoint_classifications import (
     SqliteEndpointClassificationRefresher,
 )
-from mediasync_home.adapters.sqlite.external_resources import SqliteExternalResourceStateStore
+from mediasync_home.adapters.sqlite.external_resources import (
+    SqliteExternalResourceStateStore,
+)
 from mediasync_home.adapters.sqlite.history import SqliteHistoryReadModelStore
 from mediasync_home.adapters.sqlite.hash_evidence import (
     SqliteCurrentReadHashEvidenceRefresher,
@@ -83,8 +91,12 @@ from mediasync_home.adapters.sqlite.migrations import (
 )
 from mediasync_home.adapters.sqlite.outbox import SqliteOutboxStore
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
-from mediasync_home.adapters.sqlite.recovery_intents import SqliteRecoveryIntentSegmentStore
-from mediasync_home.adapters.sqlite.recovery_operations import SqliteRecoveryOperationStore
+from mediasync_home.adapters.sqlite.recovery_intents import (
+    SqliteRecoveryIntentSegmentStore,
+)
+from mediasync_home.adapters.sqlite.recovery_operations import (
+    SqliteRecoveryOperationStore,
+)
 from mediasync_home.adapters.sqlite.run_progress import SqliteRunProgressSnapshotStore
 from mediasync_home.adapters.sqlite.runs import SqliteRunStore
 from mediasync_home.adapters.sqlite.schedules import SqliteScheduleStore
@@ -110,7 +122,9 @@ from mediasync_home.adapters.sqlite.state_migration import (
     SqliteStateMigrationReport,
     migrate_sqlite_state_stores,
 )
-from mediasync_home.adapters.sqlite.trigger_occurrences import SqliteTriggerOccurrenceStore
+from mediasync_home.adapters.sqlite.trigger_occurrences import (
+    SqliteTriggerOccurrenceStore,
+)
 from mediasync_home.adapters.sqlite.transactions import SqliteImmediateTransactionRunner
 from mediasync_home.adapters.sqlite.writable_endpoint_registrations import (
     SqliteWritableEndpointRegistrationStore,
@@ -121,7 +135,6 @@ from mediasync_home.application.run_executor import (
     RunExecutorExecutionStartStepOutcome,
     RunExecutorPumpOutcome,
     RunExecutorPumpStopReason,
-    RunExecutorQueueStore,
     RunExecutorViolation,
     RunTargetLeaseRegistry,
     execute_bounded_run_executor_preflight_pump,
@@ -136,6 +149,7 @@ from mediasync_home.application.clocks import ClockPort
 from mediasync_home.application.run_executor_cycle import (
     RunExecutorCyclePumpOutcome,
     RunExecutorCycleRecoveryOperationStore,
+    RunExecutorCycleRunStore,
     execute_bounded_run_executor_cycle,
 )
 from mediasync_home.application.host_locator import LocalEngineHostPublication
@@ -165,7 +179,9 @@ from mediasync_home.application.run_catalog_handoffs import (
     RunTargetCatalogHandoffStepOutcome,
     record_next_run_target_catalog_handoff,
 )
-from mediasync_home.application.run_completion import complete_run_target_after_catalog_handoffs
+from mediasync_home.application.run_completion import (
+    complete_run_target_after_catalog_handoffs,
+)
 from mediasync_home.application.catalog_handoff import FinalFileCatalogHandoffStore
 from mediasync_home.application.plans import PlanStore
 from mediasync_home.application.ports import (
@@ -178,13 +194,19 @@ from mediasync_home.application.recovery_reconciliation import (
     RecoveryOperationStartupReconciliationReport,
 )
 from mediasync_home.application.recovery_resume import RecoveryResumeStartupReport
-from mediasync_home.application.runs import EndpointLeaseAuthority, RunIds, RunTargetCompletionOutcome
+from mediasync_home.application.runs import (
+    EndpointLeaseAuthority,
+    RunIds,
+    RunTargetCompletionOutcome,
+)
 from mediasync_home.application.runtime_status import (
     RuntimeStatus,
     local_writable_status,
     startup_status,
 )
-from mediasync_home.application.state_maintenance import RestoreStateFromBackupSetCommand
+from mediasync_home.application.state_maintenance import (
+    RestoreStateFromBackupSetCommand,
+)
 from mediasync_home.application.state_capacity import (
     StateCapacityGate,
     StateCapacityPolicy,
@@ -361,24 +383,26 @@ class EngineHostRuntime:
     clock: ClockPort = field(default_factory=SystemClock)
     installation_state: InstallationState | None = None
     endpoint_classification_refresh: EndpointClassificationRefreshReport | None = None
-    snapshot_materialization_refresh: (
-        SnapshotMaterializationRefreshReport | None
-    ) = None
+    snapshot_materialization_refresh: SnapshotMaterializationRefreshReport | None = None
     initial_backup_plan_refresh: InitialBackupPlanRefreshReport | None = None
     state_layout: StateStoreLayout | None = None
     state_capacity_gate: StateCapacityGate | None = None
     state_capacity_report: StateCapacityReport | None = None
     state_restore_recovery: SqliteStateRestoreEpochRecoveryReport | None = None
-    state_restore_startup_reconciliation: SqliteStateRestoreStartupReconciliationReport | None = None
+    state_restore_startup_reconciliation: (
+        SqliteStateRestoreStartupReconciliationReport | None
+    ) = None
     state_compaction_recovery: SqliteStateCompactionEpochRecoveryReport | None = None
     state_migration: SqliteStateMigrationReport | None = None
     startup_reconciliation: EngineHostStartupReconciliationReport | None = None
     reconciler_instance_id: str | None = None
-    run_executor_queue_store: RunExecutorQueueStore | None = None
+    run_executor_queue_store: RunExecutorCycleRunStore | None = None
     run_executor_lease_authority: EndpointLeaseAuthority | None = None
     run_executor_lease_registry: HeldRunTargetLeaseRegistry | None = None
     run_executor_plan_store: PlanStore | None = None
-    run_executor_recovery_operation_store: RunExecutorCycleRecoveryOperationStore | None = None
+    run_executor_recovery_operation_store: (
+        RunExecutorCycleRecoveryOperationStore | None
+    ) = None
     run_executor_recovery_intent_segment_store: RecoveryIntentSegmentStore | None = None
     run_executor_catalog_handoff_store: FinalFileCatalogHandoffStore | None = None
     run_executor_staging_transfer_port: RunTargetStagingPort | None = None
@@ -387,11 +411,11 @@ class EngineHostRuntime:
     run_executor_recovery_object_cleanup_port: RecoveryObjectCleanupPort | None = None
     run_executor_process_instance_id: str | None = None
     backup_analysis_request_store: BackupAnalysisRequestStore | None = None
-    backup_analysis_endpoint_refresher: SqliteEndpointClassificationRefresher | None = None
+    backup_analysis_endpoint_refresher: SqliteEndpointClassificationRefresher | None = (
+        None
+    )
     backup_analysis_snapshot_refresher: SqliteJobSnapshotMaterializer | None = None
-    backup_analysis_hash_refresher: (
-        SqliteCurrentReadHashEvidenceRefresher | None
-    ) = None
+    backup_analysis_hash_refresher: SqliteCurrentReadHashEvidenceRefresher | None = None
     backup_analysis_plan_refresher: SqliteInitialBackupPlanMaterializer | None = None
     catalog_connection: sqlite3.Connection | None = None
     recovery_connection: sqlite3.Connection | None = None
@@ -709,7 +733,9 @@ class EngineHostRuntime:
         ):
             raise RuntimeError("RUN_EXECUTOR_RUNTIME_NOT_CONFIGURED")
         if max_steps < 1:
-            raise RunExecutorViolation("RUN_EXECUTOR_CYCLE_REQUIRES_POSITIVE_STEP_LIMIT")
+            raise RunExecutorViolation(
+                "RUN_EXECUTOR_CYCLE_REQUIRES_POSITIVE_STEP_LIMIT"
+            )
         if max_steps > MAX_RUN_EXECUTOR_PUMP_STEPS:
             raise RunExecutorViolation("RUN_EXECUTOR_CYCLE_STEP_LIMIT_TOO_LARGE")
         capacity_block = self._run_capacity_block()
@@ -726,12 +752,15 @@ class EngineHostRuntime:
                 catalog_handoffs=self.run_executor_catalog_handoff_store,
                 process_instance_id=self.run_executor_process_instance_id,
                 max_steps=max_steps,
-                final_commit_port=final_commit_port or self.run_executor_final_commit_port,
+                final_commit_port=final_commit_port
+                or self.run_executor_final_commit_port,
                 old_target_preservation_port=(
-                    old_target_preservation_port or self.run_executor_old_target_preservation_port
+                    old_target_preservation_port
+                    or self.run_executor_old_target_preservation_port
                 ),
                 recovery_object_cleanup_port=(
-                    recovery_object_cleanup_port or self.run_executor_recovery_object_cleanup_port
+                    recovery_object_cleanup_port
+                    or self.run_executor_recovery_object_cleanup_port
                 ),
                 staging_transfer_port=(
                     staging_transfer_port or self.run_executor_staging_transfer_port
@@ -949,7 +978,9 @@ class TaskSchedulerMaintenanceLoop:
                         next_interval_ms=next_interval_ms,
                     )
                     continue
-                after_schedule_id = report.stage_next_cursor or self._options.after_schedule_id
+                after_schedule_id = (
+                    report.stage_next_cursor or self._options.after_schedule_id
+                )
                 after_orphan_task_name = (
                     report.orphan_next_cursor or self._options.after_orphan_task_name
                 )
@@ -1004,7 +1035,10 @@ class HostLocatorHeartbeatLoop:
         interval_ms: int = HOST_LOCATOR_HEARTBEAT_INTERVAL_MS,
         heartbeat_clock: Callable[[], str] | None = None,
         refresh_publication: (
-            Callable[[LocalEngineHostPublication, str], LocalEngineHostPublication | None] | None
+            Callable[
+                [LocalEngineHostPublication, str], LocalEngineHostPublication | None
+            ]
+            | None
         ) = None,
     ) -> None:
         if interval_ms < 1:
@@ -1012,7 +1046,9 @@ class HostLocatorHeartbeatLoop:
         self._publication = publication
         self._interval_ms = interval_ms
         self._heartbeat_clock = heartbeat_clock or _host_locator_heartbeat_utc
-        self._refresh_publication = refresh_publication or _refresh_local_host_locator_publication
+        self._refresh_publication = (
+            refresh_publication or _refresh_local_host_locator_publication
+        )
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -1056,7 +1092,9 @@ class HostLocatorHeartbeatLoop:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MediaSync Home Engine Host")
-    parser.add_argument("--pipe-name", help="serve non-mutating IPC over this local named pipe")
+    parser.add_argument(
+        "--pipe-name", help="serve non-mutating IPC over this local named pipe"
+    )
     parser.add_argument("--installation-id", default="local-dev")
     parser.add_argument("--serve-requests", type=_positive_int, default=1)
     parser.add_argument(
@@ -1092,13 +1130,17 @@ def build_parser() -> argparse.ArgumentParser:
         default="local-file",
         help="staging transfer backend used by the run executor",
     )
-    parser.add_argument("--state-root", type=Path, help="optional local preview state root")
+    parser.add_argument(
+        "--state-root", type=Path, help="optional local preview state root"
+    )
     parser.add_argument(
         "--enable-local-mutations",
         action="store_true",
         help="enable same-user mutations against the explicit local state root",
     )
-    parser.add_argument("--host-mutex-name", help="optional local Engine Host singleton mutex")
+    parser.add_argument(
+        "--host-mutex-name", help="optional local Engine Host singleton mutex"
+    )
     parser.add_argument(
         "--publish-host-locator",
         action="store_true",
@@ -1177,15 +1219,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = None) -> int:
+def run_engine_host(
+    argv: Sequence[str] | None = None, *, emit: Emit | None = None
+) -> int:
     args = build_parser().parse_args(argv)
     if args.enable_local_mutations and args.state_root is None:
         raise RuntimeError("LOCAL_MUTATIONS_REQUIRE_STATE_ROOT")
     if args.reconcile_task_scheduler_resources and not args.pipe_name:
         raise RuntimeError("TASK_SCHEDULER_RECONCILIATION_REQUIRES_PIPE_MODE")
-    if args.task_scheduler_reconciliation_interval_ms is not None and not args.pipe_name:
+    if (
+        args.task_scheduler_reconciliation_interval_ms is not None
+        and not args.pipe_name
+    ):
         raise RuntimeError("TASK_SCHEDULER_MAINTENANCE_REQUIRES_PIPE_MODE")
-    if args.task_scheduler_reconciliation_interval_ms is not None and args.state_root is None:
+    if (
+        args.task_scheduler_reconciliation_interval_ms is not None
+        and args.state_root is None
+    ):
         raise RuntimeError("TASK_SCHEDULER_MAINTENANCE_REQUIRES_STATE_ROOT")
     if (
         args.task_scheduler_reconciliation_interval_ms is not None
@@ -1208,7 +1258,8 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
         raise RuntimeError("RUN_EXECUTOR_MAINTENANCE_REQUIRES_STATE_ROOT")
     if (
         args.run_executor_cycle_interval_ms is not None
-        and args.run_executor_cycle_max_interval_ms < args.run_executor_cycle_interval_ms
+        and args.run_executor_cycle_max_interval_ms
+        < args.run_executor_cycle_interval_ms
     ):
         raise RuntimeError("RUN_EXECUTOR_MAINTENANCE_MAX_INTERVAL_TOO_SMALL")
     if not args.pipe_name:
@@ -1227,7 +1278,9 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
         else startup_status(ProcessRole.ENGINE_HOST, runtime_policy=runtime_policy)
     )
     authorization = current_user_policy()
-    host_mutex = _acquire_host_mutex(args.host_mutex_name, output=output, pipe_name=args.pipe_name)
+    host_mutex = _acquire_host_mutex(
+        args.host_mutex_name, output=output, pipe_name=args.pipe_name
+    )
     if args.host_mutex_name and host_mutex is None:
         return 3
     host_locator_publication: LocalEngineHostPublication | None = None
@@ -1245,7 +1298,9 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
             installation_id=args.installation_id,
             state_root=args.state_root,
             reconciler_instance_id=args.installation_id,
-            inactive_outbox_owner_instance_ids=tuple(args.inactive_outbox_owner_instance_id or ()),
+            inactive_outbox_owner_instance_ids=tuple(
+                args.inactive_outbox_owner_instance_id or ()
+            ),
             inactive_external_resource_owner_instance_ids=(
                 _inactive_external_resource_owner_instance_ids(args)
             ),
@@ -1368,7 +1423,9 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                 pipe_name=args.pipe_name,
             )
         if args.serve_forever:
-            result = serve_pipe_requests_until_interrupted(server, after_request=after_request)
+            result = serve_pipe_requests_until_interrupted(
+                server, after_request=after_request
+            )
         else:
             result = serve_bounded_pipe_requests(
                 server,
@@ -1461,8 +1518,8 @@ def build_engine_host_runtime(
         layout,
         recovered_utc=runtime_clock.utc_now(),
     )
-    state_restore_startup_reconciliation = reconcile_committed_sqlite_state_restore_epochs(
-        layout
+    state_restore_startup_reconciliation = (
+        reconcile_committed_sqlite_state_restore_epochs(layout)
     )
     catalog_plan = catalog_migration_plan()
     recovery_plan = recovery_migration_plan()
@@ -1512,7 +1569,9 @@ def build_engine_host_runtime(
             id_factory=UuidEndpointIdFactory(),
         )
         for existing_job in standard_backup_jobs.list_active_standard_backup_jobs():
-            standard_backup_job_endpoints.register_standard_backup_job_endpoints(existing_job)
+            standard_backup_job_endpoints.register_standard_backup_job_endpoints(
+                existing_job
+            )
         writable_endpoint_registration = WritableEndpointRegistrationCoordinator(
             store=SqliteWritableEndpointRegistrationStore(catalog_connection),
             provisioner=LocalWritableEndpointControlAreaProvisioner(),
@@ -1571,9 +1630,7 @@ def build_engine_host_runtime(
             )
         )
         runs = SqliteRunStore(catalog_connection)
-        backup_analysis_requests = SqliteBackupAnalysisRequestStore(
-            catalog_connection
-        )
+        backup_analysis_requests = SqliteBackupAnalysisRequestStore(catalog_connection)
         if recover_interrupted_analyses:
             backup_analysis_requests.requeue_interrupted_backup_analyses()
         history = SqliteHistoryReadModelStore(catalog_connection)
@@ -1732,9 +1789,11 @@ def build_engine_host_runtime(
         catalog_connection=catalog_connection,
         recovery_connection=recovery_connection,
     )
-    runtime.service.state_restore_executor = lambda command: _execute_state_restore_command(
-        runtime,
-        command,
+    runtime.service.state_restore_executor = (
+        lambda command: _execute_state_restore_command(
+            runtime,
+            command,
+        )
     )
     return runtime
 
@@ -2016,7 +2075,9 @@ def _emit_task_scheduler_reconciliation_event(
                 "event": "ENGINE_HOST_TASK_SCHEDULER_RECONCILIATION",
                 "next_interval_ms": next_interval_ms,
                 "pipe_name": pipe_name,
-                "task_scheduler_reconciliation": _task_scheduler_resource_pump_payload(report),
+                "task_scheduler_reconciliation": _task_scheduler_resource_pump_payload(
+                    report
+                ),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -2241,7 +2302,10 @@ def _inactive_external_resource_owner_instance_ids(
     args: argparse.Namespace,
 ) -> tuple[str, ...]:
     owner_ids = list(args.inactive_external_resource_owner_instance_id or ())
-    if args.task_scheduler_reconciliation_interval_ms is not None and args.host_mutex_name:
+    if (
+        args.task_scheduler_reconciliation_interval_ms is not None
+        and args.host_mutex_name
+    ):
         scheduler_owner = f"{args.installation_id}-task-scheduler-maintenance"
         if scheduler_owner not in owner_ids:
             owner_ids.append(scheduler_owner)
@@ -2304,7 +2368,10 @@ def _acquire_host_mutex(
     if mutex_name is None:
         return None
 
-    from mediasync_home.adapters.host_mutex import EngineHostMutexError, LocalEngineHostMutex
+    from mediasync_home.adapters.host_mutex import (
+        EngineHostMutexError,
+        LocalEngineHostMutex,
+    )
 
     try:
         return LocalEngineHostMutex.acquire(mutex_name)
@@ -2338,8 +2405,12 @@ def _publish_local_host_locator(
     if state_root is None:
         raise RuntimeError("HOST_LOCATOR_STATE_ROOT_REQUIRED")
 
-    from mediasync_home.adapters.local_host_locator import publish_local_engine_host_publication
-    from mediasync_home.application.host_locator import build_local_engine_host_publication
+    from mediasync_home.adapters.local_host_locator import (
+        publish_local_engine_host_publication,
+    )
+    from mediasync_home.application.host_locator import (
+        build_local_engine_host_publication,
+    )
 
     publication = build_local_engine_host_publication(
         installation_id=installation_id,
@@ -2354,7 +2425,9 @@ def _publish_local_host_locator(
 
 
 def _host_locator_heartbeat_utc() -> str:
-    from mediasync_home.application.host_locator import format_host_locator_heartbeat_utc
+    from mediasync_home.application.host_locator import (
+        format_host_locator_heartbeat_utc,
+    )
 
     return format_host_locator_heartbeat_utc(datetime.now(timezone.utc))
 
@@ -2363,7 +2436,9 @@ def _refresh_local_host_locator_publication(
     publication: LocalEngineHostPublication,
     heartbeat_utc: str,
 ) -> LocalEngineHostPublication | None:
-    from mediasync_home.adapters.local_host_locator import refresh_local_engine_host_publication
+    from mediasync_home.adapters.local_host_locator import (
+        refresh_local_engine_host_publication,
+    )
 
     return refresh_local_engine_host_publication(
         publication,

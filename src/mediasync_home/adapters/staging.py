@@ -9,7 +9,10 @@ import stat
 from pathlib import Path
 from uuid import uuid4
 
-from mediasync_home.adapters.endpoint_leases import EndpointLeaseUnavailable, EndpointRootResolver
+from mediasync_home.adapters.endpoint_leases import (
+    EndpointLeaseUnavailable,
+    EndpointRootResolver,
+)
 from mediasync_home.adapters.file_identity import stable_file_identity_hash
 from mediasync_home.adapters.reparse_guard import (
     LocalReparseGuard,
@@ -36,7 +39,10 @@ from mediasync_home.application.run_staging import (
     StagingVerificationEvidence,
     TargetPreconditionEvidence,
 )
-from mediasync_home.application.safe_paths import SafePathViolation, parse_endpoint_relative_path
+from mediasync_home.application.safe_paths import (
+    SafePathViolation,
+    parse_endpoint_relative_path,
+)
 from mediasync_home.application.source_preconditions import (
     SourceFilePrecondition,
     SourceFilePreconditionError,
@@ -66,7 +72,9 @@ class LocalFileStagingTransferAdapter:
         self._staging_root = None if staging_root is None else Path(staging_root)
         self._reparse_guard = reparse_guard or LocalReparseGuard()
 
-    def validate_source_file(self, operation: RecoveryOperation) -> SourceValidationEvidence:
+    def validate_source_file(
+        self, operation: RecoveryOperation
+    ) -> SourceValidationEvidence:
         if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
             return SourceValidationEvidence(
                 fingerprint_json=_canonical_json(_directory_fingerprint(operation)),
@@ -87,7 +95,9 @@ class LocalFileStagingTransferAdapter:
             hash_evidence_kind="SHA256_CURRENT_SOURCE_FILE",
         )
 
-    def bind_source_stability(self, operation: RecoveryOperation) -> SourceStabilityEvidence:
+    def bind_source_stability(
+        self, operation: RecoveryOperation
+    ) -> SourceStabilityEvidence:
         if operation.operation_kind is RecoveryOperationKind.COPY_NEW:
             precondition = _source_precondition(operation)
             return SourceStabilityEvidence(
@@ -109,13 +119,21 @@ class LocalFileStagingTransferAdapter:
         operation: RecoveryOperation,
     ) -> TargetPreconditionEvidence:
         if operation.target_precondition_kind is RecoveryTargetPreconditionKind.ABSENT:
-            return self._validate_absent_target_precondition(permit=permit, operation=operation)
-        if operation.target_precondition_kind is RecoveryTargetPreconditionKind.MATCH_FINGERPRINT:
+            return self._validate_absent_target_precondition(
+                permit=permit, operation=operation
+            )
+        if (
+            operation.target_precondition_kind
+            is RecoveryTargetPreconditionKind.MATCH_FINGERPRINT
+        ):
             return self._validate_match_fingerprint_target_precondition(
                 permit=permit,
                 operation=operation,
             )
-        if operation.target_precondition_kind is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY:
+        if (
+            operation.target_precondition_kind
+            is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY
+        ):
             return self._validate_directory_empty_target_precondition(
                 permit=permit,
                 operation=operation,
@@ -147,7 +165,9 @@ class LocalFileStagingTransferAdapter:
                 "LOCAL_STAGING_TARGET_EXISTS",
                 "Refresh analysis or use the replace/version flow before staging this operation.",
             )
-        return TargetPreconditionEvidence(fingerprint_json=_canonical_json({"kind": "ABSENT"}))
+        return TargetPreconditionEvidence(
+            fingerprint_json=_canonical_json({"kind": "ABSENT"})
+        )
 
     def _validate_match_fingerprint_target_precondition(
         self,
@@ -173,7 +193,9 @@ class LocalFileStagingTransferAdapter:
             )
         observed = _fingerprint_file(final_path)
         if operation.expected_target_fingerprint_json is not None:
-            expected = _expected_target_fingerprint(operation.expected_target_fingerprint_json)
+            expected = _expected_target_fingerprint(
+                operation.expected_target_fingerprint_json
+            )
             if observed != expected:
                 raise LocalFileStagingError(
                     "LOCAL_STAGING_TARGET_FINGERPRINT_MISMATCH",
@@ -225,17 +247,27 @@ class LocalFileStagingTransferAdapter:
             "Refresh analysis because the target directory is no longer empty.",
         )
 
-    def allocate_staging_object(self, operation: RecoveryOperation) -> StagingAllocation:
+    def allocate_staging_object(
+        self, operation: RecoveryOperation
+    ) -> StagingAllocation:
         object_id = operation.staging_object_id or operation.operation_id
         if OBJECT_ID_PATTERN.fullmatch(object_id) is None:
             raise LocalFileStagingError(
                 "LOCAL_STAGING_REQUIRES_SAFE_OBJECT_ID",
                 "Use an opaque staging object id before transferring source content.",
             )
-        self._staging_root_for(operation).mkdir(parents=True, exist_ok=True)
+        try:
+            self._staging_root_for(operation).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise LocalFileStagingError(
+                "LOCAL_STAGING_ALLOCATION_FAILED",
+                "Retry after the staging storage becomes writable.",
+            ) from exc
         return StagingAllocation(staging_object_id=object_id)
 
-    def transfer_to_staging(self, operation: RecoveryOperation) -> StagingTransferEvidence:
+    def transfer_to_staging(
+        self, operation: RecoveryOperation
+    ) -> StagingTransferEvidence:
         if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
             return self._transfer_directory_to_staging(operation)
         expected = _expected_fingerprint(operation.expected_source_fingerprint_json)
@@ -243,7 +275,9 @@ class LocalFileStagingTransferAdapter:
         if payload_path.exists():
             existing = _fingerprint_file(payload_path)
             if existing == expected:
-                return StagingTransferEvidence(transfer_state="TRANSFERRED_EXISTING_MATCH")
+                return StagingTransferEvidence(
+                    transfer_state="TRANSFERRED_EXISTING_MATCH"
+                )
             raise LocalFileStagingError(
                 "LOCAL_STAGING_EXISTING_PAYLOAD_MISMATCH",
                 "Discard the stale staging payload and retry the transfer.",
@@ -252,52 +286,78 @@ class LocalFileStagingTransferAdapter:
         source_path = self._source_path(operation)
         temp_path = payload_path.with_name(f".{payload_path.name}.{uuid4().hex}.tmp")
         try:
-            observed = _copy_file_with_hash(
-                source=source_path,
-                destination=temp_path,
-                precondition=_source_precondition(operation),
-            )
-            if observed != expected:
-                raise LocalFileStagingError(
-                    "LOCAL_STAGING_SOURCE_CHANGED",
-                    "Refresh analysis because the source file changed during transfer.",
+            try:
+                observed = _copy_file_with_hash(
+                    source=source_path,
+                    destination=temp_path,
+                    precondition=_source_precondition(operation),
                 )
-            os.replace(temp_path, payload_path)
-        finally:
-            temp_path.unlink(missing_ok=True)
+                if observed != expected:
+                    raise LocalFileStagingError(
+                        "LOCAL_STAGING_SOURCE_CHANGED",
+                        "Refresh analysis because the source file changed during transfer.",
+                    )
+                os.replace(temp_path, payload_path)
+            finally:
+                temp_path.unlink(missing_ok=True)
+        except LocalFileStagingError:
+            raise
+        except OSError as exc:
+            raise LocalFileStagingError(
+                "LOCAL_STAGING_TRANSFER_FAILED",
+                "Retry after source and staging storage become readable and writable.",
+            ) from exc
         return StagingTransferEvidence(transfer_state="TRANSFERRED_TO_STAGING")
 
-    def ensure_staging_durable(self, operation: RecoveryOperation) -> StagingDurabilityEvidence:
+    def ensure_staging_durable(
+        self, operation: RecoveryOperation
+    ) -> StagingDurabilityEvidence:
         payload_path = self._staging_payload_path(operation)
-        if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
-            if not _directory_payload_matches(payload_path, operation):
-                raise LocalFileStagingError(
-                    "LOCAL_STAGING_DIRECTORY_PAYLOAD_MISSING",
-                    "Retry directory staging before durability verification.",
+        try:
+            if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
+                if not _directory_payload_matches(payload_path, operation):
+                    raise LocalFileStagingError(
+                        "LOCAL_STAGING_DIRECTORY_PAYLOAD_MISSING",
+                        "Retry directory staging before durability verification.",
+                    )
+                marker_path = payload_path / DIRECTORY_MARKER_NAME
+                with marker_path.open("ab") as handle:
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                return StagingDurabilityEvidence(
+                    durability_state="DIRECTORY_MARKER_FILE_FSYNC_COMPLETED"
                 )
-            marker_path = payload_path / DIRECTORY_MARKER_NAME
-            with marker_path.open("ab") as handle:
+            if not payload_path.is_file() or payload_path.is_symlink():
+                raise LocalFileStagingError(
+                    "LOCAL_STAGING_PAYLOAD_MISSING",
+                    "Retry the staging transfer before durability verification.",
+                )
+            with payload_path.open("ab") as handle:
                 handle.flush()
                 os.fsync(handle.fileno())
-            return StagingDurabilityEvidence(
-                durability_state="DIRECTORY_MARKER_FILE_FSYNC_COMPLETED"
-            )
-        if not payload_path.is_file() or payload_path.is_symlink():
+            return StagingDurabilityEvidence(durability_state="FILE_FSYNC_COMPLETED")
+        except LocalFileStagingError:
+            raise
+        except OSError as exc:
             raise LocalFileStagingError(
-                "LOCAL_STAGING_PAYLOAD_MISSING",
-                "Retry the staging transfer before durability verification.",
-            )
-        with payload_path.open("ab") as handle:
-            handle.flush()
-            os.fsync(handle.fileno())
-        return StagingDurabilityEvidence(durability_state="FILE_FSYNC_COMPLETED")
+                "LOCAL_STAGING_DURABILITY_FAILED",
+                "Retry after the staging storage becomes responsive.",
+            ) from exc
 
-    def verify_staging_artifact(self, operation: RecoveryOperation) -> StagingVerificationEvidence:
+    def verify_staging_artifact(
+        self, operation: RecoveryOperation
+    ) -> StagingVerificationEvidence:
         if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
             return self._verify_staging_directory(operation)
         expected = _expected_fingerprint(operation.expected_source_fingerprint_json)
         payload_path = self._staging_payload_path(operation)
-        staging_fingerprint = _fingerprint_file(payload_path)
+        try:
+            staging_fingerprint = _fingerprint_file(payload_path)
+        except OSError as exc:
+            raise LocalFileStagingError(
+                "LOCAL_STAGING_VERIFICATION_FAILED",
+                "Retry after the staging artifact becomes readable.",
+            ) from exc
         if staging_fingerprint != expected:
             raise LocalFileStagingError(
                 "LOCAL_STAGING_HASH_MISMATCH",
@@ -332,7 +392,9 @@ class LocalFileStagingTransferAdapter:
         payload_path = self._staging_payload_path(operation)
         if payload_path.exists() or payload_path.is_symlink():
             if _directory_payload_matches(payload_path, operation):
-                return StagingTransferEvidence(transfer_state="TRANSFERRED_EXISTING_MATCH")
+                return StagingTransferEvidence(
+                    transfer_state="TRANSFERRED_EXISTING_MATCH"
+                )
             raise LocalFileStagingError(
                 "LOCAL_STAGING_EXISTING_DIRECTORY_PAYLOAD_MISMATCH",
                 "Discard the stale directory staging payload and retry.",
@@ -340,24 +402,32 @@ class LocalFileStagingTransferAdapter:
 
         temp_path = payload_path.with_name(f".{payload_path.name}.{uuid4().hex}.tmp")
         try:
-            temp_path.mkdir()
-            marker_path = temp_path / DIRECTORY_MARKER_NAME
-            marker_path.write_bytes(
-                directory_marker_bytes(
-                    run_id=operation.run_id,
-                    run_target_id=operation.run_target_id,
-                    operation_id=operation.operation_id,
-                    final_relative_path=operation.final_relative_path,
+            try:
+                temp_path.mkdir()
+                marker_path = temp_path / DIRECTORY_MARKER_NAME
+                marker_path.write_bytes(
+                    directory_marker_bytes(
+                        run_id=operation.run_id,
+                        run_target_id=operation.run_target_id,
+                        operation_id=operation.operation_id,
+                        final_relative_path=operation.final_relative_path,
+                    )
                 )
-            )
-            with marker_path.open("ab") as handle:
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_path, payload_path)
-        finally:
-            if temp_path.exists():
-                shutil.rmtree(temp_path)
-        return StagingTransferEvidence(transfer_state="DIRECTORY_TRANSFERRED_TO_STAGING")
+                with marker_path.open("ab") as handle:
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp_path, payload_path)
+            finally:
+                if temp_path.exists():
+                    shutil.rmtree(temp_path)
+        except OSError as exc:
+            raise LocalFileStagingError(
+                "LOCAL_STAGING_TRANSFER_FAILED",
+                "Retry after the staging storage becomes writable.",
+            ) from exc
+        return StagingTransferEvidence(
+            transfer_state="DIRECTORY_TRANSFERRED_TO_STAGING"
+        )
 
     def _verify_staging_directory(
         self,
@@ -423,14 +493,18 @@ class LocalFileStagingTransferAdapter:
                 "Close applications using the file and refresh the backup analysis.",
             ) from exc
 
-    def _target_root(self, *, permit: MutationPermit, operation: RecoveryOperation) -> Path:
+    def _target_root(
+        self, *, permit: MutationPermit, operation: RecoveryOperation
+    ) -> Path:
         return self._resolve_root(
             resource_key=permit.resource_key,
             endpoint_id=operation.target_endpoint_id,
             endpoint_revision_id=operation.target_endpoint_revision_id,
         )
 
-    def _target_final_path(self, *, permit: MutationPermit, operation: RecoveryOperation) -> Path:
+    def _target_final_path(
+        self, *, permit: MutationPermit, operation: RecoveryOperation
+    ) -> Path:
         root = self._target_root(permit=permit, operation=operation)
         final_path = root.joinpath(*_relative_parts(operation.final_relative_path))
         try:
@@ -443,7 +517,10 @@ class LocalFileStagingTransferAdapter:
         return final_path
 
     def _staging_payload_path(self, operation: RecoveryOperation) -> Path:
-        if operation.staging_object_id is None or not operation.staging_object_id.strip():
+        if (
+            operation.staging_object_id is None
+            or not operation.staging_object_id.strip()
+        ):
             raise LocalFileStagingError(
                 "LOCAL_STAGING_OBJECT_NOT_ALLOCATED",
                 "Allocate an opaque staging object before transfer.",
@@ -453,7 +530,9 @@ class LocalFileStagingTransferAdapter:
                 "LOCAL_STAGING_REQUIRES_SAFE_OBJECT_ID",
                 "Use an opaque staging object id before transferring source content.",
             )
-        return self._staging_root_for(operation) / f"{operation.staging_object_id}.payload"
+        return (
+            self._staging_root_for(operation) / f"{operation.staging_object_id}.payload"
+        )
 
     def _staging_root_for(self, operation: RecoveryOperation) -> Path:
         if self._staging_root is not None:
@@ -584,7 +663,9 @@ def _expected_content_hash(raw_payload: str | None, *, validation_code: str) -> 
     fingerprint = _expected_fingerprint(raw_payload)
     content_hash = fingerprint["content_hash"]
     if not isinstance(content_hash, str):
-        raise LocalFileStagingError(validation_code, "Refresh source validation before transfer.")
+        raise LocalFileStagingError(
+            validation_code, "Refresh source validation before transfer."
+        )
     return content_hash
 
 
@@ -681,7 +762,9 @@ def _fingerprint_source_file(
 
 def _source_precondition(operation: RecoveryOperation) -> SourceFilePrecondition:
     try:
-        precondition = SourceFilePrecondition.from_json(operation.source_precondition_json)
+        precondition = SourceFilePrecondition.from_json(
+            operation.source_precondition_json
+        )
     except SourceFilePreconditionError as exc:
         raise LocalFileStagingError(exc.validation_code, exc.next_action) from exc
     if (

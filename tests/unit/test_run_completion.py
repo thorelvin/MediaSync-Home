@@ -15,8 +15,8 @@ from mediasync_home.application.run_completion import (
 )
 from mediasync_home.application.runs import (
     RunState,
-    RunStore,
     RunTargetState,
+    RunWarningCompletionStore,
     RunTriggerType,
     StartedRun,
     StartedRunTarget,
@@ -24,7 +24,9 @@ from mediasync_home.application.runs import (
 from mediasync_home.domain.capabilities import MutationPermit, _issue_mutation_permit
 
 
-def test_complete_run_target_after_catalog_handoffs_counts_cataloged_operations() -> None:
+def test_complete_run_target_after_catalog_handoffs_counts_cataloged_operations() -> (
+    None
+):
     runs = _InMemoryRunStore(_executing_run())
 
     outcome = complete_run_target_after_catalog_handoffs(
@@ -66,7 +68,9 @@ def test_complete_run_target_after_catalog_handoffs_counts_cleaned_operations() 
     assert loaded.state is RunState.COMPLETED
 
 
-def test_complete_run_target_after_catalog_handoffs_requires_all_catalog_handoffs() -> None:
+def test_complete_run_target_after_catalog_handoffs_requires_all_catalog_handoffs() -> (
+    None
+):
     outcome = complete_run_target_after_catalog_handoffs(
         permit=_permit(),
         runs=_InMemoryRunStore(_executing_run()),
@@ -77,7 +81,9 @@ def test_complete_run_target_after_catalog_handoffs_requires_all_catalog_handoff
     assert outcome.validation_codes == ("RUN_TARGET_COMPLETION_COUNTS_MISMATCH",)
 
 
-def test_complete_run_target_after_catalog_handoffs_rejects_target_permit_mismatch() -> None:
+def test_complete_run_target_after_catalog_handoffs_rejects_target_permit_mismatch() -> (
+    None
+):
     target = replace(_target(), last_fencing_token=99)
 
     outcome = complete_run_target_after_catalog_handoffs(
@@ -90,18 +96,26 @@ def test_complete_run_target_after_catalog_handoffs_rejects_target_permit_mismat
     assert outcome.validation_codes == ("RUN_TARGET_COMPLETION_PERMIT_MISMATCH",)
 
 
-def test_complete_run_target_after_catalog_handoffs_rejects_operation_permit_mismatch() -> None:
+def test_complete_run_target_after_catalog_handoffs_rejects_operation_permit_mismatch() -> (
+    None
+):
     outcome = complete_run_target_after_catalog_handoffs(
         permit=_permit(),
         runs=_InMemoryRunStore(_executing_run()),
-        recovery_operations=_FakeRecoveryOperationStore((_operation(lease_id="other-lease"),)),
+        recovery_operations=_FakeRecoveryOperationStore(
+            (_operation(lease_id="other-lease"),)
+        ),
     )
 
     assert outcome.completed is False
-    assert outcome.validation_codes == ("RUN_TARGET_COMPLETION_OPERATION_PERMIT_MISMATCH",)
+    assert outcome.validation_codes == (
+        "RUN_TARGET_COMPLETION_OPERATION_PERMIT_MISMATCH",
+    )
 
 
-def test_complete_run_target_after_terminal_recovery_marks_user_decision_required() -> None:
+def test_complete_run_target_after_terminal_recovery_marks_user_decision_required() -> (
+    None
+):
     runs = _InMemoryRunStore(_executing_run())
 
     outcome = complete_run_target_after_terminal_recovery(
@@ -127,7 +141,9 @@ def test_complete_run_target_after_terminal_recovery_marks_user_decision_require
     assert loaded.error_count == 1
 
 
-def test_complete_run_target_after_terminal_recovery_cancels_restored_old_target() -> None:
+def test_complete_run_target_after_terminal_recovery_cancels_restored_old_target() -> (
+    None
+):
     runs = _InMemoryRunStore(_executing_run())
 
     outcome = complete_run_target_after_terminal_recovery(
@@ -153,7 +169,36 @@ def test_complete_run_target_after_terminal_recovery_cancels_restored_old_target
     assert loaded.error_count == 1
 
 
-def test_complete_run_target_after_terminal_recovery_rejects_unknown_cancel_reason() -> None:
+def test_complete_run_target_after_terminal_recovery_marks_skipped_file_warning() -> (
+    None
+):
+    runs = _InMemoryRunStore(_executing_run())
+
+    outcome = complete_run_target_after_terminal_recovery(
+        permit=_permit(),
+        runs=runs,
+        recovery_operations=_FakeRecoveryOperationStore(
+            (
+                _operation(
+                    phase=RecoveryOperationPhase.SKIPPED,
+                    last_error_code="LOCAL_STAGING_SOURCE_FILE_UNREADABLE",
+                ),
+            )
+        ),
+    )
+
+    loaded = runs.load_started_run("run-a")
+    assert outcome.completed is True
+    assert outcome.target is not None
+    assert outcome.target.state is RunTargetState.SUCCEEDED_WITH_WARNINGS
+    assert loaded is not None
+    assert loaded.state is RunState.COMPLETED_WITH_WARNINGS
+    assert loaded.warning_count == 1
+
+
+def test_complete_run_target_after_terminal_recovery_rejects_unknown_cancel_reason() -> (
+    None
+):
     outcome = complete_run_target_after_terminal_recovery(
         permit=_permit(),
         runs=_InMemoryRunStore(_executing_run()),
@@ -168,10 +213,14 @@ def test_complete_run_target_after_terminal_recovery_rejects_unknown_cancel_reas
     )
 
     assert outcome.completed is False
-    assert outcome.validation_codes == ("RUN_TARGET_TERMINAL_RECOVERY_CANCEL_REASON_UNSUPPORTED",)
+    assert outcome.validation_codes == (
+        "RUN_TARGET_TERMINAL_RECOVERY_CANCEL_REASON_UNSUPPORTED",
+    )
 
 
-def test_complete_run_target_after_terminal_recovery_rejects_mixed_cancel_reasons() -> None:
+def test_complete_run_target_after_terminal_recovery_rejects_mixed_cancel_reasons() -> (
+    None
+):
     outcome = complete_run_target_after_terminal_recovery(
         permit=_permit(),
         runs=_InMemoryRunStore(_executing_run()),
@@ -193,7 +242,9 @@ def test_complete_run_target_after_terminal_recovery_rejects_mixed_cancel_reason
     )
 
     assert outcome.completed is False
-    assert outcome.validation_codes == ("RUN_TARGET_TERMINAL_RECOVERY_CANCEL_REASON_UNSUPPORTED",)
+    assert outcome.validation_codes == (
+        "RUN_TARGET_TERMINAL_RECOVERY_CANCEL_REASON_UNSUPPORTED",
+    )
 
 
 class _FakeRecoveryOperationStore(RunTargetCompletionOperationStore):
@@ -217,7 +268,7 @@ class _FakeRecoveryOperationStore(RunTargetCompletionOperationStore):
         )[:limit]
 
 
-class _InMemoryRunStore(RunStore):
+class _InMemoryRunStore(RunWarningCompletionStore):
     def __init__(self, run: StartedRun | None) -> None:
         self.run = run
 
@@ -229,7 +280,9 @@ class _InMemoryRunStore(RunStore):
             return self.run
         return None
 
-    def load_started_run_by_idempotency_key(self, idempotency_key: str) -> StartedRun | None:
+    def load_started_run_by_idempotency_key(
+        self, idempotency_key: str
+    ) -> StartedRun | None:
         if self.run is not None and self.run.idempotency_key == idempotency_key:
             return self.run
         return None
@@ -283,7 +336,10 @@ class _InMemoryRunStore(RunStore):
         updated_targets: list[StartedRunTarget] = []
         completed: StartedRunTarget | None = None
         for target in run.targets:
-            if target.run_target_id == run_target_id and target.state is RunTargetState.EXECUTING:
+            if (
+                target.run_target_id == run_target_id
+                and target.state is RunTargetState.EXECUTING
+            ):
                 if (
                     target.planned_operations != completed_operations
                     or target.planned_bytes != completed_bytes
@@ -302,10 +358,58 @@ class _InMemoryRunStore(RunStore):
             return None
         run_state = (
             RunState.COMPLETED
-            if all(target.state is RunTargetState.SUCCEEDED for target in updated_targets)
+            if all(
+                target.state is RunTargetState.SUCCEEDED for target in updated_targets
+            )
             else RunState.EXECUTING
         )
         self.run = replace(run, state=run_state, targets=tuple(updated_targets))
+        return self.run
+
+    def record_run_target_succeeded_with_warnings(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        completed_operations: int,
+        completed_bytes: int,
+        skipped_operations: int,
+        skipped_bytes: int,
+        last_error_code: str,
+    ) -> StartedRun | None:
+        run = self.load_started_run(run_id)
+        if run is None or run.state is not RunState.EXECUTING:
+            return None
+        updated_targets: list[StartedRunTarget] = []
+        completed: StartedRunTarget | None = None
+        for target in run.targets:
+            if (
+                target.run_target_id == run_target_id
+                and target.state is RunTargetState.EXECUTING
+            ):
+                if (
+                    target.planned_operations
+                    != completed_operations + skipped_operations
+                    or target.planned_bytes != completed_bytes + skipped_bytes
+                ):
+                    return None
+                completed = replace(
+                    target,
+                    state=RunTargetState.SUCCEEDED_WITH_WARNINGS,
+                    completed_operations=completed_operations,
+                    completed_bytes=completed_bytes,
+                )
+                updated_targets.append(completed)
+            else:
+                updated_targets.append(target)
+        if completed is None:
+            return None
+        self.run = replace(
+            run,
+            state=RunState.COMPLETED_WITH_WARNINGS,
+            targets=tuple(updated_targets),
+            warning_count=run.warning_count + skipped_operations,
+        )
         return self.run
 
     def record_run_target_recovery_required(
@@ -350,7 +454,10 @@ class _InMemoryRunStore(RunStore):
         updated_targets: list[StartedRunTarget] = []
         completed: StartedRunTarget | None = None
         for target in run.targets:
-            if target.run_target_id == run_target_id and target.state is RunTargetState.EXECUTING:
+            if (
+                target.run_target_id == run_target_id
+                and target.state is RunTargetState.EXECUTING
+            ):
                 completed = replace(target, state=target_state)
                 updated_targets.append(completed)
             else:
@@ -427,13 +534,16 @@ def _operation(
             fencing_token=42,
             final_relative_path="Pictures/A.jpg",
             target_precondition_kind=RecoveryTargetPreconditionKind.ABSENT,
+            planned_bytes=128,
         ),
         phase=phase,
         staging_object_id="op-a",
         intent_segment_id="segment-a",
         intent_ordinal=0,
         catalog_handoff_id="final-file:run-a:op-a",
-        expected_final_fingerprint_json='{"byte_count":128,"content_hash":"' + ("a" * 64) + '"}',
+        expected_final_fingerprint_json='{"byte_count":128,"content_hash":"'
+        + ("a" * 64)
+        + '"}',
         last_error_code=last_error_code,
     )
 

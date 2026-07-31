@@ -1456,11 +1456,13 @@ Alle stier er relative til eksplisitte endpoint-/kontrollrøtter. En korrupt rec
 - `final_durability_state TEXT`
 - `catalog_handoff_id TEXT`
 - `last_error_code TEXT`
+- `planned_bytes INTEGER NOT NULL`
+- `staging_failure_count INTEGER NOT NULL DEFAULT 0`
 - `updated_utc TEXT NOT NULL`
 - primærnøkkel `(run_id, operation_id)`
 - unik `(intent_segment_id, intent_ordinal)` når begge er satt
 
-`COMMIT_INTENT_RECORDED` krever et `DURABLE` intentsegment, gyldig ordinal og samme `lease_id`/`fencing_token` som aktiv `MutationPermit`. 0B-skjemaet persisterer primærnøkkel `(run_id, operation_id)`, unik `(intent_segment_id, intent_ordinal)` når begge er satt og en materialisert fase som bare kan flyttes via recoverywriterens CAS-store. Alle absolutte stier rekonstrueres fra endpointrevisjon + relative path gjennom `SafePath`; de tas aldri direkte fra recoverypayload.
+`COMMIT_INTENT_RECORDED` krever et `DURABLE` intentsegment, gyldig ordinal og samme `lease_id`/`fencing_token` som aktiv `MutationPermit`. 0B-skjemaet persisterer primærnøkkel `(run_id, operation_id)`, unik `(intent_segment_id, intent_ordinal)` når begge er satt og en materialisert fase som bare kan flyttes via recoverywriterens CAS-store. `staging_failure_count` økes med compare-and-swap i samme recoverytransaksjon som failure-eventen; tredje klassifiserte transientfeil flytter operasjonen til terminal `SKIPPED`. Alle absolutte stier rekonstrueres fra endpointrevisjon + relative path gjennom `SafePath`; de tas aldri direkte fra recoverypayload.
 
 #### `recovery_events`
 
@@ -1477,7 +1479,7 @@ Alle stier er relative til eksplisitte endpoint-/kontrollrøtter. En korrupt rec
 - `event_hash TEXT NOT NULL`
 - unik `(run_id, run_sequence)`
 
-Hver faseovergang appendes til events og oppdaterer materialisert operation/run-state i samme recoverytransaksjon. Hashkjeden er per run: `previous_event_hash` peker til foregående `run_sequence`, og hashinput bruker canonical schema/version/payload. 0B-store beregner kjeden deterministisk over schema, runsekvens, operation, fase, prosessinstans, payload og forrige hash. Kjeden er korrupsjonsdeteksjon og audit, ikke kryptografisk autentisering mot en ondsinnet lokal bruker.
+Hver faseovergang og hvert transient stagingfailure appendes til events og oppdaterer materialisert operation-state i samme recoverytransaksjon. Failure-payloaden binder forsøksnummer, stagingfase, feilkode og om retry ble planlagt. Hashkjeden er per run: `previous_event_hash` peker til foregående `run_sequence`, og hashinput bruker canonical schema/version/payload. 0B-store beregner kjeden deterministisk over schema, runsekvens, operation, fase, prosessinstans, payload og forrige hash. Kjeden er korrupsjonsdeteksjon og audit, ikke kryptografisk autentisering mot en ondsinnet lokal bruker.
 
 ### 11.3 Varighet, forbindelser og writer-eierskap
 

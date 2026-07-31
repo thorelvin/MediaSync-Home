@@ -49,16 +49,16 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
         26,
         27,
         28,
-            29,
-            30,
-            31,
-            32,
-            33,
-            34,
-            35,
-            36,
-            37,
-        ]
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+    ]
     assert [migration.version for migration in recovery.migrations] == [
         1,
         2,
@@ -68,6 +68,7 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
         6,
         7,
         8,
+        9,
     ]
     assert catalog.migrations[0].name == "catalog_core_contract_skeleton"
     assert catalog.migrations[1].name == "catalog_standard_backup_drafts"
@@ -80,18 +81,25 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
     assert catalog.migrations[8].name == "catalog_final_file_handoff_skeleton"
     assert catalog.migrations[9].name == "catalog_snapshot_entry_materialization"
     assert catalog.migrations[10].name == "catalog_snapshot_seal_checksum"
-    assert catalog.migrations[11].name == "catalog_snapshot_coverage_issue_materialization"
+    assert (
+        catalog.migrations[11].name == "catalog_snapshot_coverage_issue_materialization"
+    )
     assert catalog.migrations[12].name == "catalog_snapshot_entry_read_model_indexes"
     assert catalog.migrations[13].name == "catalog_plan_operation_read_model_indexes"
     assert catalog.migrations[14].name == "catalog_outbox_reconciliation_indexes"
-    assert catalog.migrations[15].name == "catalog_snapshot_coverage_issue_read_model_indexes"
+    assert (
+        catalog.migrations[15].name
+        == "catalog_snapshot_coverage_issue_read_model_indexes"
+    )
     assert catalog.migrations[16].name == "catalog_command_receipt_tombstones"
     assert catalog.migrations[17].name == "catalog_run_activity_read_model_indexes"
     assert catalog.migrations[18].name == "catalog_trigger_occurrence_dedup"
     assert catalog.migrations[19].name == "catalog_schedule_desired_state"
     assert catalog.migrations[20].name == "catalog_external_resource_state"
     assert catalog.migrations[21].name == "catalog_endpoint_revision_identity"
-    assert catalog.migrations[22].name == "catalog_standard_backup_job_endpoint_bindings"
+    assert (
+        catalog.migrations[22].name == "catalog_standard_backup_job_endpoint_bindings"
+    )
     assert catalog.migrations[23].name == "catalog_installation_state"
     assert catalog.migrations[24].name == "catalog_endpoint_classification_observations"
     assert (
@@ -117,6 +125,7 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
     assert recovery.migrations[5].name == "recovery_operation_kind_and_plan_sequence"
     assert recovery.migrations[6].name == "recovery_operation_planned_bytes"
     assert recovery.migrations[7].name == "recovery_source_file_preconditions"
+    assert recovery.migrations[8].name == "recovery_staging_failure_count"
 
 
 def test_migration_plan_requires_contiguous_versions() -> None:
@@ -128,7 +137,9 @@ def test_migration_plan_requires_contiguous_versions() -> None:
         ),
     )
 
-    with pytest.raises(SqliteMigrationViolation, match="MIGRATION_VERSIONS_MUST_BE_CONTIGUOUS"):
+    with pytest.raises(
+        SqliteMigrationViolation, match="MIGRATION_VERSIONS_MUST_BE_CONTIGUOUS"
+    ):
         validate_migration_plan(plan)
 
 
@@ -141,7 +152,9 @@ def test_migration_plan_rejects_duplicate_names() -> None:
         ),
     )
 
-    with pytest.raises(SqliteMigrationViolation, match="MIGRATION_NAMES_MUST_BE_UNIQUE"):
+    with pytest.raises(
+        SqliteMigrationViolation, match="MIGRATION_NAMES_MUST_BE_UNIQUE"
+    ):
         validate_migration_plan(plan)
 
 

@@ -13,6 +13,19 @@ from mediasync_home.domain.capabilities import MutationPermit
 
 
 class RunTargetStagingOperationStore(RecoveryOperationStore, Protocol):
+    def record_staging_failure(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        expected_phase: RecoveryOperationPhase,
+        expected_failure_count: int,
+        next_phase: RecoveryOperationPhase,
+        error_code: str,
+        process_instance_id: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> RecoveryOperation | None: ...
+
     def list_operations_for_run_target_in_phase(
         self,
         *,
@@ -63,9 +76,13 @@ class StagingVerificationEvidence:
 
 
 class RunTargetStagingPort(Protocol):
-    def validate_source_file(self, operation: RecoveryOperation) -> SourceValidationEvidence: ...
+    def validate_source_file(
+        self, operation: RecoveryOperation
+    ) -> SourceValidationEvidence: ...
 
-    def bind_source_stability(self, operation: RecoveryOperation) -> SourceStabilityEvidence: ...
+    def bind_source_stability(
+        self, operation: RecoveryOperation
+    ) -> SourceStabilityEvidence: ...
 
     def validate_target_precondition(
         self,
@@ -73,13 +90,21 @@ class RunTargetStagingPort(Protocol):
         operation: RecoveryOperation,
     ) -> TargetPreconditionEvidence: ...
 
-    def allocate_staging_object(self, operation: RecoveryOperation) -> StagingAllocation: ...
+    def allocate_staging_object(
+        self, operation: RecoveryOperation
+    ) -> StagingAllocation: ...
 
-    def transfer_to_staging(self, operation: RecoveryOperation) -> StagingTransferEvidence: ...
+    def transfer_to_staging(
+        self, operation: RecoveryOperation
+    ) -> StagingTransferEvidence: ...
 
-    def ensure_staging_durable(self, operation: RecoveryOperation) -> StagingDurabilityEvidence: ...
+    def ensure_staging_durable(
+        self, operation: RecoveryOperation
+    ) -> StagingDurabilityEvidence: ...
 
-    def verify_staging_artifact(self, operation: RecoveryOperation) -> StagingVerificationEvidence: ...
+    def verify_staging_artifact(
+        self, operation: RecoveryOperation
+    ) -> StagingVerificationEvidence: ...
 
 
 @dataclass(frozen=True)
@@ -103,6 +128,20 @@ STAGING_EXECUTION_PHASES = (
     RecoveryOperationPhase.TRANSFERRED,
     RecoveryOperationPhase.STAGING_DURABLE,
 )
+MAX_STAGING_ATTEMPTS = 3
+RETRYABLE_STAGING_FAILURE_CODES = frozenset(
+    {
+        "LOCAL_STAGING_ALLOCATION_FAILED",
+        "LOCAL_STAGING_DURABILITY_FAILED",
+        "LOCAL_STAGING_SOURCE_FILE_UNREADABLE",
+        "LOCAL_STAGING_TARGET_DIRECTORY_EMPTY_READ_FAILED",
+        "LOCAL_STAGING_TRANSFER_FAILED",
+        "LOCAL_STAGING_VERIFICATION_FAILED",
+        "ROBOCOPY_PROCESS_WAIT_FAILED",
+        "ROBOCOPY_TRANSFER_FAILED",
+        "ROBOCOPY_TRANSFER_TIMED_OUT",
+    }
+)
 
 
 def execute_next_run_target_staging_step(
@@ -121,7 +160,9 @@ def execute_next_run_target_staging_step(
             next_action="Bind staging execution to the Engine Host process instance.",
         )
 
-    operation = _next_staging_operation(permit=permit, recovery_operations=recovery_operations)
+    operation = _next_staging_operation(
+        permit=permit, recovery_operations=recovery_operations
+    )
     if operation is None:
         return RunTargetStagingOutcome(
             idle=True,
@@ -149,12 +190,52 @@ def execute_next_run_target_staging_step(
             staging_port=staging_port,
         )
     except RuntimeError as exc:
+        validation_code = _error_code(exc)
+        if validation_code in RETRYABLE_STAGING_FAILURE_CODES:
+            attempt_number = operation.staging_failure_count + 1
+            exhausted = attempt_number >= MAX_STAGING_ATTEMPTS
+            updated = recovery_operations.record_staging_failure(
+                run_id=operation.run_id,
+                operation_id=operation.operation_id,
+                expected_phase=operation.phase,
+                expected_failure_count=operation.staging_failure_count,
+                next_phase=(
+                    RecoveryOperationPhase.SKIPPED if exhausted else operation.phase
+                ),
+                error_code=validation_code,
+                process_instance_id=process_instance_id,
+                payload={"staging_phase": operation.phase.value},
+            )
+            if updated is None:
+                return _failed(
+                    permit=permit,
+                    operation_id=operation.operation_id,
+                    phase=operation.phase,
+                    validation_code="RUN_TARGET_STAGING_FAILURE_RECORD_CONFLICT",
+                    next_action="Reload recovery state before retrying staging execution.",
+                )
+            return RunTargetStagingOutcome(
+                idle=False,
+                advanced=True,
+                run_id=permit.run_id,
+                run_target_id=permit.run_target_id,
+                operation_id=operation.operation_id,
+                phase=updated.phase,
+                validation_codes=(),
+                next_action=(
+                    f"Skipped file after {attempt_number} failed staging attempts."
+                    if exhausted
+                    else f"Staging attempt {attempt_number} failed; retry scheduled."
+                ),
+            )
         return _failed(
             permit=permit,
             operation_id=operation.operation_id,
             phase=operation.phase,
-            validation_code=_error_code(exc),
-            next_action=_error_next_action(exc, "Reload staging state and retry this operation."),
+            validation_code=validation_code,
+            next_action=_error_next_action(
+                exc, "Reload staging state and retry this operation."
+            ),
         )
 
     updated = recovery_operations.record_operation_phase_transition(
@@ -248,7 +329,9 @@ def _execute_phase(
         target_evidence = staging_port.validate_target_precondition(permit, operation)
         return (
             RecoveryOperationPhase.TARGET_PRECONDITION_VALIDATED,
-            RecoveryOperationMetadata(expected_target_fingerprint_json=target_evidence.fingerprint_json),
+            RecoveryOperationMetadata(
+                expected_target_fingerprint_json=target_evidence.fingerprint_json
+            ),
             {"target_precondition_fingerprint_json": target_evidence.fingerprint_json},
         )
 
@@ -272,7 +355,9 @@ def _execute_phase(
         durability_evidence = staging_port.ensure_staging_durable(operation)
         return (
             RecoveryOperationPhase.STAGING_DURABLE,
-            RecoveryOperationMetadata(staging_durability_state=durability_evidence.durability_state),
+            RecoveryOperationMetadata(
+                staging_durability_state=durability_evidence.durability_state
+            ),
             {"staging_durability_state": durability_evidence.durability_state},
         )
 
@@ -294,7 +379,9 @@ def _execute_phase(
     raise RuntimeError("RUN_TARGET_STAGING_PHASE_UNSUPPORTED")
 
 
-def _operation_matches_permit(*, operation: RecoveryOperation, permit: MutationPermit) -> bool:
+def _operation_matches_permit(
+    *, operation: RecoveryOperation, permit: MutationPermit
+) -> bool:
     return (
         operation.phase in STAGING_EXECUTION_PHASES
         and operation.run_id == permit.run_id

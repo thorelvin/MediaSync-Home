@@ -41,11 +41,11 @@ from mediasync_home.application.recovery_operations import (
 from mediasync_home.application.run_executor import (
     HeldRunTargetLeaseRegistry,
     RunExecutorPumpStopReason,
-    RunExecutorQueueStore,
 )
 from mediasync_home.application.run_executor_cycle import (
     RunExecutorCycleAction,
     RunExecutorCycleRecoveryOperationStore,
+    RunExecutorCycleRunStore,
     execute_bounded_run_executor_cycle,
     execute_one_run_executor_cycle,
 )
@@ -148,6 +148,67 @@ def test_bounded_executor_cycle_progresses_queued_target_through_staging() -> No
     assert operation.expected_staging_fingerprint_json == _fingerprint_json()
 
 
+def test_bounded_executor_cycle_retries_transient_file_failure_then_advances() -> None:
+    plan = _sealed_plan()
+    runs = _InMemoryRunStore(_run(state=RunState.QUEUED, plan=plan))
+    registry = HeldRunTargetLeaseRegistry()
+    recovery_operations = _FakeRecoveryOperationStore(())
+    staging_port = _TransientStagingPort(failures=2)
+
+    outcome = execute_bounded_run_executor_cycle(
+        runs=runs,
+        leases=_FakeLeaseAuthority(_FakeLiveLease()),
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=recovery_operations,
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        staging_transfer_port=staging_port,
+        process_instance_id="host-a",
+        max_steps=6,
+    )
+
+    operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    assert outcome.stopped_reason is RunExecutorPumpStopReason.STEP_LIMIT_REACHED
+    assert operation is not None
+    assert operation.phase is RecoveryOperationPhase.SOURCE_VALIDATED
+    assert operation.staging_failure_count == 2
+    assert operation.last_error_code == "LOCAL_STAGING_SOURCE_FILE_UNREADABLE"
+    assert staging_port.calls == 3
+
+
+def test_bounded_executor_cycle_skips_file_after_three_transient_failures() -> None:
+    plan = _sealed_plan()
+    runs = _InMemoryRunStore(_run(state=RunState.QUEUED, plan=plan))
+    registry = HeldRunTargetLeaseRegistry()
+    recovery_operations = _FakeRecoveryOperationStore(())
+
+    outcome = execute_bounded_run_executor_cycle(
+        runs=runs,
+        leases=_FakeLeaseAuthority(_FakeLiveLease()),
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=recovery_operations,
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        staging_transfer_port=_TransientStagingPort(failures=3),
+        process_instance_id="host-a",
+        max_steps=10,
+    )
+
+    operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    loaded = runs.load_started_run("run-a")
+    assert outcome.stopped_reason is RunExecutorPumpStopReason.IDLE
+    assert operation is not None
+    assert operation.phase is RecoveryOperationPhase.SKIPPED
+    assert operation.staging_failure_count == 3
+    assert loaded is not None
+    assert loaded.state is RunState.COMPLETED_WITH_WARNINGS
+    assert loaded.warning_count == 1
+    assert loaded.targets[0].state is RunTargetState.SUCCEEDED_WITH_WARNINGS
+    assert registry.retained_count == 0
+
+
 def test_bounded_executor_cycle_reports_missing_staging_port_after_planning() -> None:
     plan = _sealed_plan()
     runs = _InMemoryRunStore(_run(state=RunState.QUEUED, plan=plan))
@@ -208,13 +269,18 @@ def test_executor_cycle_reacquires_revalidating_target_after_registry_loss() -> 
     assert loaded.targets[0].state is RunTargetState.EXECUTING
     assert loaded.targets[0].last_lease_id == "lease-b"
     assert loaded.targets[0].last_fencing_token == 43
-    assert registry.load_retained_run_target_lease(
-        run_id="run-a",
-        run_target_id="run-a-target-0000",
-    ) is lease
+    assert (
+        registry.load_retained_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+        )
+        is lease
+    )
 
 
-def test_executor_cycle_reacquires_executing_target_after_registry_loss_before_planning() -> None:
+def test_executor_cycle_reacquires_executing_target_after_registry_loss_before_planning() -> (
+    None
+):
     plan = _sealed_plan()
     runs = _InMemoryRunStore(
         _run(
@@ -251,17 +317,22 @@ def test_executor_cycle_reacquires_executing_target_after_registry_loss_before_p
     assert loaded.targets[0].state is RunTargetState.EXECUTING
     assert loaded.targets[0].last_lease_id == "lease-b"
     assert loaded.targets[0].last_fencing_token == 43
-    assert registry.load_retained_run_target_lease(
-        run_id="run-a",
-        run_target_id="run-a-target-0000",
-    ) is lease
+    assert (
+        registry.load_retained_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+        )
+        is lease
+    )
     assert operation is not None
     assert operation.phase is RecoveryOperationPhase.PLANNED
     assert operation.lease_id == "lease-b"
     assert operation.fencing_token == 43
 
 
-def test_executor_cycle_rebinds_pre_commit_operation_after_reacquired_executing_lease() -> None:
+def test_executor_cycle_rebinds_pre_commit_operation_after_reacquired_executing_lease() -> (
+    None
+):
     plan = _sealed_plan()
     runs = _InMemoryRunStore(
         _run(
@@ -298,7 +369,9 @@ def test_executor_cycle_rebinds_pre_commit_operation_after_reacquired_executing_
     assert operation.fencing_token == 43
 
 
-def test_executor_cycle_refreshes_commit_intent_after_reacquired_executing_lease() -> None:
+def test_executor_cycle_refreshes_commit_intent_after_reacquired_executing_lease() -> (
+    None
+):
     plan = _sealed_plan()
     runs = _InMemoryRunStore(
         _run(
@@ -325,7 +398,9 @@ def test_executor_cycle_refreshes_commit_intent_after_reacquired_executing_lease
     )
 
     operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
-    refreshed_segment = intent_segments.load_intent_segment("run-a-target-0000-intent-000001")
+    refreshed_segment = intent_segments.load_intent_segment(
+        "run-a-target-0000-intent-000001"
+    )
     assert outcome.steps_attempted == 2
     assert outcome.stopped_reason is RunExecutorPumpStopReason.STEP_LIMIT_REACHED
     assert outcome.last_step is not None
@@ -344,7 +419,9 @@ def test_executor_cycle_refreshes_commit_intent_after_reacquired_executing_lease
     assert refreshed_segment.fencing_token == 43
 
 
-def test_executor_cycle_refreshes_preserved_replacement_after_reacquired_executing_lease() -> None:
+def test_executor_cycle_refreshes_preserved_replacement_after_reacquired_executing_lease() -> (
+    None
+):
     plan = _sealed_plan()
     runs = _InMemoryRunStore(
         _run(
@@ -355,7 +432,9 @@ def test_executor_cycle_refreshes_preserved_replacement_after_reacquired_executi
     )
     lease = _FakeLiveLease("lease-b", fencing_token=43)
     registry = HeldRunTargetLeaseRegistry()
-    recovery_operations = _FakeRecoveryOperationStore((_old_target_preserved_operation(),))
+    recovery_operations = _FakeRecoveryOperationStore(
+        (_old_target_preserved_operation(),)
+    )
     intent_segments = _FakeIntentSegmentStore((_intent_segment(),))
 
     outcome = execute_bounded_run_executor_cycle(
@@ -371,7 +450,9 @@ def test_executor_cycle_refreshes_preserved_replacement_after_reacquired_executi
     )
 
     operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
-    refreshed_segment = intent_segments.load_intent_segment("run-a-target-0000-intent-000001")
+    refreshed_segment = intent_segments.load_intent_segment(
+        "run-a-target-0000-intent-000001"
+    )
     assert outcome.steps_attempted == 2
     assert outcome.stopped_reason is RunExecutorPumpStopReason.STEP_LIMIT_REACHED
     assert outcome.last_step is not None
@@ -402,7 +483,9 @@ def test_executor_cycle_commits_preserved_replacement_with_retained_lease() -> N
         run_target_id="run-a-target-0000",
         lease=lease,
     )
-    recovery_operations = _FakeRecoveryOperationStore((_old_target_preserved_operation(),))
+    recovery_operations = _FakeRecoveryOperationStore(
+        (_old_target_preserved_operation(),)
+    )
     final_commit = _FakeFinalCommitPort()
 
     outcome = execute_one_run_executor_cycle(
@@ -439,7 +522,9 @@ def test_executor_cycle_commits_preserved_replacement_with_retained_lease() -> N
 
 def test_executor_cycle_completes_catalog_recorded_target_and_releases_lease() -> None:
     plan = _sealed_plan()
-    runs = _InMemoryRunStore(_run(state=RunState.EXECUTING, plan=plan, target_state=RunTargetState.EXECUTING))
+    runs = _InMemoryRunStore(
+        _run(state=RunState.EXECUTING, plan=plan, target_state=RunTargetState.EXECUTING)
+    )
     lease = _FakeLiveLease()
     registry = HeldRunTargetLeaseRegistry()
     registry.retain_run_target_lease(
@@ -472,7 +557,9 @@ def test_executor_cycle_completes_catalog_recorded_target_and_releases_lease() -
 
 def test_executor_cycle_cleans_catalog_recorded_quarantine_before_completion() -> None:
     plan = _sealed_plan()
-    runs = _InMemoryRunStore(_run(state=RunState.EXECUTING, plan=plan, target_state=RunTargetState.EXECUTING))
+    runs = _InMemoryRunStore(
+        _run(state=RunState.EXECUTING, plan=plan, target_state=RunTargetState.EXECUTING)
+    )
     lease = _FakeLiveLease()
     registry = HeldRunTargetLeaseRegistry()
     registry.retain_run_target_lease(
@@ -480,7 +567,9 @@ def test_executor_cycle_cleans_catalog_recorded_quarantine_before_completion() -
         run_target_id="run-a-target-0000",
         lease=lease,
     )
-    recovery_operations = _FakeRecoveryOperationStore((_directory_cataloged_operation(),))
+    recovery_operations = _FakeRecoveryOperationStore(
+        (_directory_cataloged_operation(),)
+    )
     cleanup_port = _FakeRecoveryObjectCleanupPort()
 
     outcome = execute_one_run_executor_cycle(
@@ -510,9 +599,13 @@ def test_executor_cycle_cleans_catalog_recorded_quarantine_before_completion() -
     assert loaded.targets[0].state is RunTargetState.EXECUTING
 
 
-def test_executor_cycle_marks_user_decision_target_recovery_required_and_releases_lease() -> None:
+def test_executor_cycle_marks_user_decision_target_recovery_required_and_releases_lease() -> (
+    None
+):
     plan = _sealed_plan()
-    runs = _InMemoryRunStore(_run(state=RunState.EXECUTING, plan=plan, target_state=RunTargetState.EXECUTING))
+    runs = _InMemoryRunStore(
+        _run(state=RunState.EXECUTING, plan=plan, target_state=RunTargetState.EXECUTING)
+    )
     lease = _FakeLiveLease()
     registry = HeldRunTargetLeaseRegistry()
     registry.retain_run_target_lease(
@@ -550,9 +643,13 @@ def test_executor_cycle_marks_user_decision_target_recovery_required_and_release
     assert loaded.targets[0].state is RunTargetState.RECOVERY_REQUIRED
 
 
-def test_executor_cycle_marks_restored_old_target_cancelled_and_releases_lease() -> None:
+def test_executor_cycle_marks_restored_old_target_cancelled_and_releases_lease() -> (
+    None
+):
     plan = _sealed_plan()
-    runs = _InMemoryRunStore(_run(state=RunState.EXECUTING, plan=plan, target_state=RunTargetState.EXECUTING))
+    runs = _InMemoryRunStore(
+        _run(state=RunState.EXECUTING, plan=plan, target_state=RunTargetState.EXECUTING)
+    )
     lease = _FakeLiveLease()
     registry = HeldRunTargetLeaseRegistry()
     registry.retain_run_target_lease(
@@ -590,7 +687,7 @@ def test_executor_cycle_marks_restored_old_target_cancelled_and_releases_lease()
     assert loaded.targets[0].state is RunTargetState.CANCELLED
 
 
-class _InMemoryRunStore(RunExecutorQueueStore):
+class _InMemoryRunStore(RunExecutorCycleRunStore):
     def __init__(self, run: StartedRun | None) -> None:
         self.run = run
 
@@ -602,15 +699,22 @@ class _InMemoryRunStore(RunExecutorQueueStore):
             return self.run
         return None
 
-    def load_started_run_by_idempotency_key(self, idempotency_key: str) -> StartedRun | None:
+    def load_started_run_by_idempotency_key(
+        self, idempotency_key: str
+    ) -> StartedRun | None:
         if self.run is not None and self.run.idempotency_key == idempotency_key:
             return self.run
         return None
 
     def load_next_runnable_run(self) -> StartedRun | None:
-        if self.run is None or self.run.state not in {RunState.QUEUED, RunState.PREFLIGHT}:
+        if self.run is None or self.run.state not in {
+            RunState.QUEUED,
+            RunState.PREFLIGHT,
+        }:
             return None
-        if not any(target.state is RunTargetState.PENDING for target in self.run.targets):
+        if not any(
+            target.state is RunTargetState.PENDING for target in self.run.targets
+        ):
             return None
         return self.run
 
@@ -647,10 +751,17 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         return self.run
 
     def load_next_revalidating_run_target_key(self) -> tuple[str, str] | None:
-        if self.run is None or self.run.state not in {RunState.PREFLIGHT, RunState.EXECUTING}:
+        if self.run is None or self.run.state not in {
+            RunState.PREFLIGHT,
+            RunState.EXECUTING,
+        }:
             return None
         target = next(
-            (target for target in self.run.targets if target.state is RunTargetState.REVALIDATING),
+            (
+                target
+                for target in self.run.targets
+                if target.state is RunTargetState.REVALIDATING
+            ),
             None,
         )
         if target is None:
@@ -661,7 +772,11 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         if self.run is None or self.run.state is not RunState.EXECUTING:
             return None
         target = next(
-            (target for target in self.run.targets if target.state is RunTargetState.EXECUTING),
+            (
+                target
+                for target in self.run.targets
+                if target.state is RunTargetState.EXECUTING
+            ),
             None,
         )
         if target is None:
@@ -672,7 +787,14 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         run = self.load_started_run(run_id)
         if run is None:
             return None
-        return next((target for target in run.targets if target.state is RunTargetState.PENDING), None)
+        return next(
+            (
+                target
+                for target in run.targets
+                if target.state is RunTargetState.PENDING
+            ),
+            None,
+        )
 
     def begin_run_target_preflight(
         self,
@@ -686,14 +808,19 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         updated_targets: list[StartedRunTarget] = []
         claimed: StartedRunTarget | None = None
         for target in run.targets:
-            if target.run_target_id == run_target_id and target.state is RunTargetState.PENDING:
+            if (
+                target.run_target_id == run_target_id
+                and target.state is RunTargetState.PENDING
+            ):
                 claimed = replace(target, state=RunTargetState.ACQUIRING_LEASE)
                 updated_targets.append(claimed)
             else:
                 updated_targets.append(target)
         if claimed is None:
             return None
-        self.run = replace(run, state=RunState.PREFLIGHT, targets=tuple(updated_targets))
+        self.run = replace(
+            run, state=RunState.PREFLIGHT, targets=tuple(updated_targets)
+        )
         return claimed
 
     def record_run_target_lease_acquired(
@@ -712,7 +839,10 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         updated_targets: list[StartedRunTarget] = []
         recorded: StartedRunTarget | None = None
         for target in run.targets:
-            if target.run_target_id == run_target_id and target.state is RunTargetState.ACQUIRING_LEASE:
+            if (
+                target.run_target_id == run_target_id
+                and target.state is RunTargetState.ACQUIRING_LEASE
+            ):
                 recorded = replace(
                     target,
                     state=RunTargetState.REVALIDATING,
@@ -787,14 +917,19 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         updated_targets: list[StartedRunTarget] = []
         started: StartedRunTarget | None = None
         for target in run.targets:
-            if target.run_target_id == run_target_id and target.state is RunTargetState.REVALIDATING:
+            if (
+                target.run_target_id == run_target_id
+                and target.state is RunTargetState.REVALIDATING
+            ):
                 started = replace(target, state=RunTargetState.EXECUTING)
                 updated_targets.append(started)
             else:
                 updated_targets.append(target)
         if started is None:
             return None
-        self.run = replace(run, state=RunState.EXECUTING, targets=tuple(updated_targets))
+        self.run = replace(
+            run, state=RunState.EXECUTING, targets=tuple(updated_targets)
+        )
         return started
 
     def record_run_target_succeeded(
@@ -811,7 +946,10 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         updated_targets: list[StartedRunTarget] = []
         completed: StartedRunTarget | None = None
         for target in run.targets:
-            if target.run_target_id == run_target_id and target.state is RunTargetState.EXECUTING:
+            if (
+                target.run_target_id == run_target_id
+                and target.state is RunTargetState.EXECUTING
+            ):
                 if (
                     target.planned_operations != completed_operations
                     or target.planned_bytes != completed_bytes
@@ -828,7 +966,55 @@ class _InMemoryRunStore(RunExecutorQueueStore):
                 updated_targets.append(target)
         if completed is None:
             return None
-        self.run = replace(run, state=RunState.COMPLETED, targets=tuple(updated_targets))
+        self.run = replace(
+            run, state=RunState.COMPLETED, targets=tuple(updated_targets)
+        )
+        return self.run
+
+    def record_run_target_succeeded_with_warnings(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        completed_operations: int,
+        completed_bytes: int,
+        skipped_operations: int,
+        skipped_bytes: int,
+        last_error_code: str,
+    ) -> StartedRun | None:
+        run = self.load_started_run(run_id)
+        if run is None or run.state is not RunState.EXECUTING:
+            return None
+        updated_targets: list[StartedRunTarget] = []
+        completed: StartedRunTarget | None = None
+        for target in run.targets:
+            if (
+                target.run_target_id == run_target_id
+                and target.state is RunTargetState.EXECUTING
+            ):
+                if (
+                    target.planned_operations
+                    != completed_operations + skipped_operations
+                    or target.planned_bytes != completed_bytes + skipped_bytes
+                ):
+                    return None
+                completed = replace(
+                    target,
+                    state=RunTargetState.SUCCEEDED_WITH_WARNINGS,
+                    completed_operations=completed_operations,
+                    completed_bytes=completed_bytes,
+                )
+                updated_targets.append(completed)
+            else:
+                updated_targets.append(target)
+        if completed is None:
+            return None
+        self.run = replace(
+            run,
+            state=RunState.COMPLETED_WITH_WARNINGS,
+            targets=tuple(updated_targets),
+            warning_count=run.warning_count + skipped_operations,
+        )
         return self.run
 
     def record_run_target_recovery_required(
@@ -873,7 +1059,10 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         updated_targets: list[StartedRunTarget] = []
         completed: StartedRunTarget | None = None
         for target in run.targets:
-            if target.run_target_id == run_target_id and target.state is RunTargetState.EXECUTING:
+            if (
+                target.run_target_id == run_target_id
+                and target.state is RunTargetState.EXECUTING
+            ):
                 completed = replace(target, state=target_state)
                 updated_targets.append(completed)
             else:
@@ -892,7 +1081,8 @@ class _InMemoryRunStore(RunExecutorQueueStore):
 class _FakeRecoveryOperationStore(RunExecutorCycleRecoveryOperationStore):
     def __init__(self, operations: tuple[RecoveryOperation, ...]) -> None:
         self.operations = {
-            (operation.run_id, operation.operation_id): operation for operation in operations
+            (operation.run_id, operation.operation_id): operation
+            for operation in operations
         }
 
     def record_planned_operation(
@@ -951,9 +1141,39 @@ class _FakeRecoveryOperationStore(RunExecutorCycleRecoveryOperationStore):
             operation,
             phase=next_phase,
             intent_segment_id=intent_segment_id or operation.intent_segment_id,
-            intent_ordinal=operation.intent_ordinal if intent_ordinal is None else intent_ordinal,
+            intent_ordinal=operation.intent_ordinal
+            if intent_ordinal is None
+            else intent_ordinal,
             catalog_handoff_id=catalog_handoff_id or operation.catalog_handoff_id,
             **cast(Any, metadata_updates),
+        )
+        self.operations[(run_id, operation_id)] = updated
+        return updated
+
+    def record_staging_failure(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        expected_phase: RecoveryOperationPhase,
+        expected_failure_count: int,
+        next_phase: RecoveryOperationPhase,
+        error_code: str,
+        process_instance_id: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> RecoveryOperation | None:
+        operation = self.operations.get((run_id, operation_id))
+        if (
+            operation is None
+            or operation.phase is not expected_phase
+            or operation.staging_failure_count != expected_failure_count
+        ):
+            return None
+        updated = replace(
+            operation,
+            phase=next_phase,
+            last_error_code=error_code,
+            staging_failure_count=expected_failure_count + 1,
         )
         self.operations[(run_id, operation_id)] = updated
         return updated
@@ -1069,7 +1289,9 @@ class _FakeRecoveryOperationStore(RunExecutorCycleRecoveryOperationStore):
         self.operations[(run_id, operation_id)] = updated
         return updated
 
-    def load_operation(self, *, run_id: str, operation_id: str) -> RecoveryOperation | None:
+    def load_operation(
+        self, *, run_id: str, operation_id: str
+    ) -> RecoveryOperation | None:
         return self.operations.get((run_id, operation_id))
 
     def list_operations_for_run_target_in_phase(
@@ -1082,7 +1304,9 @@ class _FakeRecoveryOperationStore(RunExecutorCycleRecoveryOperationStore):
     ) -> tuple[RecoveryOperation, ...]:
         return tuple(
             operation
-            for operation in sorted(self.operations.values(), key=lambda item: item.operation_id)
+            for operation in sorted(
+                self.operations.values(), key=lambda item: item.operation_id
+            )
             if operation.run_id == run_id
             and operation.run_target_id == run_target_id
             and operation.phase is phase
@@ -1103,13 +1327,17 @@ class _SinglePlanStore(PlanStore):
 
 
 class _FakeStagingPort:
-    def validate_source_file(self, operation: RecoveryOperation) -> SourceValidationEvidence:
+    def validate_source_file(
+        self, operation: RecoveryOperation
+    ) -> SourceValidationEvidence:
         return SourceValidationEvidence(
             fingerprint_json=_fingerprint_json(),
             hash_evidence_kind="SHA256_CURRENT_SOURCE_FILE",
         )
 
-    def bind_source_stability(self, operation: RecoveryOperation) -> SourceStabilityEvidence:
+    def bind_source_stability(
+        self, operation: RecoveryOperation
+    ) -> SourceStabilityEvidence:
         return SourceStabilityEvidence(
             guard_kind="POST_TRANSFER_HASH_ONLY",
             guard_evidence_hash="a" * 64,
@@ -1122,21 +1350,43 @@ class _FakeStagingPort:
     ) -> TargetPreconditionEvidence:
         return TargetPreconditionEvidence(fingerprint_json='{"kind":"ABSENT"}')
 
-    def allocate_staging_object(self, operation: RecoveryOperation) -> StagingAllocation:
+    def allocate_staging_object(
+        self, operation: RecoveryOperation
+    ) -> StagingAllocation:
         return StagingAllocation(staging_object_id=operation.operation_id)
 
-    def transfer_to_staging(self, operation: RecoveryOperation) -> StagingTransferEvidence:
+    def transfer_to_staging(
+        self, operation: RecoveryOperation
+    ) -> StagingTransferEvidence:
         return StagingTransferEvidence(transfer_state="TRANSFERRED_TO_STAGING")
 
-    def ensure_staging_durable(self, operation: RecoveryOperation) -> StagingDurabilityEvidence:
+    def ensure_staging_durable(
+        self, operation: RecoveryOperation
+    ) -> StagingDurabilityEvidence:
         return StagingDurabilityEvidence(durability_state="FILE_FSYNC_COMPLETED")
 
-    def verify_staging_artifact(self, operation: RecoveryOperation) -> StagingVerificationEvidence:
+    def verify_staging_artifact(
+        self, operation: RecoveryOperation
+    ) -> StagingVerificationEvidence:
         return StagingVerificationEvidence(
             fingerprint_json=_fingerprint_json(),
             final_fingerprint_json=_fingerprint_json(),
             assurance_level="STAGING_HASH_MATCHES_POST_TRANSFER_SOURCE_HASH",
         )
+
+
+class _TransientStagingPort(_FakeStagingPort):
+    def __init__(self, *, failures: int) -> None:
+        self.failures = failures
+        self.calls = 0
+
+    def validate_source_file(
+        self, operation: RecoveryOperation
+    ) -> SourceValidationEvidence:
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise RuntimeError("LOCAL_STAGING_SOURCE_FILE_UNREADABLE")
+        return super().validate_source_file(operation)
 
 
 class _FakeFinalCommitPort(FinalCommitPort):
@@ -1176,7 +1426,9 @@ class _FakeLeaseAuthority(EndpointLeaseAuthority):
     def __init__(self, lease: "_FakeLiveLease") -> None:
         self.lease = lease
 
-    def acquire_endpoint_lease(self, request: EndpointLeaseRequest) -> EndpointLeaseAttempt:
+    def acquire_endpoint_lease(
+        self, request: EndpointLeaseRequest
+    ) -> EndpointLeaseAttempt:
         return EndpointLeaseAttempt(
             acquired=True,
             lease=self.lease,
@@ -1215,7 +1467,9 @@ class _FakeIntentSegmentStore(RecoveryIntentSegmentStore):
     def __init__(self, segments: tuple[RecoveryIntentSegment, ...] = ()) -> None:
         self.segments = {segment.segment_id: segment for segment in segments}
 
-    def publish_intent_segment(self, segment: RecoveryIntentSegment) -> RecoveryIntentSegment:
+    def publish_intent_segment(
+        self, segment: RecoveryIntentSegment
+    ) -> RecoveryIntentSegment:
         self.segments.setdefault(segment.segment_id, segment)
         return segment
 
@@ -1245,7 +1499,9 @@ class _FakeCatalogHandoffStore(FinalFileCatalogHandoffStore):
     ) -> FinalFileCatalogHandoff:
         return handoff
 
-    def load_final_file_handoff(self, handoff_id: str) -> FinalFileCatalogHandoff | None:
+    def load_final_file_handoff(
+        self, handoff_id: str
+    ) -> FinalFileCatalogHandoff | None:
         return None
 
 
@@ -1308,7 +1564,9 @@ def _operation(
         intent_segment_id="segment-a",
         intent_ordinal=0,
         catalog_handoff_id="final-file:run-a:op-a",
-        expected_final_fingerprint_json='{"byte_count":128,"content_hash":"' + ("a" * 64) + '"}',
+        expected_final_fingerprint_json='{"byte_count":128,"content_hash":"'
+        + ("a" * 64)
+        + '"}',
         last_error_code=last_error_code,
     )
 
@@ -1357,7 +1615,9 @@ def _old_target_preserved_operation() -> RecoveryOperation:
         _commit_intent_operation(),
         phase=RecoveryOperationPhase.OLD_TARGET_PRESERVED,
         target_precondition_kind=RecoveryTargetPreconditionKind.MATCH_FINGERPRINT,
-        expected_target_fingerprint_json='{"byte_count":128,"content_hash":"' + ("b" * 64) + '"}',
+        expected_target_fingerprint_json='{"byte_count":128,"content_hash":"'
+        + ("b" * 64)
+        + '"}',
         version_object_id="op-a",
     )
 

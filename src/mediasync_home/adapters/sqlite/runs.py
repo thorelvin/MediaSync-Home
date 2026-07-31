@@ -154,7 +154,9 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
             (run_id,),
         )
 
-    def load_started_run_by_idempotency_key(self, idempotency_key: str) -> StartedRun | None:
+    def load_started_run_by_idempotency_key(
+        self, idempotency_key: str
+    ) -> StartedRun | None:
         return self._load_one(
             """
             SELECT
@@ -1337,9 +1339,35 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                             SELECT 1
                             FROM run_targets
                             WHERE run_targets.run_id = runs.id
-                                AND run_targets.state != 'SUCCEEDED'
+                                AND run_targets.state IN (
+                                    'PENDING',
+                                    'ACQUIRING_LEASE',
+                                    'REVALIDATING',
+                                    'EXECUTING',
+                                    'PAUSED',
+                                    'WAITING_FOR_ENDPOINT',
+                                    'NEEDS_REVIEW'
+                                )
                         )
-                        THEN 'COMPLETED'
+                        THEN CASE
+                            WHEN NOT EXISTS (
+                                SELECT 1
+                                FROM run_targets
+                                WHERE run_targets.run_id = runs.id
+                                    AND run_targets.state != 'SUCCEEDED'
+                            )
+                            THEN 'COMPLETED'
+                            WHEN NOT EXISTS (
+                                SELECT 1
+                                FROM run_targets
+                                WHERE run_targets.run_id = runs.id
+                                    AND run_targets.state NOT IN (
+                                        'SUCCEEDED', 'SUCCEEDED_WITH_WARNINGS'
+                                    )
+                            )
+                            THEN 'COMPLETED_WITH_WARNINGS'
+                            ELSE 'PARTIAL_FAILURE'
+                        END
                         ELSE state
                     END,
                     finished_utc = CASE
@@ -1347,7 +1375,15 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                             SELECT 1
                             FROM run_targets
                             WHERE run_targets.run_id = runs.id
-                                AND run_targets.state != 'SUCCEEDED'
+                                AND run_targets.state IN (
+                                    'PENDING',
+                                    'ACQUIRING_LEASE',
+                                    'REVALIDATING',
+                                    'EXECUTING',
+                                    'PAUSED',
+                                    'WAITING_FOR_ENDPOINT',
+                                    'NEEDS_REVIEW'
+                                )
                         )
                         THEN COALESCE(finished_utc, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
                         ELSE finished_utc
@@ -1374,6 +1410,150 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
             if isinstance(exc, SqliteRunStoreError):
                 raise
             raise SqliteRunStoreError("RUN_TARGET_COMPLETION_FAILED") from exc
+
+    def record_run_target_succeeded_with_warnings(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        completed_operations: int,
+        completed_bytes: int,
+        skipped_operations: int,
+        skipped_bytes: int,
+        last_error_code: str,
+    ) -> StartedRun | None:
+        normalized_error_code = last_error_code.strip()
+        if (
+            completed_operations < 0
+            or completed_bytes < 0
+            or skipped_operations < 1
+            or skipped_bytes < 0
+            or not normalized_error_code
+        ):
+            return None
+        result_json = _json_dump(
+            {
+                "last_error_code": normalized_error_code,
+                "skipped_bytes": skipped_bytes,
+                "skipped_operations": skipped_operations,
+            }
+        )
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            target_cursor = self._connection.execute(
+                """
+                UPDATE run_targets
+                SET
+                    state = 'SUCCEEDED_WITH_WARNINGS',
+                    completed_operations = ?,
+                    completed_bytes = ?,
+                    warning_count = warning_count + ?,
+                    result_json = ?,
+                    finished_utc = COALESCE(finished_utc, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    row_version = row_version + 1
+                WHERE run_id = ?
+                    AND id = ?
+                    AND state = 'EXECUTING'
+                    AND planned_operations = ?
+                    AND planned_bytes = ?
+                    AND EXISTS (
+                        SELECT 1
+                        FROM runs
+                        WHERE runs.id = run_targets.run_id
+                            AND runs.state = 'EXECUTING'
+                    )
+                """,
+                (
+                    completed_operations,
+                    completed_bytes,
+                    skipped_operations,
+                    result_json,
+                    run_id,
+                    run_target_id,
+                    completed_operations + skipped_operations,
+                    completed_bytes + skipped_bytes,
+                ),
+            )
+            if target_cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            run_cursor = self._connection.execute(
+                """
+                UPDATE runs
+                SET
+                    state = CASE
+                        WHEN NOT EXISTS (
+                            SELECT 1
+                            FROM run_targets
+                            WHERE run_targets.run_id = runs.id
+                                AND run_targets.state IN (
+                                    'PENDING',
+                                    'ACQUIRING_LEASE',
+                                    'REVALIDATING',
+                                    'EXECUTING',
+                                    'PAUSED',
+                                    'WAITING_FOR_ENDPOINT',
+                                    'NEEDS_REVIEW'
+                                )
+                        )
+                        THEN CASE
+                            WHEN NOT EXISTS (
+                                SELECT 1
+                                FROM run_targets
+                                WHERE run_targets.run_id = runs.id
+                                    AND run_targets.state NOT IN (
+                                        'SUCCEEDED', 'SUCCEEDED_WITH_WARNINGS'
+                                    )
+                            )
+                            THEN 'COMPLETED_WITH_WARNINGS'
+                            ELSE 'PARTIAL_FAILURE'
+                        END
+                        ELSE state
+                    END,
+                    finished_utc = CASE
+                        WHEN NOT EXISTS (
+                            SELECT 1
+                            FROM run_targets
+                            WHERE run_targets.run_id = runs.id
+                                AND run_targets.state IN (
+                                    'PENDING',
+                                    'ACQUIRING_LEASE',
+                                    'REVALIDATING',
+                                    'EXECUTING',
+                                    'PAUSED',
+                                    'WAITING_FOR_ENDPOINT',
+                                    'NEEDS_REVIEW'
+                                )
+                        )
+                        THEN COALESCE(finished_utc, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                        ELSE finished_utc
+                    END,
+                    warning_count = warning_count + ?,
+                    row_version = row_version + 1
+                WHERE id = ?
+                    AND state = 'EXECUTING'
+                """,
+                (skipped_operations, run_id),
+            )
+            if run_cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            run = self.load_started_run(run_id)
+            if run is None:
+                raise SqliteRunStoreError("RUN_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return run
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_TARGET_WARNING_COMPLETION_FAILED") from exc
 
     def record_run_target_recovery_required(
         self,
@@ -1598,7 +1778,9 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
             targets=self._load_targets(run_id),
         )
 
-    def _load_target(self, *, run_id: str, run_target_id: str) -> StartedRunTarget | None:
+    def _load_target(
+        self, *, run_id: str, run_target_id: str
+    ) -> StartedRunTarget | None:
         rows = self._load_targets_by_query(
             """
             SELECT

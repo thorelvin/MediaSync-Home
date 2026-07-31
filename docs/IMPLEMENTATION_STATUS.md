@@ -1,5 +1,18 @@
 # Implementeringsstatus
 
+Oppdatering 2026-07-31: Feil på enkeltfiler har nå en varig, avgrenset
+retryflyt. Recovery schema 9 lagrer `staging_failure_count`, og hvert transient
+stagingforsøk appendes som en hashkjedet recovery-event med forsøksnummer,
+feilkode og retryutfall. Bare eksplisitt klassifiserte lokale I/O- og
+Robocopy-feil prøves på nytt; precondition-, reparse-, containment- og andre
+sikkerhetsfeil forblir blokkert. Tredje transientfeil flytter operasjonen til
+`SKIPPED`, resten av filene fortsetter, og et ellers ferdig mål avsluttes som
+`SUCCEEDED_WITH_WARNINGS`. Run blir `COMPLETED_WITH_WARNINGS`, med samme
+varseltilstand og varselantall i Jobs-fremdrift og Historikk. Lokal staging
+normaliserer nå også allocation-, transfer-, durability- og verification-I/O
+til retryklassifiserbare feilkoder. Persistente catalog-`operation_attempts`,
+tidsstyrt backoff og nettverksbrudd som setter hele målet på vent gjenstår.
+
 Oppdatering 2026-07-31: Kildebytes er nå bundet til analysen som opprettet
 planen. Snapshot schema 2 og catalog schema 37 lagrer et stabilt
 identitetsfingerprint for hver kildefil. Operation schema 3 forsegler eksakt

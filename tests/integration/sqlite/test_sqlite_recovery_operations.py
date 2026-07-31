@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -10,8 +11,13 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     recovery_writer_policy,
 )
 from mediasync_home.adapters.sqlite.lease_tokens import SqliteResourceLeaseStore
-from mediasync_home.adapters.sqlite.migrations import apply_sqlite_migrations, recovery_migration_plan
-from mediasync_home.adapters.sqlite.recovery_intents import SqliteRecoveryIntentSegmentStore
+from mediasync_home.adapters.sqlite.migrations import (
+    apply_sqlite_migrations,
+    recovery_migration_plan,
+)
+from mediasync_home.adapters.sqlite.recovery_intents import (
+    SqliteRecoveryIntentSegmentStore,
+)
 from mediasync_home.adapters.sqlite.recovery_operations import (
     SqliteRecoveryOperationStore,
     SqliteRecoveryOperationStoreError,
@@ -35,12 +41,18 @@ def test_sqlite_recovery_operation_store_records_planned_operation_and_event(
         store = SqliteRecoveryOperationStore(connection)
         operation = _operation()
 
-        assert store.record_planned_operation(
-            operation,
-            process_instance_id="host-a",
-            payload={"reason": "start"},
-        ) == operation
-        assert store.load_operation(run_id="run-a", operation_id="operation-a") == operation
+        assert (
+            store.record_planned_operation(
+                operation,
+                process_instance_id="host-a",
+                payload={"reason": "start"},
+            )
+            == operation
+        )
+        assert (
+            store.load_operation(run_id="run-a", operation_id="operation-a")
+            == operation
+        )
 
         row = connection.execute(
             """
@@ -170,7 +182,9 @@ def test_sqlite_recovery_operation_store_rebinds_pre_commit_operation_lease(
         assert updated.phase is RecoveryOperationPhase.PLANNED
         assert updated.lease_id == "lease-b"
         assert updated.fencing_token == new_token
-        assert store.load_operation(run_id="run-a", operation_id="operation-a") == updated
+        assert (
+            store.load_operation(run_id="run-a", operation_id="operation-a") == updated
+        )
         rows = connection.execute(
             """
             SELECT run_sequence, from_phase, to_phase, payload_json
@@ -274,7 +288,9 @@ def test_sqlite_recovery_operation_store_refreshes_commit_intent_to_fresh_lease(
         assert updated.fencing_token == new_token
         assert updated.intent_segment_id == "segment-b"
         assert updated.intent_ordinal == 0
-        assert store.load_operation(run_id="run-a", operation_id="operation-a") == updated
+        assert (
+            store.load_operation(run_id="run-a", operation_id="operation-a") == updated
+        )
         rows = connection.execute(
             """
             SELECT from_phase, to_phase, payload_json
@@ -284,7 +300,11 @@ def test_sqlite_recovery_operation_store_refreshes_commit_intent_to_fresh_lease(
             """,
             ("run-a",),
         ).fetchall()
-        assert rows[-1] == ("COMMIT_INTENT_RECORDED", "COMMIT_INTENT_RECORDED", '{"reason":"restart"}')
+        assert rows[-1] == (
+            "COMMIT_INTENT_RECORDED",
+            "COMMIT_INTENT_RECORDED",
+            '{"reason":"restart"}',
+        )
     finally:
         connection.close()
 
@@ -328,7 +348,9 @@ def test_sqlite_recovery_operation_store_refreshes_preserved_commit_intent_to_fr
             expected_phase=RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
             next_phase=RecoveryOperationPhase.OLD_TARGET_PRESERVED,
             process_instance_id="host-a",
-            operation_metadata=RecoveryOperationMetadata(version_object_id="operation-a"),
+            operation_metadata=RecoveryOperationMetadata(
+                version_object_id="operation-a"
+            ),
         )
         assert operation is not None
         SqliteResourceLeaseStore(connection).release_resource_lease(lease_id="lease-a")
@@ -370,7 +392,9 @@ def test_sqlite_recovery_operation_store_refreshes_preserved_commit_intent_to_fr
         assert updated.intent_segment_id == "segment-b"
         assert updated.intent_ordinal == 0
         assert updated.version_object_id == "operation-a"
-        assert store.load_operation(run_id="run-a", operation_id="operation-a") == updated
+        assert (
+            store.load_operation(run_id="run-a", operation_id="operation-a") == updated
+        )
         rows = connection.execute(
             """
             SELECT from_phase, to_phase, payload_json
@@ -409,7 +433,9 @@ def test_sqlite_recovery_operation_store_rejects_commit_intent_lease_rebind(
         )
         assert operation is not None
 
-        with pytest.raises(SqliteRecoveryOperationStoreError, match="LEASE_REBIND_PHASE_UNSUPPORTED"):
+        with pytest.raises(
+            SqliteRecoveryOperationStoreError, match="LEASE_REBIND_PHASE_UNSUPPORTED"
+        ):
             store.record_operation_lease_rebound(
                 run_id="run-a",
                 operation_id="operation-a",
@@ -433,7 +459,9 @@ def test_sqlite_recovery_operation_store_rejects_commit_intent_for_mismatched_se
     connection = _prepared_recovery_connection(tmp_path)
     try:
         _register_resource_lease(connection)
-        _register_resource_lease(connection, lease_id="lease-b", resource_key="endpoint:target-b")
+        _register_resource_lease(
+            connection, lease_id="lease-b", resource_key="endpoint:target-b"
+        )
         SqliteRecoveryIntentSegmentStore(connection).publish_intent_segment(
             _segment(
                 segment_id="segment-b",
@@ -446,7 +474,9 @@ def test_sqlite_recovery_operation_store_rejects_commit_intent_for_mismatched_se
         store = SqliteRecoveryOperationStore(connection)
         _record_staging_verified_operation(store)
 
-        with pytest.raises(SqliteRecoveryOperationStoreError, match="INTENT_SEGMENT_MISMATCH"):
+        with pytest.raises(
+            SqliteRecoveryOperationStoreError, match="INTENT_SEGMENT_MISMATCH"
+        ):
             store.record_operation_phase_transition(
                 run_id="run-a",
                 operation_id="operation-a",
@@ -488,7 +518,9 @@ def test_sqlite_recovery_operation_store_rejects_duplicate_intent_ordinal(
             intent_ordinal=0,
         )
 
-        with pytest.raises(SqliteRecoveryOperationStoreError, match="PERSISTENCE_CONFLICT"):
+        with pytest.raises(
+            SqliteRecoveryOperationStoreError, match="PERSISTENCE_CONFLICT"
+        ):
             store.record_operation_phase_transition(
                 run_id="run-a",
                 operation_id="operation-b",
@@ -506,7 +538,9 @@ def test_sqlite_recovery_operation_store_rejects_duplicate_intent_ordinal(
         connection.close()
 
 
-def test_sqlite_recovery_operation_store_returns_none_on_phase_conflict(tmp_path: Path) -> None:
+def test_sqlite_recovery_operation_store_returns_none_on_phase_conflict(
+    tmp_path: Path,
+) -> None:
     connection = _prepared_recovery_connection(tmp_path)
     try:
         _register_resource_lease(connection)
@@ -524,6 +558,62 @@ def test_sqlite_recovery_operation_store_returns_none_on_phase_conflict(tmp_path
         assert result is None
         assert connection.in_transaction is False
         assert _event_count(connection) == 1
+    finally:
+        connection.close()
+
+
+def test_sqlite_recovery_operation_store_journals_bounded_staging_failures(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _register_resource_lease(connection)
+        store = SqliteRecoveryOperationStore(connection)
+        store.record_planned_operation(_operation(), process_instance_id="host-a")
+
+        for expected_count in range(3):
+            updated = store.record_staging_failure(
+                run_id="run-a",
+                operation_id="operation-a",
+                expected_phase=RecoveryOperationPhase.PLANNED,
+                expected_failure_count=expected_count,
+                next_phase=(
+                    RecoveryOperationPhase.SKIPPED
+                    if expected_count == 2
+                    else RecoveryOperationPhase.PLANNED
+                ),
+                error_code="LOCAL_STAGING_SOURCE_FILE_UNREADABLE",
+                process_instance_id="host-a",
+                payload={"staging_phase": "PLANNED"},
+            )
+            assert updated is not None
+            assert updated.staging_failure_count == expected_count + 1
+
+        operation = store.load_operation(run_id="run-a", operation_id="operation-a")
+        assert operation is not None
+        assert operation.phase is RecoveryOperationPhase.SKIPPED
+        assert operation.staging_failure_count == 3
+        assert operation.last_error_code == "LOCAL_STAGING_SOURCE_FILE_UNREADABLE"
+        rows = connection.execute(
+            """
+            SELECT from_phase, to_phase, payload_json
+            FROM recovery_events
+            WHERE run_id = ?
+            ORDER BY run_sequence
+            """,
+            ("run-a",),
+        ).fetchall()
+        assert [row[:2] for row in rows[-3:]] == [
+            ("PLANNED", "PLANNED"),
+            ("PLANNED", "PLANNED"),
+            ("PLANNED", "SKIPPED"),
+        ]
+        assert [json.loads(str(row[2]))["attempt_number"] for row in rows[-3:]] == [
+            1,
+            2,
+            3,
+        ]
+        assert json.loads(str(rows[-1][2]))["retry_scheduled"] is False
     finally:
         connection.close()
 

@@ -39,7 +39,10 @@ from mediasync_home.adapters.sqlite.state_backup import (
     SqliteStateRestoreEpochRecoveryReport,
     create_sqlite_state_backup_set,
 )
-from mediasync_home.application.external_resources import ExternalResourceState, ExternalResourceType
+from mediasync_home.application.external_resources import (
+    ExternalResourceState,
+    ExternalResourceType,
+)
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.backup_analysis import BackupAnalysisCommandName
 from mediasync_home.application.host_locator import build_local_engine_host_publication
@@ -51,7 +54,10 @@ from mediasync_home.application.run_executor_cycle import (
     RunExecutorCycleOutcome,
     RunExecutorCyclePumpOutcome,
 )
-from mediasync_home.application.runtime_status import local_writable_status, startup_status
+from mediasync_home.application.runtime_status import (
+    local_writable_status,
+    startup_status,
+)
 from mediasync_home.application.state_maintenance import StateMaintenanceCommandName
 from mediasync_home.application.state_capacity import (
     StateCapacityObservation,
@@ -86,7 +92,10 @@ from mediasync_home.composition.engine_host import (
 )
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
-from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
+from mediasync_home.ipc.client_identity import (
+    ClientAuthorizationPolicy,
+    VerifiedClientIdentity,
+)
 from mediasync_home.ipc.protocol import IpcReason, IpcStatus
 
 
@@ -282,7 +291,9 @@ def test_executor_maintenance_loop_reports_sanitized_runtime_failure() -> None:
     ]
 
 
-def test_task_scheduler_maintenance_loop_runs_interval_reconciliation_and_closes_runtime() -> None:
+def test_task_scheduler_maintenance_loop_runs_interval_reconciliation_and_closes_runtime() -> (
+    None
+):
     runtime = _TaskSchedulerRuntime((_task_scheduler_pump_report(),))
     registry = _TaskSchedulerRegistry()
     lines: list[str] = []
@@ -331,7 +342,9 @@ def test_task_scheduler_maintenance_loop_runs_interval_reconciliation_and_closes
     assert events[0]["task_scheduler_reconciliation"]["resources_reconciled"] == 0
 
 
-def test_task_scheduler_maintenance_loop_carries_stage_cursor_until_scan_completes() -> None:
+def test_task_scheduler_maintenance_loop_carries_stage_cursor_until_scan_completes() -> (
+    None
+):
     runtime = _TaskSchedulerRuntime(
         (
             _task_scheduler_pump_report(
@@ -373,7 +386,9 @@ def test_task_scheduler_maintenance_loop_carries_stage_cursor_until_scan_complet
     assert [event["next_interval_ms"] for event in events[:2]] == [1, 2]
 
 
-def test_task_scheduler_maintenance_loop_carries_orphan_cursor_until_scan_completes() -> None:
+def test_task_scheduler_maintenance_loop_carries_orphan_cursor_until_scan_completes() -> (
+    None
+):
     runtime = _TaskSchedulerRuntime(
         (
             _task_scheduler_pump_report(
@@ -408,7 +423,9 @@ def test_task_scheduler_maintenance_loop_carries_orphan_cursor_until_scan_comple
     loop.stop()
 
     events = [json.loads(line) for line in lines]
-    assert [call["after_orphan_task_name"] for call in runtime.task_scheduler_calls[:2]] == [
+    assert [
+        call["after_orphan_task_name"] for call in runtime.task_scheduler_calls[:2]
+    ] == [
         None,
         "schedule-a",
     ]
@@ -510,7 +527,9 @@ def test_long_running_pipe_loop_reports_sanitized_failure() -> None:
     assert server.calls == 3
 
 
-def test_engine_host_run_uses_long_running_pipe_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_engine_host_run_uses_long_running_pipe_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fake_win32_pipe = types.ModuleType("mediasync_home.ipc.win32_named_pipe")
     runtime = _FakeRuntime()
     lines: list[str] = []
@@ -523,12 +542,20 @@ def test_engine_host_run_uses_long_running_pipe_mode(monkeypatch: pytest.MonkeyP
 
     fake_win32_pipe.Win32NamedPipeServer = FakeWin32NamedPipeServer
     fake_win32_pipe.current_user_policy = _authorization
-    monkeypatch.setitem(sys.modules, "mediasync_home.ipc.win32_named_pipe", fake_win32_pipe)
+    monkeypatch.setitem(
+        sys.modules, "mediasync_home.ipc.win32_named_pipe", fake_win32_pipe
+    )
     monkeypatch.setattr(engine_host_module.os, "name", "nt")
-    monkeypatch.setattr(engine_host_module, "current_process_runtime_policy", lambda root: None)
-    monkeypatch.setattr(engine_host_module, "build_engine_host_runtime", lambda **kwargs: runtime)
+    monkeypatch.setattr(
+        engine_host_module, "current_process_runtime_policy", lambda root: None
+    )
+    monkeypatch.setattr(
+        engine_host_module, "build_engine_host_runtime", lambda **kwargs: runtime
+    )
 
-    code = run_engine_host(["--pipe-name", "pipe-a", "--serve-forever"], emit=lines.append)
+    code = run_engine_host(
+        ["--pipe-name", "pipe-a", "--serve-forever"], emit=lines.append
+    )
 
     events = [json.loads(line) for line in lines]
     assert code == 0
@@ -554,9 +581,13 @@ def test_engine_host_startup_failure_publishes_no_locator_or_readiness(
 
     fake_win32_pipe.Win32NamedPipeServer = _FakePipeServer
     fake_win32_pipe.current_user_policy = _authorization
-    monkeypatch.setitem(sys.modules, "mediasync_home.ipc.win32_named_pipe", fake_win32_pipe)
+    monkeypatch.setitem(
+        sys.modules, "mediasync_home.ipc.win32_named_pipe", fake_win32_pipe
+    )
     monkeypatch.setattr(engine_host_module.os, "name", "nt")
-    monkeypatch.setattr(engine_host_module, "current_process_runtime_policy", lambda root: None)
+    monkeypatch.setattr(
+        engine_host_module, "current_process_runtime_policy", lambda root: None
+    )
     monkeypatch.setattr(
         engine_host_module,
         "build_engine_host_runtime",
@@ -602,13 +633,23 @@ def test_engine_host_run_clears_own_host_locator_on_exit(
 
     fake_win32_pipe.Win32NamedPipeServer = FakeWin32NamedPipeServer
     fake_win32_pipe.current_user_policy = _authorization
-    monkeypatch.setitem(sys.modules, "mediasync_home.ipc.win32_named_pipe", fake_win32_pipe)
-    monkeypatch.setattr(local_host_locator_module, "LocalReparseGuard", _PermissiveReparseGuard)
+    monkeypatch.setitem(
+        sys.modules, "mediasync_home.ipc.win32_named_pipe", fake_win32_pipe
+    )
+    monkeypatch.setattr(
+        local_host_locator_module, "LocalReparseGuard", _PermissiveReparseGuard
+    )
     monkeypatch.setattr(engine_host_module.os, "name", "nt")
     monkeypatch.setattr(engine_host_module.os, "getpid", lambda: 1111)
-    monkeypatch.setattr(engine_host_module, "current_process_runtime_policy", lambda root: None)
-    monkeypatch.setattr(engine_host_module, "build_engine_host_runtime", lambda **kwargs: runtime)
-    monkeypatch.setattr(engine_host_module, "_acquire_host_mutex", lambda *args, **kwargs: host_mutex)
+    monkeypatch.setattr(
+        engine_host_module, "current_process_runtime_policy", lambda root: None
+    )
+    monkeypatch.setattr(
+        engine_host_module, "build_engine_host_runtime", lambda **kwargs: runtime
+    )
+    monkeypatch.setattr(
+        engine_host_module, "_acquire_host_mutex", lambda *args, **kwargs: host_mutex
+    )
 
     code = run_engine_host(
         [
@@ -628,7 +669,9 @@ def test_engine_host_run_clears_own_host_locator_on_exit(
     assert runtime.closed is True
     assert host_mutex.closed is True
     assert events[0]["host_locator"]["process_id"] == 1111
-    assert events[0]["host_locator_path"] == str(state_root / "engine-host.locator.json")
+    assert events[0]["host_locator_path"] == str(
+        state_root / "engine-host.locator.json"
+    )
     assert load_local_engine_host_publication(state_root) is None
 
 
@@ -660,13 +703,23 @@ def test_engine_host_run_preserves_replaced_host_locator_on_exit(
 
     fake_win32_pipe.Win32NamedPipeServer = FakeWin32NamedPipeServer
     fake_win32_pipe.current_user_policy = _authorization
-    monkeypatch.setitem(sys.modules, "mediasync_home.ipc.win32_named_pipe", fake_win32_pipe)
-    monkeypatch.setattr(local_host_locator_module, "LocalReparseGuard", _PermissiveReparseGuard)
+    monkeypatch.setitem(
+        sys.modules, "mediasync_home.ipc.win32_named_pipe", fake_win32_pipe
+    )
+    monkeypatch.setattr(
+        local_host_locator_module, "LocalReparseGuard", _PermissiveReparseGuard
+    )
     monkeypatch.setattr(engine_host_module.os, "name", "nt")
     monkeypatch.setattr(engine_host_module.os, "getpid", lambda: 1111)
-    monkeypatch.setattr(engine_host_module, "current_process_runtime_policy", lambda root: None)
-    monkeypatch.setattr(engine_host_module, "build_engine_host_runtime", lambda **kwargs: runtime)
-    monkeypatch.setattr(engine_host_module, "_acquire_host_mutex", lambda *args, **kwargs: host_mutex)
+    monkeypatch.setattr(
+        engine_host_module, "current_process_runtime_policy", lambda root: None
+    )
+    monkeypatch.setattr(
+        engine_host_module, "build_engine_host_runtime", lambda **kwargs: runtime
+    )
+    monkeypatch.setattr(
+        engine_host_module, "_acquire_host_mutex", lambda *args, **kwargs: host_mutex
+    )
 
     code = run_engine_host(
         [
@@ -700,10 +753,16 @@ def test_engine_host_run_emits_executor_cycle_after_request(
 
     fake_win32_pipe.Win32NamedPipeServer = FakeWin32NamedPipeServer
     fake_win32_pipe.current_user_policy = _authorization
-    monkeypatch.setitem(sys.modules, "mediasync_home.ipc.win32_named_pipe", fake_win32_pipe)
+    monkeypatch.setitem(
+        sys.modules, "mediasync_home.ipc.win32_named_pipe", fake_win32_pipe
+    )
     monkeypatch.setattr(engine_host_module.os, "name", "nt")
-    monkeypatch.setattr(engine_host_module, "current_process_runtime_policy", lambda root: None)
-    monkeypatch.setattr(engine_host_module, "build_engine_host_runtime", lambda **kwargs: runtime)
+    monkeypatch.setattr(
+        engine_host_module, "current_process_runtime_policy", lambda root: None
+    )
+    monkeypatch.setattr(
+        engine_host_module, "build_engine_host_runtime", lambda **kwargs: runtime
+    )
 
     code = run_engine_host(
         [
@@ -841,7 +900,9 @@ def test_engine_host_infers_inactive_scheduler_maintenance_owner_with_mutex(
     )
 
 
-def test_engine_host_runtime_without_state_root_preserves_non_persistent_service() -> None:
+def test_engine_host_runtime_without_state_root_preserves_non_persistent_service() -> (
+    None
+):
     runtime = build_engine_host_runtime(
         authorization=_authorization(),
         service_status=startup_status(ProcessRole.ENGINE_HOST),
@@ -910,7 +971,9 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.state_restore_recovery.scanned_epoch_count == 0
         assert runtime.state_restore_startup_reconciliation is not None
         assert runtime.state_restore_startup_reconciliation.scanned_epoch_count == 0
-        assert runtime.state_restore_startup_reconciliation.latest_committed_epoch is None
+        assert (
+            runtime.state_restore_startup_reconciliation.latest_committed_epoch is None
+        )
         assert runtime.state_compaction_recovery is not None
         assert runtime.state_compaction_recovery.scanned_epoch_count == 0
         assert runtime.state_migration is not None
@@ -926,7 +989,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.installation_state is not None
         assert runtime.installation_state.product_channel == "local-preview"
         assert runtime.installation_state.catalog_schema_version == 37
-        assert runtime.installation_state.recovery_schema_version == 8
+        assert runtime.installation_state.recovery_schema_version == 9
         assert runtime.installation_state.ipc_protocol_major == 1
         assert runtime.snapshot_materialization_refresh is not None
         assert runtime.snapshot_materialization_refresh.scanned_job_count == 0
@@ -964,8 +1027,14 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
             runtime.run_executor_recovery_object_cleanup_port
             is runtime.run_executor_final_commit_port
         )
-        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 37
-        assert current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY) == 8
+        assert (
+            current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG)
+            == 37
+        )
+        assert (
+            current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY)
+            == 9
+        )
         assert runtime.startup_reconciliation is not None
         assert runtime.startup_reconciliation.reconciler_instance_id == "host-new"
         assert runtime.startup_reconciliation.recovery_operations is not None
@@ -975,8 +1044,9 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.startup_reconciliation.skipped_outbox_requeue_reason == (
             "OUTBOX_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF"
         )
-        assert runtime.startup_reconciliation.skipped_external_resource_requeue_reason == (
-            "EXTERNAL_RESOURCE_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF"
+        assert (
+            runtime.startup_reconciliation.skipped_external_resource_requeue_reason
+            == ("EXTERNAL_RESOURCE_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF")
         )
         admission = runtime.admit_state_restore_maintenance()
         assert admission.admitted is True
@@ -1001,12 +1071,16 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         history = ipc_client.query_history_timeline(limit=5)
         plan_operations = ipc_client.query_plan_operations(plan_id="plan-a", limit=5)
         plan_endpoints = ipc_client.query_plan_endpoints(plan_id="plan-a", limit=5)
-        snapshot_entries = ipc_client.query_snapshot_entries(snapshot_id="snapshot-a", limit=5)
+        snapshot_entries = ipc_client.query_snapshot_entries(
+            snapshot_id="snapshot-a", limit=5
+        )
         snapshot_coverage = ipc_client.query_snapshot_coverage(
             snapshot_id="snapshot-a",
             limit=5,
         )
-        snapshot_issues = ipc_client.query_snapshot_issues(snapshot_id="snapshot-a", limit=5)
+        snapshot_issues = ipc_client.query_snapshot_issues(
+            snapshot_id="snapshot-a", limit=5
+        )
 
         response = ipc_client.submit_command(
             "UNKNOWN_MUTATION",
@@ -1026,7 +1100,10 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert overview.payload["backup_overview"]["read_model_available"] is True
         assert overview.payload["backup_overview"]["draft"]["can_create"] is True
         assert backup_job_detail.status is IpcStatus.ACCEPTED
-        assert backup_job_detail.payload["backup_job_detail"]["read_model_available"] is True
+        assert (
+            backup_job_detail.payload["backup_job_detail"]["read_model_available"]
+            is True
+        )
         assert backup_job_detail.payload["backup_job_detail"]["found"] is False
         assert backup_job_detail.payload["backup_job_detail"]["job"] is None
         assert activity.status is IpcStatus.ACCEPTED
@@ -1038,7 +1115,9 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert history.payload["history_timeline"]["limit"] == 5
         assert history.payload["history_timeline"]["activities"] == []
         assert plan_operations.status is IpcStatus.ACCEPTED
-        assert plan_operations.payload["plan_operations"]["read_model_available"] is True
+        assert (
+            plan_operations.payload["plan_operations"]["read_model_available"] is True
+        )
         assert plan_operations.payload["plan_operations"]["limit"] == 5
         assert plan_operations.payload["plan_operations"]["operations"] == []
         assert plan_endpoints.status is IpcStatus.ACCEPTED
@@ -1046,15 +1125,22 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert plan_endpoints.payload["plan_endpoints"]["limit"] == 5
         assert plan_endpoints.payload["plan_endpoints"]["endpoints"] == []
         assert snapshot_entries.status is IpcStatus.ACCEPTED
-        assert snapshot_entries.payload["snapshot_entries"]["read_model_available"] is True
+        assert (
+            snapshot_entries.payload["snapshot_entries"]["read_model_available"] is True
+        )
         assert snapshot_entries.payload["snapshot_entries"]["limit"] == 5
         assert snapshot_entries.payload["snapshot_entries"]["entries"] == []
         assert snapshot_coverage.status is IpcStatus.ACCEPTED
-        assert snapshot_coverage.payload["snapshot_coverage"]["read_model_available"] is True
+        assert (
+            snapshot_coverage.payload["snapshot_coverage"]["read_model_available"]
+            is True
+        )
         assert snapshot_coverage.payload["snapshot_coverage"]["limit"] == 5
         assert snapshot_coverage.payload["snapshot_coverage"]["coverage"] == []
         assert snapshot_issues.status is IpcStatus.ACCEPTED
-        assert snapshot_issues.payload["snapshot_issues"]["read_model_available"] is True
+        assert (
+            snapshot_issues.payload["snapshot_issues"]["read_model_available"] is True
+        )
         assert snapshot_issues.payload["snapshot_issues"]["limit"] == 5
         assert snapshot_issues.payload["snapshot_issues"]["issues"] == []
         assert response.status is IpcStatus.REJECTED
@@ -1110,7 +1196,9 @@ def test_engine_host_hard_capacity_stop_is_published_and_starts_no_executor_step
         runtime.close()
 
 
-def test_local_writable_runtime_creates_job_from_inline_gui_draft(tmp_path: Path) -> None:
+def test_local_writable_runtime_creates_job_from_inline_gui_draft(
+    tmp_path: Path,
+) -> None:
     source_root = tmp_path / "Pictures"
     target_root = tmp_path / "Backup"
     source_root.mkdir()
@@ -1199,7 +1287,9 @@ def test_local_writable_runtime_creates_job_from_inline_gui_draft(tmp_path: Path
         assert snapshot_report["results"][0]["reason_code"] == "JOB_SNAPSHOTS_SEALED"
         assert len(snapshot_report["results"][0]["snapshot_ids"]) == 2
         assert overview.payload["backup_overview"]["draft"]["source_name"] == "Pictures"
-        assert overview.payload["backup_overview"]["jobs"][0]["source_name"] == "Pictures"
+        assert (
+            overview.payload["backup_overview"]["jobs"][0]["source_name"] == "Pictures"
+        )
         detail_target = detail.payload["backup_job_detail"]["job"]["targets"][0]
         assert detail_target["registration_state"] == "WRITABLE_READY"
         assert detail_target["registration_reason_code"] == (
@@ -1308,7 +1398,9 @@ def test_engine_host_runtime_backfills_endpoint_bindings_for_existing_job(
         migrations=full_plan.migrations[:22],
     )
     with sqlite3.connect(database) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
         apply_sqlite_migrations(connection, legacy_plan)
         connection.execute(
             """
@@ -1437,7 +1529,9 @@ def test_engine_host_runtime_backfills_endpoint_bindings_for_existing_job(
         restarted.close()
 
 
-def test_engine_host_runtime_reuses_stable_installation_identity(tmp_path: Path) -> None:
+def test_engine_host_runtime_reuses_stable_installation_identity(
+    tmp_path: Path,
+) -> None:
     state_root = tmp_path / "state"
     runtime = build_engine_host_runtime(
         authorization=_authorization(),
@@ -1553,7 +1647,9 @@ def test_engine_host_runtime_recovers_compaction_epochs_before_sqlite_open(
         runtime.close()
 
 
-def test_engine_host_runtime_can_select_robocopy_staging_backend(tmp_path: Path) -> None:
+def test_engine_host_runtime_can_select_robocopy_staging_backend(
+    tmp_path: Path,
+) -> None:
     runtime = build_engine_host_runtime(
         authorization=_authorization(),
         service_status=startup_status(ProcessRole.ENGINE_HOST),
@@ -1597,15 +1693,19 @@ def test_engine_host_runtime_stages_and_reconciles_task_scheduler_resources(
         report = runtime.task_scheduler_reconcile_resources_bounded(
             installation_id="install-a",
             executable_path=TASK_SCHEDULER_EXECUTABLE,
-            registry=_TaskSchedulerRegistry(_observed_task_scheduler_definition(definition)),
+            registry=_TaskSchedulerRegistry(
+                _observed_task_scheduler_definition(definition)
+            ),
             schedule_page_limit=10,
             max_schedule_pages=1,
             max_claims=2,
             claim_token_prefix="pump-a",
         )
-        stored_resource = runtime.service.external_resource_state_store.load_external_resource_state(
-            resource_type=ExternalResourceType.TASK_SCHEDULER,
-            resource_id=schedule.schedule_id,
+        stored_resource = (
+            runtime.service.external_resource_state_store.load_external_resource_state(
+                resource_type=ExternalResourceType.TASK_SCHEDULER,
+                resource_id=schedule.schedule_id,
+            )
         )
 
         assert report.schedules_scanned == 1
@@ -1613,7 +1713,9 @@ def test_engine_host_runtime_stages_and_reconciles_task_scheduler_resources(
         assert report.resources_reconciled == 1
         assert report.claims_attempted == 2
         assert report.claim_idle is True
-        assert report.claim_findings[0].action is TaskSchedulerReconciliationAction.IN_SYNC
+        assert (
+            report.claim_findings[0].action is TaskSchedulerReconciliationAction.IN_SYNC
+        )
         assert report.claim_findings[0].completed is True
         assert stored_resource is not None
         assert stored_resource.state is ExternalResourceState.IN_SYNC
@@ -1648,7 +1750,9 @@ def test_engine_host_startup_task_scheduler_reconciliation_uses_injected_registr
             installation_id="install-a",
             executable_path=TASK_SCHEDULER_EXECUTABLE,
         )
-        registry = _TaskSchedulerRegistry(_observed_task_scheduler_definition(definition))
+        registry = _TaskSchedulerRegistry(
+            _observed_task_scheduler_definition(definition)
+        )
 
         report = reconcile_task_scheduler_resources_for_engine_host_startup(
             runtime,
@@ -1668,7 +1772,9 @@ def test_engine_host_startup_task_scheduler_reconciliation_uses_injected_registr
         assert report.resources_reconciled == 1
         assert report.claims_attempted == 2
         assert report.claim_idle is True
-        assert report.claim_findings[0].action is TaskSchedulerReconciliationAction.IN_SYNC
+        assert (
+            report.claim_findings[0].action is TaskSchedulerReconciliationAction.IN_SYNC
+        )
     finally:
         runtime.close()
 
@@ -1735,7 +1841,10 @@ def test_engine_host_runtime_restore_closes_sqlite_handles_and_swaps_state(
         assert receipt.restore_epoch_id == "restore-runtime-a"
         assert runtime.catalog_connection is None
         assert runtime.recovery_connection is None
-        assert _read_sqlite_user_version(runtime.state_layout.catalog) == backup_catalog_version
+        assert (
+            _read_sqlite_user_version(runtime.state_layout.catalog)
+            == backup_catalog_version
+        )
 
         restarted = build_engine_host_runtime(
             authorization=_authorization(),
@@ -1823,7 +1932,10 @@ def test_engine_host_ipc_restore_command_runs_read_only_maintenance_restore(
         )
         assert runtime.catalog_connection is None
         assert runtime.recovery_connection is None
-        assert _read_sqlite_user_version(runtime.state_layout.catalog) == backup_catalog_version
+        assert (
+            _read_sqlite_user_version(runtime.state_layout.catalog)
+            == backup_catalog_version
+        )
     finally:
         runtime.close()
 
@@ -2376,8 +2488,12 @@ def _observed_task_scheduler_definition(
 
 
 def _insert_task_scheduler_plan_parent_rows(connection: sqlite3.Connection) -> None:
-    connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')")
-    connection.execute("INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')")
+    connection.execute(
+        "INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')"
+    )
+    connection.execute(
+        "INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')"
+    )
     insert_default_filter_set_version(
         connection,
         job_id="job-a",
@@ -2395,7 +2511,9 @@ def _insert_task_scheduler_plan_parent_rows(connection: sqlite3.Connection) -> N
             VALUES ('analysis-a', 'job-a', 'job-rev-a')
         """
     )
-    connection.execute("INSERT INTO plans (id, analysis_id) VALUES ('plan-a', 'analysis-a')")
+    connection.execute(
+        "INSERT INTO plans (id, analysis_id) VALUES ('plan-a', 'analysis-a')"
+    )
     connection.execute(
         """
         INSERT INTO plan_seal_details (

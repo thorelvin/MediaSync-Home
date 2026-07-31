@@ -65,8 +65,8 @@ def test_sqlite_state_backup_set_captures_verified_catalog_recovery_pair(
     assert (backup_dir / BACKUP_SET_INTENT_FILENAME).is_file()
     assert (backup_dir / BACKUP_SET_MANIFEST_FILENAME).is_file()
     assert [entry.store.value for entry in manifest.stores] == ["catalog", "recovery"]
-    assert [entry.schema_version for entry in manifest.stores] == [37, 8]
-    assert [entry.migration_count for entry in manifest.stores] == [37, 8]
+    assert [entry.schema_version for entry in manifest.stores] == [37, 9]
+    assert [entry.migration_count for entry in manifest.stores] == [37, 9]
     assert all(entry.quick_check == "ok" for entry in manifest.stores)
     assert all(entry.foreign_key_violations == 0 for entry in manifest.stores)
     assert all(len(entry.sha256) == 64 for entry in manifest.stores)
@@ -99,7 +99,10 @@ def test_sqlite_state_restore_plan_accepts_verified_backup_set(
     plan = plan_sqlite_state_restore(tmp_path / "state-backups" / "set-a", layout)
 
     assert plan.backup_set_id == "set-a"
-    assert [entry.store.value for entry in plan.restore_files] == ["catalog", "recovery"]
+    assert [entry.store.value for entry in plan.restore_files] == [
+        "catalog",
+        "recovery",
+    ]
     assert [entry.target_path for entry in plan.restore_files] == [
         layout.catalog,
         layout.recovery,
@@ -184,7 +187,9 @@ def test_sqlite_state_restore_plan_blocks_newer_target_side_intent_marker(
         backup_set_id="set-a",
         created_utc="2026-07-30T12:00:00Z",
     )
-    _insert_endpoint_revision(layout, target_root=target_root, owner_installation_id="owner-a")
+    _insert_endpoint_revision(
+        layout, target_root=target_root, owner_installation_id="owner-a"
+    )
     _write_target_side_intent_marker(
         target_root,
         owner_installation_id="owner-a",
@@ -206,7 +211,9 @@ def test_sqlite_state_restore_plan_dedupes_matching_target_side_intent_marker(
     layout = build_state_store_layout(tmp_path / "state")
     target_root = tmp_path / "target"
     _initialize_state_stores(layout)
-    _insert_endpoint_revision(layout, target_root=target_root, owner_installation_id="owner-a")
+    _insert_endpoint_revision(
+        layout, target_root=target_root, owner_installation_id="owner-a"
+    )
     _insert_active_recovery_intent_segment(
         layout,
         segment_id="segment-a",
@@ -270,7 +277,10 @@ def test_sqlite_state_restore_swap_restores_verified_pair_and_preserves_rollback
     assert receipt.intent_path.is_file()
     assert receipt.committed_path.is_file()
     assert _read_user_versions(layout) == backup_versions
-    assert [entry.store.value for entry in receipt.restored_files] == ["catalog", "recovery"]
+    assert [entry.store.value for entry in receipt.restored_files] == [
+        "catalog",
+        "recovery",
+    ]
     assert all(entry.rollback_path is not None for entry in receipt.restored_files)
     assert [entry.target_path for entry in receipt.restored_files] == [
         layout.catalog,
@@ -356,8 +366,16 @@ def test_sqlite_state_restore_swap_rolls_back_when_second_store_publish_fails(
         )
 
     assert _read_user_versions(layout) == (77, 88)
-    assert layout.catalog.with_name(".catalog.sqlite.restore-b.restore-rollback").exists() is False
-    assert layout.recovery.with_name(".recovery.sqlite.restore-b.restore-rollback").exists() is False
+    assert (
+        layout.catalog.with_name(".catalog.sqlite.restore-b.restore-rollback").exists()
+        is False
+    )
+    assert (
+        layout.recovery.with_name(
+            ".recovery.sqlite.restore-b.restore-rollback"
+        ).exists()
+        is False
+    )
 
 
 def test_sqlite_state_restore_startup_recovery_rolls_back_interrupted_epoch(
@@ -397,9 +415,15 @@ def test_sqlite_state_restore_startup_recovery_rolls_back_interrupted_epoch(
     epoch_dir = layout.root / STATE_RESTORE_EPOCHS_DIR_NAME / "restore-c"
     assert (epoch_dir / STATE_RESTORE_INTENT_FILENAME).is_file()
     assert not (epoch_dir / STATE_RESTORE_COMMITTED_FILENAME).exists()
-    assert layout.catalog.with_name(".catalog.sqlite.restore-c.restore-rollback").is_file()
-    assert layout.recovery.with_name(".recovery.sqlite.restore-c.restore-rollback").is_file()
-    assert layout.recovery.with_name(".recovery.sqlite.restore-c.restore-new.tmp").is_file()
+    assert layout.catalog.with_name(
+        ".catalog.sqlite.restore-c.restore-rollback"
+    ).is_file()
+    assert layout.recovery.with_name(
+        ".recovery.sqlite.restore-c.restore-rollback"
+    ).is_file()
+    assert layout.recovery.with_name(
+        ".recovery.sqlite.restore-c.restore-new.tmp"
+    ).is_file()
 
     report = recover_incomplete_sqlite_state_restore_epochs(
         layout,
@@ -414,9 +438,15 @@ def test_sqlite_state_restore_startup_recovery_rolls_back_interrupted_epoch(
     assert report.recovered_epochs[0].rolled_back_store_count == 2
     assert report.recovered_epochs[0].removed_temp_file_count == 1
     assert (epoch_dir / STATE_RESTORE_ROLLED_BACK_FILENAME).is_file()
-    assert not layout.catalog.with_name(".catalog.sqlite.restore-c.restore-rollback").exists()
-    assert not layout.recovery.with_name(".recovery.sqlite.restore-c.restore-rollback").exists()
-    assert not layout.recovery.with_name(".recovery.sqlite.restore-c.restore-new.tmp").exists()
+    assert not layout.catalog.with_name(
+        ".catalog.sqlite.restore-c.restore-rollback"
+    ).exists()
+    assert not layout.recovery.with_name(
+        ".recovery.sqlite.restore-c.restore-rollback"
+    ).exists()
+    assert not layout.recovery.with_name(
+        ".recovery.sqlite.restore-c.restore-new.tmp"
+    ).exists()
     assert _read_user_versions(layout) == (77, 88)
 
     startup_report = reconcile_committed_sqlite_state_restore_epochs(layout)
@@ -529,9 +559,15 @@ def test_sqlite_state_compaction_recovery_rolls_back_interrupted_epoch(
     epoch_dir = layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME / "compact-b"
     assert (epoch_dir / STATE_COMPACTION_INTENT_FILENAME).is_file()
     assert not (epoch_dir / STATE_COMPACTION_COMMITTED_FILENAME).exists()
-    assert layout.catalog.with_name(".catalog.sqlite.compact-b.compaction-rollback").is_file()
-    assert layout.recovery.with_name(".recovery.sqlite.compact-b.compaction-rollback").is_file()
-    assert layout.recovery.with_name(".recovery.sqlite.compact-b.compaction-new.tmp").is_file()
+    assert layout.catalog.with_name(
+        ".catalog.sqlite.compact-b.compaction-rollback"
+    ).is_file()
+    assert layout.recovery.with_name(
+        ".recovery.sqlite.compact-b.compaction-rollback"
+    ).is_file()
+    assert layout.recovery.with_name(
+        ".recovery.sqlite.compact-b.compaction-new.tmp"
+    ).is_file()
 
     report = recover_incomplete_sqlite_state_compaction_epochs(
         layout,
@@ -546,9 +582,15 @@ def test_sqlite_state_compaction_recovery_rolls_back_interrupted_epoch(
     assert report.recovered_epochs[0].rolled_back_store_count == 2
     assert report.recovered_epochs[0].removed_temp_file_count == 1
     assert (epoch_dir / STATE_COMPACTION_ROLLED_BACK_FILENAME).is_file()
-    assert not layout.catalog.with_name(".catalog.sqlite.compact-b.compaction-rollback").exists()
-    assert not layout.recovery.with_name(".recovery.sqlite.compact-b.compaction-rollback").exists()
-    assert not layout.recovery.with_name(".recovery.sqlite.compact-b.compaction-new.tmp").exists()
+    assert not layout.catalog.with_name(
+        ".catalog.sqlite.compact-b.compaction-rollback"
+    ).exists()
+    assert not layout.recovery.with_name(
+        ".recovery.sqlite.compact-b.compaction-rollback"
+    ).exists()
+    assert not layout.recovery.with_name(
+        ".recovery.sqlite.compact-b.compaction-new.tmp"
+    ).exists()
     assert _read_user_versions(layout) == (77, 88)
 
 
@@ -654,13 +696,9 @@ def test_sqlite_state_maintenance_retention_deletes_only_unprotected_terminal_ar
     assert not (backup_root / "set-a").exists()
     assert (backup_root / "set-b").is_dir()
     assert (backup_root / "set-c").is_dir()
-    assert not (
-        layout.root / STATE_RESTORE_EPOCHS_DIR_NAME / "restore-old"
-    ).exists()
+    assert not (layout.root / STATE_RESTORE_EPOCHS_DIR_NAME / "restore-old").exists()
     assert (layout.root / STATE_RESTORE_EPOCHS_DIR_NAME / "restore-new").is_dir()
-    assert not (
-        layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME / "compact-old"
-    ).exists()
+    assert not (layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME / "compact-old").exists()
     assert (layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME / "compact-new").is_dir()
     assert not old_restore_rollback.exists()
     assert new_restore_rollback.is_file()
@@ -726,9 +764,7 @@ def test_sqlite_state_maintenance_retention_skips_incomplete_and_malformed_artif
     assert (backup_root / "set-a").is_dir()
     assert (backup_root / "bad-set").is_dir()
     assert (layout.root / STATE_RESTORE_EPOCHS_DIR_NAME / "restore-pending").is_dir()
-    assert (
-        layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME / "compact-pending"
-    ).is_dir()
+    assert (layout.root / STATE_COMPACTION_EPOCHS_DIR_NAME / "compact-pending").is_dir()
 
 
 def test_sqlite_state_restore_maintenance_admits_clean_state(
@@ -820,7 +856,9 @@ def test_sqlite_state_backup_set_rejects_mixed_store_file_from_another_epoch(
         tmp_path / "state-backups" / "set-a" / "recovery.sqlite.backup",
     )
 
-    with pytest.raises(SqliteStateBackupViolation, match="STATE_BACKUP_CHECKSUM_MISMATCH"):
+    with pytest.raises(
+        SqliteStateBackupViolation, match="STATE_BACKUP_CHECKSUM_MISMATCH"
+    ):
         verify_sqlite_state_backup_set(
             tmp_path / "state-backups" / "set-a",
             manifest=manifest_a,
@@ -830,10 +868,14 @@ def test_sqlite_state_backup_set_rejects_mixed_store_file_from_another_epoch(
 def _initialize_state_stores(layout) -> None:
     layout.root.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(layout.catalog) as connection:
-        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(layout.catalog))
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(layout.catalog)
+        )
         apply_sqlite_migrations(connection, catalog_migration_plan())
     with sqlite3.connect(layout.recovery) as connection:
-        apply_sqlite_connection_policy(connection, recovery_writer_policy(layout.recovery))
+        apply_sqlite_connection_policy(
+            connection, recovery_writer_policy(layout.recovery)
+        )
         apply_sqlite_migrations(connection, recovery_migration_plan())
 
 
@@ -1027,7 +1069,9 @@ def _insert_active_recovery_intent_segment(
         )
 
 
-def _insert_active_catalog_restore_maintenance_evidence(layout: StateStoreLayout) -> None:
+def _insert_active_catalog_restore_maintenance_evidence(
+    layout: StateStoreLayout,
+) -> None:
     with sqlite3.connect(layout.catalog) as connection:
         connection.execute(
             """

@@ -14,16 +14,22 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     recovery_writer_policy,
 )
 from mediasync_home.adapters.sqlite.lease_tokens import SqliteResourceLeaseStore
+from mediasync_home.adapters.sqlite.history import SqliteHistoryReadModelStore
 from mediasync_home.adapters.sqlite.migrations import (
     apply_sqlite_migrations,
     catalog_migration_plan,
     recovery_migration_plan,
 )
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
-from mediasync_home.adapters.sqlite.recovery_intents import SqliteRecoveryIntentSegmentStore
-from mediasync_home.adapters.sqlite.recovery_operations import SqliteRecoveryOperationStore
+from mediasync_home.adapters.sqlite.recovery_intents import (
+    SqliteRecoveryIntentSegmentStore,
+)
+from mediasync_home.adapters.sqlite.recovery_operations import (
+    SqliteRecoveryOperationStore,
+)
 from mediasync_home.adapters.sqlite.runs import SqliteRunStore
 from mediasync_home.application.command_receipts import CommandReceipt
+from mediasync_home.application.history_read_models import HistoryActivityFilter
 from mediasync_home.application.plans import (
     PlanEndpoint,
     PlanEndpointRole,
@@ -74,7 +80,9 @@ class FixedLeaseAuthority(EndpointLeaseAuthority):
     def __init__(self, lease: FixedLiveLease) -> None:
         self.lease = lease
 
-    def acquire_endpoint_lease(self, request: EndpointLeaseRequest) -> EndpointLeaseAttempt:
+    def acquire_endpoint_lease(
+        self, request: EndpointLeaseRequest
+    ) -> EndpointLeaseAttempt:
         return EndpointLeaseAttempt(
             acquired=True,
             lease=self.lease,
@@ -143,7 +151,9 @@ def test_sqlite_run_completion_bridge_completes_catalog_recorded_target(
         execute_one_run_target_execution_start_step(runs=runs, lease_registry=registry)
 
         _register_resource_lease(recovery_connection)
-        SqliteRecoveryIntentSegmentStore(recovery_connection).publish_intent_segment(_segment())
+        SqliteRecoveryIntentSegmentStore(recovery_connection).publish_intent_segment(
+            _segment()
+        )
         recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
         _record_catalog_recorded_operation(recovery_operations)
 
@@ -240,6 +250,112 @@ def test_sqlite_run_completion_bridge_marks_terminal_user_decision_required(
         recovery_connection.close()
 
 
+def test_sqlite_run_completion_bridge_marks_exhausted_file_warning(
+    tmp_path: Path,
+) -> None:
+    catalog_connection = _prepared_catalog_connection(tmp_path)
+    recovery_connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _insert_plan_parent_rows(catalog_connection)
+        _insert_receipt(catalog_connection)
+        plans = SqlitePlanStore(catalog_connection)
+        runs = SqliteRunStore(catalog_connection)
+        plan = _sealed_plan()
+        lease = FixedLiveLease()
+        registry = HeldRunTargetLeaseRegistry()
+        plans.save_sealed_plan(plan)
+        start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        preflight = execute_one_run_target_preflight_step(
+            runs=runs,
+            leases=FixedLeaseAuthority(lease),
+        )
+        assert preflight.lease is lease
+        registry.retain_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            lease=lease,
+        )
+        execute_one_run_target_execution_start_step(runs=runs, lease_registry=registry)
+
+        _register_resource_lease(recovery_connection)
+        recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
+        operation = recovery_operations.record_planned_operation(
+            _operation(),
+            process_instance_id="host-a",
+        )
+        for expected_count in range(3):
+            updated = recovery_operations.record_staging_failure(
+                run_id=operation.run_id,
+                operation_id=operation.operation_id,
+                expected_phase=operation.phase,
+                expected_failure_count=expected_count,
+                next_phase=(
+                    RecoveryOperationPhase.SKIPPED
+                    if expected_count == 2
+                    else operation.phase
+                ),
+                error_code="LOCAL_STAGING_SOURCE_FILE_UNREADABLE",
+                process_instance_id="host-a",
+            )
+            assert updated is not None
+            operation = updated
+
+        outcome = complete_run_target_after_terminal_recovery(
+            permit=lease.issue_mutation_permit(),
+            runs=runs,
+            recovery_operations=recovery_operations,
+        )
+
+        loaded = runs.load_started_run("run-a")
+        progress = runs.load_run_progress_snapshot("run-a")
+        history = SqliteHistoryReadModelStore(
+            catalog_connection
+        ).list_recent_history_activities(
+            limit=10,
+            offset=0,
+            activity_filter=HistoryActivityFilter.BACKUPS,
+            job_id="job-a",
+        )
+        target_row = catalog_connection.execute(
+            """
+            SELECT state, warning_count, completed_operations, completed_bytes, result_json
+            FROM run_targets
+            WHERE run_id = 'run-a' AND id = 'run-a-target-0000'
+            """
+        ).fetchone()
+        assert outcome.completed is True
+        assert loaded is not None
+        assert loaded.state is RunState.COMPLETED_WITH_WARNINGS
+        assert loaded.warning_count == 1
+        assert progress is not None
+        assert progress.state is RunState.COMPLETED_WITH_WARNINGS
+        assert progress.warning_count == 1
+        assert progress.targets[0].state is RunTargetState.SUCCEEDED_WITH_WARNINGS
+        assert progress.targets[0].warning_count == 1
+        assert len(history) == 1
+        assert history[0].state == "COMPLETED_WITH_WARNINGS"
+        assert history[0].warning_count == 1
+        assert history[0].targets[0].state == "SUCCEEDED_WITH_WARNINGS"
+        assert history[0].targets[0].warning_count == 1
+        assert target_row is not None
+        assert target_row[:4] == ("SUCCEEDED_WITH_WARNINGS", 1, 0, 0)
+        assert json.loads(str(target_row[4]))["last_error_code"] == (
+            "LOCAL_STAGING_SOURCE_FILE_UNREADABLE"
+        )
+    finally:
+        catalog_connection.close()
+        recovery_connection.close()
+
+
 def _prepared_catalog_connection(tmp_path: Path) -> sqlite3.Connection:
     database = tmp_path / "catalog.sqlite"
     connection = sqlite3.connect(database)
@@ -257,8 +373,12 @@ def _prepared_recovery_connection(tmp_path: Path) -> sqlite3.Connection:
 
 
 def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
-    connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')")
-    connection.execute("INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')")
+    connection.execute(
+        "INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')"
+    )
+    connection.execute(
+        "INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')"
+    )
     insert_default_filter_set_version(
         connection,
         job_id="job-a",
@@ -270,7 +390,43 @@ def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
             VALUES ('job-a', 'job-rev-a', 'filter-a')
         """
     )
-    connection.execute("INSERT INTO job_heads (job_id, active_revision_id) VALUES ('job-a', 'job-rev-a')")
+    connection.execute(
+        """
+        INSERT INTO standard_backup_job_drafts (
+            draft_id, schema_version, source_name, source_path_label, defaults_json, targets_json
+        )
+        VALUES ('draft-a', 1, 'Pictures', 'C:/Users/Ada/Pictures', '{}', '[]')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO standard_backup_job_revision_details (
+            job_id,
+            job_revision_id,
+            draft_id,
+            command_request_id,
+            idempotency_key,
+            source_name,
+            source_path_label,
+            defaults_json,
+            targets_json
+        )
+        VALUES (
+            'job-a',
+            'job-rev-a',
+            'draft-a',
+            'request-job-a',
+            'idempotency-job-a',
+            'Pictures',
+            'C:/Users/Ada/Pictures',
+            '{}',
+            '[]'
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO job_heads (job_id, active_revision_id) VALUES ('job-a', 'job-rev-a')"
+    )
     connection.execute(
         """
         INSERT INTO analyses (id, job_id, job_revision_id)
@@ -399,22 +555,29 @@ def _target_endpoint() -> PlanEndpoint:
 
 
 def _register_resource_lease(connection: sqlite3.Connection) -> None:
-    assert SqliteResourceLeaseStore(connection).register_acquired_resource_lease(
-        lease_id="lease-a",
-        resource_key="endpoint:target-a",
-        owner_instance_id="owner-a",
-        ownership_epoch=1,
-        run_id="run-a",
-        run_target_id="run-a-target-0000",
-        endpoint_id="target-a",
-        endpoint_generation=None,
-        lease_mode="EXCLUSIVE",
-        os_lock_kind="LOCAL_OS_HANDLE",
-    ) == 1
+    assert (
+        SqliteResourceLeaseStore(connection).register_acquired_resource_lease(
+            lease_id="lease-a",
+            resource_key="endpoint:target-a",
+            owner_instance_id="owner-a",
+            ownership_epoch=1,
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            endpoint_id="target-a",
+            endpoint_generation=None,
+            lease_mode="EXCLUSIVE",
+            os_lock_kind="LOCAL_OS_HANDLE",
+        )
+        == 1
+    )
 
 
-def _record_catalog_recorded_operation(store: SqliteRecoveryOperationStore) -> RecoveryOperation:
-    operation = store.record_planned_operation(_operation(), process_instance_id="host-a")
+def _record_catalog_recorded_operation(
+    store: SqliteRecoveryOperationStore,
+) -> RecoveryOperation:
+    operation = store.record_planned_operation(
+        _operation(), process_instance_id="host-a"
+    )
     for next_phase in (
         RecoveryOperationPhase.SOURCE_VALIDATED,
         RecoveryOperationPhase.SOURCE_STABILITY_BOUND,
@@ -487,6 +650,7 @@ def _operation() -> RecoveryOperation:
             fencing_token=1,
             final_relative_path="Pictures/A.jpg",
             target_precondition_kind=RecoveryTargetPreconditionKind.ABSENT,
+            planned_bytes=128,
         ),
         staging_object_id="op-a",
         expected_final_fingerprint_json=json.dumps(
