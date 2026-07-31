@@ -297,10 +297,10 @@ def test_target_selection_reflows_without_horizontal_clipping(qapp) -> None:
         window.show()
         qapp.processEvents()
         choices = [
-            "C:/Users/Example/Documents/A very long source folder name/"
-            "containing important family photos and documents",
-            "E:/MediaSync Backups/Primary external drive/"
-            "A very long target folder name for the complete home backup",
+            "C:/Users/Example/Documents/"
+            "ImportantDocumentsAndFamilyPicturesCollectionWithoutBreaks",
+            "E:/MediaSync Home Backups/Primary External Drive/"
+            "CompleteComputerBackupTargetFolderWithoutBreaks",
         ]
         window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
         create_backup = window.findChild(QPushButton, "createBackupButton")
@@ -331,15 +331,13 @@ def test_target_selection_reflows_without_horizontal_clipping(qapp) -> None:
         dashboard_page = dashboard_scroll.widget()
         assert dashboard_page is not None
         assert dashboard_page.height() >= dashboard_page.minimumSizeHint().height()
-        for object_name in (
-            "setupSourceValue",
-            "setupTargetValue",
-            "jobDetailTitle",
-            "jobDetailSourceValue",
-            "jobDetailTargetRow",
-        ):
-            label = window.findChild(QLabel, object_name)
-            assert label is not None
+        responsive_labels = [
+            label
+            for label in dashboard_page.findChildren(QLabel)
+            if label.property("responsiveText") and not label.isHidden()
+        ]
+        assert responsive_labels
+        for label in responsive_labels:
             assert label.wordWrap() is True
             assert label.minimumWidth() == 0
             assert label.sizePolicy().horizontalPolicy() is QSizePolicy.Policy.Ignored

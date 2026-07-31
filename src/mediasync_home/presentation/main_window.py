@@ -1410,8 +1410,18 @@ class MediaSyncWindow(QMainWindow):
             return
         layout = page.layout()
         if layout is not None:
-            layout.invalidate()
-            layout.activate()
+            for _ in range(2):
+                layout.invalidate()
+                layout.activate()
+                for label in page.findChildren(QLabel):
+                    if not label.property("responsiveText"):
+                        continue
+                    required_height = (
+                        0
+                        if label.isHidden()
+                        else max(0, label.heightForWidth(max(1, label.width())))
+                    )
+                    label.setMinimumHeight(required_height)
         page.updateGeometry()
         if self._dashboard_scroll_area is not None:
             self._dashboard_scroll_area.updateGeometry()
@@ -1527,6 +1537,7 @@ def _scrollable_page(widget: QWidget, object_name: str) -> QScrollArea:
 def _configure_responsive_label(label: QLabel, *, selectable: bool = False) -> None:
     label.setWordWrap(True)
     label.setMinimumWidth(0)
+    label.setProperty("responsiveText", True)
     label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
     if selectable:
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
