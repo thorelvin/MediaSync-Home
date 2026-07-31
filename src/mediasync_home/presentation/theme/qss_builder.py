@@ -3,7 +3,10 @@ from __future__ import annotations
 from mediasync_home.presentation.theme.tokens import ThemeTokens
 
 
-def build_qss(tokens: ThemeTokens) -> str:
+def build_qss(tokens: ThemeTokens, *, compact: bool = False) -> str:
+    navigation_height = 30 if compact else 36
+    list_height = 42 if compact else 50
+    control_height = 28 if compact else 32
     return f"""
 * {{
     font-family: "Segoe UI", "Arial";
@@ -75,7 +78,7 @@ QListWidget#navigationRail {{
 }}
 
 QListWidget#navigationRail::item {{
-    min-height: 36px;
+    min-height: {navigation_height}px;
     padding: 0 {tokens.space_4}px;
     border-left: {tokens.border_focus}px solid transparent;
 }}
@@ -96,7 +99,7 @@ QListWidget#historyList {{
 
 QListWidget#jobsList::item,
 QListWidget#historyList::item {{
-    min-height: 50px;
+    min-height: {list_height}px;
     padding: {tokens.space_2}px {tokens.space_3}px;
     border-bottom: {tokens.border_hairline}px solid {tokens.border};
 }}
@@ -117,6 +120,7 @@ QFrame#standardBackupPanel,
 QFrame#backupJobDetailPanel,
 QFrame#jobsDetailPanel,
 QFrame#historyDetailPanel,
+QFrame#settingsSectionPanel,
 QFrame#componentGallery {{
     background: {tokens.panel};
     border: {tokens.border_hairline}px solid {tokens.border};
@@ -190,6 +194,7 @@ QFrame#activityBar {{
 QScrollArea#dashboardScrollArea,
 QScrollArea#jobsScrollArea,
 QScrollArea#historyScrollArea,
+QScrollArea#settingsScrollArea,
 QScrollArea#activityScrollArea,
 QWidget#activityContent {{
     background: transparent;
@@ -198,7 +203,8 @@ QWidget#activityContent {{
 
 QScrollArea#dashboardScrollArea > QWidget > QWidget,
 QScrollArea#jobsScrollArea > QWidget > QWidget,
-QScrollArea#historyScrollArea > QWidget > QWidget {{
+QScrollArea#historyScrollArea > QWidget > QWidget,
+QScrollArea#settingsScrollArea > QWidget > QWidget {{
     background: {tokens.window_background};
 }}
 
@@ -210,8 +216,8 @@ QWidget#activityContent {{
 QPushButton#refreshEngineButton {{
     min-width: 32px;
     max-width: 32px;
-    min-height: 32px;
-    max-height: 32px;
+    min-height: {control_height}px;
+    max-height: {control_height}px;
     border-radius: {tokens.radius_sm}px;
     border: {tokens.border_hairline}px solid {tokens.border};
     background: {tokens.surface_alt};
@@ -310,6 +316,66 @@ QPushButton#historyFilterButton {{
     background: {tokens.surface_alt};
     color: {tokens.text_muted};
     padding: 0 {tokens.space_3}px;
+}}
+
+QPushButton#settingsModeButton {{
+    min-height: 30px;
+    border: {tokens.border_hairline}px solid {tokens.border};
+    border-radius: {tokens.radius_sm}px;
+    background: {tokens.surface_alt};
+    color: {tokens.text_muted};
+    padding: 0 {tokens.space_3}px;
+}}
+
+QPushButton#settingsModeButton:checked {{
+    border-color: {tokens.accent};
+    background: {tokens.selection};
+    color: {tokens.text};
+}}
+
+QPushButton#settingsModeButton:focus,
+QComboBox#settingsDensityCombo:focus,
+QComboBox#settingsLanguageCombo:focus,
+QCheckBox#settingsReducedMotionCheck:focus {{
+    border: {tokens.border_focus}px solid {tokens.focus};
+}}
+
+QComboBox#settingsDensityCombo,
+QComboBox#settingsLanguageCombo {{
+    min-height: 30px;
+    border: {tokens.border_hairline}px solid {tokens.border};
+    border-radius: {tokens.radius_sm}px;
+    background: {tokens.surface};
+    color: {tokens.text};
+    padding: 0 {tokens.space_3}px;
+}}
+
+QCheckBox#settingsReducedMotionCheck {{
+    spacing: {tokens.space_2}px;
+}}
+
+QLabel#settingsStatusLabel[statusKind="error"] {{
+    color: {tokens.danger};
+}}
+
+QLabel#settingsStatusLabel[statusKind="saved"] {{
+    color: {tokens.success};
+}}
+
+QPushButton#settingsActionButton {{
+    min-height: 32px;
+    border-radius: {tokens.radius_sm}px;
+    border: {tokens.border_hairline}px solid {tokens.border};
+    background: {tokens.surface_alt};
+    padding: 0 {tokens.space_4}px;
+}}
+
+QPushButton#settingsActionButton:hover {{
+    border-color: {tokens.accent};
+}}
+
+QPushButton#settingsActionButton:focus {{
+    border: {tokens.border_focus}px solid {tokens.focus};
 }}
 
 QPushButton#historyFilterButton:checked {{

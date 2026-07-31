@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from enum import Enum
+from pathlib import Path
 from types import ModuleType
 
 import pytest
@@ -521,11 +522,15 @@ def test_qt_shell_wires_host_locator_publication_to_engine_client(
         engine_client: object | None = None,
         engine_client_factory: object | None = None,
         theme_mode: FakeThemeMode = FakeThemeMode.SYSTEM,
+        user_preferences_store: object | None = None,
+        data_root: Path | None = None,
     ) -> int:
         captured["argv"] = argv
         captured["engine_client"] = engine_client
         captured["engine_client_factory"] = engine_client_factory
         captured["theme_mode"] = theme_mode
+        captured["user_preferences_store"] = user_preferences_store
+        captured["data_root"] = data_root
         return 0
 
     app_module.run_gui = fake_run_gui  # type: ignore[attr-defined]
@@ -565,6 +570,10 @@ def test_qt_shell_wires_host_locator_publication_to_engine_client(
     assert captured["theme_mode"] is FakeThemeMode.LIGHT
     assert captured["engine_client"] is not None
     assert callable(captured["engine_client_factory"])
+    assert captured["user_preferences_store"] is not None
+    data_root = captured["data_root"]
+    assert isinstance(data_root, Path)
+    assert data_root.name == "preview-a"
     assert len(FakeWin32NamedPipeClient.instances) == 1
     client = FakeWin32NamedPipeClient.instances[0]
     assert client.pipe_name == "pipe-from-host-locator"

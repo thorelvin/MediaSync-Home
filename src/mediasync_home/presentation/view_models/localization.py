@@ -12,6 +12,50 @@ class LanguageCode(str, Enum):
 
 
 @dataclass(frozen=True)
+class SettingsText:
+    appearance_title: str
+    appearance_detail: str
+    theme: str
+    theme_system: str
+    theme_light: str
+    theme_dark: str
+    density: str
+    density_comfortable: str
+    density_compact: str
+    reduced_motion: str
+    language: str
+    defaults_title: str
+    defaults_detail: str
+    retention: str
+    retention_value: str
+    performance: str
+    performance_value: str
+    quarantine: str
+    quarantine_value: str
+    notifications: str
+    notifications_value: str
+    storage_title: str
+    storage_detail: str
+    storage_status: str
+    state_usage: str
+    free_space: str
+    data_location: str
+    capacity_ready: str
+    capacity_warning: str
+    capacity_blocked: str
+    capacity_unavailable: str
+    about_title: str
+    about_detail: str
+    version: str
+    privacy_report: str
+    open_data_folder: str
+    copy_diagnostics: str
+    diagnostics_copied: str
+    preference_save_failed: str
+    open_data_folder_failed: str
+
+
+@dataclass(frozen=True)
 class ShellText:
     local_preview: str
     refresh_engine_status: str
@@ -256,6 +300,100 @@ EN_TEXT = ShellText(
 )
 
 
+NB_SETTINGS_TEXT = SettingsText(
+    appearance_title="Utseende og språk",
+    appearance_detail="Endringer brukes med en gang og lagres for denne Windows-brukeren.",
+    theme="Tema",
+    theme_system="System",
+    theme_light="Lys",
+    theme_dark="Mørk",
+    density="Tetthet",
+    density_comfortable="Komfortabel",
+    density_compact="Kompakt",
+    reduced_motion="Reduser bevegelse",
+    language="Språk",
+    defaults_title="Trygge standarder",
+    defaults_detail=(
+        "Disse verdiene håndheves for nye jobber. Flere valg kommer når motoren kan "
+        "bruke dem sikkert."
+    ),
+    retention="Versjonsbevaring",
+    retention_value="Tidligere versjoner beholdes i 30 dager",
+    performance="Ytelsesprofil",
+    performance_value="Auto - anbefalt",
+    quarantine="Karanteneperiode",
+    quarantine_value="Ikke konfigurerbar i denne versjonen",
+    notifications="Varsler",
+    notifications_value="Ikke aktivert i lokal forhåndsvisning",
+    storage_title="Lagring og vedlikehold",
+    storage_detail="Statusen kommer direkte fra Engine Host og oppdateres med motorstatus.",
+    storage_status="Status",
+    state_usage="Database, logger og lokal tilstand",
+    free_space="Ledig lokal plass",
+    data_location="Datamappe",
+    capacity_ready="Klar",
+    capacity_warning="Krever oppmerksomhet",
+    capacity_blocked="Blokkert - frigjør lokal plass",
+    capacity_unavailable="Kapasitetsmåling er ikke tilgjengelig",
+    about_title="Om og diagnostikk",
+    about_detail="Den kopierbare rapporten utelater brukernavn og private filstier.",
+    version="Versjon",
+    privacy_report="Personvernbevisst rapport",
+    open_data_folder="Åpne datamappe",
+    copy_diagnostics="Kopier diagnostikk",
+    diagnostics_copied="Diagnostikk kopiert",
+    preference_save_failed="Kunne ikke lagre innstillingen",
+    open_data_folder_failed="Kunne ikke åpne datamappen",
+)
+
+
+EN_SETTINGS_TEXT = SettingsText(
+    appearance_title="Appearance and language",
+    appearance_detail="Changes apply immediately and are saved for this Windows user.",
+    theme="Theme",
+    theme_system="System",
+    theme_light="Light",
+    theme_dark="Dark",
+    density="Density",
+    density_comfortable="Comfortable",
+    density_compact="Compact",
+    reduced_motion="Reduce motion",
+    language="Language",
+    defaults_title="Safe defaults",
+    defaults_detail=(
+        "These values are enforced for new jobs. More choices will appear when the "
+        "engine can apply them safely."
+    ),
+    retention="Version retention",
+    retention_value="Previous versions are kept for 30 days",
+    performance="Performance profile",
+    performance_value="Auto - recommended",
+    quarantine="Quarantine period",
+    quarantine_value="Not configurable in this version",
+    notifications="Notifications",
+    notifications_value="Not enabled in the local preview",
+    storage_title="Storage and maintenance",
+    storage_detail="Status comes directly from Engine Host and refreshes with engine status.",
+    storage_status="Status",
+    state_usage="Database, logs, and local state",
+    free_space="Free local space",
+    data_location="Data folder",
+    capacity_ready="Ready",
+    capacity_warning="Needs attention",
+    capacity_blocked="Blocked - free local space",
+    capacity_unavailable="Capacity measurement is unavailable",
+    about_title="About and diagnostics",
+    about_detail="The copied report omits usernames and private file paths.",
+    version="Version",
+    privacy_report="Privacy-aware report",
+    open_data_folder="Open data folder",
+    copy_diagnostics="Copy diagnostics",
+    diagnostics_copied="Diagnostics copied",
+    preference_save_failed="Could not save the setting",
+    open_data_folder_failed="Could not open the data folder",
+)
+
+
 _NB_TO_EN = {
     "Aldri kontrollert": "Never checked",
     "Alle brukerfiler": "All user files",
@@ -407,7 +545,6 @@ _EN_TO_NB.update(
         "Local preview draft is ready. Connect an Engine Host before creating durable backup changes.": (
             "Lokalt forhåndsvisningsutkast er klart. Koble til en Engine Host før varige backupendringer opprettes."
         ),
-        "Local preview settings will appear here.": "Lokale forhåndsvisningsinnstillinger vises her.",
         "Blocking issue": "Blokkerende problem",
         "Backup job was created and saved.": "Backupjobben ble opprettet og lagret.",
         "Backup job was saved. Endpoint safety setup is pending.": (
@@ -456,6 +593,12 @@ def shell_text(language_code: LanguageCode) -> ShellText:
     if language_code is LanguageCode.ENGLISH:
         return EN_TEXT
     return NB_TEXT
+
+
+def settings_text(language_code: LanguageCode) -> SettingsText:
+    if language_code is LanguageCode.ENGLISH:
+        return EN_SETTINGS_TEXT
+    return NB_SETTINGS_TEXT
 
 
 def normalize_language_code(language_code: str) -> LanguageCode | None:

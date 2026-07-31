@@ -2651,6 +2651,18 @@ Endepunktdiagnostikk viser:
 
 En knapp **Kopier diagnostikk** lager en personvernbevisst rapport som standard maskerer brukernavn og kan forkorte private stier før kopiering.
 
+0B-implementasjonsnote: Innstillingssiden bruker tema, tetthet, redusert
+bevegelse og norsk/engelsk umiddelbart og lagrer dem i en versjonert lokal
+brukerpreferansefil med atomisk replace. Flaggmenyen og språkfeltet deler samme
+preferanse. Engine Hosts eksisterende `state_capacity`-payload gir faktisk
+tilstandsbruk, ledig plass og kapasitetstilstand uten GUI-SQLite-tilgang.
+Datamappen kan åpnes, og **Kopier diagnostikk** lager en rapport uten brukernavn
+eller private stier. Versjonsbevaring og ytelsesprofil vises skrivebeskyttet så
+lenge domenekontrakten bare støtter henholdsvis 30 dager og Auto; karantene og
+varsler merkes eksplisitt som utilgjengelige i den lokale previewen. Kontrollene
+reflowes ved kompakt bredde og har automatisert 900×560-dekning uten horisontal
+clipping.
+
 ### 8.15 Første oppstart og onboarding
 
 Ikke bruk en tvungen karusell med flere sider. Første oppstart viser ett rolig velkomstpanel eller går direkte til dashboardets tomtilstand:
@@ -3378,6 +3390,15 @@ Engine Host-startupkoordinereren kjører command receipt-avstemming før nye mut
 0B pipe-komposisjonen kan eksplisitt startes med `--state-root` for å opprette og migrere lokale `catalog.sqlite`/`recovery.sqlite` før serving. GUI-rollen har en command-submit smoke mode for denne IPC-linjen, men Engine Host-policyen styrer fortsatt utfallet og skriver terminal receipt når muterende kommandoer er deaktivert. Uten denne flaggen beholdes den ikke-persistente status-previewen, og ingen lokal statefil opprettes av pipe-komposisjonen.
 
 0B read-model-linjen implementerer `QUERY_STATUS`, bounded `QUERY_BACKUP_OVERVIEW`, `QUERY_BACKUP_JOB_DETAIL`, bounded `QUERY_ACTIVITY_OVERVIEW`, bounded `QUERY_HISTORY_TIMELINE`, bounded `QUERY_RUN_PROGRESS`, bounded `QUERY_PLAN_OPERATIONS`, bounded `QUERY_SNAPSHOT_ENTRIES`, bounded `QUERY_SNAPSHOT_COVERAGE` og bounded `QUERY_SNAPSHOT_ISSUES` etter handshake. `QUERY_BACKUP_OVERVIEW` leser standard-backup draft og aktive jobbsammendrag gjennom Engine Host-eide katalogporter. `QUERY_BACKUP_JOB_DETAIL` leser én aktiv standard-backup jobbrevisjon med kilde, mål, filter-/revisjons-ID-er og standardvalg gjennom Engine Host-eid katalogport. `QUERY_ACTIVITY_OVERVIEW` leser nylige run-/target-sammendrag gjennom Engine Host-eid run read store og bruker catalog indexer for global og job-filtered recent-run order. `QUERY_HISTORY_TIMELINE` slår sammen immutable førstegangsplanmaterialiseringer og run-/target-resultater i én tidsordnet read-only side, med aktivitets- og jobbfilter; `(activity_kind, activity_id)` er radidentiteten fordi analysis- og run-ID-er har separate namespaces. `QUERY_RUN_PROGRESS` leser ett autoritativt run-/target-snapshot med maksimalt 32 mål og en responsgrense på 64 KiB. Klienten kan sende sist observerte `sequence_no`; lik sekvens gir `changed=false` uten snapshot, høyere autoritativ sekvens gir nytt snapshot, og lavere autoritativ sekvens etter state restore gir `sequence_reset=true` med full refresh. Sekvensen avledes monotont fra persisterte run-/target-`row_version`-felt. `QUERY_PLAN_OPERATIONS` leser forseglete planoperasjoner gjennom Engine Host-eid plan read store med `limit <= 1000` og keysetcursor over `execution_phase`, `stable_order_key` og `operation_id`. `QUERY_SNAPSHOT_ENTRIES` leser materialiserte snapshot entries gjennom Engine Host-eid snapshot read store med `limit <= 1000` og keysetcursor over `comparison_key`, `relative_path` og `entry_id`. `QUERY_SNAPSHOT_COVERAGE` leser materialisert directory coverage med `limit <= 1000`, keysetcursor over `comparison_key`/`relative_path` og valgfritt `coverage_states`-filter. `QUERY_SNAPSHOT_ISSUES` leser materialiserte snapshot issues med `limit <= 1000`, keysetcursor over `relative_path`/`issue_type`/`issue_id` og valgfritt `blocking_only`-filter. Backup-, activity- og history-oversiktsqueries krever `limit <= 25` og ikke-negativ `offset`, og alle read-model queries returnerer `read_model_available=false` når hosten kjører uten relevant read store. GUI-/presentation-laget får bare IPC-payloaden og åpner ikke SQLite.
+
+Lokale GUI-preferanser følger en separat, ikke-autoritativ port i
+`application.user_preferences`. Composition kobler denne til en atomisk
+JSON-adapter under samme brukers lokale state-root og injiserer porten i
+presentation. Preferansene omfatter bare utseende, tetthet, redusert bevegelse
+og språk; backupjobber, Engine Host-state og sikkerhetspolicy lagres ikke der.
+Ugyldig eller fremtidig preferanseformat faller tilbake til sikre standarder.
+Presentation leser fortsatt all autoritativ lagringskapasitet fra
+`QUERY_STATUS`, og en kopierbar diagnostikkrapport maskerer selve state-rooten.
 
 Idempotency-retention:
 

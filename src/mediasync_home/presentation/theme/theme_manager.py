@@ -6,6 +6,7 @@ from enum import Enum
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication
 
+from mediasync_home.application.user_preferences import DensityPreference
 from mediasync_home.presentation.theme.qss_builder import build_qss
 from mediasync_home.presentation.theme.tokens import DARK_TOKENS, LIGHT_TOKENS, ThemeTokens
 
@@ -21,11 +22,18 @@ class ThemeManager:
     app: QApplication
     mode: ThemeMode = ThemeMode.SYSTEM
 
-    def apply(self, mode: ThemeMode | None = None) -> ThemeTokens:
+    def apply(
+        self,
+        mode: ThemeMode | None = None,
+        *,
+        density: DensityPreference = DensityPreference.COMFORTABLE,
+    ) -> ThemeTokens:
         if mode is not None:
             self.mode = mode
         tokens = resolve_tokens(self.mode, self.app)
-        self.app.setStyleSheet(build_qss(tokens))
+        self.app.setStyleSheet(
+            build_qss(tokens, compact=density is DensityPreference.COMPACT)
+        )
         return tokens
 
 

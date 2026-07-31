@@ -12,8 +12,10 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap, QResizeEvent
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
+    QApplication,
     QBoxLayout,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -36,6 +38,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mediasync_home import __version__
+from mediasync_home.application.user_preferences import (
+    AppearancePreference,
+    DensityPreference,
+    UserLanguage,
+    UserPreferences,
+    UserPreferencesStore,
+)
 from mediasync_home.presentation.theme.icon_registry import IconRegistry
 from mediasync_home.application.job_drafts import (
     DraftTarget,
@@ -79,6 +89,7 @@ from mediasync_home.presentation.view_models.localization import (
     ShellText,
     localize_display_value,
     normalize_language_code,
+    settings_text,
     shell_text,
 )
 from mediasync_home.presentation.view_models.plan_preview import (
@@ -223,11 +234,23 @@ class MediaSyncWindow(QMainWindow):
         initial_state: EngineStatusViewState,
         engine_client: EngineStatusProvider | None = None,
         engine_client_factory: Callable[[], EngineStatusProvider | None] | None = None,
+        user_preferences: UserPreferences | None = None,
+        user_preferences_store: UserPreferencesStore | None = None,
+        apply_appearance: (
+            Callable[[AppearancePreference, DensityPreference], None] | None
+        ) = None,
+        data_root: Path | None = None,
+        open_data_folder: Callable[[Path], bool] | None = None,
         show_component_gallery: bool | None = None,
     ) -> None:
         super().__init__()
         self._engine_client = engine_client
         self._engine_client_factory = engine_client_factory
+        self._user_preferences = user_preferences or UserPreferences()
+        self._user_preferences_store = user_preferences_store
+        self._apply_appearance = apply_appearance
+        self._data_root = data_root
+        self._open_data_folder = open_data_folder
         self._icons = IconRegistry()
         self._connected = False
         self._setup_draft = BackupSetupDraft.empty()
@@ -357,11 +380,23 @@ class MediaSyncWindow(QMainWindow):
         self._cataloged_files_title: QLabel | None = None
         self._cataloged_files_summary: QLabel | None = None
         self._cataloged_files_rows: list[QLabel] = []
+        self._settings_page: QWidget | None = None
+        self._settings_scroll_area: QScrollArea | None = None
+        self._settings_labels: dict[str, QLabel] = {}
+        self._settings_theme_buttons: dict[AppearancePreference, QPushButton] = {}
+        self._settings_theme_layout: QBoxLayout | None = None
+        self._settings_action_layout: QBoxLayout | None = None
+        self._settings_density_combo: QComboBox | None = None
+        self._settings_language_combo: QComboBox | None = None
+        self._settings_reduced_motion: QCheckBox | None = None
+        self._settings_status_label: QLabel | None = None
+        self._settings_open_data_button: QPushButton | None = None
+        self._settings_copy_diagnostics_button: QPushButton | None = None
         self._language_options = (
             ("nb", "Norsk"),
             ("en", "English"),
         )
-        self._selected_language_code = LanguageCode.NORWEGIAN
+        self._selected_language_code = LanguageCode(self._user_preferences.language.value)
         self._language_actions: dict[str, QAction] = {}
         self._show_component_gallery = (
             os.environ.get("MEDIASYNC_DEV_COMPONENT_GALLERY") == "1"
@@ -460,6 +495,7 @@ class MediaSyncWindow(QMainWindow):
         self._engine_scope.setText(self._display(state.scope_label))
         self._engine_protocol.setText(self._display(state.protocol_label))
         self._engine_mutation.setText(self._display(state.mutation_label))
+        self._apply_settings_storage_state()
         _refresh_style(self._engine_chip)
 
     def apply_backup_overview(self, state: BackupOverviewViewState) -> None:
@@ -1613,6 +1649,8 @@ class MediaSyncWindow(QMainWindow):
     def _build_layout(self) -> None:
         root = QWidget()
         root.setObjectName("appRoot")
+        root.setProperty("densityMode", self._user_preferences.density.value)
+        root.setProperty("reducedMotion", self._user_preferences.reduced_motion)
         root_layout = QVBoxLayout(root)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
@@ -1708,9 +1746,11 @@ class MediaSyncWindow(QMainWindow):
         self._history_page = history_page
         self._history_scroll_area = history_scroll
         stack.addWidget(history_scroll)
-        stack.addWidget(
-            self._build_placeholder_page("Settings", "Local preview settings will appear here.")
-        )
+        settings_page = self._build_settings_page()
+        settings_scroll = _scrollable_page(settings_page, "settingsScrollArea")
+        self._settings_page = settings_page
+        self._settings_scroll_area = settings_scroll
+        stack.addWidget(settings_scroll)
         self._workspace_stack = stack
         layout.addWidget(stack, 1)
         return workspace
@@ -1727,6 +1767,8 @@ class MediaSyncWindow(QMainWindow):
             self._refresh_backup_overview()
         if self._selected_navigation_index == 2:
             self._refresh_history_timeline()
+        if self._selected_navigation_index == 3:
+            self._apply_settings_storage_state()
 
     def _current_navigation_label(self) -> str:
         labels = (
@@ -2056,6 +2098,230 @@ class MediaSyncWindow(QMainWindow):
             layout.addWidget(target_row, 12 + index, 1, 1, 2)
         layout.setColumnStretch(1, 1)
         return panel
+
+    def _build_settings_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("settingsPage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        layout.setSizeConstraints(
+            QLayout.SizeConstraint.SetMinimumSize,
+            QLayout.SizeConstraint.SetMinimumSize,
+        )
+        layout.addWidget(self._build_appearance_settings_panel())
+        layout.addWidget(self._build_default_settings_panel())
+        layout.addWidget(self._build_storage_settings_panel())
+        layout.addWidget(self._build_about_settings_panel())
+        layout.addStretch(1)
+        return page
+
+    def _build_appearance_settings_panel(self) -> QFrame:
+        text = settings_text(self._selected_language_code)
+        panel, layout = self._new_settings_panel(
+            "appearance_title",
+            text.appearance_title,
+            "appearance_detail",
+            text.appearance_detail,
+        )
+
+        self._settings_labels["theme"] = self._settings_row_label(text.theme)
+        layout.addWidget(self._settings_labels["theme"], 2, 0)
+        theme_controls = QWidget()
+        theme_controls.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        theme_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight, theme_controls)
+        theme_layout.setContentsMargins(0, 0, 0, 0)
+        theme_layout.setSpacing(8)
+        group = QButtonGroup(panel)
+        group.setExclusive(True)
+        for mode, label in (
+            (AppearancePreference.SYSTEM, text.theme_system),
+            (AppearancePreference.LIGHT, text.theme_light),
+            (AppearancePreference.DARK, text.theme_dark),
+        ):
+            button = QPushButton(label)
+            button.setObjectName("settingsModeButton")
+            button.setCheckable(True)
+            button.setChecked(mode is self._user_preferences.appearance)
+            button.clicked.connect(
+                lambda checked=False, selected=mode: self._select_appearance(selected)
+            )
+            group.addButton(button)
+            theme_layout.addWidget(button)
+            self._settings_theme_buttons[mode] = button
+        theme_layout.addStretch(1)
+        self._settings_theme_layout = theme_layout
+        layout.addWidget(theme_controls, 2, 1, 1, 2)
+
+        self._settings_labels["density"] = self._settings_row_label(text.density)
+        layout.addWidget(self._settings_labels["density"], 3, 0)
+        density = QComboBox()
+        density.setObjectName("settingsDensityCombo")
+        density.addItem(text.density_comfortable, DensityPreference.COMFORTABLE.value)
+        density.addItem(text.density_compact, DensityPreference.COMPACT.value)
+        density.setCurrentIndex(density.findData(self._user_preferences.density.value))
+        density.currentIndexChanged.connect(self._select_density)
+        self._settings_density_combo = density
+        layout.addWidget(density, 3, 1, 1, 2)
+
+        reduced_motion = QCheckBox(text.reduced_motion)
+        reduced_motion.setObjectName("settingsReducedMotionCheck")
+        reduced_motion.setChecked(self._user_preferences.reduced_motion)
+        reduced_motion.toggled.connect(self._select_reduced_motion)
+        self._settings_reduced_motion = reduced_motion
+        layout.addWidget(reduced_motion, 4, 1, 1, 2)
+
+        self._settings_labels["language"] = self._settings_row_label(text.language)
+        layout.addWidget(self._settings_labels["language"], 5, 0)
+        language = QComboBox()
+        language.setObjectName("settingsLanguageCombo")
+        for code, label in self._language_options:
+            language.addItem(_flag_icon(code), label, code)
+        language.setCurrentIndex(language.findData(self._selected_language_code.value))
+        language.currentIndexChanged.connect(self._select_settings_language)
+        self._settings_language_combo = language
+        layout.addWidget(language, 5, 1, 1, 2)
+        return panel
+
+    def _build_default_settings_panel(self) -> QFrame:
+        text = settings_text(self._selected_language_code)
+        panel, layout = self._new_settings_panel(
+            "defaults_title",
+            text.defaults_title,
+            "defaults_detail",
+            text.defaults_detail,
+        )
+        for row, key, label_text, value_text in (
+            (2, "retention", text.retention, text.retention_value),
+            (3, "performance", text.performance, text.performance_value),
+            (4, "quarantine", text.quarantine, text.quarantine_value),
+            (5, "notifications", text.notifications, text.notifications_value),
+        ):
+            label, value = _add_labeled_text_value(layout, row, label_text, value_text)
+            self._configure_settings_key_label(label)
+            value.setObjectName(f"settings{key.title().replace('_', '')}Value")
+            self._settings_labels[key] = label
+            self._settings_labels[f"{key}_value"] = value
+        return panel
+
+    def _build_storage_settings_panel(self) -> QFrame:
+        text = settings_text(self._selected_language_code)
+        panel, layout = self._new_settings_panel(
+            "storage_title",
+            text.storage_title,
+            "storage_detail",
+            text.storage_detail,
+        )
+        for row, key, label_text in (
+            (2, "storage_status", text.storage_status),
+            (3, "state_usage", text.state_usage),
+            (4, "free_space", text.free_space),
+            (5, "data_location", text.data_location),
+        ):
+            label, value = _add_labeled_text_value(layout, row, label_text, "")
+            self._configure_settings_key_label(label)
+            value.setObjectName(f"settings{key.title().replace('_', '')}Value")
+            self._settings_labels[key] = label
+            self._settings_labels[f"{key}_value"] = value
+        return panel
+
+    def _build_about_settings_panel(self) -> QFrame:
+        text = settings_text(self._selected_language_code)
+        panel, layout = self._new_settings_panel(
+            "about_title",
+            text.about_title,
+            "about_detail",
+            text.about_detail,
+        )
+        version_label, version_value = _add_labeled_text_value(
+            layout,
+            2,
+            text.version,
+            __version__,
+        )
+        self._settings_labels["version"] = version_label
+        self._settings_labels["version_value"] = version_value
+        self._configure_settings_key_label(version_label)
+        version_value.setObjectName("settingsVersionValue")
+
+        report_label, report_value = _add_labeled_text_value(
+            layout,
+            3,
+            text.privacy_report,
+            text.about_detail,
+        )
+        self._settings_labels["privacy_report"] = report_label
+        self._settings_labels["privacy_report_value"] = report_value
+        self._configure_settings_key_label(report_label)
+        report_value.setObjectName("settingsPrivacyReportValue")
+
+        actions = QWidget()
+        actions.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        action_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight, actions)
+        action_layout.setContentsMargins(0, 4, 0, 0)
+        action_layout.setSpacing(8)
+        open_button = QPushButton(text.open_data_folder)
+        open_button.setObjectName("settingsActionButton")
+        open_button.setEnabled(self._data_root is not None and self._open_data_folder is not None)
+        open_button.clicked.connect(self._open_local_data_folder)
+        self._settings_open_data_button = open_button
+        copy_button = QPushButton(text.copy_diagnostics)
+        copy_button.setObjectName("settingsActionButton")
+        copy_button.clicked.connect(self._copy_diagnostics)
+        self._settings_copy_diagnostics_button = copy_button
+        action_layout.addWidget(open_button)
+        action_layout.addWidget(copy_button)
+        action_layout.addStretch(1)
+        self._settings_action_layout = action_layout
+        layout.addWidget(actions, 4, 0, 1, 3)
+
+        status = QLabel()
+        status.setObjectName("settingsStatusLabel")
+        status.setVisible(False)
+        _configure_responsive_label(status)
+        self._settings_status_label = status
+        layout.addWidget(status, 5, 0, 1, 3)
+        return panel
+
+    def _new_settings_panel(
+        self,
+        title_key: str,
+        title_text: str,
+        detail_key: str,
+        detail_text: str,
+    ) -> tuple[QFrame, QGridLayout]:
+        panel = QFrame()
+        panel.setObjectName("settingsSectionPanel")
+        layout = QGridLayout(panel)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setHorizontalSpacing(18)
+        layout.setVerticalSpacing(10)
+        title = QLabel(title_text)
+        title.setObjectName("sectionTitle")
+        _configure_responsive_label(title)
+        detail = QLabel(detail_text)
+        detail.setObjectName("mutedLabel")
+        _configure_responsive_label(detail)
+        self._settings_labels[title_key] = title
+        self._settings_labels[detail_key] = detail
+        layout.addWidget(title, 0, 0, 1, 3)
+        layout.addWidget(detail, 1, 0, 1, 3)
+        layout.setColumnStretch(1, 1)
+        return panel, layout
+
+    @staticmethod
+    def _settings_row_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("mutedLabel")
+        MediaSyncWindow._configure_settings_key_label(label)
+        return label
+
+    @staticmethod
+    def _configure_settings_key_label(label: QLabel) -> None:
+        label.setWordWrap(True)
+        label.setMinimumWidth(100)
+        label.setProperty("responsiveText", True)
+        label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
 
     def _build_placeholder_page(self, title: str, detail: str) -> QFrame:
         page = QFrame()
@@ -2541,10 +2807,177 @@ class MediaSyncWindow(QMainWindow):
         if normalized is None:
             return
         self._selected_language_code = normalized
+        self._user_preferences = replace(
+            self._user_preferences,
+            language=UserLanguage(normalized.value),
+        )
+        self._save_user_preferences()
         self._apply_selected_language()
         self._apply_localized_text()
 
+    def _select_settings_language(self, index: int) -> None:
+        if self._settings_language_combo is None:
+            return
+        language_code = self._settings_language_combo.itemData(index)
+        if isinstance(language_code, str):
+            self._select_language(language_code)
+
+    def _select_appearance(self, appearance: AppearancePreference) -> None:
+        if appearance is self._user_preferences.appearance:
+            return
+        self._user_preferences = replace(self._user_preferences, appearance=appearance)
+        self._apply_current_appearance()
+        self._save_user_preferences()
+
+    def _select_density(self, index: int) -> None:
+        if self._settings_density_combo is None:
+            return
+        value = self._settings_density_combo.itemData(index)
+        try:
+            density = DensityPreference(value)
+        except (TypeError, ValueError):
+            return
+        if density is self._user_preferences.density:
+            return
+        self._user_preferences = replace(self._user_preferences, density=density)
+        self._apply_current_appearance()
+        root = self.centralWidget()
+        if root is not None:
+            root.setProperty("densityMode", density.value)
+        self._refresh_dashboard_geometry()
+        self._save_user_preferences()
+
+    def _select_reduced_motion(self, enabled: bool) -> None:
+        if enabled is self._user_preferences.reduced_motion:
+            return
+        self._user_preferences = replace(self._user_preferences, reduced_motion=enabled)
+        root = self.centralWidget()
+        if root is not None:
+            root.setProperty("reducedMotion", enabled)
+        self._save_user_preferences()
+
+    def _apply_current_appearance(self) -> None:
+        if self._apply_appearance is not None:
+            self._apply_appearance(
+                self._user_preferences.appearance,
+                self._user_preferences.density,
+            )
+
+    def _save_user_preferences(self) -> None:
+        if self._user_preferences_store is None:
+            return
+        try:
+            self._user_preferences_store.save(self._user_preferences)
+        except (OSError, ValueError):
+            self._set_settings_status(
+                settings_text(
+                    self._selected_language_code
+                ).preference_save_failed,
+                status_kind="error",
+            )
+
+    def _open_local_data_folder(self) -> None:
+        if self._data_root is None or self._open_data_folder is None:
+            return
+        self._data_root.mkdir(parents=True, exist_ok=True)
+        if not self._open_data_folder(self._data_root):
+            self._set_settings_status(
+                settings_text(
+                    self._selected_language_code
+                ).open_data_folder_failed,
+                status_kind="error",
+            )
+
+    def _copy_diagnostics(self) -> None:
+        application = QApplication.instance()
+        if application is None:
+            return
+        app = cast(QApplication, application)
+        state = self._engine_status_state
+        report = "\n".join(
+            (
+                "MediaSync Home diagnostics",
+                f"version: {__version__}",
+                "privacy: user names and private paths omitted",
+                f"language: {self._user_preferences.language.value}",
+                f"appearance: {self._user_preferences.appearance.value}",
+                f"density: {self._user_preferences.density.value}",
+                f"reduced_motion: {str(self._user_preferences.reduced_motion).lower()}",
+                f"engine_connection: {state.connection_label}",
+                f"engine_state: {state.state_label}",
+                f"engine_scope: {state.scope_label}",
+                f"engine_contract: {state.protocol_label}",
+                f"mutation_policy: {state.mutation_label}",
+                f"capacity_status: {state.capacity_status or 'unavailable'}",
+                f"capacity_reason: {state.capacity_reason_code or 'unavailable'}",
+                (
+                    "state_size_bytes: "
+                    f"{state.state_size_bytes if state.state_size_bytes is not None else 'unavailable'}"
+                ),
+                (
+                    "local_free_space_bytes: "
+                    f"{state.local_free_space_bytes if state.local_free_space_bytes is not None else 'unavailable'}"
+                ),
+                f"data_root: {'configured' if self._data_root is not None else 'unavailable'}",
+            )
+        )
+        app.clipboard().setText(report)
+        self._set_settings_status(
+            settings_text(self._selected_language_code).diagnostics_copied,
+            status_kind="saved",
+        )
+
+    def _set_settings_status(self, text: str, *, status_kind: str) -> None:
+        if self._settings_status_label is None:
+            return
+        self._settings_status_label.setText(text)
+        self._settings_status_label.setProperty("statusKind", status_kind)
+        self._settings_status_label.setVisible(True)
+        style = self._settings_status_label.style()
+        style.unpolish(self._settings_status_label)
+        style.polish(self._settings_status_label)
+
+    def _apply_settings_storage_state(self) -> None:
+        if not self._settings_labels:
+            return
+        text = settings_text(self._selected_language_code)
+        state = self._engine_status_state
+        capacity_status = state.capacity_status
+        if state.capacity_measurement_complete is False or capacity_status is None:
+            status_text = text.capacity_unavailable
+        elif capacity_status == "READY":
+            status_text = text.capacity_ready
+        elif capacity_status == "SOFT_QUOTA":
+            status_text = text.capacity_warning
+        elif capacity_status == "HARD_STOP":
+            status_text = text.capacity_blocked
+        else:
+            status_text = capacity_status
+        values = {
+            "storage_status_value": status_text,
+            "state_usage_value": (
+                _format_bytes(state.state_size_bytes)
+                if state.state_size_bytes is not None
+                else text.capacity_unavailable
+            ),
+            "free_space_value": (
+                _format_bytes(state.local_free_space_bytes)
+                if state.local_free_space_bytes is not None
+                else text.capacity_unavailable
+            ),
+            "data_location_value": (
+                str(self._data_root)
+                if self._data_root is not None
+                else text.capacity_unavailable
+            ),
+        }
+        for key, value in values.items():
+            label = self._settings_labels.get(key)
+            if label is not None:
+                label.setText(value)
+
     def _update_responsive_dashboard_layout(self) -> None:
+        self._update_responsive_settings_layout()
         compact_steps = self.width() < 1040
         stacked_details = self.width() < 1360
         if (
@@ -2577,6 +3010,17 @@ class MediaSyncWindow(QMainWindow):
                 )
         self._refresh_dashboard_geometry()
 
+    def _update_responsive_settings_layout(self) -> None:
+        direction = (
+            QBoxLayout.Direction.TopToBottom
+            if self.width() < 1040
+            else QBoxLayout.Direction.LeftToRight
+        )
+        if self._settings_theme_layout is not None:
+            self._settings_theme_layout.setDirection(direction)
+        if self._settings_action_layout is not None:
+            self._settings_action_layout.setDirection(direction)
+
     def _refresh_dashboard_geometry(self) -> None:
         self._refresh_responsive_page_geometry(
             self._dashboard_page,
@@ -2589,6 +3033,10 @@ class MediaSyncWindow(QMainWindow):
         self._refresh_responsive_page_geometry(
             self._history_page,
             self._history_scroll_area,
+        )
+        self._refresh_responsive_page_geometry(
+            self._settings_page,
+            self._settings_scroll_area,
         )
 
     def _refresh_responsive_page_geometry(
@@ -2635,6 +3083,12 @@ class MediaSyncWindow(QMainWindow):
                 self._language_button.setAccessibleName(tooltip)
                 for action_code, action in self._language_actions.items():
                     action.setChecked(action_code == code)
+                if self._settings_language_combo is not None:
+                    self._settings_language_combo.blockSignals(True)
+                    self._settings_language_combo.setCurrentIndex(
+                        self._settings_language_combo.findData(code)
+                    )
+                    self._settings_language_combo.blockSignals(False)
                 return
 
     def _apply_localized_text(self) -> None:
@@ -2725,6 +3179,66 @@ class MediaSyncWindow(QMainWindow):
         self._apply_plan_endpoint_preview_state(self._plan_endpoint_preview_state)
         self._apply_snapshot_health_preview_state(self._snapshot_health_preview_state)
         self._apply_cataloged_files_preview_state(self._cataloged_files_preview_state)
+        self._apply_settings_localized_text()
+        self._apply_settings_storage_state()
+
+    def _apply_settings_localized_text(self) -> None:
+        text = settings_text(self._selected_language_code)
+        values = {
+            "appearance_title": text.appearance_title,
+            "appearance_detail": text.appearance_detail,
+            "theme": text.theme,
+            "density": text.density,
+            "language": text.language,
+            "defaults_title": text.defaults_title,
+            "defaults_detail": text.defaults_detail,
+            "retention": text.retention,
+            "retention_value": text.retention_value,
+            "performance": text.performance,
+            "performance_value": text.performance_value,
+            "quarantine": text.quarantine,
+            "quarantine_value": text.quarantine_value,
+            "notifications": text.notifications,
+            "notifications_value": text.notifications_value,
+            "storage_title": text.storage_title,
+            "storage_detail": text.storage_detail,
+            "storage_status": text.storage_status,
+            "state_usage": text.state_usage,
+            "free_space": text.free_space,
+            "data_location": text.data_location,
+            "about_title": text.about_title,
+            "about_detail": text.about_detail,
+            "version": text.version,
+            "privacy_report": text.privacy_report,
+            "privacy_report_value": text.about_detail,
+        }
+        for key, value in values.items():
+            label = self._settings_labels.get(key)
+            if label is not None:
+                label.setText(value)
+        for mode, mode_label in (
+            (AppearancePreference.SYSTEM, text.theme_system),
+            (AppearancePreference.LIGHT, text.theme_light),
+            (AppearancePreference.DARK, text.theme_dark),
+        ):
+            button = self._settings_theme_buttons.get(mode)
+            if button is not None:
+                button.setText(mode_label)
+        if self._settings_density_combo is not None:
+            current = self._settings_density_combo.currentData()
+            self._settings_density_combo.blockSignals(True)
+            self._settings_density_combo.setItemText(0, text.density_comfortable)
+            self._settings_density_combo.setItemText(1, text.density_compact)
+            self._settings_density_combo.setCurrentIndex(
+                self._settings_density_combo.findData(current)
+            )
+            self._settings_density_combo.blockSignals(False)
+        if self._settings_reduced_motion is not None:
+            self._settings_reduced_motion.setText(text.reduced_motion)
+        if self._settings_open_data_button is not None:
+            self._settings_open_data_button.setText(text.open_data_folder)
+        if self._settings_copy_diagnostics_button is not None:
+            self._settings_copy_diagnostics_button.setText(text.copy_diagnostics)
 
 
 def _add_key_value(layout: QGridLayout, row: int, label_text: str, value: QLabel) -> QLabel:

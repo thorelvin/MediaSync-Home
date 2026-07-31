@@ -322,19 +322,22 @@ def _run_pipe_action(args: argparse.Namespace, client: GuiIpcClient) -> IpcRespo
 def _load_matching_local_preview_publication(
     args: argparse.Namespace,
 ) -> LocalEngineHostPublication | None:
+    return _load_matching_publication_for_descriptor(_local_preview_descriptor(args))
+
+
+def _local_preview_descriptor(args: argparse.Namespace) -> LocalEngineHostDescriptor:
     from mediasync_home.adapters.local_host_locator import (
         build_local_engine_host_descriptor_for_user,
     )
     from mediasync_home.ipc.win32_named_pipe import current_process_identity
 
     identity = current_process_identity()
-    descriptor = build_local_engine_host_descriptor_for_user(
+    return build_local_engine_host_descriptor_for_user(
         installation_id=args.installation_id,
         user_scope_hash=identity.user_sid_hash,
         state_root=args.state_root,
         environ=os.environ,
     )
-    return _load_matching_publication_for_descriptor(descriptor)
 
 
 def _load_matching_publication_for_descriptor(
@@ -402,6 +405,8 @@ def _parse_after_json(after_json: str | None) -> dict[str, object] | None:
 
 
 def _run_qt_shell(args: argparse.Namespace) -> int:
+    descriptor = _local_preview_descriptor(args)
+
     def engine_client_factory() -> EngineStatusProvider | None:
         pipe_name = _resolve_qt_shell_pipe_name(args)
         if pipe_name is None:
@@ -422,12 +427,21 @@ def _run_qt_shell(args: argparse.Namespace) -> int:
 
     from mediasync_home.presentation.app import run_gui
     from mediasync_home.presentation.theme.theme_manager import ThemeMode
+    from mediasync_home.adapters.local_user_preferences import LocalUserPreferencesStore
+
+    preferences_store = (
+        LocalUserPreferencesStore(descriptor.state_root / "user-preferences.json")
+        if descriptor.state_root is not None
+        else None
+    )
 
     return run_gui(
         [],
         engine_client=engine_client_factory(),
         engine_client_factory=engine_client_factory,
         theme_mode=ThemeMode(args.theme),
+        user_preferences_store=preferences_store,
+        data_root=descriptor.state_root,
     )
 
 

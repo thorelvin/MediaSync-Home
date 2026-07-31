@@ -17,6 +17,11 @@ class EngineStatusViewState:
     status_kind: str
     ready: bool
     mutations_enabled: bool
+    capacity_status: str | None = None
+    capacity_reason_code: str | None = None
+    state_size_bytes: int | None = None
+    local_free_space_bytes: int | None = None
+    capacity_measurement_complete: bool | None = None
 
     @classmethod
     def disconnected(cls, detail: str = "Engine Host is not connected yet.") -> "EngineStatusViewState":
@@ -78,6 +83,8 @@ def engine_status_from_response(response: IpcResponse | None) -> EngineStatusVie
     protocol_version = host_status.get("protocol_version", "?")
     schema_version = host_status.get("schema_version", "?")
     role = str(host_status.get("role", "engine-host"))
+    capacity = response.payload.get("state_capacity")
+    capacity_payload = capacity if isinstance(capacity, dict) else {}
 
     return EngineStatusViewState(
         connection_label="Connected",
@@ -89,6 +96,17 @@ def engine_status_from_response(response: IpcResponse | None) -> EngineStatusVie
         status_kind="ready" if ready else "warning",
         ready=ready,
         mutations_enabled=mutations_enabled,
+        capacity_status=_optional_string(capacity_payload.get("status")),
+        capacity_reason_code=_optional_string(capacity_payload.get("reason_code")),
+        state_size_bytes=_optional_nonnegative_int(capacity_payload.get("state_size_bytes")),
+        local_free_space_bytes=_optional_nonnegative_int(
+            capacity_payload.get("local_free_space_bytes")
+        ),
+        capacity_measurement_complete=(
+            capacity_payload.get("measurement_complete")
+            if isinstance(capacity_payload.get("measurement_complete"), bool)
+            else None
+        ),
     )
 
 
@@ -119,3 +137,13 @@ def _format_scope(scope: str) -> str:
     if label.startswith("0b "):
         label = "0B " + label[3:]
     return label
+
+
+def _optional_string(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _optional_nonnegative_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value

@@ -1309,6 +1309,18 @@ Endepunktdiagnostikk viser:
 
 En knapp **Kopier diagnostikk** lager en personvernbevisst rapport som standard maskerer brukernavn og kan forkorte private stier før kopiering.
 
+0B-implementasjonsnote: Innstillingssiden bruker tema, tetthet, redusert
+bevegelse og norsk/engelsk umiddelbart og lagrer dem i en versjonert lokal
+brukerpreferansefil med atomisk replace. Flaggmenyen og språkfeltet deler samme
+preferanse. Engine Hosts eksisterende `state_capacity`-payload gir faktisk
+tilstandsbruk, ledig plass og kapasitetstilstand uten GUI-SQLite-tilgang.
+Datamappen kan åpnes, og **Kopier diagnostikk** lager en rapport uten brukernavn
+eller private stier. Versjonsbevaring og ytelsesprofil vises skrivebeskyttet så
+lenge domenekontrakten bare støtter henholdsvis 30 dager og Auto; karantene og
+varsler merkes eksplisitt som utilgjengelige i den lokale previewen. Kontrollene
+reflowes ved kompakt bredde og har automatisert 900×560-dekning uten horisontal
+clipping.
+
 ### 8.15 Første oppstart og onboarding
 
 Ikke bruk en tvungen karusell med flere sider. Første oppstart viser ett rolig velkomstpanel eller går direkte til dashboardets tomtilstand:

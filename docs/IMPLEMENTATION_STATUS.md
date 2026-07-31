@@ -1,5 +1,16 @@
 # Implementeringsstatus
 
+Oppdatering 2026-07-31: Navigasjonssiden **Innstillinger** er ikke lenger en
+placeholder. Tema (system/lys/mørk), tetthet, redusert bevegelse og språk brukes
+umiddelbart og lagres atomisk i en validert, versjonert JSON-fil under samme
+brukers lokale MediaSync-state. Språkvalget i flaggmenyen og på innstillingssiden
+er samme preferanse. Siden viser de eneste domenestøttede standardene
+skrivebeskyttet i stedet for å tilby valg motoren ikke kan håndheve. Lagringsfelt
+kommer fra Engine Hosts eksisterende kapasitetsrapport; datamappen kan åpnes, og
+en kopierbar diagnostikkrapport utelater brukernavn og private stier. Kontrollene
+reflowes ved kompakt bredde, og GUI-dekning verifiserer 900×560 uten horisontal
+clipping samt at preferansene lastes ved neste oppstart.
+
 Oppdatering 2026-07-31: Navigasjonssiden **Historikk** er ikke lenger en
 placeholder. En ny bounded `QUERY_HISTORY_TIMELINE`-kontrakt samler immutable
 førstegangskontroller og backupkjøringer fra Engine Host i én tidsordnet side,

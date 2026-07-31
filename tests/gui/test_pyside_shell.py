@@ -11,6 +11,7 @@ from PySide6.QtCore import QTimer, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QBoxLayout,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QLabel,
@@ -25,6 +26,15 @@ from PySide6.QtWidgets import (  # noqa: E402
 
 from mediasync_home.application.runtime_status import startup_status  # noqa: E402
 from mediasync_home.application.job_drafts import StandardBackupJobDraft  # noqa: E402
+from mediasync_home.adapters.local_user_preferences import (  # noqa: E402
+    LocalUserPreferencesStore,
+)
+from mediasync_home.application.user_preferences import (  # noqa: E402
+    AppearancePreference,
+    DensityPreference,
+    UserLanguage,
+    UserPreferences,
+)
 from mediasync_home.domain.process_roles import ProcessRole  # noqa: E402
 from mediasync_home.ipc.protocol import IpcResponse  # noqa: E402
 from mediasync_home.presentation.app import build_main_window, ensure_qapplication  # noqa: E402
@@ -570,6 +580,131 @@ def test_failed_target_registration_keeps_review_and_retry_without_clipping(qapp
         assert provider.calls.count("create_standard_backup_job") == 2
         assert target.text().startswith("1 mål:")
         assert dashboard_scroll.horizontalScrollBar().maximum() == 0
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_settings_apply_and_persist_with_private_diagnostics(
+    qapp,
+    tmp_path,
+) -> None:
+    state = engine_status_from_response(
+        IpcResponse.accepted(
+            {
+                "host_status": startup_status(ProcessRole.ENGINE_HOST).to_dict(),
+                "state_capacity": {
+                    "status": "READY",
+                    "reason_code": "STATE_CAPACITY_READY",
+                    "state_size_bytes": 4096,
+                    "local_free_space_bytes": 8192,
+                    "measurement_complete": True,
+                },
+            }
+        )
+    )
+    store = _MemoryUserPreferencesStore()
+    opened: list[object] = []
+    data_root = tmp_path / "private-user" / "state"
+    window = build_main_window(
+        initial_state=state,
+        user_preferences=UserPreferences(appearance=AppearancePreference.LIGHT),
+        user_preferences_store=store,
+        data_root=data_root,
+        open_data_folder=lambda path: opened.append(path) is None,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        qapp.processEvents()
+        nav = window.findChild(QListWidget, "navigationRail")
+        settings_scroll = window.findChild(QScrollArea, "settingsScrollArea")
+        theme_buttons = window.findChildren(QPushButton, "settingsModeButton")
+        density = window.findChild(QComboBox, "settingsDensityCombo")
+        language = window.findChild(QComboBox, "settingsLanguageCombo")
+        reduced_motion = window.findChild(QCheckBox, "settingsReducedMotionCheck")
+        state_usage = window.findChild(QLabel, "settingsStateUsageValue")
+        free_space = window.findChild(QLabel, "settingsFreeSpaceValue")
+        open_button = window.findChildren(QPushButton, "settingsActionButton")[0]
+        copy_button = window.findChildren(QPushButton, "settingsActionButton")[1]
+
+        assert nav is not None
+        nav.setCurrentRow(3)
+        qapp.processEvents()
+        assert settings_scroll is not None
+        assert settings_scroll.horizontalScrollBar().maximum() == 0
+        assert state_usage is not None
+        assert state_usage.text() == "4.0 KiB"
+        assert free_space is not None
+        assert free_space.text() == "8.0 KiB"
+        retention_label = next(
+            label
+            for label in window.findChildren(QLabel)
+            if label.text() == "Versjonsbevaring"
+        )
+        assert retention_label.isVisible()
+        assert retention_label.width() >= 100
+
+        dark = next(button for button in theme_buttons if button.text() == "Mørk")
+        QTest.mouseClick(dark, Qt.MouseButton.LeftButton)
+        density.setCurrentIndex(density.findData(DensityPreference.COMPACT.value))
+        reduced_motion.setChecked(True)
+        language.setCurrentIndex(language.findData(UserLanguage.ENGLISH.value))
+        qapp.processEvents()
+
+        assert store.saved[-1] == UserPreferences(
+            appearance=AppearancePreference.DARK,
+            density=DensityPreference.COMPACT,
+            reduced_motion=True,
+            language=UserLanguage.ENGLISH,
+        )
+        assert window.centralWidget().property("densityMode") == "compact"
+        assert window.centralWidget().property("reducedMotion") is True
+        assert nav.item(3).text() == "Settings"
+        assert "#151a1d" in qapp.styleSheet()
+        assert settings_scroll.horizontalScrollBar().maximum() == 0
+
+        QTest.mouseClick(open_button, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(copy_button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        report = qapp.clipboard().text()
+        assert opened == [data_root]
+        assert "MediaSync Home diagnostics" in report
+        assert "capacity_status: READY" in report
+        assert str(data_root) not in report
+        assert "private-user" not in report
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_main_window_loads_stored_preferences_on_next_launch(qapp, tmp_path) -> None:
+    store = LocalUserPreferencesStore(tmp_path / "user-preferences.json")
+    store.save(
+        UserPreferences(
+            appearance=AppearancePreference.DARK,
+            density=DensityPreference.COMPACT,
+            reduced_motion=True,
+            language=UserLanguage.ENGLISH,
+        )
+    )
+
+    window = build_main_window(
+        initial_state=_ready_state(),
+        theme_mode=ThemeMode.LIGHT,
+        user_preferences_store=store,
+    )
+
+    try:
+        nav = window.findChild(QListWidget, "navigationRail")
+
+        assert nav is not None
+        assert nav.item(0).text() == "Dashboard"
+        assert window.centralWidget().property("densityMode") == "compact"
+        assert window.centralWidget().property("reducedMotion") is True
+        assert "#151a1d" in qapp.styleSheet()
     finally:
         window.close()
         window.deleteLater()
@@ -1169,6 +1304,17 @@ class _FakeEngineClient:
         return IpcResponse.accepted(
             {"host_status": startup_status(ProcessRole.ENGINE_HOST).to_dict()}
         )
+
+
+class _MemoryUserPreferencesStore:
+    def __init__(self) -> None:
+        self.saved: list[UserPreferences] = []
+
+    def load(self) -> UserPreferences:
+        return UserPreferences()
+
+    def save(self, preferences: UserPreferences) -> None:
+        self.saved.append(preferences)
 
 
 class _FakeBackupCreationEngineClient(_FakeEngineClient):

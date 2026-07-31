@@ -26,6 +26,29 @@ def test_engine_status_view_model_formats_accepted_host_status() -> None:
     assert state.mutations_enabled is False
 
 
+def test_engine_status_view_model_exposes_bounded_capacity_fields() -> None:
+    response = IpcResponse.accepted(
+        {
+            "host_status": startup_status(ProcessRole.ENGINE_HOST).to_dict(),
+            "state_capacity": {
+                "status": "SOFT_QUOTA",
+                "reason_code": "STATE_CAPACITY_SOFT_QUOTA",
+                "state_size_bytes": 4096,
+                "local_free_space_bytes": 8192,
+                "measurement_complete": True,
+            },
+        }
+    )
+
+    state = engine_status_from_response(response)
+
+    assert state.capacity_status == "SOFT_QUOTA"
+    assert state.capacity_reason_code == "STATE_CAPACITY_SOFT_QUOTA"
+    assert state.state_size_bytes == 4096
+    assert state.local_free_space_bytes == 8192
+    assert state.capacity_measurement_complete is True
+
+
 def test_engine_status_view_model_formats_rejected_response() -> None:
     response = IpcResponse.rejected(IpcReason.HANDSHAKE_REQUIRED)
 
