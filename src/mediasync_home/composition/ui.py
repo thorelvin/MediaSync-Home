@@ -190,13 +190,14 @@ def run_ui(argv: Sequence[str] | None = None, *, emit: Emit | None = None) -> in
     except (OSError, TimeoutError):
         if publication is None:
             raise
+        stale_publication_cleared = _clear_stale_host_publication(publication)
         response = IpcResponse.rejected(
             IpcReason.ENGINE_HOST_UNAVAILABLE,
             {
                 "host_locator_publication": publication.to_payload(),
                 "reason": "HOST_LOCATOR_PUBLICATION_NOT_LIVE",
                 "scope": "0B_SAME_USER_LOCAL_PREVIEW",
-                "stale_host_locator_publication_cleared": False,
+                "stale_host_locator_publication_cleared": stale_publication_cleared,
             },
         )
     output(json.dumps(response.to_dict(), sort_keys=True, separators=(",", ":")))
@@ -333,12 +334,12 @@ def _clear_stale_host_publication(
     publication: LocalEngineHostPublication,
 ) -> bool:
     from mediasync_home.adapters.local_host_locator import (
-        clear_stale_local_engine_host_publication,
+        clear_unreachable_local_engine_host_publication,
     )
 
     try:
-        return clear_stale_local_engine_host_publication(publication)
-    except OSError:
+        return clear_unreachable_local_engine_host_publication(publication)
+    except (OSError, ValueError):
         return False
 
 

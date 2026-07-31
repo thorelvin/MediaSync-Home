@@ -12,6 +12,7 @@ import mediasync_home.adapters.local_host_locator as local_host_locator_module
 from mediasync_home.adapters.local_host_locator import (
     build_local_engine_host_descriptor_for_user,
     clear_stale_local_engine_host_publication,
+    clear_unreachable_local_engine_host_publication,
     default_local_preview_state_root,
     load_matching_live_local_engine_host_publication,
     load_local_engine_host_publication,
@@ -382,6 +383,80 @@ def test_local_host_locator_adapter_clears_only_matching_stale_publication(
 
     assert clear_stale_local_engine_host_publication(newer_publication) is True
     assert load_local_engine_host_publication(state_root) is None
+
+
+@pytest.mark.parametrize("is_running", (True, None))
+def test_unreachable_publication_cleanup_preserves_fresh_host_startup(
+    tmp_path: Path,
+    is_running: bool | None,
+) -> None:
+    now = datetime(2026, 7, 31, 10, 12, 0, tzinfo=timezone.utc)
+    publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=tmp_path / "state",
+        process_id=4321,
+        heartbeat_utc=format_host_locator_heartbeat_utc(now),
+    )
+    process_probe = _ProcessProbe(is_running=is_running)
+    publish_local_engine_host_publication(publication)
+
+    assert (
+        clear_unreachable_local_engine_host_publication(
+            publication,
+            process_probe=process_probe,
+            now_utc=now,
+        )
+        is False
+    )
+    assert process_probe.process_ids == [4321]
+    assert load_local_engine_host_publication(tmp_path / "state") == publication
+
+
+def test_unreachable_publication_cleanup_removes_heartbeatless_legacy_record(
+    tmp_path: Path,
+) -> None:
+    publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=tmp_path / "state",
+        process_id=4321,
+    )
+    process_probe = _ProcessProbe(is_running=True)
+    publish_local_engine_host_publication(publication)
+
+    assert clear_unreachable_local_engine_host_publication(
+        publication,
+        process_probe=process_probe,
+    )
+    assert process_probe.process_ids == [4321]
+    assert load_local_engine_host_publication(tmp_path / "state") is None
+
+
+def test_unreachable_publication_cleanup_removes_dead_fresh_record(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 31, 10, 12, 0, tzinfo=timezone.utc)
+    publication = build_local_engine_host_publication(
+        installation_id="local-dev",
+        pipe_name="MediaSyncHome-0B-1234567890abcdef12345678",
+        mutex_name="Local\\MediaSyncHome-0B-1234567890abcdef12345678",
+        state_root=tmp_path / "state",
+        process_id=4321,
+        heartbeat_utc=format_host_locator_heartbeat_utc(now),
+    )
+    process_probe = _ProcessProbe(is_running=False)
+    publish_local_engine_host_publication(publication)
+
+    assert clear_unreachable_local_engine_host_publication(
+        publication,
+        process_probe=process_probe,
+        now_utc=now,
+    )
+    assert process_probe.process_ids == [4321]
+    assert load_local_engine_host_publication(tmp_path / "state") is None
 
 
 def test_load_matching_live_publication_accepts_unknown_process_liveness(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,7 @@ from mediasync_home.adapters.process_supervisor import CompletedRoleProcess
 from mediasync_home.application.host_locator import (
     build_local_engine_host_descriptor,
     build_local_engine_host_publication,
+    format_host_locator_heartbeat_utc,
 )
 from mediasync_home.composition import engine_host as engine_host_module
 from mediasync_home.composition import launcher as launcher_module
@@ -431,6 +434,48 @@ def test_local_preview_status_falls_back_to_new_host_when_publication_is_stale(
     assert result.engine_host_returncode == 0
     assert result.host_locator_publication == publication.to_payload()
     assert load_local_engine_host_publication(tmp_path / "state") is None
+
+
+def test_local_preview_status_preserves_fresh_live_publication_during_startup_race(
+    tmp_path: Path,
+) -> None:
+    descriptor = build_local_engine_host_descriptor(
+        installation_id="preview-a",
+        user_scope_hash="b" * 64,
+        state_root=tmp_path / "state",
+    )
+    publication = build_local_engine_host_publication(
+        installation_id=descriptor.installation_id,
+        pipe_name=descriptor.pipe_name,
+        mutex_name=descriptor.mutex_name,
+        state_root=tmp_path / "state",
+        process_id=os.getpid(),
+        heartbeat_utc=format_host_locator_heartbeat_utc(datetime.now(timezone.utc)),
+    )
+    publish_local_engine_host_publication(publication)
+    launch = build_local_preview_status_launch(
+        host_descriptor=descriptor,
+        environment={"PYTHONUTF8": "1"},
+    )
+    supervisor = _StaleThenSuccessfulPreviewSupervisor()
+
+    result = run_local_preview_status(
+        launch,
+        supervisor=supervisor,
+        timeout_seconds=10.0,
+        existing_publication=publication,
+    )
+
+    assert supervisor.started_plan is None
+    assert supervisor.ran_plans == [launch.gui_status]
+    assert result.accepted is False
+    assert result.adoption_attempted is True
+    assert result.adopted_existing_host is False
+    assert result.stale_host_locator_publication_cleared is False
+    assert result.engine_host_returncode is None
+    assert result.gui_response is not None
+    assert result.gui_response["reason"] == IpcReason.ENGINE_HOST_UNAVAILABLE.value
+    assert load_local_engine_host_publication(tmp_path / "state") == publication
 
 
 class _SuccessfulPreviewSupervisor:

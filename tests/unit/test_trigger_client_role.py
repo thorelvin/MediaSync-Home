@@ -247,6 +247,11 @@ def test_trigger_status_query_preserves_live_unready_publication_when_locator_pi
         "_load_matching_local_preview_publication",
         lambda args: publication,
     )
+    monkeypatch.setattr(
+        trigger_module,
+        "_clear_stale_host_publication",
+        lambda current: False,
+    )
     _install_fake_win32_module(monkeypatch, FakeWin32NamedPipeClient)
     output: list[str] = []
 
@@ -272,6 +277,49 @@ def test_trigger_status_query_preserves_live_unready_publication_when_locator_pi
         "reason": "ENGINE_HOST_UNAVAILABLE",
         "status": "REJECTED",
     }
+
+
+def test_trigger_status_query_reports_guarded_stale_publication_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeWin32NamedPipeClient(_DeadPipeClient):
+        instances: list["FakeWin32NamedPipeClient"] = []
+
+    publication = _Publication(pipe_name="dead-pipe")
+    cleared: list[object] = []
+
+    def clear_publication(current: object) -> bool:
+        cleared.append(current)
+        return True
+
+    monkeypatch.setattr(trigger_module.os, "name", "nt")
+    monkeypatch.setattr(
+        trigger_module,
+        "_load_matching_local_preview_publication",
+        lambda args: publication,
+    )
+    monkeypatch.setattr(
+        trigger_module,
+        "_clear_stale_host_publication",
+        clear_publication,
+    )
+    _install_fake_win32_module(monkeypatch, FakeWin32NamedPipeClient)
+    output: list[str] = []
+
+    result = run_trigger_client(
+        [
+            "--query-status",
+            "--installation-id",
+            "preview-a",
+            "--timeout-seconds",
+            "1",
+        ],
+        emit=output.append,
+    )
+
+    assert result == 2
+    assert cleared == [publication]
+    assert json.loads(output[0])["payload"]["stale_host_locator_publication_cleared"] is True
 
 
 def test_trigger_status_query_returns_failed_handshake_without_status_query() -> None:

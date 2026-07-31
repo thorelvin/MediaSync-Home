@@ -3233,6 +3233,8 @@ Krav:
 - installer/oppgradering skal be host om kontrollert avslutning og blokkere binærutskifting mens en aktiv filsystemovergang pågår;
 - dersom en eldre host kjører etter oppgradering, skal launcher enten bruke en eksplisitt kompatibel protokoll eller stoppe med en klar versjonsmelding. Den skal aldri sende nyere kommandoer til en eldre host på antakelse.
 
+0B-implementasjonsnote: Den lokale HostLocator-publikasjonen inneholder prosess-ID og en periodisk UTC-heartbeat, men ingen av delene er alene autoritet for mutasjon. Launcher, GUI og trigger verifiserer fortsatt hosten gjennom named-pipe-handshake. Dersom denne IPC-proben feiler, fjernes publikasjonen med compare-and-delete bare når prosessen er bekreftet død, heartbeaten er stale, eller den unreachable posten er et eldre heartbeat-løst kompatibilitetsformat. En fersk heartbeat fra en levende eller ikke sikkert død prosess bevares, og launcheren starter ikke en konkurrerende host i vinduet mellom publikasjon og pipe-readiness. Dette er same-user local-preview-herding; cross-session singleton, Task Scheduler-bootstrap og full produksjonslivssyklus gjenstår.
+
 ### 9.4 Lokal IPC-protokoll
 
 Bruk lokale Windows named pipes. Implementasjonen skal bruke Windows-sikkerhetsattributter og avvise eksterne klienter der API-et støtter det.

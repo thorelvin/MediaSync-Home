@@ -209,6 +209,32 @@ def clear_stale_local_engine_host_publication(
     return True
 
 
+def clear_unreachable_local_engine_host_publication(
+    publication: LocalEngineHostPublication,
+    *,
+    process_probe: ProcessLivenessProbe | None = None,
+    now_utc: datetime | None = None,
+    max_heartbeat_age_seconds: float = LOCAL_ENGINE_HOST_HEARTBEAT_MAX_AGE_SECONDS,
+) -> bool:
+    current = load_local_engine_host_publication(publication.state_root)
+    if current != publication:
+        return False
+    probe = process_probe or LocalProcessLivenessProbe()
+    process_running = probe.is_process_running(publication.process_id)
+    heartbeat_is_missing = publication.heartbeat_utc is None
+    heartbeat_is_stale = (
+        not heartbeat_is_missing
+        and local_engine_host_publication_heartbeat_is_stale(
+            publication,
+            now_utc=now_utc or datetime.now(timezone.utc),
+            max_age_seconds=max_heartbeat_age_seconds,
+        )
+    )
+    if process_running is not False and not heartbeat_is_missing and not heartbeat_is_stale:
+        return False
+    return clear_stale_local_engine_host_publication(publication)
+
+
 def _ensure_publication_path_safe(
     state_root: Path,
     *,

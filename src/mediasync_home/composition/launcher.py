@@ -119,6 +119,12 @@ class LocalPreviewStatusResult:
         }
 
 
+@dataclass(frozen=True)
+class _ExistingHostAdoptionAttempt:
+    result: LocalPreviewStatusResult
+    replacement_candidate: bool
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MediaSync Home launcher role")
     mode = parser.add_mutually_exclusive_group()
@@ -360,15 +366,17 @@ def run_local_preview_status(
 ) -> LocalPreviewStatusResult:
     stale_publication_cleared = False
     if existing_publication is not None:
-        adopted = _try_adopt_existing_local_preview_host(
+        adoption_attempt = _try_adopt_existing_local_preview_host(
             launch,
             supervisor=supervisor,
             timeout_seconds=timeout_seconds,
             publication=existing_publication,
         )
-        if adopted is not None:
-            return adopted
+        if not adoption_attempt.replacement_candidate:
+            return adoption_attempt.result
         stale_publication_cleared = _clear_stale_host_publication(existing_publication)
+        if not stale_publication_cleared:
+            return adoption_attempt.result
 
     host = supervisor.start(launch.engine_host)
     host_completed: CompletedRoleProcess | None = None
@@ -420,49 +428,78 @@ def _try_adopt_existing_local_preview_host(
     supervisor: RoleProcessSupervisor,
     timeout_seconds: float,
     publication: LocalEngineHostPublication,
-) -> LocalPreviewStatusResult | None:
+) -> _ExistingHostAdoptionAttempt:
     try:
         gui_completed = supervisor.run(launch.gui_status, timeout_seconds=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        return None
+    except subprocess.TimeoutExpired as exc:
+        return _ExistingHostAdoptionAttempt(
+            result=_existing_host_adoption_result(
+                launch=launch,
+                publication=publication,
+                gui_completed=None,
+                error_type=type(exc).__name__,
+            ),
+            replacement_candidate=True,
+        )
 
     gui_response = _parse_json_object(gui_completed.stdout)
     if gui_completed.returncode == 0 and _response_status_is(gui_response, IpcStatus.ACCEPTED):
-        return LocalPreviewStatusResult(
-            pipe_name=launch.pipe_name,
-            engine_host_returncode=None,
-            engine_host_events=(),
-            engine_host_stderr="",
-            gui_returncode=gui_completed.returncode,
-            gui_response=gui_response,
-            gui_stderr=gui_completed.stderr,
-            host_locator=None
-            if launch.host_descriptor is None
-            else launch.host_descriptor.to_payload(),
-            host_locator_publication=publication.to_payload(),
-            adoption_attempted=True,
-            adopted_existing_host=True,
-            stale_host_locator_publication_cleared=False,
+        return _ExistingHostAdoptionAttempt(
+            result=_existing_host_adoption_result(
+                launch=launch,
+                publication=publication,
+                gui_completed=gui_completed,
+                adopted_existing_host=True,
+            ),
+            replacement_candidate=False,
         )
     if _is_live_adoption_rejection(gui_response):
-        return LocalPreviewStatusResult(
-            pipe_name=launch.pipe_name,
-            engine_host_returncode=None,
-            engine_host_events=(),
-            engine_host_stderr="",
-            gui_returncode=gui_completed.returncode,
-            gui_response=gui_response,
-            gui_stderr=gui_completed.stderr,
-            host_locator=None
-            if launch.host_descriptor is None
-            else launch.host_descriptor.to_payload(),
-            host_locator_publication=publication.to_payload(),
-            adoption_attempted=True,
-            adopted_existing_host=False,
-            stale_host_locator_publication_cleared=False,
+        return _ExistingHostAdoptionAttempt(
+            result=_existing_host_adoption_result(
+                launch=launch,
+                publication=publication,
+                gui_completed=gui_completed,
+            ),
+            replacement_candidate=False,
         )
 
-    return None
+    return _ExistingHostAdoptionAttempt(
+        result=_existing_host_adoption_result(
+            launch=launch,
+            publication=publication,
+            gui_completed=gui_completed,
+        ),
+        replacement_candidate=True,
+    )
+
+
+def _existing_host_adoption_result(
+    *,
+    launch: LocalPreviewStatusLaunch,
+    publication: LocalEngineHostPublication,
+    gui_completed: CompletedRoleProcess | None,
+    adopted_existing_host: bool = False,
+    error_type: str | None = None,
+) -> LocalPreviewStatusResult:
+    return LocalPreviewStatusResult(
+        pipe_name=launch.pipe_name,
+        engine_host_returncode=None,
+        engine_host_events=(),
+        engine_host_stderr="",
+        gui_returncode=None if gui_completed is None else gui_completed.returncode,
+        gui_response=None
+        if gui_completed is None
+        else _parse_json_object(gui_completed.stdout),
+        gui_stderr="" if gui_completed is None else gui_completed.stderr,
+        host_locator=None
+        if launch.host_descriptor is None
+        else launch.host_descriptor.to_payload(),
+        host_locator_publication=publication.to_payload(),
+        adoption_attempted=True,
+        adopted_existing_host=adopted_existing_host,
+        stale_host_locator_publication_cleared=False,
+        error_type=error_type,
+    )
 
 
 def _response_status_is(
@@ -484,12 +521,12 @@ def _clear_stale_host_publication(
     publication: LocalEngineHostPublication,
 ) -> bool:
     from mediasync_home.adapters.local_host_locator import (
-        clear_stale_local_engine_host_publication,
+        clear_unreachable_local_engine_host_publication,
     )
 
     try:
-        return clear_stale_local_engine_host_publication(publication)
-    except OSError:
+        return clear_unreachable_local_engine_host_publication(publication)
+    except (OSError, ValueError):
         return False
 
 

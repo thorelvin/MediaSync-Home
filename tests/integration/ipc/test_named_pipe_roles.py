@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -15,6 +16,7 @@ from mediasync_home.application.command_payloads import canonical_command_payloa
 from mediasync_home.application.host_locator import (
     LOCAL_ENGINE_HOST_PUBLICATION_FILENAME,
     build_local_engine_host_publication,
+    format_host_locator_heartbeat_utc,
 )
 
 
@@ -598,6 +600,66 @@ def test_launcher_local_preview_status_clears_stale_publication_before_fallback(
     assert not publication_path.exists()
 
 
+def test_launcher_preserves_fresh_live_unready_publication_before_fallback(
+    tmp_path: Path,
+) -> None:
+    installation_id = f"preview-{uuid4().hex}"
+    state_root = tmp_path / "state"
+    identity = win32_named_pipe.current_process_identity()
+    descriptor = build_local_engine_host_descriptor_for_user(
+        installation_id=installation_id,
+        user_scope_hash=identity.user_sid_hash,
+        state_root=state_root,
+    )
+    publication = build_local_engine_host_publication(
+        installation_id=descriptor.installation_id,
+        pipe_name=descriptor.pipe_name,
+        mutex_name=descriptor.mutex_name,
+        state_root=state_root,
+        process_id=os.getpid(),
+        heartbeat_utc=format_host_locator_heartbeat_utc(datetime.now(timezone.utc)),
+    )
+    publication_path = publish_local_engine_host_publication(publication)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_role.py",
+            "--role",
+            "launcher",
+            "--local-preview-status",
+            "--installation-id",
+            installation_id,
+            "--state-root",
+            str(state_root),
+            "--timeout-seconds",
+            "1",
+        ],
+        cwd=Path(__file__).resolve().parents[3],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    payload = json.loads(result.stdout)
+
+    assert result.returncode == 2
+    assert result.stderr == ""
+    assert payload["accepted"] is False
+    assert payload["adoption_attempted"] is True
+    assert payload["adopted_existing_host"] is False
+    assert payload["stale_host_locator_publication_cleared"] is False
+    assert payload["engine_host"] == {
+        "events": [],
+        "killed": False,
+        "returncode": None,
+        "stderr": "",
+    }
+    assert payload["host_locator_publication"] == publication.to_payload()
+    assert publication_path.exists()
+
+
 def test_gui_status_query_uses_host_locator_when_pipe_omitted(
     tmp_path: Path,
 ) -> None:
@@ -765,6 +827,7 @@ def test_gui_status_query_preserves_live_unready_host_locator_when_pipe_omitted(
         mutex_name=descriptor.mutex_name,
         state_root=state_root,
         process_id=os.getpid(),
+        heartbeat_utc=format_host_locator_heartbeat_utc(datetime.now(timezone.utc)),
     )
     publication_path = publish_local_engine_host_publication(stale_publication)
 
@@ -806,6 +869,58 @@ def test_gui_status_query_preserves_live_unready_host_locator_when_pipe_omitted(
     assert publication_path.exists()
 
 
+def test_gui_status_query_clears_unreachable_legacy_host_locator_when_pipe_omitted(
+    tmp_path: Path,
+) -> None:
+    installation_id = f"preview-{uuid4().hex}"
+    state_root = tmp_path / "state"
+    identity = win32_named_pipe.current_process_identity()
+    descriptor = build_local_engine_host_descriptor_for_user(
+        installation_id=installation_id,
+        user_scope_hash=identity.user_sid_hash,
+        state_root=state_root,
+    )
+    stale_publication = build_local_engine_host_publication(
+        installation_id=descriptor.installation_id,
+        pipe_name=descriptor.pipe_name,
+        mutex_name=descriptor.mutex_name,
+        state_root=state_root,
+        process_id=os.getpid(),
+    )
+    publication_path = publish_local_engine_host_publication(stale_publication)
+
+    gui = subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_role.py",
+            "--role",
+            "gui",
+            "--query-status",
+            "--installation-id",
+            installation_id,
+            "--state-root",
+            str(state_root),
+            "--timeout-seconds",
+            "1",
+        ],
+        cwd=Path(__file__).resolve().parents[3],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    gui_response = json.loads(gui.stdout)
+
+    assert gui.stderr == ""
+    assert gui.returncode == 2
+    assert gui_response["payload"]["host_locator_publication"] == stale_publication.to_payload()
+    assert gui_response["payload"]["stale_host_locator_publication_cleared"] is True
+    assert gui_response["reason"] == "ENGINE_HOST_UNAVAILABLE"
+    assert gui_response["status"] == "REJECTED"
+    assert not publication_path.exists()
+
+
 def test_trigger_status_query_preserves_live_unready_host_locator_when_pipe_omitted(
     tmp_path: Path,
 ) -> None:
@@ -823,6 +938,7 @@ def test_trigger_status_query_preserves_live_unready_host_locator_when_pipe_omit
         mutex_name=descriptor.mutex_name,
         state_root=state_root,
         process_id=os.getpid(),
+        heartbeat_utc=format_host_locator_heartbeat_utc(datetime.now(timezone.utc)),
     )
     publication_path = publish_local_engine_host_publication(stale_publication)
 
