@@ -172,7 +172,7 @@ def execute_bounded_run_executor_cycle(
     if max_steps > MAX_RUN_EXECUTOR_PUMP_STEPS:
         raise RunExecutorViolation("RUN_EXECUTOR_CYCLE_STEP_LIMIT_TOO_LARGE")
 
-    runs.requeue_next_waiting_run_target()
+    runs.requeue_next_due_waiting_run_target()
     last_step: RunExecutorCycleOutcome | None = None
     for step_index in range(1, max_steps + 1):
         last_step = execute_one_run_executor_cycle(

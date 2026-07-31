@@ -161,6 +161,20 @@ invariants:
     precondition_schema_version: 1
     checksum_bound: true
     before_and_after_transfer_validation: true
+  - id: TIME-001_ENDPOINT_RETRY_TIMING
+    requirement_id: TIME-001
+    table: run_target_endpoint_wait_events
+    assertion: >
+      Each endpoint wait records a bounded actual backoff and display-only UTC
+      retry time; a live Engine Host derives retry eligibility from a monotonic
+      deadline so wall-clock changes cannot accelerate an active wait.
+    immutable: true
+    backoff_column: backoff_ms
+    retry_audit_column: retry_not_before_utc
+    minimum_backoff_ms: 1
+    maximum_backoff_ms: 300000
+    live_deadline_clock: monotonic
+    restart_reconciliation_clock: utc_once_then_monotonic
   - id: DB-007_PARENT_SCOPE_COMPOSITE_KEYS
     requirement_id: DB-007
     assertion: Security-relevant child rows are bound to their parent scope with composite keys.

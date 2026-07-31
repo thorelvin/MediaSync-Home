@@ -146,6 +146,7 @@ from mediasync_home.application.backup_analysis import (
     execute_next_backup_analysis,
 )
 from mediasync_home.application.clocks import ClockPort
+from mediasync_home.application.endpoint_retry import MonotonicEndpointRetryScheduler
 from mediasync_home.application.run_executor_cycle import (
     RunExecutorCyclePumpOutcome,
     RunExecutorCycleRecoveryOperationStore,
@@ -381,6 +382,7 @@ class TaskSchedulerStartupReconciliationOptions:
 class EngineHostRuntime:
     service: EngineHostIpcService
     clock: ClockPort = field(default_factory=SystemClock)
+    endpoint_retry_scheduler: MonotonicEndpointRetryScheduler | None = None
     installation_state: InstallationState | None = None
     endpoint_classification_refresh: EndpointClassificationRefreshReport | None = None
     snapshot_materialization_refresh: SnapshotMaterializationRefreshReport | None = None
@@ -1395,6 +1397,7 @@ def run_engine_host(
                 authorization=authorization,
                 service_status=service_status,
                 output=output,
+                endpoint_retry_scheduler=runtime.endpoint_retry_scheduler,
             )
             executor_maintenance_loop.start()
         if host_locator_publication is not None:
@@ -1490,9 +1493,13 @@ def build_engine_host_runtime(
     state_capacity_policy: StateCapacityPolicy | None = None,
     state_capacity_probe: StateCapacityProbe | None = None,
     clock: ClockPort | None = None,
+    endpoint_retry_scheduler: MonotonicEndpointRetryScheduler | None = None,
     recover_interrupted_analyses: bool = True,
 ) -> EngineHostRuntime:
     runtime_clock = clock or SystemClock()
+    runtime_endpoint_retry_scheduler = (
+        endpoint_retry_scheduler or MonotonicEndpointRetryScheduler(runtime_clock)
+    )
     if state_root is None:
         return EngineHostRuntime(
             service=EngineHostIpcService(
@@ -1629,7 +1636,10 @@ def build_engine_host_runtime(
                 observed_utc=runtime_clock.utc_now(),
             )
         )
-        runs = SqliteRunStore(catalog_connection)
+        runs = SqliteRunStore(
+            catalog_connection,
+            endpoint_retry_scheduler=runtime_endpoint_retry_scheduler,
+        )
         backup_analysis_requests = SqliteBackupAnalysisRequestStore(catalog_connection)
         if recover_interrupted_analyses:
             backup_analysis_requests.requeue_interrupted_backup_analyses()
@@ -1756,6 +1766,7 @@ def build_engine_host_runtime(
     runtime = EngineHostRuntime(
         service=service,
         clock=runtime_clock,
+        endpoint_retry_scheduler=runtime_endpoint_retry_scheduler,
         installation_state=installation_state,
         endpoint_classification_refresh=endpoint_classification_refresh,
         snapshot_materialization_refresh=snapshot_materialization_refresh,
@@ -1956,6 +1967,7 @@ def _build_executor_maintenance_loop(
     authorization: ClientAuthorizationPolicy,
     service_status: RuntimeStatus,
     output: Emit,
+    endpoint_retry_scheduler: MonotonicEndpointRetryScheduler | None = None,
 ) -> ExecutorMaintenanceLoop:
     if args.state_root is None:
         raise RuntimeError("RUN_EXECUTOR_MAINTENANCE_REQUIRES_STATE_ROOT")
@@ -1968,6 +1980,7 @@ def _build_executor_maintenance_loop(
             state_root=args.state_root,
             reconciler_instance_id=f"{args.installation_id}-executor-maintenance",
             run_executor_staging_backend=args.run_executor_staging_backend,
+            endpoint_retry_scheduler=endpoint_retry_scheduler,
             recover_interrupted_analyses=False,
         )
 

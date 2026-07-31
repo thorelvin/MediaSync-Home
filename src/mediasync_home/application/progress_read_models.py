@@ -7,7 +7,7 @@ from typing import Protocol
 from mediasync_home.application.runs import RunState, RunTargetState
 
 
-PROGRESS_SNAPSHOT_SCHEMA_VERSION = 2
+PROGRESS_SNAPSHOT_SCHEMA_VERSION = 3
 MAX_PROGRESS_SNAPSHOT_TARGETS = 32
 MAX_PROGRESS_QUERY_ID_LENGTH = 256
 MAX_PROGRESS_ACTIVE_PATH_LENGTH = 32767
@@ -29,6 +29,12 @@ class RunTargetProgressSnapshot:
     completed_bytes: int
     warning_count: int
     error_count: int
+    endpoint_wait_attempts: int = 0
+    endpoint_wait_total_backoff_ms: int = 0
+    endpoint_retry_backoff_ms: int | None = None
+    endpoint_retry_not_before_utc: str | None = None
+    endpoint_wait_reason_code: str | None = None
+    endpoint_wait_started_utc: str | None = None
 
     def __post_init__(self) -> None:
         _validate_snapshot_text(self.run_target_id, "RUN_PROGRESS_TARGET_ID_INVALID")
@@ -44,7 +50,27 @@ class RunTargetProgressSnapshot:
             self.completed_bytes,
             self.warning_count,
             self.error_count,
+            self.endpoint_wait_attempts,
+            self.endpoint_wait_total_backoff_ms,
         )
+        if self.endpoint_retry_backoff_ms is not None and (
+            self.endpoint_retry_backoff_ms < 1
+            or self.endpoint_retry_backoff_ms > 300_000
+        ):
+            raise ProgressSnapshotQueryError("RUN_PROGRESS_ENDPOINT_BACKOFF_INVALID")
+        for value in (
+            self.endpoint_retry_not_before_utc,
+            self.endpoint_wait_started_utc,
+        ):
+            if value is not None and (
+                not value.strip() or len(value) > 64 or not value.endswith("Z")
+            ):
+                raise ProgressSnapshotQueryError("RUN_PROGRESS_ENDPOINT_UTC_INVALID")
+        if self.endpoint_wait_reason_code is not None:
+            _validate_snapshot_text(
+                self.endpoint_wait_reason_code,
+                "RUN_PROGRESS_ENDPOINT_WAIT_REASON_INVALID",
+            )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -58,6 +84,12 @@ class RunTargetProgressSnapshot:
             "completed_bytes": self.completed_bytes,
             "warning_count": self.warning_count,
             "error_count": self.error_count,
+            "endpoint_wait_attempts": self.endpoint_wait_attempts,
+            "endpoint_wait_total_backoff_ms": self.endpoint_wait_total_backoff_ms,
+            "endpoint_retry_backoff_ms": self.endpoint_retry_backoff_ms,
+            "endpoint_retry_not_before_utc": self.endpoint_retry_not_before_utc,
+            "endpoint_wait_reason_code": self.endpoint_wait_reason_code,
+            "endpoint_wait_started_utc": self.endpoint_wait_started_utc,
         }
 
 

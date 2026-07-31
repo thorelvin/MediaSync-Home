@@ -1430,6 +1430,36 @@ def test_jobs_page_shows_live_progress_and_run_controls(qapp) -> None:
         window.deleteLater()
 
 
+def test_jobs_page_wraps_endpoint_retry_diagnostics_without_clipping(qapp) -> None:
+    provider = _FakeRunControlDashboardEngineClient()
+    provider.target_waiting = True
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(700, 500)
+        window.show()
+        window.refresh_engine_status()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+        rows = window.findChildren(QLabel, "jobsRunTargetRow")
+        row = next(candidate for candidate in rows if candidate.isVisible())
+
+        assert row.wordWrap()
+        assert "Venter på mål" in row.text()
+        assert "Forsøk 2" in row.text()
+        assert "nytt forsøk etter" in row.text()
+        assert "ENDPOINT_ROOT_UNAVAILABLE" in row.toolTip()
+        assert "14.2 s" in row.toolTip()
+        assert row.height() >= row.fontMetrics().height()
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def _ready_state() -> EngineStatusViewState:
     return engine_status_from_response(
         IpcResponse.accepted({"host_status": startup_status(ProcessRole.ENGINE_HOST).to_dict()})
@@ -1920,6 +1950,7 @@ class _FakeRunControlDashboardEngineClient(_FakeBackupStartDashboardEngineClient
         self.sequence_no = 1
         self.controls: list[str] = []
         self.stop_requested = False
+        self.target_waiting = False
 
     def get_run_progress(
         self,
@@ -1952,13 +1983,41 @@ class _FakeRunControlDashboardEngineClient(_FakeBackupStartDashboardEngineClient
             "targets": [
                 {
                     "endpoint_id": "target-a",
-                    "state": "PAUSED" if self.run_state == "PAUSED" else "EXECUTING",
+                    "state": (
+                        "WAITING_FOR_ENDPOINT"
+                        if self.target_waiting
+                        else "PAUSED"
+                        if self.run_state == "PAUSED"
+                        else "EXECUTING"
+                    ),
                     "planned_operations": 3,
                     "completed_operations": 1,
                     "planned_bytes": 3072,
                     "completed_bytes": 1024,
                     "warning_count": 0,
                     "error_count": 0,
+                    "endpoint_wait_attempts": 2 if self.target_waiting else 0,
+                    "endpoint_wait_total_backoff_ms": (
+                        14_250 if self.target_waiting else 0
+                    ),
+                    "endpoint_retry_backoff_ms": (
+                        9_500 if self.target_waiting else None
+                    ),
+                    "endpoint_retry_not_before_utc": (
+                        "2026-07-31T00:00:09.500Z"
+                        if self.target_waiting
+                        else None
+                    ),
+                    "endpoint_wait_reason_code": (
+                        "ENDPOINT_ROOT_UNAVAILABLE"
+                        if self.target_waiting
+                        else None
+                    ),
+                    "endpoint_wait_started_utc": (
+                        "2026-07-31T00:00:00.000Z"
+                        if self.target_waiting
+                        else None
+                    ),
                 }
             ],
         }

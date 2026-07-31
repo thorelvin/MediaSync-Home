@@ -28,13 +28,21 @@ def test_run_progress_view_model_parses_snapshot_and_retains_unchanged_state() -
                     "targets": [
                         {
                             "endpoint_id": "target-a",
-                            "state": "EXECUTING",
+                            "state": "WAITING_FOR_ENDPOINT",
                             "planned_operations": 3,
                             "completed_operations": 1,
                             "planned_bytes": 300,
                             "completed_bytes": 100,
                             "warning_count": 0,
                             "error_count": 0,
+                            "endpoint_wait_attempts": 2,
+                            "endpoint_wait_total_backoff_ms": 14_250,
+                            "endpoint_retry_backoff_ms": 9_500,
+                            "endpoint_retry_not_before_utc": (
+                                "2026-07-31T00:00:09.500Z"
+                            ),
+                            "endpoint_wait_reason_code": "ENDPOINT_ROOT_UNAVAILABLE",
+                            "endpoint_wait_started_utc": "2026-07-31T00:00:00.000Z",
                         }
                     ],
                 },
@@ -62,6 +70,12 @@ def test_run_progress_view_model_parses_snapshot_and_retains_unchanged_state() -
     assert state.sequence_no == 7
     assert state.completed_operations == 1
     assert state.targets[0].endpoint_id == "target-a"
+    assert state.targets[0].endpoint_wait_attempts == 2
+    assert state.targets[0].endpoint_wait_total_backoff_ms == 14_250
+    assert state.targets[0].endpoint_retry_backoff_ms == 9_500
+    assert (
+        state.targets[0].endpoint_wait_reason_code == "ENDPOINT_ROOT_UNAVAILABLE"
+    )
     assert unchanged == state
 
 

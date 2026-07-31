@@ -1074,6 +1074,17 @@ class MediaSyncWindow(QMainWindow):
         pair = labels.get(state, (state.replace("_", " ").title(), state))
         return pair[0] if english else pair[1]
 
+    def _format_endpoint_retry_time(self, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone().strftime("%H:%M:%S")
+
     def _run_operation_phase_label(self, phase: str | None) -> str:
         english = self._selected_language_code is LanguageCode.ENGLISH
         labels = {
@@ -1319,10 +1330,47 @@ class MediaSyncWindow(QMainWindow):
                 row.setVisible(False)
                 continue
             target = state.targets[index]
-            row.setText(
-                f"{target.endpoint_id} · {self._target_state_label(target.state)} · "
-                f"{target.completed_operations}/{target.planned_operations}"
-            )
+            details = [
+                target.endpoint_id,
+                self._target_state_label(target.state),
+                f"{target.completed_operations}/{target.planned_operations}",
+            ]
+            tooltip_lines: list[str] = []
+            if (
+                target.state == "WAITING_FOR_ENDPOINT"
+                and target.endpoint_wait_attempts > 0
+            ):
+                english = self._selected_language_code is LanguageCode.ENGLISH
+                attempt_label = "Attempt" if english else "Forsøk"
+                details.append(f"{attempt_label} {target.endpoint_wait_attempts}")
+                retry_time = self._format_endpoint_retry_time(
+                    target.endpoint_retry_not_before_utc
+                )
+                if retry_time is not None:
+                    retry_label = "next retry after" if english else "nytt forsøk etter"
+                    details.append(f"{retry_label} {retry_time}")
+                if target.endpoint_wait_reason_code is not None:
+                    reason_label = "Reason" if english else "Årsak"
+                    tooltip_lines.append(
+                        f"{reason_label}: {target.endpoint_wait_reason_code}"
+                    )
+                backoff_label = "Scheduled backoff" if english else "Planlagt ventetid"
+                total_label = (
+                    "Total scheduled backoff"
+                    if english
+                    else "Samlet planlagt ventetid"
+                )
+                if target.endpoint_retry_backoff_ms is not None:
+                    tooltip_lines.append(
+                        f"{backoff_label}: "
+                        f"{target.endpoint_retry_backoff_ms / 1000:.1f} s"
+                    )
+                tooltip_lines.append(
+                    f"{total_label}: "
+                    f"{target.endpoint_wait_total_backoff_ms / 1000:.1f} s"
+                )
+            row.setText(" · ".join(details))
+            row.setToolTip("\n".join(tooltip_lines))
             row.setVisible(True)
         pausable = (
             not state.stop_requested

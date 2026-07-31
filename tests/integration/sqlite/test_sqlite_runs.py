@@ -8,6 +8,7 @@ import pytest
 
 from tests.support.sqlite_catalog import insert_default_filter_set_version
 from tests.support.source_preconditions import source_precondition_json
+from tests.support.fake_clock import FakeClock
 
 from mediasync_home.adapters.sqlite.command_receipts import SqliteCommandReceiptStore
 from mediasync_home.adapters.sqlite.connection_policy import (
@@ -28,6 +29,10 @@ from mediasync_home.adapters.sqlite.trigger_occurrences import (
 )
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.command_receipts import CommandReceipt
+from mediasync_home.application.endpoint_retry import (
+    MonotonicEndpointRetryScheduler,
+    endpoint_retry_backoff_ms,
+)
 from mediasync_home.application.plans import (
     PlanEndpoint,
     PlanEndpointRole,
@@ -465,7 +470,7 @@ def test_sqlite_run_store_begins_run_target_preflight(tmp_path: Path) -> None:
         assert repeated.validation_codes == ("RUN_HAS_NO_PENDING_TARGETS",)
 
 
-def test_sqlite_run_store_journals_endpoint_waits_and_requeues_one_attempt_per_pass(
+def test_sqlite_run_store_journals_timed_endpoint_waits_and_requeues_when_due(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "catalog.sqlite"
@@ -474,7 +479,12 @@ def test_sqlite_run_store_journals_endpoint_waits_and_requeues_one_attempt_per_p
         _insert_plan_parent_rows(connection)
         _insert_receipt(connection)
         plans = SqlitePlanStore(connection)
-        runs = SqliteRunStore(connection)
+        clock = FakeClock()
+        scheduler = MonotonicEndpointRetryScheduler(clock)
+        runs = SqliteRunStore(
+            connection,
+            endpoint_retry_scheduler=scheduler,
+        )
         plan = _sealed_plan()
         plans.save_sealed_plan(plan)
         start_run_from_sealed_plan(
@@ -499,15 +509,54 @@ def test_sqlite_run_store_journals_endpoint_waits_and_requeues_one_attempt_per_p
         assert first.target.state is RunTargetState.WAITING_FOR_ENDPOINT
         assert first_snapshot is not None
         assert first_snapshot.targets[0].state is RunTargetState.WAITING_FOR_ENDPOINT
+        first_backoff_ms = endpoint_retry_backoff_ms(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            attempt_no=1,
+        )
+        assert first_snapshot.targets[0].endpoint_wait_attempts == 1
+        assert (
+            first_snapshot.targets[0].endpoint_wait_total_backoff_ms
+            == first_backoff_ms
+        )
+        assert first_snapshot.targets[0].endpoint_retry_backoff_ms == first_backoff_ms
+        assert (
+            first_snapshot.targets[0].endpoint_wait_reason_code
+            == "ENDPOINT_ROOT_UNAVAILABLE"
+        )
         assert connection.execute(
             """
-            SELECT attempt_no, reason_code
+            SELECT
+                attempt_no,
+                reason_code,
+                observed_utc,
+                backoff_ms,
+                retry_not_before_utc
             FROM run_target_endpoint_wait_events
             ORDER BY id
             """
-        ).fetchall() == [(1, "ENDPOINT_ROOT_UNAVAILABLE")]
+        ).fetchall() == [
+            (
+                1,
+                "ENDPOINT_ROOT_UNAVAILABLE",
+                "2026-07-31T00:00:00.000Z",
+                first_backoff_ms,
+                f"2026-07-31T00:00:{first_backoff_ms / 1000:06.3f}Z",
+            )
+        ]
 
-        requeued = runs.requeue_next_waiting_run_target()
+        assert runs.requeue_next_due_waiting_run_target() is None
+        peer_runs = SqliteRunStore(
+            connection,
+            endpoint_retry_scheduler=scheduler,
+        )
+        clock.set_utc("2036-07-31T00:00:00.000Z")
+        assert peer_runs.requeue_next_due_waiting_run_target() is None
+        clock.advance_monotonic_ms(first_backoff_ms - 1)
+        assert peer_runs.requeue_next_due_waiting_run_target() is None
+        clock.advance_monotonic_ms(1)
+        requeued = peer_runs.requeue_next_due_waiting_run_target()
+        clock.set_utc("2026-07-31T00:00:00.000Z")
         second = execute_one_run_target_preflight_step(
             runs=runs,
             leases=UnavailableLeaseAuthority("ENDPOINT_LEASE_UNAVAILABLE"),
@@ -517,16 +566,51 @@ def test_sqlite_run_store_journals_endpoint_waits_and_requeues_one_attempt_per_p
         assert requeued.state is RunTargetState.PENDING
         assert second.target is not None
         assert second.target.state is RunTargetState.WAITING_FOR_ENDPOINT
+        second_backoff_ms = endpoint_retry_backoff_ms(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            attempt_no=2,
+        )
         assert connection.execute(
             """
-            SELECT attempt_no, reason_code
+            SELECT attempt_no, reason_code, backoff_ms
             FROM run_target_endpoint_wait_events
             ORDER BY id
             """
         ).fetchall() == [
-            (1, "ENDPOINT_ROOT_UNAVAILABLE"),
-            (2, "ENDPOINT_LEASE_UNAVAILABLE"),
+            (1, "ENDPOINT_ROOT_UNAVAILABLE", first_backoff_ms),
+            (2, "ENDPOINT_LEASE_UNAVAILABLE", second_backoff_ms),
         ]
+        restarted_clock = FakeClock()
+        restarted_runs = SqliteRunStore(connection, clock=restarted_clock)
+        assert restarted_runs.requeue_next_due_waiting_run_target() is None
+        restarted_clock.set_utc("2036-07-31T00:00:00.000Z")
+        restarted_clock.advance_monotonic_ms(second_backoff_ms - 1)
+        assert restarted_runs.requeue_next_due_waiting_run_target() is None
+        restarted_clock.advance_monotonic_ms(1)
+        assert restarted_runs.requeue_next_due_waiting_run_target() is not None
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="RUN_TARGET_ENDPOINT_RETRY_TIMING_REQUIRED",
+        ):
+            connection.execute(
+                """
+                INSERT INTO run_target_endpoint_wait_events (
+                    run_id,
+                    run_target_id,
+                    attempt_no,
+                    reason_code,
+                    observed_utc
+                )
+                VALUES (
+                    'run-a',
+                    'run-a-target-0000',
+                    3,
+                    'ENDPOINT_ROOT_UNAVAILABLE',
+                    '2026-07-31T00:00:00.000Z'
+                )
+                """
+            )
         with pytest.raises(
             sqlite3.IntegrityError, match="RUN_TARGET_ENDPOINT_WAIT_EVENT_IMMUTABLE"
         ):

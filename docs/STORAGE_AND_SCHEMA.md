@@ -880,14 +880,21 @@ for samme terminale input.
 - `attempt_no INTEGER NOT NULL`
 - `reason_code TEXT NOT NULL`
 - `observed_utc TEXT NOT NULL`
+- `backoff_ms INTEGER NOT NULL`, avgrenset til 1-300000
+- `retry_not_before_utc TEXT NOT NULL`
 - unik `(run_id, run_target_id, attempt_no)`
 - sammensatt FK `(run_id, run_target_id) REFERENCES run_targets(run_id, id)`
 
-Catalog schema 38 gjør radene immutable med update-/delete-triggere. En
-klassifisert utilgjengelig målrot eller opptatt endpointlock appender eventen i
-samme transaksjon som `run_targets.state` flyttes til
-`WAITING_FOR_ENDPOINT`; stale leasefelt nullstilles. En senere bounded
-maintenance-pass kan flytte ett ventende mål tilbake til `PENDING` for ny
+Catalog schema 38 oppretter eventloggen, og schema 39 legger til varig
+retrytiming. Radene er immutable med update-/delete-triggere, og nye events må
+ha en RFC3339-Z-verdi i `retry_not_before_utc`. En klassifisert utilgjengelig
+målrot eller opptatt endpointlock appender eventen i samme transaksjon som
+`run_targets.state` flyttes til `WAITING_FOR_ENDPOINT`; stale leasefelt
+nullstilles. Backoff er deterministisk jitteret og eksponentiell fra fem
+sekunder til maksimalt fem minutter. Engine Host holder levende deadlines mot
+monotonic clock. Etter restart oversettes lagret UTC én gang til en ny bounded
+monotonic deadline; senere wall-clock-hopp påvirker ikke ventetiden. En bounded
+maintenance-pass kan flytte høyst ett due mål tilbake til `PENDING` for ny
 preflight. Feil i kontrollmarkør, owner, epoch eller endpointidentitet bruker
 ikke denne retryflyten.
 

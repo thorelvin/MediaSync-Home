@@ -526,7 +526,7 @@ class _InMemoryRunStore(RunExecutorQueueStore):
             return None
         return self.run
 
-    def requeue_next_waiting_run_target(self) -> StartedRunTarget | None:
+    def requeue_next_due_waiting_run_target(self) -> StartedRunTarget | None:
         if self.run is None or self.run.state not in {
             RunState.QUEUED,
             RunState.PREFLIGHT,

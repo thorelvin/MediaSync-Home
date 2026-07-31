@@ -4,10 +4,17 @@ import json
 import sqlite3
 from typing import Any
 
+from mediasync_home.adapters.system_clock import SystemClock
 from mediasync_home.application.activity_read_models import (
     RunActivityReadModelStore,
     RunActivitySummary,
     RunTargetActivitySummary,
+)
+from mediasync_home.application.clocks import ClockPort
+from mediasync_home.application.endpoint_retry import (
+    EndpointRetryViolation,
+    MonotonicEndpointRetryScheduler,
+    endpoint_retry_backoff_ms,
 )
 from mediasync_home.application.progress_read_models import (
     MAX_PROGRESS_SNAPSHOT_TARGETS,
@@ -32,9 +39,24 @@ class SqliteRunStoreError(ValueError):
     pass
 
 
+_MAX_ENDPOINT_RETRY_CANDIDATES = 128
+
+
 class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotStore):
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        clock: ClockPort | None = None,
+        endpoint_retry_scheduler: MonotonicEndpointRetryScheduler | None = None,
+    ) -> None:
+        if clock is not None and endpoint_retry_scheduler is not None:
+            raise SqliteRunStoreError("RUN_STORE_RETRY_CLOCK_IS_AMBIGUOUS")
         self._connection = connection
+        self._endpoint_retries = (
+            endpoint_retry_scheduler
+            or MonotonicEndpointRetryScheduler(clock or SystemClock())
+        )
 
     def save_started_run(self, run: StartedRun) -> None:
         outer_transaction = self._connection.in_transaction
@@ -932,7 +954,49 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                 run_targets.completed_bytes,
                 run_targets.warning_count,
                 run_targets.error_count,
-                run_targets.row_version
+                run_targets.row_version,
+                (
+                    SELECT count(*)
+                    FROM run_target_endpoint_wait_events AS wait_events
+                    WHERE wait_events.run_id = run_targets.run_id
+                        AND wait_events.run_target_id = run_targets.id
+                ),
+                (
+                    SELECT coalesce(sum(wait_events.backoff_ms), 0)
+                    FROM run_target_endpoint_wait_events AS wait_events
+                    WHERE wait_events.run_id = run_targets.run_id
+                        AND wait_events.run_target_id = run_targets.id
+                ),
+                (
+                    SELECT wait_events.backoff_ms
+                    FROM run_target_endpoint_wait_events AS wait_events
+                    WHERE wait_events.run_id = run_targets.run_id
+                        AND wait_events.run_target_id = run_targets.id
+                    ORDER BY wait_events.id DESC
+                    LIMIT 1
+                ),
+                (
+                    SELECT wait_events.retry_not_before_utc
+                    FROM run_target_endpoint_wait_events AS wait_events
+                    WHERE wait_events.run_id = run_targets.run_id
+                        AND wait_events.run_target_id = run_targets.id
+                    ORDER BY wait_events.id DESC
+                    LIMIT 1
+                ),
+                (
+                    SELECT wait_events.reason_code
+                    FROM run_target_endpoint_wait_events AS wait_events
+                    WHERE wait_events.run_id = run_targets.run_id
+                        AND wait_events.run_target_id = run_targets.id
+                    ORDER BY wait_events.id DESC
+                    LIMIT 1
+                ),
+                (
+                    SELECT min(wait_events.observed_utc)
+                    FROM run_target_endpoint_wait_events AS wait_events
+                    WHERE wait_events.run_id = run_targets.run_id
+                        AND wait_events.run_target_id = run_targets.id
+                )
             FROM runs
             LEFT JOIN run_targets ON run_targets.run_id = runs.id
             WHERE runs.id = ?
@@ -969,6 +1033,20 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                 completed_bytes=int(target_row[19]),
                 warning_count=int(target_row[20]),
                 error_count=int(target_row[21]),
+                endpoint_wait_attempts=int(target_row[23]),
+                endpoint_wait_total_backoff_ms=int(target_row[24]),
+                endpoint_retry_backoff_ms=(
+                    None if target_row[25] is None else int(target_row[25])
+                ),
+                endpoint_retry_not_before_utc=(
+                    None if target_row[26] is None else str(target_row[26])
+                ),
+                endpoint_wait_reason_code=(
+                    None if target_row[27] is None else str(target_row[27])
+                ),
+                endpoint_wait_started_utc=(
+                    None if target_row[28] is None else str(target_row[28])
+                ),
             )
             for target_row in target_rows
         )
@@ -1103,6 +1181,26 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
         try:
             if not outer_transaction:
                 self._connection.execute("BEGIN IMMEDIATE")
+            attempt_row = self._connection.execute(
+                """
+                SELECT coalesce(max(attempt_no), 0) + 1
+                FROM run_target_endpoint_wait_events
+                WHERE run_id = ?
+                    AND run_target_id = ?
+                """,
+                (run_id, run_target_id),
+            ).fetchone()
+            if attempt_row is None:
+                raise SqliteRunStoreError(
+                    "RUN_TARGET_ENDPOINT_WAIT_ATTEMPT_LOAD_FAILED"
+                )
+            attempt_no = int(attempt_row[0])
+            backoff_ms = endpoint_retry_backoff_ms(
+                run_id=run_id,
+                run_target_id=run_target_id,
+                attempt_no=attempt_no,
+            )
+            timing = self._endpoint_retries.plan(backoff_ms=backoff_ms)
             cursor = self._connection.execute(
                 """
                 UPDATE run_targets
@@ -1126,6 +1224,11 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                 (
                     _json_dump(
                         {
+                            "endpoint_retry_backoff_ms": timing.backoff_ms,
+                            "endpoint_retry_not_before_utc": (
+                                timing.retry_not_before_utc
+                            ),
+                            "endpoint_wait_attempts": attempt_no,
                             "last_endpoint_error_code": normalized_reason,
                             "status": "WAITING_FOR_ENDPOINT",
                         }
@@ -1139,74 +1242,93 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                 if not outer_transaction:
                     self._connection.execute("ROLLBACK")
                 return None
-            attempt_row = self._connection.execute(
-                """
-                SELECT coalesce(max(attempt_no), 0) + 1
-                FROM run_target_endpoint_wait_events
-                WHERE run_id = ?
-                    AND run_target_id = ?
-                """,
-                (run_id, run_target_id),
-            ).fetchone()
-            if attempt_row is None:
-                raise SqliteRunStoreError(
-                    "RUN_TARGET_ENDPOINT_WAIT_ATTEMPT_LOAD_FAILED"
-                )
-            self._connection.execute(
+            event_cursor = self._connection.execute(
                 """
                 INSERT INTO run_target_endpoint_wait_events (
                     run_id,
                     run_target_id,
                     attempt_no,
-                    reason_code
+                    reason_code,
+                    observed_utc,
+                    backoff_ms,
+                    retry_not_before_utc
                 )
-                VALUES (?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (run_id, run_target_id, int(attempt_row[0]), normalized_reason),
+                (
+                    run_id,
+                    run_target_id,
+                    attempt_no,
+                    normalized_reason,
+                    timing.observed_utc,
+                    timing.backoff_ms,
+                    timing.retry_not_before_utc,
+                ),
             )
+            event_id = event_cursor.lastrowid
+            if event_id is None:
+                raise SqliteRunStoreError("RUN_TARGET_ENDPOINT_WAIT_EVENT_ID_MISSING")
             target = self._load_target(run_id=run_id, run_target_id=run_target_id)
             if target is None:
                 raise SqliteRunStoreError("RUN_TARGET_LOAD_FAILED")
             if not outer_transaction:
                 self._connection.execute("COMMIT")
+            self._endpoint_retries.activate(event_id=event_id, timing=timing)
             return target
-        except (sqlite3.Error, SqliteRunStoreError) as exc:
+        except (sqlite3.Error, SqliteRunStoreError, EndpointRetryViolation) as exc:
             if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
             if isinstance(exc, SqliteRunStoreError):
                 raise
             raise SqliteRunStoreError("RUN_TARGET_ENDPOINT_WAIT_RECORD_FAILED") from exc
 
-    def requeue_next_waiting_run_target(self) -> StartedRunTarget | None:
+    def requeue_next_due_waiting_run_target(self) -> StartedRunTarget | None:
         outer_transaction = self._connection.in_transaction
         try:
             if not outer_transaction:
                 self._connection.execute("BEGIN IMMEDIATE")
-            row = self._connection.execute(
+            rows = self._connection.execute(
                 """
-                SELECT run_targets.run_id, run_targets.id
+                SELECT
+                    run_targets.run_id,
+                    run_targets.id,
+                    events.id,
+                    events.backoff_ms,
+                    events.retry_not_before_utc
                 FROM run_targets
                 INNER JOIN runs ON runs.id = run_targets.run_id
+                INNER JOIN run_target_endpoint_wait_events AS events
+                    ON events.id = (
+                        SELECT max(latest.id)
+                        FROM run_target_endpoint_wait_events AS latest
+                        WHERE latest.run_id = run_targets.run_id
+                            AND latest.run_target_id = run_targets.id
+                    )
                 WHERE run_targets.state = 'WAITING_FOR_ENDPOINT'
                     AND runs.state IN ('QUEUED', 'PREFLIGHT', 'EXECUTING')
-                ORDER BY
-                    (
-                        SELECT max(events.id)
-                        FROM run_target_endpoint_wait_events AS events
-                        WHERE events.run_id = run_targets.run_id
-                            AND events.run_target_id = run_targets.id
-                    ),
-                    run_targets.run_id,
-                    run_targets.id
-                LIMIT 1
+                ORDER BY events.id, run_targets.run_id, run_targets.id
+                LIMIT ?
                 """,
-                (),
-            ).fetchone()
+                (_MAX_ENDPOINT_RETRY_CANDIDATES,),
+            ).fetchall()
+            row = next(
+                (
+                    candidate
+                    for candidate in rows
+                    if self._endpoint_retries.is_due(
+                        event_id=int(candidate[2]),
+                        backoff_ms=int(candidate[3]),
+                        retry_not_before_utc=str(candidate[4]),
+                    )
+                ),
+                None,
+            )
             if row is None:
                 if not outer_transaction:
                     self._connection.execute("COMMIT")
                 return None
             run_id, run_target_id = str(row[0]), str(row[1])
+            event_id = int(row[2])
             cursor = self._connection.execute(
                 """
                 UPDATE run_targets
@@ -1229,8 +1351,9 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                 raise SqliteRunStoreError("RUN_TARGET_LOAD_FAILED")
             if not outer_transaction:
                 self._connection.execute("COMMIT")
+            self._endpoint_retries.discard(event_id=event_id)
             return target
-        except (sqlite3.Error, SqliteRunStoreError) as exc:
+        except (sqlite3.Error, SqliteRunStoreError, EndpointRetryViolation) as exc:
             if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
             if isinstance(exc, SqliteRunStoreError):

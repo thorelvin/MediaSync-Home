@@ -228,6 +228,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_run_target_endpoint_waits",
                 statements=CATALOG_RUN_TARGET_ENDPOINT_WAITS,
             ),
+            SqliteMigration(
+                version=39,
+                name="catalog_run_target_endpoint_retry_timing",
+                statements=CATALOG_RUN_TARGET_ENDPOINT_RETRY_TIMING,
+            ),
         ),
     )
 
@@ -1598,6 +1603,50 @@ CATALOG_RUN_TARGET_ENDPOINT_WAITS = (
     """
     CREATE TRIGGER trg_run_target_endpoint_wait_events_no_delete
     BEFORE DELETE ON run_target_endpoint_wait_events
+    BEGIN
+        SELECT RAISE(ABORT, 'RUN_TARGET_ENDPOINT_WAIT_EVENT_IMMUTABLE');
+    END
+    """,
+)
+
+CATALOG_RUN_TARGET_ENDPOINT_RETRY_TIMING = (
+    """
+    DROP TRIGGER trg_run_target_endpoint_wait_events_no_update
+    """,
+    """
+    ALTER TABLE run_target_endpoint_wait_events
+        ADD COLUMN backoff_ms INTEGER NOT NULL DEFAULT 5000
+            CHECK (backoff_ms >= 1 AND backoff_ms <= 300000)
+    """,
+    """
+    ALTER TABLE run_target_endpoint_wait_events
+        ADD COLUMN retry_not_before_utc TEXT
+    """,
+    """
+    UPDATE run_target_endpoint_wait_events
+    SET retry_not_before_utc = strftime(
+        '%Y-%m-%dT%H:%M:%fZ',
+        observed_utc,
+        '+5 seconds'
+    )
+    """,
+    """
+    CREATE INDEX idx_run_target_endpoint_wait_events_retry
+        ON run_target_endpoint_wait_events (retry_not_before_utc, id)
+    """,
+    """
+    CREATE TRIGGER trg_run_target_endpoint_wait_events_retry_timing_required
+    BEFORE INSERT ON run_target_endpoint_wait_events
+    WHEN NEW.retry_not_before_utc IS NULL
+        OR length(trim(NEW.retry_not_before_utc)) = 0
+        OR substr(trim(NEW.retry_not_before_utc), -1) <> 'Z'
+    BEGIN
+        SELECT RAISE(ABORT, 'RUN_TARGET_ENDPOINT_RETRY_TIMING_REQUIRED');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_run_target_endpoint_wait_events_no_update
+    BEFORE UPDATE ON run_target_endpoint_wait_events
     BEGIN
         SELECT RAISE(ABORT, 'RUN_TARGET_ENDPOINT_WAIT_EVENT_IMMUTABLE');
     END

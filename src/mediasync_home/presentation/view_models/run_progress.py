@@ -15,6 +15,12 @@ class RunTargetProgressViewState:
     completed_bytes: int
     warning_count: int
     error_count: int
+    endpoint_wait_attempts: int = 0
+    endpoint_wait_total_backoff_ms: int = 0
+    endpoint_retry_backoff_ms: int | None = None
+    endpoint_retry_not_before_utc: str | None = None
+    endpoint_wait_reason_code: str | None = None
+    endpoint_wait_started_utc: str | None = None
 
 
 @dataclass(frozen=True)
@@ -150,6 +156,20 @@ def _target_from_payload(payload: dict[object, object]) -> RunTargetProgressView
         completed_bytes=_non_negative_int(payload.get("completed_bytes")) or 0,
         warning_count=_non_negative_int(payload.get("warning_count")) or 0,
         error_count=_non_negative_int(payload.get("error_count")) or 0,
+        endpoint_wait_attempts=(
+            _non_negative_int(payload.get("endpoint_wait_attempts")) or 0
+        ),
+        endpoint_wait_total_backoff_ms=(
+            _non_negative_int(payload.get("endpoint_wait_total_backoff_ms")) or 0
+        ),
+        endpoint_retry_backoff_ms=_non_negative_int(
+            payload.get("endpoint_retry_backoff_ms")
+        ),
+        endpoint_retry_not_before_utc=_text(
+            payload.get("endpoint_retry_not_before_utc")
+        ),
+        endpoint_wait_reason_code=_text(payload.get("endpoint_wait_reason_code")),
+        endpoint_wait_started_utc=_text(payload.get("endpoint_wait_started_utc")),
     )
 
 
