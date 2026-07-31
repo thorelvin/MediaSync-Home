@@ -1,7 +1,7 @@
 {
   "build": {
     "returncode": 0,
-    "stderr_tail": "Nuitka-Options: Used command line options:\nNuitka-Options:   --standalone --enable-plugin=pyside6 --assume-yes-for-downloads --output-dir=<packaged-work-dir> --output-filename=MediaSyncHome0B.exe --include-package=mediasync_home --include-package=win32com --include-module=pythoncom --include-module=pywintypes <repo-root>\\src\\mediasync_home\\__main__.py\nNuitka:WARNING: To compile a package with a '__main__' module, specify its containing\ndirectory but, not the '__main__.py' itself, also consider if\n'--python-flag=-m' should be used.\nNuitka: Starting Python compilation with:\nNuitka:   Version '4.1.3' on Python 3.10 (flavor 'CPython Official') commercial grade 'not installed'.\nNuitka-Plugins:WARNING: anti-bloat: Undesirable import of 'unittest' in 'win32com.test.util' (at '<repo-root>\\.venv\\Lib\\site-packages\\win32com\\test\\util.py:5') encountered. It may slow down compilation.\nNuitka-Plugins:WARNING:     Complex topic! More information can be found at \u001b[94mhttps://nuitka.net/info/unwanted-module.html\u001b[0m\nNuitka-Plugins:WARNING: anti-bloat: Undesirable import of 'setuptools' in 'win32com.test.pippo_server' (at '<repo-root>\\.venv\\Lib\\site-packages\\win32com\\test\\pippo_server.py:44') encountered. It may slow down compilation.\nNuitka-Plugins:WARNING:     Complex topic! More information can be found at \u001b[94mhttps://nuitka.net/info/unwanted-module.html\u001b[0m\nNuitka-Plugins:pyside6: Including Qt plugins 'iconengines,imageformats,platforms,styles,tls' below 'PySide6\\qt-plugins'.\nNuitka-Plugins:dll-files: Found 4 files DLLs from shiboken6 installation.\nNuitka-Inclusion: Including Windows Runtime DLLs, which increases distribution size. Use '--include-windows-runtime-dlls=no' to disable, or make explicit with '--include-windows-runtime-dlls=yes'.\nNuitka: Completed Python level compilation and optimization.\nNuitka: Generating source code for C backend compiler.\nNuitka: Running data composer tool for optimal constant value handling.\nNuitka: Running C compilation via Scons.\nNuitka-Scons: Backend C compiler: cl (cl 14.3).\nNuitka-Scons: Backend C linking with 287 files (no progress information available for this stage).\nNuitka-Scons: Compiled 287 C files using clcache with 287 cache hits and 0 cache misses.\nNuitka: Keeping build directory '<packaged-work-dir>\\__main__.build'.\nNuitka: Successfully created '<packaged-work-dir>\\__main__.dist\\MediaSyncHome0B.exe'.\n",
+    "stderr_tail": "Nuitka-Options: Used command line options:\nNuitka-Options:   --standalone --enable-plugin=pyside6 --assume-yes-for-downloads --output-dir=<packaged-work-dir> --output-filename=MediaSyncHome0B.exe --include-package=mediasync_home --include-package=win32com --include-module=pythoncom --include-module=pywintypes <repo-root>\\src\\mediasync_home\\__main__.py\nNuitka:WARNING: To compile a package with a '__main__' module, specify its containing\ndirectory but, not the '__main__.py' itself, also consider if\n'--python-flag=-m' should be used.\nNuitka: Starting Python compilation with:\nNuitka:   Version '4.1.3' on Python 3.10 (flavor 'CPython Official') commercial grade 'not installed'.\nNuitka-Plugins:WARNING: anti-bloat: Undesirable import of 'unittest' in 'win32com.test.util' (at '<repo-root>\\.venv\\Lib\\site-packages\\win32com\\test\\util.py:5') encountered. It may slow down compilation.\nNuitka-Plugins:WARNING:     Complex topic! More information can be found at \u001b[94mhttps://nuitka.net/info/unwanted-module.html\u001b[0m\nNuitka-Plugins:WARNING: anti-bloat: Undesirable import of 'setuptools' in 'win32com.test.pippo_server' (at '<repo-root>\\.venv\\Lib\\site-packages\\win32com\\test\\pippo_server.py:44') encountered. It may slow down compilation.\nNuitka-Plugins:WARNING:     Complex topic! More information can be found at \u001b[94mhttps://nuitka.net/info/unwanted-module.html\u001b[0m\nNuitka-Plugins:pyside6: Including Qt plugins 'iconengines,imageformats,platforms,styles,tls' below 'PySide6\\qt-plugins'.\nNuitka-Plugins:dll-files: Found 4 files DLLs from shiboken6 installation.\nNuitka-Inclusion: Including Windows Runtime DLLs, which increases distribution size. Use '--include-windows-runtime-dlls=no' to disable, or make explicit with '--include-windows-runtime-dlls=yes'.\nNuitka: Completed Python level compilation and optimization.\nNuitka: Generating source code for C backend compiler.\nNuitka: Running data composer tool for optimal constant value handling.\nNuitka: Running C compilation via Scons.\nNuitka-Scons: Backend C compiler: cl (cl 14.3).\nNuitka-Scons: Backend C linking with 288 files (no progress information available for this stage).\nNuitka-Scons: Compiled 288 C files using clcache with 275 cache hits and 13 cache misses.\nNuitka: Keeping build directory '<packaged-work-dir>\\__main__.build'.\nNuitka: Successfully created '<packaged-work-dir>\\__main__.dist\\MediaSyncHome0B.exe'.\n",
     "stdout_json": null,
     "stdout_json_lines": [],
     "stdout_tail": "",
@@ -10,17 +10,17 @@
   "event": "PACKAGED_RUNTIME_SMOKE",
   "executable": {
     "dist_file_count": 78,
-    "dist_size_bytes": 94171952,
+    "dist_size_bytes": 94336816,
     "relative_to_work_dir": "__main__.dist\\MediaSyncHome0B.exe",
-    "sha256": "836abca0394f3a1787273f6746726d720cf97d54f0dd7d2081d8a32a25e131b0",
-    "size_bytes": 23287296
+    "sha256": "26e7da5329ab50e3bde5aeb3284c99aef8e9890b49981ec0222531165d98de12",
+    "size_bytes": 23452160
   },
   "folder_deleted": true,
-  "installation_id": "packaged-smoke-a24538d29b7a",
+  "installation_id": "packaged-smoke-e007276b867d",
   "nuitka_version": "4.1.3",
   "packaged_engine_host": {
     "returncode": 0,
-    "stderr_tail": "Win32 exception occurred releasing IUnknown at 0x000002B6A20B1260\n",
+    "stderr_tail": "Win32 exception occurred releasing IUnknown at 0x000001D0E4121260\n",
     "stdout_json": null,
     "stdout_json_lines": [
       {
@@ -48,7 +48,7 @@
           "schema_version": 2,
           "scope": "0B_NON_MUTATING_LOCAL_PREVIEW"
         },
-        "pipe_name": "MediaSyncHome-0B-packaged-smoke-76694834277e",
+        "pipe_name": "MediaSyncHome-0B-packaged-smoke-3e8ceb80e84e",
         "run_executor_cycle_after_request": false,
         "run_executor_cycle_interval_ms": null,
         "run_executor_cycle_max_interval_ms": 60000,
@@ -64,7 +64,7 @@
           },
           "external_resources": null,
           "outbox": null,
-          "reconciler_instance_id": "packaged-smoke-a24538d29b7a",
+          "reconciler_instance_id": "packaged-smoke-e007276b867d",
           "recovery_operations": {
             "findings": [],
             "manual_decision_operation_ids": [],
@@ -144,7 +144,7 @@
               "reason": null,
               "schedule_id": "schedule-packaged-smoke",
               "task_name": "schedule-packaged-smoke",
-              "task_path": "\\MediaSync Home\\packaged-smoke-a24538d29b7a\\schedule-packaged-smoke"
+              "task_path": "\\MediaSync Home\\packaged-smoke-e007276b867d\\schedule-packaged-smoke"
             }
           ],
           "orphan_next_cursor": null,
@@ -165,7 +165,7 @@
               "reason": null,
               "schedule_id": "schedule-packaged-smoke",
               "staged": true,
-              "task_path": "\\MediaSync Home\\packaged-smoke-a24538d29b7a\\schedule-packaged-smoke"
+              "task_path": "\\MediaSync Home\\packaged-smoke-e007276b867d\\schedule-packaged-smoke"
             }
           ],
           "stage_next_cursor": null
@@ -175,12 +175,12 @@
       },
       {
         "event": "ENGINE_HOST_PIPE_STOPPED",
-        "pipe_name": "MediaSyncHome-0B-packaged-smoke-76694834277e",
+        "pipe_name": "MediaSyncHome-0B-packaged-smoke-3e8ceb80e84e",
         "served_requests": 2,
         "stop_reason": "REQUEST_LIMIT_REACHED"
       }
     ],
-    "stdout_tail": "{\"event\":\"ENGINE_HOST_PIPE_STARTING\",\"host_locator\":null,\"host_locator_path\":null,\"host_mutex\":null,\"host_status\":{\"application\":\"MediaSync Home\",\"mutations_enabled\":false,\"protocol_version\":1,\"ready\":true,\"role\":\"engine-host\",\"runtime_policy\":{\"compliant\":false,\"controlled_current_directory\":false,\"dll_search_policy\":\"LOCAL_DEV_NO_CHILD_PROCESS_DLL_SEARCH_SURFACE\",\"elevated\":false,\"evaluated\":true,\"handle_inheritance_policy\":\"NO_CHILD_PROCESS_SPAWNED_BY_ROLE_RUNNER\",\"reasons\":[\"UNCONTROLLED_CURRENT_DIRECTORY\"]},\"schema_version\":2,\"scope\":\"0B_NON_MUTATING_LOCAL_PREVIEW\"},\"pipe_name\":\"MediaSyncHome-0B-packaged-smoke-76694834277e\",\"run_executor_cycle_after_request\":false,\"run_executor_cycle_interval_ms\":null,\"run_executor_cycle_max_interval_ms\":60000,\"run_executor_cycle_max_steps\":10,\"run_executor_staging_backend\":\"local-file\",\"serve_forever\":false,\"serve_requests\":2,\"startup_reconciliation\":{\"command_receipts\":{\"pending_effect_reconciliation_keys\":[],\"rejected_idempotency_keys\":[],\"scanned\":0},\"external_resources\":null,\"outbox\":null,\"reconciler_instance_id\":\"packaged-smoke-a24538d29b7a\",\"recovery_operations\":{\"findings\":[],\"manual_decision_operation_ids\":[],\"requires_recovery_mode\":false,\"scanned\":0},\"recovery_resume\":{\"blocked_run_target_ids\":[],\"completed_run_target_ids\":[],\"findings\":[],\"scanned\":0},\"skipped_external_resource_requeue_reason\":\"EXTERNAL_RESOURCE_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF\",\"skipped_outbox_requeue_reason\":\"OUTBOX_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF\"},\"state_compaction_recovery\":{\"committed_epoch_count\":0,\"previously_rolled_back_epoch_count\":0,\"recovered_epochs\":[],\"scanned_epoch_count\":0},\"state_migration\":{\"committed_epoch_ids\":[],\"created_epoch_count\":0,\"latest_backup_set_path\":null,\"latest_backup_state_set_hash\":null,\"migration_performed\":false,\"previously_committed_epoch_count\":1,\"resumed_epoch_count\":0,\"stores\":[{\"final_version\":33,\"initial_version\":33,\"store\":\"catalog\",\"target_version\":33},{\"final_version\":6,\"initial_version\":6,\"store\":\"recovery\",\"target_version\":6}]},\"state_restore_recovery\":{\"committed_epoch_count\":0,\"previously_rolled_back_epoch_count\":0,\"recovered_epochs\":[],\"scanned_epoch_count\":0},\"state_restore_startup_reconciliation\":{\"committed_epoch_count\":0,\"committed_epochs\":[],\"latest_committed_epoch\":null,\"previously_rolled_back_epoch_count\":0,\"scanned_epoch_count\":0},\"state_root\":\"<packaged-work-dir>\\\\state-root\",\"task_scheduler_reconciliation\":{\"claim_findings\":[{\"action\":\"CREATE\",\"applied\":true,\"blocked\":false,\"completed\":true,\"reason\":\"TASK_SCHEDULER_TASK_MISSING\",\"resource_id\":\"schedule-packaged-smoke\"}],\"claim_idle\":true,\"claims_attempted\":2,\"orphan_findings\":[{\"action\":\"IN_SYNC\",\"blocked\":false,\"deleted\":false,\"reason\":null,\"schedule_id\":\"schedule-packaged-smoke\",\"task_name\":\"schedule-packaged-smoke\",\"task_path\":\"\\\\MediaSync Home\\\\packaged-smoke-a24538d29b7a\\\\schedule-packaged-smoke\"}],\"orphan_next_cursor\":null,\"orphan_tasks_blocked\":0,\"orphan_tasks_deleted\":0,\"orphan_tasks_scanned\":1,\"resources_applied\":1,\"resources_blocked\":0,\"resources_completed\":1,\"resources_reconciled\":1,\"resources_staged\":1,\"schedule_pages_attempted\":1,\"schedules_scanned\":1,\"stage_blocked\":0,\"stage_completed\":true,\"stage_findings\":[{\"reason\":null,\"schedule_id\":\"schedule-packaged-smoke\",\"staged\":true,\"task_path\":\"\\\\MediaSync Home\\\\packaged-smoke-a24538d29b7a\\\\schedule-packaged-smoke\"}],\"stage_next_cursor\":null},\"task_scheduler_reconciliation_interval_ms\":null,\"task_scheduler_reconciliation_max_interval_ms\":3600000}\n{\"event\":\"ENGINE_HOST_PIPE_STOPPED\",\"pipe_name\":\"MediaSyncHome-0B-packaged-smoke-76694834277e\",\"served_requests\":2,\"stop_reason\":\"REQUEST_LIMIT_REACHED\"}\n",
+    "stdout_tail": "{\"event\":\"ENGINE_HOST_PIPE_STARTING\",\"host_locator\":null,\"host_locator_path\":null,\"host_mutex\":null,\"host_status\":{\"application\":\"MediaSync Home\",\"mutations_enabled\":false,\"protocol_version\":1,\"ready\":true,\"role\":\"engine-host\",\"runtime_policy\":{\"compliant\":false,\"controlled_current_directory\":false,\"dll_search_policy\":\"LOCAL_DEV_NO_CHILD_PROCESS_DLL_SEARCH_SURFACE\",\"elevated\":false,\"evaluated\":true,\"handle_inheritance_policy\":\"NO_CHILD_PROCESS_SPAWNED_BY_ROLE_RUNNER\",\"reasons\":[\"UNCONTROLLED_CURRENT_DIRECTORY\"]},\"schema_version\":2,\"scope\":\"0B_NON_MUTATING_LOCAL_PREVIEW\"},\"pipe_name\":\"MediaSyncHome-0B-packaged-smoke-3e8ceb80e84e\",\"run_executor_cycle_after_request\":false,\"run_executor_cycle_interval_ms\":null,\"run_executor_cycle_max_interval_ms\":60000,\"run_executor_cycle_max_steps\":10,\"run_executor_staging_backend\":\"local-file\",\"serve_forever\":false,\"serve_requests\":2,\"startup_reconciliation\":{\"command_receipts\":{\"pending_effect_reconciliation_keys\":[],\"rejected_idempotency_keys\":[],\"scanned\":0},\"external_resources\":null,\"outbox\":null,\"reconciler_instance_id\":\"packaged-smoke-e007276b867d\",\"recovery_operations\":{\"findings\":[],\"manual_decision_operation_ids\":[],\"requires_recovery_mode\":false,\"scanned\":0},\"recovery_resume\":{\"blocked_run_target_ids\":[],\"completed_run_target_ids\":[],\"findings\":[],\"scanned\":0},\"skipped_external_resource_requeue_reason\":\"EXTERNAL_RESOURCE_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF\",\"skipped_outbox_requeue_reason\":\"OUTBOX_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF\"},\"state_compaction_recovery\":{\"committed_epoch_count\":0,\"previously_rolled_back_epoch_count\":0,\"recovered_epochs\":[],\"scanned_epoch_count\":0},\"state_migration\":{\"committed_epoch_ids\":[],\"created_epoch_count\":0,\"latest_backup_set_path\":null,\"latest_backup_state_set_hash\":null,\"migration_performed\":false,\"previously_committed_epoch_count\":1,\"resumed_epoch_count\":0,\"stores\":[{\"final_version\":33,\"initial_version\":33,\"store\":\"catalog\",\"target_version\":33},{\"final_version\":6,\"initial_version\":6,\"store\":\"recovery\",\"target_version\":6}]},\"state_restore_recovery\":{\"committed_epoch_count\":0,\"previously_rolled_back_epoch_count\":0,\"recovered_epochs\":[],\"scanned_epoch_count\":0},\"state_restore_startup_reconciliation\":{\"committed_epoch_count\":0,\"committed_epochs\":[],\"latest_committed_epoch\":null,\"previously_rolled_back_epoch_count\":0,\"scanned_epoch_count\":0},\"state_root\":\"<packaged-work-dir>\\\\state-root\",\"task_scheduler_reconciliation\":{\"claim_findings\":[{\"action\":\"CREATE\",\"applied\":true,\"blocked\":false,\"completed\":true,\"reason\":\"TASK_SCHEDULER_TASK_MISSING\",\"resource_id\":\"schedule-packaged-smoke\"}],\"claim_idle\":true,\"claims_attempted\":2,\"orphan_findings\":[{\"action\":\"IN_SYNC\",\"blocked\":false,\"deleted\":false,\"reason\":null,\"schedule_id\":\"schedule-packaged-smoke\",\"task_name\":\"schedule-packaged-smoke\",\"task_path\":\"\\\\MediaSync Home\\\\packaged-smoke-e007276b867d\\\\schedule-packaged-smoke\"}],\"orphan_next_cursor\":null,\"orphan_tasks_blocked\":0,\"orphan_tasks_deleted\":0,\"orphan_tasks_scanned\":1,\"resources_applied\":1,\"resources_blocked\":0,\"resources_completed\":1,\"resources_reconciled\":1,\"resources_staged\":1,\"schedule_pages_attempted\":1,\"schedules_scanned\":1,\"stage_blocked\":0,\"stage_completed\":true,\"stage_findings\":[{\"reason\":null,\"schedule_id\":\"schedule-packaged-smoke\",\"staged\":true,\"task_path\":\"\\\\MediaSync Home\\\\packaged-smoke-e007276b867d\\\\schedule-packaged-smoke\"}],\"stage_next_cursor\":null},\"task_scheduler_reconciliation_interval_ms\":null,\"task_scheduler_reconciliation_max_interval_ms\":3600000}\n{\"event\":\"ENGINE_HOST_PIPE_STOPPED\",\"pipe_name\":\"MediaSyncHome-0B-packaged-smoke-3e8ceb80e84e\",\"served_requests\":2,\"stop_reason\":\"REQUEST_LIMIT_REACHED\"}\n",
     "timed_out": false
   },
   "packaged_gui_status": {
@@ -217,7 +217,7 @@
           "estimated_recovery_growth_bytes": 16777216,
           "hard_stop_quota_bytes": 8589934592,
           "internal_backup_reserve_bytes": 536870912,
-          "local_free_space_bytes": 220019519488,
+          "local_free_space_bytes": 218960199680,
           "measurement_complete": true,
           "measurement_error_code": null,
           "minimum_free_space_bytes": 1073741824,
@@ -234,7 +234,7 @@
         }
       },
       "reason": null,
-      "request_id": "209e2cf7-a97f-465f-8383-d2b3b7d1d878",
+      "request_id": "c8b9e38d-2ea4-4625-b65e-754276c609c2",
       "status": "ACCEPTED"
     },
     "stdout_json_lines": [
@@ -269,7 +269,7 @@
             "estimated_recovery_growth_bytes": 16777216,
             "hard_stop_quota_bytes": 8589934592,
             "internal_backup_reserve_bytes": 536870912,
-            "local_free_space_bytes": 220019519488,
+            "local_free_space_bytes": 218960199680,
             "measurement_complete": true,
             "measurement_error_code": null,
             "minimum_free_space_bytes": 1073741824,
@@ -286,11 +286,11 @@
           }
         },
         "reason": null,
-        "request_id": "209e2cf7-a97f-465f-8383-d2b3b7d1d878",
+        "request_id": "c8b9e38d-2ea4-4625-b65e-754276c609c2",
         "status": "ACCEPTED"
       }
     ],
-    "stdout_tail": "{\"payload\":{\"host_status\":{\"application\":\"MediaSync Home\",\"mutations_enabled\":false,\"protocol_version\":1,\"ready\":true,\"role\":\"engine-host\",\"runtime_policy\":{\"compliant\":false,\"controlled_current_directory\":false,\"dll_search_policy\":\"LOCAL_DEV_NO_CHILD_PROCESS_DLL_SEARCH_SURFACE\",\"elevated\":false,\"evaluated\":true,\"handle_inheritance_policy\":\"NO_CHILD_PROCESS_SPAWNED_BY_ROLE_RUNNER\",\"reasons\":[\"UNCONTROLLED_CURRENT_DIRECTORY\"]},\"schema_version\":2,\"scope\":\"0B_NON_MUTATING_LOCAL_PREVIEW\"},\"state_capacity\":{\"allows_new_analysis_and_transfers\":true,\"estimated_catalog_growth_bytes\":33554432,\"estimated_hash_cache_growth_bytes\":16777216,\"estimated_local_growth_bytes\":75497472,\"estimated_log_growth_bytes\":8388608,\"estimated_recovery_growth_bytes\":16777216,\"hard_stop_quota_bytes\":8589934592,\"internal_backup_reserve_bytes\":536870912,\"local_free_space_bytes\":220019519488,\"measurement_complete\":true,\"measurement_error_code\":null,\"minimum_free_space_bytes\":1073741824,\"projected_state_size_bytes\":76379711,\"reason_code\":\"STATE_CAPACITY_READY\",\"recommended_action\":\"NONE\",\"required_local_free_space_bytes\":1686110208,\"scanned_entry_count\":8,\"scope\":\"LOCAL_APPDATA_STATE\",\"soft_quota_bytes\":4294967296,\"sqlite_full_store\":null,\"state_size_bytes\":882239,\"status\":\"READY\"}},\"reason\":null,\"request_id\":\"209e2cf7-a97f-465f-8383-d2b3b7d1d878\",\"status\":\"ACCEPTED\"}\n",
+    "stdout_tail": "{\"payload\":{\"host_status\":{\"application\":\"MediaSync Home\",\"mutations_enabled\":false,\"protocol_version\":1,\"ready\":true,\"role\":\"engine-host\",\"runtime_policy\":{\"compliant\":false,\"controlled_current_directory\":false,\"dll_search_policy\":\"LOCAL_DEV_NO_CHILD_PROCESS_DLL_SEARCH_SURFACE\",\"elevated\":false,\"evaluated\":true,\"handle_inheritance_policy\":\"NO_CHILD_PROCESS_SPAWNED_BY_ROLE_RUNNER\",\"reasons\":[\"UNCONTROLLED_CURRENT_DIRECTORY\"]},\"schema_version\":2,\"scope\":\"0B_NON_MUTATING_LOCAL_PREVIEW\"},\"state_capacity\":{\"allows_new_analysis_and_transfers\":true,\"estimated_catalog_growth_bytes\":33554432,\"estimated_hash_cache_growth_bytes\":16777216,\"estimated_local_growth_bytes\":75497472,\"estimated_log_growth_bytes\":8388608,\"estimated_recovery_growth_bytes\":16777216,\"hard_stop_quota_bytes\":8589934592,\"internal_backup_reserve_bytes\":536870912,\"local_free_space_bytes\":218960199680,\"measurement_complete\":true,\"measurement_error_code\":null,\"minimum_free_space_bytes\":1073741824,\"projected_state_size_bytes\":76379711,\"reason_code\":\"STATE_CAPACITY_READY\",\"recommended_action\":\"NONE\",\"required_local_free_space_bytes\":1686110208,\"scanned_entry_count\":8,\"scope\":\"LOCAL_APPDATA_STATE\",\"soft_quota_bytes\":4294967296,\"sqlite_full_store\":null,\"state_size_bytes\":882239,\"status\":\"READY\"}},\"reason\":null,\"request_id\":\"c8b9e38d-2ea4-4625-b65e-754276c609c2\",\"status\":\"ACCEPTED\"}\n",
     "timed_out": false
   },
   "packaged_protocol_trigger": {
@@ -317,7 +317,7 @@
     "stdout_tail": "{\"payload\":{\"reason\":\"HOST_LOCATOR_PUBLICATION_UNAVAILABLE\",\"scope\":\"0B_SAME_USER_LOCAL_PREVIEW\"},\"reason\":\"ENGINE_HOST_UNAVAILABLE\",\"status\":\"REJECTED\"}\n",
     "timed_out": false
   },
-  "packaged_task_path": "\\MediaSync Home\\packaged-smoke-a24538d29b7a\\schedule-packaged-smoke",
+  "packaged_task_path": "\\MediaSync Home\\packaged-smoke-e007276b867d\\schedule-packaged-smoke",
   "pywin32_version": "312",
   "reason": null,
   "root_deleted": true,
