@@ -146,6 +146,15 @@ Uforanderlig observasjon/konfigurasjon av ett endepunkt.
 
 En ny sikkerhetsrelevant probe oppretter ny revisjon/generasjon; historiske planer endres ikke.
 
+0B-implementasjonsnote: Catalog migration 29 legger en positiv, monoton `generation`
+direkte på hver immutable endpointrevision. Eldre revisjoner nummereres deterministisk
+per endpoint etter `created_utc` og revisjons-ID. En insert-trigger krever eksakt neste
+generation, mens de eksisterende revisjonstriggerne avviser senere update/delete.
+`snapshots` og `plan_endpoints` lagrer og guarder den eksakte generationen mot både
+endpointrevisionen og, for planer, snapshotet. Endpoint resolver, live lease,
+recovery-backed lease evidence og `MutationPermit` propagerer samme verdi; markerens
+`control_schema_version` er et separat formatfelt og brukes ikke lenger som generation.
+
 #### `endpoint_ownership_events`
 
 Lokal audit/read model for mål-side ownership-records. Den autoritative aktive eieren ligger i validert target marker/record.

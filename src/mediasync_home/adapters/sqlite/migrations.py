@@ -178,6 +178,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_filter_set_versions",
                 statements=CATALOG_FILTER_SET_VERSIONS,
             ),
+            SqliteMigration(
+                version=29,
+                name="catalog_endpoint_generation_bindings",
+                statements=CATALOG_ENDPOINT_GENERATION_BINDINGS,
+            ),
         ),
     )
 
@@ -1905,6 +1910,167 @@ CATALOG_FILTER_SET_VERSIONS = (
     BEFORE DELETE ON job_revision_filter_bindings
     BEGIN
         SELECT RAISE(ABORT, 'JOB_REVISION_FILTER_BINDING_IMMUTABLE');
+    END
+    """,
+)
+
+CATALOG_ENDPOINT_GENERATION_BINDINGS = (
+    """
+    DROP TRIGGER trg_endpoint_revisions_no_update
+    """,
+    """
+    ALTER TABLE endpoint_revisions
+    ADD COLUMN generation INTEGER NOT NULL DEFAULT 1
+        CHECK (generation >= 1)
+    """,
+    """
+    UPDATE endpoint_revisions AS current
+    SET generation = (
+        SELECT COUNT(*)
+        FROM endpoint_revisions AS prior
+        WHERE prior.endpoint_id = current.endpoint_id
+            AND (
+                prior.created_utc < current.created_utc
+                OR (
+                    prior.created_utc = current.created_utc
+                    AND prior.id <= current.id
+                )
+            )
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX uq_endpoint_revisions_endpoint_generation
+        ON endpoint_revisions (endpoint_id, generation)
+    """,
+    """
+    CREATE TRIGGER trg_endpoint_revisions_generation_must_advance
+    BEFORE INSERT ON endpoint_revisions
+    WHEN NEW.generation <> COALESCE(
+        (
+            SELECT MAX(generation) + 1
+            FROM endpoint_revisions
+            WHERE endpoint_id = NEW.endpoint_id
+        ),
+        1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'ENDPOINT_GENERATION_MUST_ADVANCE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_endpoint_revisions_no_update
+    BEFORE UPDATE ON endpoint_revisions
+    BEGIN
+        SELECT RAISE(ABORT, 'ENDPOINT_REVISION_IMMUTABLE');
+    END
+    """,
+    """
+    DROP TRIGGER trg_snapshots_no_update_after_immutable
+    """,
+    """
+    ALTER TABLE snapshots
+    ADD COLUMN endpoint_generation INTEGER NOT NULL DEFAULT 1
+        CHECK (endpoint_generation >= 1)
+    """,
+    """
+    UPDATE snapshots
+    SET endpoint_generation = (
+        SELECT revisions.generation
+        FROM endpoint_revisions AS revisions
+        WHERE revisions.endpoint_id = snapshots.endpoint_id
+            AND revisions.id = snapshots.endpoint_revision_id
+    )
+    """,
+    """
+    CREATE TRIGGER trg_snapshots_endpoint_generation_required
+    BEFORE INSERT ON snapshots
+    WHEN NOT EXISTS (
+        SELECT 1
+        FROM endpoint_revisions
+        WHERE endpoint_id = NEW.endpoint_id
+            AND id = NEW.endpoint_revision_id
+            AND generation = NEW.endpoint_generation
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'ENDPOINT_GENERATION_MISMATCH');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_snapshots_endpoint_identity_immutable
+    BEFORE UPDATE ON snapshots
+    WHEN
+        NEW.endpoint_id IS NOT OLD.endpoint_id
+        OR NEW.endpoint_revision_id IS NOT OLD.endpoint_revision_id
+        OR NEW.endpoint_generation IS NOT OLD.endpoint_generation
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_ENDPOINT_IDENTITY_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_snapshots_no_update_after_immutable
+    BEFORE UPDATE ON snapshots
+    WHEN OLD.immutable = 1
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    DROP TRIGGER trg_plan_endpoints_no_update_after_seal
+    """,
+    """
+    ALTER TABLE plan_endpoints
+    ADD COLUMN endpoint_generation INTEGER NOT NULL DEFAULT 1
+        CHECK (endpoint_generation >= 1)
+    """,
+    """
+    UPDATE plan_endpoints
+    SET endpoint_generation = (
+        SELECT revisions.generation
+        FROM endpoint_revisions AS revisions
+        WHERE revisions.endpoint_id = plan_endpoints.endpoint_id
+            AND revisions.id = plan_endpoints.endpoint_revision_id
+    )
+    """,
+    """
+    CREATE TRIGGER trg_plan_endpoints_endpoint_generation_required
+    BEFORE INSERT ON plan_endpoints
+    WHEN
+        NOT EXISTS (
+            SELECT 1
+            FROM endpoint_revisions
+            WHERE endpoint_id = NEW.endpoint_id
+                AND id = NEW.endpoint_revision_id
+                AND generation = NEW.endpoint_generation
+        )
+        OR NOT EXISTS (
+            SELECT 1
+            FROM snapshots
+            WHERE id = NEW.snapshot_id
+                AND endpoint_id = NEW.endpoint_id
+                AND endpoint_generation = NEW.endpoint_generation
+        )
+    BEGIN
+        SELECT RAISE(ABORT, 'ENDPOINT_GENERATION_MISMATCH');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_plan_endpoints_endpoint_identity_immutable
+    BEFORE UPDATE ON plan_endpoints
+    WHEN
+        NEW.endpoint_id IS NOT OLD.endpoint_id
+        OR NEW.endpoint_revision_id IS NOT OLD.endpoint_revision_id
+        OR NEW.endpoint_generation IS NOT OLD.endpoint_generation
+        OR NEW.snapshot_id IS NOT OLD.snapshot_id
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_ENDPOINT_IDENTITY_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_plan_endpoints_no_update_after_seal
+    BEFORE UPDATE ON plan_endpoints
+    WHEN EXISTS (SELECT 1 FROM plan_seal_details WHERE plan_id = OLD.plan_id)
+    BEGIN
+        SELECT RAISE(ABORT, 'PLAN_SEAL_IMMUTABLE');
     END
     """,
 )

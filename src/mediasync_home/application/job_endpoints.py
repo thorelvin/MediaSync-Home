@@ -36,6 +36,7 @@ class StandardBackupJobEndpointBinding:
     ordinal: int
     endpoint_id: str
     endpoint_revision_id: str
+    endpoint_generation: int
     display_name: str
     root_uri: str
     registration_state: EndpointRegistrationState
@@ -48,6 +49,7 @@ class StandardBackupJobEndpointBinding:
             "role": self.role.value,
             "ordinal": self.ordinal,
             "endpoint_id": self.endpoint_id,
+            "endpoint_generation": self.endpoint_generation,
             "endpoint_revision_id": self.endpoint_revision_id,
             "display_name": self.display_name,
             "root_uri": self.root_uri,

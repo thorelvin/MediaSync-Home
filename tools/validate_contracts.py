@@ -531,6 +531,46 @@ def _validate_immutable_revision_invariant(invariant: dict[str, Any]) -> None:
     if mutable_heads != {"endpoint_heads", "job_heads"}:
         fail("ARC-005 mutable head tables drifted")
 
+    endpoint_generation = require_mapping(
+        invariant.get("endpoint_generation"),
+        "ARC-005 endpoint_generation",
+    )
+    if endpoint_generation.get("revision_table") != "endpoint_revisions":
+        fail("ARC-005 endpoint generation revision table drifted")
+    if endpoint_generation.get("generation_column") != "generation":
+        fail("ARC-005 endpoint generation column drifted")
+    if endpoint_generation.get("positive") is not True:
+        fail("ARC-005 endpoint generation must remain positive")
+    if endpoint_generation.get("monotonic_insert") is not True:
+        fail("ARC-005 endpoint generation must advance monotonically")
+    raw_bindings = endpoint_generation.get("exact_bindings")
+    if not isinstance(raw_bindings, list):
+        fail("ARC-005 endpoint generation exact_bindings must be a list")
+    bindings = {
+        (
+            item.get("table"),
+            _column_tuple(
+                item.get("columns"),
+                "ARC-005 endpoint_generation.exact_bindings[].columns",
+            ),
+        )
+        for item in raw_bindings
+        if isinstance(item, dict)
+    }
+    if bindings != {
+        (
+            "snapshots",
+            ("endpoint_id", "endpoint_revision_id", "endpoint_generation"),
+        ),
+        (
+            "plan_endpoints",
+            ("endpoint_id", "endpoint_revision_id", "endpoint_generation"),
+        ),
+    }:
+        fail("ARC-005 endpoint generation exact bindings drifted")
+    if endpoint_generation.get("runtime_capability") != "MutationPermit":
+        fail("ARC-005 endpoint generation runtime capability drifted")
+
 
 def validate_state_machines(document: dict[str, Any]) -> int:
     if document.get("schema_version") != 1:

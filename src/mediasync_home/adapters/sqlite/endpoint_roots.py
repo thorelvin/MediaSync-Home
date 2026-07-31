@@ -48,6 +48,7 @@ class SqliteEndpointRootResolver(EndpointRootResolver):
             """
             SELECT
                 root_uri,
+                generation,
                 control_area_id,
                 root_identity_hash_algorithm,
                 root_identity_hash,
@@ -65,13 +66,14 @@ class SqliteEndpointRootResolver(EndpointRootResolver):
             return None
         return EndpointRootDescriptor(
             root=local_path_from_file_uri(str(row[0])),
-            control_area_id=_optional_str(row[1]),
-            root_identity_hash_algorithm=_optional_str(row[2]),
-            root_identity_hash=_optional_str(row[3]),
-            owner_installation_id=_optional_str(row[4]),
-            ownership_epoch=_optional_int(row[5]),
-            marker_checksum_algorithm=_optional_str(row[6]),
-            marker_checksum=_optional_str(row[7]),
+            endpoint_generation=_required_positive_int(row[1]),
+            control_area_id=_optional_str(row[2]),
+            root_identity_hash_algorithm=_optional_str(row[3]),
+            root_identity_hash=_optional_str(row[4]),
+            owner_installation_id=_optional_str(row[5]),
+            ownership_epoch=_optional_int(row[6]),
+            marker_checksum_algorithm=_optional_str(row[7]),
+            marker_checksum=_optional_str(row[8]),
         )
 
 
@@ -122,3 +124,13 @@ def _optional_int(value: object) -> int | None:
         "ENDPOINT_REVISION_IDENTITY_INVALID",
         "Refresh endpoint adoption because the stored endpoint revision identity is invalid.",
     )
+
+
+def _required_positive_int(value: object) -> int:
+    parsed = _optional_int(value)
+    if parsed is None or parsed < 1:
+        raise EndpointLeaseUnavailable(
+            "ENDPOINT_GENERATION_INVALID",
+            "Refresh endpoint adoption because the stored endpoint generation is invalid.",
+        )
+    return parsed

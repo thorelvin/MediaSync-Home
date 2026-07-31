@@ -141,8 +141,9 @@ def test_plan_endpoint_query_returns_bounded_serializable_page() -> None:
         },
         "endpoints": [
             {
-                "endpoint_id": "source-a",
-                "endpoint_revision_id": "source-a-rev",
+                    "endpoint_id": "source-a",
+                    "endpoint_generation": 1,
+                    "endpoint_revision_id": "source-a-rev",
                 "snapshot_id": "source-a-snapshot",
                 "role": "SOURCE",
                 "target_ordinal": None,
@@ -256,6 +257,7 @@ def _endpoint(endpoint_id: str) -> PlanEndpointReadModel:
         target_ordinal=None if endpoint_id.startswith("source") else 0,
         capabilities_hash="capabilities-a",
         root_case_context_hash="case-a",
+        endpoint_generation=1,
         required_owner_installation_id=None,
         required_ownership_epoch=None,
         control_schema_version=None,

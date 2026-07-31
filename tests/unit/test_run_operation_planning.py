@@ -121,6 +121,22 @@ def test_plan_run_target_recovery_operations_is_idempotent() -> None:
     assert len(recovery_operations.operations) == 1
 
 
+def test_plan_run_target_recovery_operations_rejects_generation_mismatch() -> None:
+    plan = _sealed_plan(endpoint_generation=2)
+    run = replace(_executing_run(), plan_checksum=plan.plan_checksum)
+
+    outcome = plan_run_target_recovery_operations(
+        permit=_permit(),
+        runs=_SingleRunStore(run),
+        plans=_SinglePlanStore(plan),
+        recovery_operations=_FakeRecoveryOperationStore(),
+        process_instance_id="host-a",
+    )
+
+    assert outcome.planned is False
+    assert outcome.validation_codes == ("PLAN_TARGET_ENDPOINT_GENERATION_MISMATCH",)
+
+
 def test_plan_run_target_recovery_operations_requires_executing_run() -> None:
     outcome = plan_run_target_recovery_operations(
         permit=_permit(),
@@ -352,13 +368,17 @@ def _sealed_plan(
     *,
     reason_code: str = "COPY_NEW",
     target_precondition_kind: TargetPreconditionKind = TargetPreconditionKind.ABSENT,
+    endpoint_generation: int = 1,
 ) -> SealedPlan:
     return seal_plan(
         plan_id="plan-a",
         analysis_id="analysis-a",
         job_id="job-a",
         job_revision_id="job-rev-a",
-        endpoints=(_source_endpoint(), _target_endpoint()),
+        endpoints=(
+            _source_endpoint(),
+            replace(_target_endpoint(), endpoint_generation=endpoint_generation),
+        ),
         operations=(
             PlanOperation(
                 operation_id="op-copy",
@@ -397,6 +417,7 @@ def _target_endpoint() -> PlanEndpoint:
         target_ordinal=0,
         capabilities_hash="capabilities-a",
         root_case_context_hash="case-a",
+        endpoint_generation=1,
         required_owner_installation_id="owner-a",
         required_ownership_epoch=1,
         control_schema_version=1,
@@ -414,6 +435,7 @@ def _source_endpoint() -> PlanEndpoint:
         target_ordinal=None,
         capabilities_hash="capabilities-source-a",
         root_case_context_hash="case-source-a",
+        endpoint_generation=1,
         control_schema_version=1,
         planned_operations=0,
         planned_bytes=0,

@@ -76,6 +76,17 @@ invariants:
     mutable_head_tables:
       - endpoint_heads
       - job_heads
+    endpoint_generation:
+      revision_table: endpoint_revisions
+      generation_column: generation
+      positive: true
+      monotonic_insert: true
+      exact_bindings:
+        - table: snapshots
+          columns: [endpoint_id, endpoint_revision_id, endpoint_generation]
+        - table: plan_endpoints
+          columns: [endpoint_id, endpoint_revision_id, endpoint_generation]
+      runtime_capability: MutationPermit
   - id: DB-007_PARENT_SCOPE_COMPOSITE_KEYS
     requirement_id: DB-007
     assertion: Security-relevant child rows are bound to their parent scope with composite keys.

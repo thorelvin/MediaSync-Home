@@ -224,6 +224,7 @@ def _endpoint_to_dict(endpoint: PlanEndpointReadModel) -> dict[str, object]:
         "target_ordinal": endpoint.target_ordinal,
         "capabilities_hash": endpoint.capabilities_hash,
         "root_case_context_hash": endpoint.root_case_context_hash,
+        "endpoint_generation": endpoint.endpoint_generation,
         "required_owner_installation_id": endpoint.required_owner_installation_id,
         "required_ownership_epoch": endpoint.required_ownership_epoch,
         "control_schema_version": endpoint.control_schema_version,

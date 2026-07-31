@@ -578,6 +578,7 @@ def _lease(*, lock_path: Path = Path("mutation.lock")) -> LocalEndpointLease:
         run_target_id="run-a-target-0000",
         endpoint_id="target-a",
         endpoint_revision_id="target-rev-a",
+        endpoint_generation=1,
         resource_key="endpoint:target-a",
         lock_path=lock_path,
         _lock_handle=_FakeHandle(lock_path),

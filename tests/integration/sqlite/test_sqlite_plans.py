@@ -369,6 +369,7 @@ def _target_endpoint() -> PlanEndpoint:
         target_ordinal=0,
         capabilities_hash="capabilities-a",
         root_case_context_hash="case-a",
+        endpoint_generation=1,
         required_owner_installation_id="owner-a",
         required_ownership_epoch=1,
         control_schema_version=1,
@@ -385,6 +386,7 @@ def _source_endpoint() -> PlanEndpoint:
         role=PlanEndpointRole.SOURCE,
         capabilities_hash="capabilities-source",
         root_case_context_hash="case-source",
+        endpoint_generation=1,
     )
 
 

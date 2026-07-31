@@ -82,6 +82,7 @@ class PlanEndpoint:
     role: PlanEndpointRole
     capabilities_hash: str
     root_case_context_hash: str
+    endpoint_generation: int
     target_ordinal: int | None = None
     required_owner_installation_id: str | None = None
     required_ownership_epoch: int | None = None
@@ -113,6 +114,7 @@ class PlanEndpointReadModel:
     target_ordinal: int | None
     capabilities_hash: str
     root_case_context_hash: str
+    endpoint_generation: int
     required_owner_installation_id: str | None
     required_ownership_epoch: int | None
     control_schema_version: int | None
@@ -407,6 +409,8 @@ def _validate_endpoints(endpoints: tuple[PlanEndpoint, ...]) -> None:
             raise PlanSealViolation("PLAN_ENDPOINT_OPERATIONS_MUST_BE_NON_NEGATIVE")
         if endpoint.planned_bytes < 0:
             raise PlanSealViolation("PLAN_ENDPOINT_BYTES_MUST_BE_NON_NEGATIVE")
+        if endpoint.endpoint_generation < 1:
+            raise PlanSealViolation("PLAN_ENDPOINT_REQUIRES_GENERATION")
         if endpoint.role is PlanEndpointRole.TARGET_WRITABLE:
             _validate_writable_target_endpoint(endpoint, target_ordinals)
         elif endpoint.target_ordinal is not None and endpoint.target_ordinal < 0:
@@ -572,6 +576,7 @@ def _endpoint_payload(endpoint: PlanEndpoint) -> dict[str, object]:
         "capabilities_hash": endpoint.capabilities_hash,
         "control_schema_version": endpoint.control_schema_version,
         "endpoint_id": endpoint.endpoint_id,
+        "endpoint_generation": endpoint.endpoint_generation,
         "endpoint_revision_id": endpoint.endpoint_revision_id,
         "planned_bytes": endpoint.planned_bytes,
         "planned_operations": endpoint.planned_operations,

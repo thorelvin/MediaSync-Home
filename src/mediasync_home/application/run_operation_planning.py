@@ -120,11 +120,11 @@ def plan_run_target_recovery_operations(
             validation_code="PLAN_TARGET_ENDPOINT_NOT_FOUND",
             next_action="Reload the sealed plan endpoint binding before planning operations.",
         )
-    if endpoint.control_schema_version is None:
+    if endpoint.endpoint_generation != permit.endpoint_generation:
         return _failed(
             permit=permit,
-            validation_code="PLAN_TARGET_ENDPOINT_REQUIRES_GENERATION",
-            next_action="Refresh endpoint adoption before planning recovery operations.",
+            validation_code="PLAN_TARGET_ENDPOINT_GENERATION_MISMATCH",
+            next_action="Refresh analysis and reacquire the endpoint lease before planning operations.",
         )
 
     planned: list[RecoveryOperation] = []
@@ -189,8 +189,6 @@ def _planned_recovery_operation(
     operation: PlanOperation,
     source_endpoint: PlanEndpoint | None,
 ) -> RecoveryOperation:
-    if endpoint.control_schema_version is None:
-        raise RunTargetOperationPlanningError("PLAN_TARGET_ENDPOINT_REQUIRES_GENERATION")
     if operation.target_relative_path is None:
         raise RunTargetOperationPlanningError("PLAN_OPERATION_MISSING_TARGET_PATH")
     source_endpoint_id: str | None = None
@@ -208,7 +206,7 @@ def _planned_recovery_operation(
         operation_id=operation.operation_id,
         target_endpoint_id=target.endpoint_id,
         target_endpoint_revision_id=target.endpoint_revision_id,
-        endpoint_generation=endpoint.control_schema_version,
+        endpoint_generation=permit.endpoint_generation,
         owner_installation_id=permit.owner_installation_id,
         ownership_epoch=permit.ownership_epoch,
         lease_id=permit.lease_id,

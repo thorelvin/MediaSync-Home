@@ -62,9 +62,11 @@ def test_registrar_persists_pending_source_and_target_bindings(tmp_path: Path) -
         assert registered == replay
         assert registered.source.role is JobEndpointRole.SOURCE
         assert registered.source.ordinal == 0
+        assert registered.source.endpoint_generation == 1
         assert registered.source.root_uri == "file:///C:/Users/Ada/Pictures"
         assert registered.targets[0].role is JobEndpointRole.TARGET
         assert registered.targets[0].ordinal == 1
+        assert registered.targets[0].endpoint_generation == 1
         assert registered.targets[0].root_uri == "file:///E:/Backup"
         assert all(
             binding.registration_state is EndpointRegistrationState.REGISTRATION_PENDING

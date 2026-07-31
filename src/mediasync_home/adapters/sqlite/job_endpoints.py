@@ -123,6 +123,7 @@ class SqliteStandardBackupJobEndpointRegistrar(StandardBackupJobEndpointRegistra
                 bindings.ordinal,
                 bindings.endpoint_id,
                 bindings.endpoint_revision_id,
+                revisions.generation,
                 revisions.display_name,
                 revisions.root_uri,
                 bindings.registration_state,
@@ -147,10 +148,11 @@ class SqliteStandardBackupJobEndpointRegistrar(StandardBackupJobEndpointRegistra
                 ordinal=int(row[1]),
                 endpoint_id=str(row[2]),
                 endpoint_revision_id=str(row[3]),
-                display_name=str(row[4]),
-                root_uri=str(row[5]),
-                registration_state=EndpointRegistrationState(str(row[6])),
-                registration_reason_code=str(row[7]),
+                endpoint_generation=int(row[4]),
+                display_name=str(row[5]),
+                root_uri=str(row[6]),
+                registration_state=EndpointRegistrationState(str(row[7])),
+                registration_reason_code=str(row[8]),
             )
             for row in rows
         )

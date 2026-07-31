@@ -80,6 +80,7 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
                         analysis_id,
                         endpoint_id,
                         endpoint_revision_id,
+                        endpoint_generation,
                         snapshot_id,
                         role,
                         target_ordinal,
@@ -91,13 +92,14 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
                         planned_operations,
                         planned_bytes
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         plan.plan_id,
                         plan.analysis_id,
                         endpoint.endpoint_id,
                         endpoint.endpoint_revision_id,
+                        endpoint.endpoint_generation,
                         endpoint.snapshot_id,
                         endpoint.role.value,
                         endpoint.target_ordinal,
@@ -276,16 +278,17 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
             PlanEndpointReadModel(
                 endpoint_id=str(row[0]),
                 endpoint_revision_id=str(row[1]),
-                snapshot_id=str(row[2]),
-                role=PlanEndpointRole(str(row[3])),
-                target_ordinal=None if row[4] is None else int(row[4]),
-                capabilities_hash=str(row[5]),
-                root_case_context_hash=str(row[6]),
-                required_owner_installation_id=None if row[7] is None else str(row[7]),
-                required_ownership_epoch=None if row[8] is None else int(row[8]),
-                control_schema_version=None if row[9] is None else int(row[9]),
-                planned_operations=int(row[10]),
-                planned_bytes=int(row[11]),
+                endpoint_generation=int(row[2]),
+                snapshot_id=str(row[3]),
+                role=PlanEndpointRole(str(row[4])),
+                target_ordinal=None if row[5] is None else int(row[5]),
+                capabilities_hash=str(row[6]),
+                root_case_context_hash=str(row[7]),
+                required_owner_installation_id=None if row[8] is None else str(row[8]),
+                required_ownership_epoch=None if row[9] is None else int(row[9]),
+                control_schema_version=None if row[10] is None else int(row[10]),
+                planned_operations=int(row[11]),
+                planned_bytes=int(row[12]),
             )
             for row in page_rows
         )
@@ -303,6 +306,7 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
             SELECT
                 endpoint_id,
                 endpoint_revision_id,
+                endpoint_generation,
                 snapshot_id,
                 role,
                 target_ordinal,
@@ -323,16 +327,17 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
             PlanEndpoint(
                 endpoint_id=str(row[0]),
                 endpoint_revision_id=str(row[1]),
-                snapshot_id=str(row[2]),
-                role=PlanEndpointRole(str(row[3])),
-                target_ordinal=None if row[4] is None else int(row[4]),
-                capabilities_hash=str(row[5]),
-                root_case_context_hash=str(row[6]),
-                required_owner_installation_id=None if row[7] is None else str(row[7]),
-                required_ownership_epoch=None if row[8] is None else int(row[8]),
-                control_schema_version=None if row[9] is None else int(row[9]),
-                planned_operations=int(row[10]),
-                planned_bytes=int(row[11]),
+                endpoint_generation=int(row[2]),
+                snapshot_id=str(row[3]),
+                role=PlanEndpointRole(str(row[4])),
+                target_ordinal=None if row[5] is None else int(row[5]),
+                capabilities_hash=str(row[6]),
+                root_case_context_hash=str(row[7]),
+                required_owner_installation_id=None if row[8] is None else str(row[8]),
+                required_ownership_epoch=None if row[9] is None else int(row[9]),
+                control_schema_version=None if row[10] is None else int(row[10]),
+                planned_operations=int(row[11]),
+                planned_bytes=int(row[12]),
             )
             for row in rows
         )
@@ -497,6 +502,7 @@ def _plan_endpoint_page_sql(after: PlanEndpointCursor | None) -> str:
         SELECT
             endpoint_id,
             endpoint_revision_id,
+            endpoint_generation,
             snapshot_id,
             role,
             target_ordinal,

@@ -91,6 +91,7 @@ def test_local_resolving_endpoint_lease_authority_validates_resolved_identity(
         {
             "endpoint:target-a": EndpointRootDescriptor(
                 root=root,
+                endpoint_generation=7,
                 control_area_id="control-a",
                 root_identity_hash_algorithm="BLAKE3-256",
                 root_identity_hash="a" * 64,
@@ -111,6 +112,8 @@ def test_local_resolving_endpoint_lease_authority_validates_resolved_identity(
 
     assert attempt.acquired is True
     assert attempt.lease is not None
+    assert attempt.lease.endpoint_generation == 7
+    assert attempt.lease.issue_mutation_permit().endpoint_generation == 7
     assert resolver.descriptor_requests == [("endpoint:target-a", "target-a", "target-rev-a")]
     assert resolver.path_requests == []
     assert opener.paths == [root / ".mediasync" / "locks" / "mutation.lock"]
@@ -175,7 +178,7 @@ def test_local_endpoint_lease_authority_registers_durable_resource_lease(tmp_pat
         "run_id": "run-a",
         "run_target_id": "run-a-target-0000",
         "endpoint_id": "target-a",
-        "endpoint_generation": None,
+            "endpoint_generation": 1,
         "lease_mode": "EXCLUSIVE",
         "os_lock_kind": "LOCAL_OS_HANDLE",
     }
@@ -202,6 +205,7 @@ def test_local_endpoint_lease_authority_rejects_root_identity_mismatch(
         target_identities={
             "endpoint:target-a": EndpointRootDescriptor(
                 root=root,
+                endpoint_generation=1,
                 root_identity_hash_algorithm="BLAKE3-256",
                 root_identity_hash="a" * 64,
             )
@@ -284,6 +288,7 @@ def test_local_endpoint_lease_issues_current_mutation_permit(tmp_path: Path) -> 
     assert permit.run_id == "run-a"
     assert permit.run_target_id == "run-a-target-0000"
     assert permit.endpoint_id == "target-a"
+    assert permit.endpoint_generation == 1
     assert permit.endpoint_revision_id == "target-rev-a"
     with pytest.raises(TypeError, match="not serializable"):
         permit.__reduce__()

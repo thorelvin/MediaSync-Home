@@ -105,6 +105,7 @@ class EndpointRootResolver(Protocol):
 @dataclass(frozen=True, slots=True)
 class EndpointRootDescriptor:
     root: Path
+    endpoint_generation: int
     control_area_id: str | None = None
     root_identity_hash_algorithm: str | None = None
     root_identity_hash: str | None = None
@@ -134,6 +135,7 @@ class LocalEndpointLease:
     run_target_id: str
     endpoint_id: str
     endpoint_revision_id: str
+    endpoint_generation: int
     resource_key: str
     lock_path: Path
     _lock_handle: EndpointLockHandle = field(repr=False)
@@ -160,6 +162,7 @@ class LocalEndpointLease:
             run_target_id=self.run_target_id,
             endpoint_id=self.endpoint_id,
             endpoint_revision_id=self.endpoint_revision_id,
+            endpoint_generation=self.endpoint_generation,
         )
 
     def assert_mutation_permit_current(self, permit: MutationPermit) -> None:
@@ -174,6 +177,7 @@ class LocalEndpointLease:
             or permit.run_target_id != self.run_target_id
             or permit.endpoint_id != self.endpoint_id
             or permit.endpoint_revision_id != self.endpoint_revision_id
+            or permit.endpoint_generation != self.endpoint_generation
         ):
             raise MutationPermitIssueError(
                 "MUTATION_PERMIT_LEASE_MISMATCH",
@@ -217,6 +221,7 @@ class LocalEndpointLeaseAuthority(EndpointLeaseAuthority):
         self._target_identities = {
             resource_key: EndpointRootDescriptor(
                 root=Path(descriptor.root),
+                endpoint_generation=descriptor.endpoint_generation,
                 control_area_id=descriptor.control_area_id,
                 root_identity_hash_algorithm=descriptor.root_identity_hash_algorithm,
                 root_identity_hash=descriptor.root_identity_hash,
@@ -269,7 +274,14 @@ class LocalEndpointLeaseAuthority(EndpointLeaseAuthority):
         try:
             marker = _read_endpoint_marker(marker_path)
             owner_installation_id, ownership_epoch = _validate_marker(marker, request)
-            _validate_marker_identity(marker, self._target_identities.get(request.resource_key))
+            identity = self._target_identities.get(request.resource_key)
+            _validate_marker_identity(marker, identity)
+            endpoint_generation = 1 if identity is None else identity.endpoint_generation
+            if endpoint_generation < 1:
+                raise EndpointLeaseUnavailable(
+                    "ENDPOINT_GENERATION_INVALID",
+                    "Refresh endpoint adoption before acquiring its mutation lock.",
+                )
             if self._resource_lease_store is not None:
                 self._resource_lease_store.reconcile_stale_active_resource_lease_after_lock_acquired(
                     resource_key=request.resource_key,
@@ -280,6 +292,7 @@ class LocalEndpointLeaseAuthority(EndpointLeaseAuthority):
                 lease_id=lease_id,
                 owner_installation_id=owner_installation_id,
                 ownership_epoch=ownership_epoch,
+                endpoint_generation=endpoint_generation,
                 request=request,
             )
             if fencing_token < 1:
@@ -306,6 +319,7 @@ class LocalEndpointLeaseAuthority(EndpointLeaseAuthority):
             resource_key=request.resource_key,
             lock_path=lock_path,
             _lock_handle=lock_handle,
+            endpoint_generation=endpoint_generation,
             _resource_lease_store=self._resource_lease_store,
         )
         return EndpointLeaseAttempt(
@@ -321,6 +335,7 @@ class LocalEndpointLeaseAuthority(EndpointLeaseAuthority):
         lease_id: str,
         owner_installation_id: str,
         ownership_epoch: int,
+        endpoint_generation: int,
         request: EndpointLeaseRequest,
     ) -> int:
         if self._resource_lease_store is not None:
@@ -332,7 +347,7 @@ class LocalEndpointLeaseAuthority(EndpointLeaseAuthority):
                 run_id=request.run_id,
                 run_target_id=request.run_target_id,
                 endpoint_id=request.endpoint_id,
-                endpoint_generation=None,
+                endpoint_generation=endpoint_generation,
                 lease_mode="EXCLUSIVE",
                 os_lock_kind="LOCAL_OS_HANDLE",
             )
@@ -402,6 +417,7 @@ class LocalResolvingEndpointLeaseAuthority(EndpointLeaseAuthority):
                 return None
             return EndpointRootDescriptor(
                 root=Path(descriptor.root),
+                endpoint_generation=descriptor.endpoint_generation,
                 control_area_id=descriptor.control_area_id,
                 root_identity_hash_algorithm=descriptor.root_identity_hash_algorithm,
                 root_identity_hash=descriptor.root_identity_hash,
@@ -417,7 +433,7 @@ class LocalResolvingEndpointLeaseAuthority(EndpointLeaseAuthority):
         )
         if root is None:
             return None
-        return EndpointRootDescriptor(root=Path(root))
+        return EndpointRootDescriptor(root=Path(root), endpoint_generation=1)
 
 
 class Win32EndpointLockOpener(EndpointLockOpener):

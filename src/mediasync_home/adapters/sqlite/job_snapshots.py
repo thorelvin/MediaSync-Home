@@ -54,6 +54,7 @@ class _SnapshotEndpointCandidate:
     ordinal: int
     endpoint_id: str
     endpoint_revision_id: str
+    endpoint_generation: int
     root_uri: str
     registration_state: str
     inspection_status: str | None
@@ -152,6 +153,7 @@ class SqliteJobSnapshotMaterializer:
                 bindings.ordinal,
                 bindings.endpoint_id,
                 bindings.endpoint_revision_id,
+                revisions.generation,
                 revisions.root_uri,
                 bindings.registration_state,
                 observations.inspection_status,
@@ -195,11 +197,12 @@ class SqliteJobSnapshotMaterializer:
                     ordinal=int(row[3]),
                     endpoint_id=str(row[4]),
                     endpoint_revision_id=str(row[5]),
-                    root_uri=str(row[6]),
-                    registration_state=str(row[7]),
-                    inspection_status=None if row[8] is None else str(row[8]),
-                    classification_state=None if row[9] is None else str(row[9]),
-                    marker_json=None if row[10] is None else str(row[10]),
+                    endpoint_generation=int(row[6]),
+                    root_uri=str(row[7]),
+                    registration_state=str(row[8]),
+                    inspection_status=None if row[9] is None else str(row[9]),
+                    classification_state=None if row[10] is None else str(row[10]),
+                    marker_json=None if row[11] is None else str(row[11]),
                 )
             )
         if current_key is not None:
@@ -430,15 +433,17 @@ class SqliteJobSnapshotMaterializer:
                     id,
                     analysis_id,
                     endpoint_id,
-                    endpoint_revision_id
+                    endpoint_revision_id,
+                    endpoint_generation
                 )
-                VALUES (?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     item.scan.snapshot_id,
                     analysis_id,
                     endpoint.endpoint_id,
                     endpoint.endpoint_revision_id,
+                    endpoint.endpoint_generation,
                 ),
             )
 

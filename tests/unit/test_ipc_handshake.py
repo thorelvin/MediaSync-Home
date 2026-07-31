@@ -2581,6 +2581,7 @@ def _plan_endpoint_read_model(endpoint: PlanEndpoint) -> PlanEndpointReadModel:
         target_ordinal=endpoint.target_ordinal,
         capabilities_hash=endpoint.capabilities_hash,
         root_case_context_hash=endpoint.root_case_context_hash,
+        endpoint_generation=endpoint.endpoint_generation,
         required_owner_installation_id=endpoint.required_owner_installation_id,
         required_ownership_epoch=endpoint.required_ownership_epoch,
         control_schema_version=endpoint.control_schema_version,
@@ -2772,6 +2773,7 @@ def _target_endpoint() -> PlanEndpoint:
         target_ordinal=0,
         capabilities_hash="capabilities-a",
         root_case_context_hash="case-a",
+        endpoint_generation=1,
         required_owner_installation_id="owner-a",
         required_ownership_epoch=1,
         control_schema_version=1,
@@ -2788,4 +2790,5 @@ def _source_endpoint() -> PlanEndpoint:
         role=PlanEndpointRole.SOURCE,
         capabilities_hash="capabilities-source",
         root_case_context_hash="case-source",
+        endpoint_generation=1,
     )

@@ -61,6 +61,7 @@ def test_sqlite_endpoint_root_resolver_returns_endpoint_identity_descriptor(
 
         assert resolved == EndpointRootDescriptor(
             root=endpoint_root,
+            endpoint_generation=1,
             control_area_id="control-a",
             root_identity_hash_algorithm="BLAKE3-256",
             root_identity_hash="a" * 64,

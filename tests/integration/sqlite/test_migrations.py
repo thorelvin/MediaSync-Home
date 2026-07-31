@@ -34,7 +34,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 28
+        assert current_schema_version(connection, plan.store) == 29
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -69,7 +69,10 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 28
+        assert _row_count(connection, "schema_migrations") == 29
+        assert _column_names(connection, "endpoint_revisions") >= {"generation"}
+        assert _column_names(connection, "snapshots") >= {"endpoint_generation"}
+        assert _column_names(connection, "plan_endpoints") >= {"endpoint_generation"}
         assert _column_names(connection, "schema_migrations") >= {
             "store",
             "version",
@@ -91,6 +94,11 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "trg_schema_migrations_immutable_delete",
             "trg_endpoint_revisions_no_update",
             "trg_endpoint_revisions_no_delete",
+            "trg_endpoint_revisions_generation_must_advance",
+            "trg_snapshots_endpoint_generation_required",
+            "trg_snapshots_endpoint_identity_immutable",
+            "trg_plan_endpoints_endpoint_generation_required",
+            "trg_plan_endpoints_endpoint_identity_immutable",
             "trg_job_revisions_no_update",
             "trg_job_revisions_no_delete",
             "trg_filter_sets_no_update_after_use",
@@ -826,7 +834,7 @@ def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> N
                 name,
                 migration_checksum
             )
-                VALUES ('catalog', 29, 'future_migration', ?)
+                VALUES ('catalog', 30, 'future_migration', ?)
             """,
             ("f" * 64,),
         )
@@ -933,8 +941,8 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
         preflight = inspect_sqlite_migration_state(connection, plan)
 
         assert preflight.initialized
-        assert preflight.current_version == 28
-        assert preflight.target_version == 28
+        assert preflight.current_version == 29
+        assert preflight.target_version == 29
         assert preflight.checksum_backfill_required
         assert "migration_checksum" not in _column_names(
             connection,
@@ -1026,6 +1034,260 @@ def test_catalog_filter_version_migration_backfills_existing_revisions(
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
+def test_catalog_endpoint_generation_migration_backfills_and_enforces_exact_bindings(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    plan = catalog_migration_plan()
+    version_28_plan = replace(plan, migrations=plan.migrations[:28])
+    with sqlite3.connect(database) as connection:
+        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_migrations(connection, version_28_plan)
+        connection.execute("INSERT INTO endpoints (id) VALUES ('endpoint-a')")
+        connection.executemany(
+            """
+            INSERT INTO endpoint_revisions (
+                endpoint_id,
+                id,
+                display_name,
+                root_uri,
+                created_utc
+            )
+            VALUES ('endpoint-a', ?, ?, ?, ?)
+            """,
+            (
+                (
+                    "endpoint-rev-a",
+                    "Endpoint A",
+                    "file:///C:/Endpoint",
+                    "2026-07-31T00:00:00.000Z",
+                ),
+                (
+                    "endpoint-rev-b",
+                    "Endpoint B",
+                    "file:///C:/Endpoint",
+                    "2026-07-31T00:00:01.000Z",
+                ),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO endpoint_heads (endpoint_id, active_revision_id)
+            VALUES ('endpoint-a', 'endpoint-rev-b')
+            """
+        )
+        connection.execute(
+            "INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')"
+        )
+        connection.execute(
+            "INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')"
+        )
+        _insert_filter_version(connection, job_id="job-a", filter_set_id="filter-a")
+        connection.execute(
+            """
+            INSERT INTO job_revisions (job_id, id, filter_set_id)
+            VALUES ('job-a', 'job-rev-a', 'filter-a')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO analyses (id, job_id, job_revision_id)
+            VALUES ('analysis-a', 'job-a', 'job-rev-a')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO analysis_targets (
+                analysis_id,
+                endpoint_id,
+                endpoint_revision_id
+            )
+            VALUES ('analysis-a', 'endpoint-a', 'endpoint-rev-b')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO snapshots (
+                id,
+                analysis_id,
+                endpoint_id,
+                endpoint_revision_id
+            )
+            VALUES ('snapshot-a', 'analysis-a', 'endpoint-a', 'endpoint-rev-b')
+            """
+        )
+        connection.execute(
+            "INSERT INTO plans (id, analysis_id) VALUES ('plan-a', 'analysis-a')"
+        )
+        connection.execute(
+            """
+            INSERT INTO plan_endpoints (
+                plan_id,
+                analysis_id,
+                endpoint_id,
+                endpoint_revision_id,
+                snapshot_id,
+                role,
+                capabilities_hash,
+                root_case_context_hash
+            )
+            VALUES (
+                'plan-a',
+                'analysis-a',
+                'endpoint-a',
+                'endpoint-rev-b',
+                'snapshot-a',
+                'SOURCE',
+                'capabilities-a',
+                'case-a'
+            )
+            """
+        )
+        connection.commit()
+
+        apply_sqlite_migrations(connection, plan)
+
+        assert connection.execute(
+            """
+            SELECT id, generation
+            FROM endpoint_revisions
+            WHERE endpoint_id = 'endpoint-a'
+            ORDER BY generation
+            """
+        ).fetchall() == [("endpoint-rev-a", 1), ("endpoint-rev-b", 2)]
+        assert connection.execute(
+            "SELECT endpoint_generation FROM snapshots WHERE id = 'snapshot-a'"
+        ).fetchone() == (2,)
+        assert connection.execute(
+            "SELECT endpoint_generation FROM plan_endpoints WHERE plan_id = 'plan-a'"
+        ).fetchone() == (2,)
+
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="ENDPOINT_GENERATION_MUST_ADVANCE",
+        ):
+            connection.execute(
+                """
+                INSERT INTO endpoint_revisions (
+                    endpoint_id,
+                    id,
+                    display_name,
+                    root_uri,
+                    generation
+                )
+                VALUES (
+                    'endpoint-a',
+                    'endpoint-rev-skipped',
+                    'Skipped',
+                    'file:///C:/Endpoint',
+                    4
+                )
+                """
+            )
+        connection.execute(
+            """
+            INSERT INTO endpoint_revisions (
+                endpoint_id,
+                id,
+                display_name,
+                root_uri,
+                generation
+            )
+            VALUES (
+                'endpoint-a',
+                'endpoint-rev-c',
+                'Endpoint C',
+                'file:///C:/Endpoint',
+                3
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO analyses (id, job_id, job_revision_id)
+            VALUES ('analysis-b', 'job-a', 'job-rev-a')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO analysis_targets (
+                analysis_id,
+                endpoint_id,
+                endpoint_revision_id
+            )
+            VALUES ('analysis-b', 'endpoint-a', 'endpoint-rev-b')
+            """
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="ENDPOINT_GENERATION_MISMATCH"):
+            connection.execute(
+                """
+                INSERT INTO snapshots (
+                    id,
+                    analysis_id,
+                    endpoint_id,
+                    endpoint_revision_id,
+                    endpoint_generation
+                )
+                VALUES (
+                    'snapshot-wrong',
+                    'analysis-b',
+                    'endpoint-a',
+                    'endpoint-rev-b',
+                    1
+                )
+                """
+            )
+        connection.execute(
+            """
+            INSERT INTO snapshots (
+                id,
+                analysis_id,
+                endpoint_id,
+                endpoint_revision_id,
+                endpoint_generation
+            )
+            VALUES (
+                'snapshot-b',
+                'analysis-b',
+                'endpoint-a',
+                'endpoint-rev-b',
+                2
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO plans (id, analysis_id) VALUES ('plan-b', 'analysis-b')"
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="ENDPOINT_GENERATION_MISMATCH"):
+            connection.execute(
+                """
+                INSERT INTO plan_endpoints (
+                    plan_id,
+                    analysis_id,
+                    endpoint_id,
+                    endpoint_revision_id,
+                    endpoint_generation,
+                    snapshot_id,
+                    role,
+                    capabilities_hash,
+                    root_case_context_hash
+                )
+                VALUES (
+                    'plan-b',
+                    'analysis-b',
+                    'endpoint-a',
+                    'endpoint-rev-b',
+                    1,
+                    'snapshot-b',
+                    'SOURCE',
+                    'capabilities-a',
+                    'case-a'
+                )
+                """
+            )
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
 def _insert_catalog_parent_rows(connection: sqlite3.Connection) -> None:
     connection.execute("INSERT INTO endpoints (id) VALUES ('endpoint-a')")
     connection.execute(
@@ -1076,12 +1338,18 @@ def _insert_immutable_revision_rows(connection: sqlite3.Connection) -> None:
     connection.execute("INSERT INTO endpoints (id) VALUES ('endpoint-a')")
     connection.executemany(
         """
-        INSERT INTO endpoint_revisions (endpoint_id, id, display_name, root_uri)
-        VALUES ('endpoint-a', ?, ?, ?)
+        INSERT INTO endpoint_revisions (
+            endpoint_id,
+            id,
+            display_name,
+            root_uri,
+            generation
+        )
+        VALUES ('endpoint-a', ?, ?, ?, ?)
         """,
         (
-            ("endpoint-rev-a", "Source A", "file:///C:/Source"),
-            ("endpoint-rev-b", "Source B", "file:///C:/Source"),
+            ("endpoint-rev-a", "Source A", "file:///C:/Source", 1),
+            ("endpoint-rev-b", "Source B", "file:///C:/Source", 2),
         ),
     )
     connection.execute(

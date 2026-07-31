@@ -9,6 +9,7 @@ _MUTATION_PERMIT_ISSUER_TOKEN: Final[object] = object()
 class MutationPermit:
     __slots__ = (
         "_endpoint_id",
+        "_endpoint_generation",
         "_endpoint_revision_id",
         "_fencing_token",
         "_lease_id",
@@ -40,6 +41,7 @@ class MutationPermit:
         run_id: str | None = None,
         run_target_id: str | None = None,
         endpoint_id: str | None = None,
+        endpoint_generation: int | None = None,
         endpoint_revision_id: str | None = None,
     ) -> None:
         if issuer_token is not _MUTATION_PERMIT_ISSUER_TOKEN:
@@ -56,6 +58,10 @@ class MutationPermit:
         self._run_id = _require_text(run_id, "run_id")
         self._run_target_id = _require_text(run_target_id, "run_target_id")
         self._endpoint_id = _require_text(endpoint_id, "endpoint_id")
+        self._endpoint_generation = _require_positive_int(
+            endpoint_generation,
+            "endpoint_generation",
+        )
         self._endpoint_revision_id = _require_text(
             endpoint_revision_id,
             "endpoint_revision_id",
@@ -97,6 +103,10 @@ class MutationPermit:
         return self._endpoint_id
 
     @property
+    def endpoint_generation(self) -> int:
+        return self._endpoint_generation
+
+    @property
     def endpoint_revision_id(self) -> str:
         return self._endpoint_revision_id
 
@@ -115,6 +125,7 @@ def _issue_mutation_permit(
     run_target_id: str,
     endpoint_id: str,
     endpoint_revision_id: str,
+    endpoint_generation: int = 1,
 ) -> MutationPermit:
     return MutationPermit(
         _MUTATION_PERMIT_ISSUER_TOKEN,
@@ -126,6 +137,7 @@ def _issue_mutation_permit(
         run_id=run_id,
         run_target_id=run_target_id,
         endpoint_id=endpoint_id,
+        endpoint_generation=endpoint_generation,
         endpoint_revision_id=endpoint_revision_id,
     )
 
