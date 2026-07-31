@@ -510,6 +510,21 @@ def test_target_selection_reflows_without_horizontal_clipping(
         dashboard_page = dashboard_scroll.widget()
         assert dashboard_page is not None
         assert dashboard_page.height() >= dashboard_page.minimumSizeHint().height()
+        assert dashboard_scroll.verticalScrollBar().value() == 0
+        setup_position = setup_panel.mapTo(
+            dashboard_scroll.viewport(), setup_panel.rect().topLeft()
+        )
+        setup_title = window._setup_title_label
+        assert setup_title is not None
+        title_position = setup_title.mapTo(
+            dashboard_scroll.viewport(), setup_title.rect().topLeft()
+        )
+        assert setup_position.y() >= 0
+        assert title_position.y() >= 0
+        assert (
+            title_position.y() + setup_title.height()
+            <= dashboard_scroll.viewport().height()
+        )
         responsive_labels = [
             label
             for label in dashboard_page.findChildren(QLabel)
@@ -522,6 +537,8 @@ def test_target_selection_reflows_without_horizontal_clipping(
             assert label.sizePolicy().horizontalPolicy() is QSizePolicy.Policy.Ignored
             assert label.width() > 0
             assert label.height() >= label.heightForWidth(label.width())
+        dashboard_scroll.ensureWidgetVisible(create_backup, 12, 12)
+        qapp.processEvents()
         action_position = create_backup.mapTo(
             dashboard_scroll.viewport(), create_backup.rect().topLeft()
         )

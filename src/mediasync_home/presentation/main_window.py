@@ -561,7 +561,7 @@ class MediaSyncWindow(QMainWindow):
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._update_responsive_dashboard_layout()
-        QTimer.singleShot(0, self._settle_setup_layout)
+        QTimer.singleShot(0, self._refresh_dashboard_geometry)
 
     def _texts(self) -> ShellText:
         return shell_text(self._selected_language_code)
@@ -2103,7 +2103,10 @@ class MediaSyncWindow(QMainWindow):
                 source_path_label=selected,
                 targets=self._setup_draft.targets,
             )
-            self._apply_local_setup_draft(BackupSetupStep.TARGETS)
+            self._apply_local_setup_draft(
+                BackupSetupStep.TARGETS,
+                reveal_action=False,
+            )
             self._apply_local_preview_job_detail()
             return
         if step is BackupSetupStep.TARGETS:
@@ -2162,7 +2165,10 @@ class MediaSyncWindow(QMainWindow):
                 ),
             ),
         )
-        self._apply_local_setup_draft(BackupSetupStep.TARGETS)
+        self._apply_local_setup_draft(
+            BackupSetupStep.TARGETS,
+            reveal_action=False,
+        )
         self._apply_local_preview_job_detail()
 
     def _remove_setup_target(self, index: int) -> None:
@@ -2179,7 +2185,10 @@ class MediaSyncWindow(QMainWindow):
                 *self._setup_draft.targets[index + 1 :],
             ),
         )
-        self._apply_local_setup_draft(BackupSetupStep.TARGETS)
+        self._apply_local_setup_draft(
+            BackupSetupStep.TARGETS,
+            reveal_action=False,
+        )
         self._apply_local_preview_job_detail()
 
     def _handle_setup_back_action(self) -> None:
@@ -2359,13 +2368,23 @@ class MediaSyncWindow(QMainWindow):
         dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptOpen)
         return dialog
 
-    def _apply_local_setup_draft(self, step: BackupSetupStep) -> None:
+    def _apply_local_setup_draft(
+        self,
+        step: BackupSetupStep,
+        *,
+        reveal_action: bool = True,
+    ) -> None:
         self._setup_state = build_standard_backup_setup_state(
             self._setup_draft,
             current_step=step,
         )
         self._apply_backup_setup_state(self._setup_state)
-        QTimer.singleShot(0, self._settle_setup_layout)
+        settle_layout = (
+            self._settle_setup_layout
+            if reveal_action
+            else self._refresh_dashboard_geometry
+        )
+        QTimer.singleShot(0, settle_layout)
 
     def _settle_setup_layout(self) -> None:
         self._refresh_dashboard_geometry()

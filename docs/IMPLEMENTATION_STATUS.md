@@ -158,7 +158,9 @@ sidens minimumshøyde på nytt; GUI-beviset dekker lange valgte kilde-/målstier
 900×560, 1000×650 og 1120×700 uten utilgjengelig eller horisontalt klippet
 innhold. Targetkontrollen og hvert synlig targetrow bruker nå også eksplisitt
 vertikal minimumspolicy, og panelet reserverer den dynamiske layouthøyden før
-primærhandlingen scrolles inn i viewporten.
+visning. Valg eller fjerning av mapper og vindusendring bevarer viewporten i
+stedet for å autoscrolle bort setupoverskriften; primærhandlingen forblir
+tilgjengelig via sidens vertikale scrollbar når panelet er høyere enn vinduet.
 
 Oppdatering 2026-07-31: Navigasjonssiden **Jobber** er ikke lenger en
 placeholder. Den viser opptil 25 aktive jobber per bounded Engine Host-query,
