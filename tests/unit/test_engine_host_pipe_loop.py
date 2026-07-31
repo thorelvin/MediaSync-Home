@@ -22,12 +22,14 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     SqliteStore,
     apply_sqlite_connection_policy,
     catalog_critical_writer_policy,
+    recovery_writer_policy,
 )
 from mediasync_home.adapters.sqlite.migrations import (
     SqliteMigrationPlan,
     apply_sqlite_migrations,
     catalog_migration_plan,
     current_schema_version,
+    recovery_migration_plan,
 )
 from mediasync_home.adapters.sqlite.state_backup import (
     SqliteStateCompactionEpochRecoveryReport,
@@ -539,6 +541,46 @@ def test_engine_host_run_uses_long_running_pipe_mode(monkeypatch: pytest.MonkeyP
     }
 
 
+def test_engine_host_startup_failure_publishes_no_locator_or_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_win32_pipe = types.ModuleType("mediasync_home.ipc.win32_named_pipe")
+    published: list[object] = []
+    lines: list[str] = []
+
+    fake_win32_pipe.Win32NamedPipeServer = _FakePipeServer
+    fake_win32_pipe.current_user_policy = _authorization
+    monkeypatch.setitem(sys.modules, "mediasync_home.ipc.win32_named_pipe", fake_win32_pipe)
+    monkeypatch.setattr(engine_host_module.os, "name", "nt")
+    monkeypatch.setattr(engine_host_module, "current_process_runtime_policy", lambda root: None)
+    monkeypatch.setattr(
+        engine_host_module,
+        "build_engine_host_runtime",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("migration failed")),
+    )
+    monkeypatch.setattr(
+        engine_host_module,
+        "_publish_local_host_locator",
+        lambda **kwargs: published.append(kwargs),
+    )
+
+    with pytest.raises(RuntimeError, match="migration failed"):
+        run_engine_host(
+            [
+                "--pipe-name",
+                HOST_LOCATOR_PIPE,
+                "--state-root",
+                str(tmp_path / "state"),
+                "--publish-host-locator",
+            ],
+            emit=lines.append,
+        )
+
+    assert published == []
+    assert lines == []
+
+
 def test_engine_host_run_clears_own_host_locator_on_exit(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -807,6 +849,7 @@ def test_engine_host_runtime_without_state_root_preserves_non_persistent_service
         assert runtime.state_restore_recovery is None
         assert runtime.state_restore_startup_reconciliation is None
         assert runtime.state_compaction_recovery is None
+        assert runtime.state_migration is None
         assert runtime.installation_state is None
         assert runtime.startup_reconciliation is None
         assert runtime.catalog_connection is None
@@ -817,6 +860,35 @@ def test_engine_host_runtime_without_state_root_preserves_non_persistent_service
             runtime.admit_state_restore_maintenance()
     finally:
         runtime.close()
+
+
+def test_engine_host_runtime_migration_failure_opens_no_repository_connections(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    connect_calls: list[tuple[object, ...]] = []
+
+    monkeypatch.setattr(
+        engine_host_module,
+        "migrate_sqlite_state_stores",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("migration failed")),
+    )
+    monkeypatch.setattr(
+        engine_host_module,
+        "sqlite3",
+        types.SimpleNamespace(
+            connect=lambda *args, **kwargs: connect_calls.append(args),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="migration failed"):
+        build_engine_host_runtime(
+            authorization=_authorization(),
+            service_status=startup_status(ProcessRole.ENGINE_HOST),
+            state_root=tmp_path / "state",
+        )
+
+    assert connect_calls == []
 
 
 def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts(
@@ -838,6 +910,12 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.state_restore_startup_reconciliation.latest_committed_epoch is None
         assert runtime.state_compaction_recovery is not None
         assert runtime.state_compaction_recovery.scanned_epoch_count == 0
+        assert runtime.state_migration is not None
+        assert runtime.state_migration.migration_performed
+        assert runtime.state_migration.created_epoch_count == 1
+        assert runtime.state_migration.resumed_epoch_count == 0
+        assert len(runtime.state_migration.committed_epoch_ids) == 1
+        assert runtime.state_migration.latest_backup_set_path is None
         assert runtime.state_layout.catalog.is_file()
         assert runtime.state_layout.recovery.is_file()
         assert runtime.catalog_connection is not None
@@ -1237,6 +1315,13 @@ def test_engine_host_runtime_backfills_endpoint_bindings_for_existing_job(
             """
         )
         connection.commit()
+    recovery_database = state_root / "recovery.sqlite"
+    with sqlite3.connect(recovery_database) as connection:
+        apply_sqlite_connection_policy(
+            connection,
+            recovery_writer_policy(recovery_database),
+        )
+        apply_sqlite_migrations(connection, recovery_migration_plan())
 
     restarted = build_engine_host_runtime(
         authorization=_authorization(),

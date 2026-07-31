@@ -92,6 +92,10 @@ from mediasync_home.adapters.sqlite.state_backup import (
     reconcile_committed_sqlite_state_restore_epochs,
     restore_sqlite_state_backup_set,
 )
+from mediasync_home.adapters.sqlite.state_migration import (
+    SqliteStateMigrationReport,
+    migrate_sqlite_state_stores,
+)
 from mediasync_home.adapters.sqlite.trigger_occurrences import SqliteTriggerOccurrenceStore
 from mediasync_home.adapters.sqlite.transactions import SqliteImmediateTransactionRunner
 from mediasync_home.application.run_executor import (
@@ -311,6 +315,7 @@ class EngineHostRuntime:
     state_restore_recovery: SqliteStateRestoreEpochRecoveryReport | None = None
     state_restore_startup_reconciliation: SqliteStateRestoreStartupReconciliationReport | None = None
     state_compaction_recovery: SqliteStateCompactionEpochRecoveryReport | None = None
+    state_migration: SqliteStateMigrationReport | None = None
     startup_reconciliation: EngineHostStartupReconciliationReport | None = None
     reconciler_instance_id: str | None = None
     run_executor_queue_store: RunExecutorQueueStore | None = None
@@ -1142,15 +1147,6 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
     task_scheduler_maintenance_loop: TaskSchedulerMaintenanceLoop | None = None
     task_scheduler_reconciliation: TaskSchedulerResourcePumpReport | None = None
     try:
-        if args.publish_host_locator:
-            host_locator_publication, host_locator_path = _publish_local_host_locator(
-                installation_id=args.installation_id,
-                pipe_name=args.pipe_name,
-                mutex_name=args.host_mutex_name,
-                state_root=args.state_root,
-                process_id=os.getpid(),
-            )
-            host_locator_payload = host_locator_publication.to_payload()
         runtime = build_engine_host_runtime(
             authorization=authorization,
             service_status=service_status,
@@ -1163,6 +1159,15 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
             ),
             run_executor_staging_backend=args.run_executor_staging_backend,
         )
+        if args.publish_host_locator:
+            host_locator_publication, host_locator_path = _publish_local_host_locator(
+                installation_id=args.installation_id,
+                pipe_name=args.pipe_name,
+                mutex_name=args.host_mutex_name,
+                state_root=args.state_root,
+                process_id=os.getpid(),
+            )
+            host_locator_payload = host_locator_publication.to_payload()
         if args.reconcile_task_scheduler_resources:
             try:
                 task_scheduler_reconciliation = (
@@ -1214,6 +1219,9 @@ def run_engine_host(argv: Sequence[str] | None = None, *, emit: Emit | None = No
                     ),
                     "state_compaction_recovery": _state_compaction_recovery_payload(
                         runtime.state_compaction_recovery
+                    ),
+                    "state_migration": _state_migration_payload(
+                        getattr(runtime, "state_migration", None)
                     ),
                     "state_root": None
                     if runtime.state_layout is None
@@ -1363,6 +1371,16 @@ def build_engine_host_runtime(
     state_restore_startup_reconciliation = reconcile_committed_sqlite_state_restore_epochs(
         layout
     )
+    catalog_plan = catalog_migration_plan()
+    recovery_plan = recovery_migration_plan()
+    state_migration = migrate_sqlite_state_stores(
+        layout,
+        catalog_plan=catalog_plan,
+        recovery_plan=recovery_plan,
+        app_version=__version__,
+        started_utc=runtime_clock.utc_now(),
+        completed_utc=runtime_clock.utc_now(),
+    )
     catalog_connection = sqlite3.connect(layout.catalog)
     recovery_connection = sqlite3.connect(layout.recovery)
     try:
@@ -1374,8 +1392,6 @@ def build_engine_host_runtime(
             recovery_connection,
             recovery_writer_policy(layout.recovery),
         )
-        catalog_plan = catalog_migration_plan()
-        recovery_plan = recovery_migration_plan()
         apply_sqlite_migrations(catalog_connection, catalog_plan)
         apply_sqlite_migrations(recovery_connection, recovery_plan)
         installation_state = SqliteInstallationStateStore(
@@ -1536,6 +1552,7 @@ def build_engine_host_runtime(
         state_restore_recovery=state_restore_recovery,
         state_restore_startup_reconciliation=state_restore_startup_reconciliation,
         state_compaction_recovery=state_compaction_recovery,
+        state_migration=state_migration,
         startup_reconciliation=startup_reconciliation,
         reconciler_instance_id=reconciler_instance_id,
         run_executor_queue_store=runs,
@@ -1958,6 +1975,14 @@ def _state_restore_startup_reconciliation_payload(
 
 def _state_compaction_recovery_payload(
     report: SqliteStateCompactionEpochRecoveryReport | None,
+) -> dict[str, object] | None:
+    if report is None:
+        return None
+    return report.to_payload()
+
+
+def _state_migration_payload(
+    report: SqliteStateMigrationReport | None,
 ) -> dict[str, object] | None:
     if report is None:
         return None

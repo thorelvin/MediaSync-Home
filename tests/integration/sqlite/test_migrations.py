@@ -16,6 +16,7 @@ from mediasync_home.adapters.sqlite.migrations import (
     apply_sqlite_migrations,
     catalog_migration_plan,
     current_schema_version,
+    inspect_sqlite_migration_state,
     migration_checksum,
     recovery_migration_plan,
 )
@@ -825,6 +826,17 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
         connection.execute("DROP TABLE schema_migrations_current")
         connection.commit()
 
+        preflight = inspect_sqlite_migration_state(connection, plan)
+
+        assert preflight.initialized
+        assert preflight.current_version == 27
+        assert preflight.target_version == 27
+        assert preflight.checksum_backfill_required
+        assert "migration_checksum" not in _column_names(
+            connection,
+            "schema_migrations",
+        )
+
         apply_sqlite_migrations(connection, plan)
 
         assert len(_migration_checksums(connection)) == len(plan.migrations)
@@ -841,6 +853,21 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
             "trg_schema_migrations_immutable_update",
             "trg_schema_migrations_immutable_delete",
         } <= _trigger_names(connection)
+
+
+def test_migration_preflight_rejects_unmanaged_nonempty_schema(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE unknown_owner (id INTEGER PRIMARY KEY)")
+        connection.commit()
+
+        with pytest.raises(
+            SqliteMigrationViolation,
+            match="MIGRATION_UNMANAGED_SCHEMA",
+        ):
+            inspect_sqlite_migration_state(connection, catalog_migration_plan())
+
+        assert _table_names(connection) == {"unknown_owner"}
 
 
 def _insert_catalog_parent_rows(connection: sqlite3.Connection) -> None:

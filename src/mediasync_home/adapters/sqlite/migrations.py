@@ -25,6 +25,15 @@ class SqliteMigrationPlan:
     migrations: tuple[SqliteMigration, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SqliteMigrationState:
+    store: SqliteStore
+    current_version: int
+    target_version: int
+    initialized: bool
+    checksum_backfill_required: bool
+
+
 def catalog_migration_plan() -> SqliteMigrationPlan:
     return SqliteMigrationPlan(
         store=SqliteStore.CATALOG,
@@ -257,6 +266,67 @@ def current_schema_version(connection: sqlite3.Connection, store: SqliteStore) -
     if row is None or row[0] is None:
         return 0
     return int(row[0])
+
+
+def inspect_sqlite_migration_state(
+    connection: sqlite3.Connection,
+    plan: SqliteMigrationPlan,
+) -> SqliteMigrationState:
+    validate_migration_plan(plan)
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+                AND name NOT LIKE 'sqlite_%'
+            """
+        ).fetchall()
+    }
+    metadata_tables = tables & {"store_identity", "schema_migrations"}
+    if not metadata_tables:
+        if tables:
+            raise SqliteMigrationViolation("MIGRATION_UNMANAGED_SCHEMA")
+        return SqliteMigrationState(
+            store=plan.store,
+            current_version=0,
+            target_version=len(plan.migrations),
+            initialized=False,
+            checksum_backfill_required=False,
+        )
+    if metadata_tables != {"store_identity", "schema_migrations"}:
+        raise SqliteMigrationViolation("MIGRATION_METADATA_INCOMPLETE")
+
+    identity = connection.execute(
+        "SELECT store FROM store_identity WHERE singleton = 1"
+    ).fetchone()
+    if identity is None or identity[0] != plan.store.value:
+        raise SqliteMigrationViolation("MIGRATION_STORE_IDENTITY_MISMATCH")
+    columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(schema_migrations)").fetchall()
+    }
+    checksum_column_present = "migration_checksum" in columns
+    rows = _migration_history_rows(
+        connection,
+        plan.store,
+        has_checksum_column=checksum_column_present,
+    )
+    _validate_migration_history(
+        plan,
+        rows,
+        allow_missing_checksums=True,
+    )
+    return SqliteMigrationState(
+        store=plan.store,
+        current_version=0 if not rows else rows[-1][0],
+        target_version=len(plan.migrations),
+        initialized=True,
+        checksum_backfill_required=(
+            not checksum_column_present or any(row[2] is None for row in rows)
+        ),
+    )
 
 
 def migration_checksum(migration: SqliteMigration) -> str:
