@@ -26,6 +26,7 @@ from mediasync_home.adapters.robocopy import (
     validate_robocopy_command_line,
     write_robocopy_batch_manifest,
 )
+from mediasync_home.adapters.file_identity import stable_file_identity_hash
 from mediasync_home.adapters.staging import LocalFileStagingError
 from mediasync_home.adapters.windows_argv import build_windows_command_line
 from mediasync_home.application.process_supervision import (
@@ -38,6 +39,7 @@ from mediasync_home.application.recovery_operations import (
     RecoveryTargetPreconditionKind,
     planned_recovery_operation,
 )
+from mediasync_home.application.source_preconditions import SourceFilePrecondition
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
@@ -505,7 +507,7 @@ def test_robocopy_staging_transfer_starts_contained_process_and_publishes_payloa
         profile=RobocopyTransferProfile(timeout_seconds=5.0),
     )
 
-    evidence = adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+    evidence = adapter.transfer_to_staging(_operation(source_file))
 
     assert evidence.transfer_state == "ROBOCOPY_EXIT_1_COPIED_TRANSFERRED_TO_STAGING"
     assert (staging_root / "object-a.payload").read_bytes() == b"image-bytes"
@@ -545,7 +547,7 @@ def test_robocopy_staging_transfer_reuses_existing_matching_payload(
         executable_resolver=_FakeExecutableResolver(_resolved_executable(tmp_path)),
     )
 
-    evidence = adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+    evidence = adapter.transfer_to_staging(_operation(source_file))
 
     assert evidence.transfer_state == "ROBOCOPY_TRANSFERRED_EXISTING_MATCH"
     assert supervisor.launch_plans == []
@@ -570,7 +572,7 @@ def test_robocopy_staging_transfer_times_out_and_terminates_child(tmp_path: Path
     )
 
     with pytest.raises(LocalFileStagingError) as exc_info:
-        adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+        adapter.transfer_to_staging(_operation(source_file))
 
     assert exc_info.value.validation_code == "ROBOCOPY_TRANSFER_TIMED_OUT"
     assert supervisor.process is not None
@@ -602,7 +604,7 @@ def test_robocopy_staging_transfer_wait_failure_terminates_child_and_cleans_inbo
     )
 
     with pytest.raises(LocalFileStagingError) as exc_info:
-        adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+        adapter.transfer_to_staging(_operation(source_file))
 
     assert exc_info.value.validation_code == "ROBOCOPY_PROCESS_WAIT_FAILED"
     assert supervisor.process is not None
@@ -634,7 +636,7 @@ def test_robocopy_staging_transfer_termination_failure_is_classified(
     )
 
     with pytest.raises(LocalFileStagingError) as exc_info:
-        adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+        adapter.transfer_to_staging(_operation(source_file))
 
     assert exc_info.value.validation_code == "ROBOCOPY_PROCESS_TERMINATION_FAILED"
     assert supervisor.process is not None
@@ -665,7 +667,7 @@ def test_robocopy_staging_transfer_handle_cleanup_failure_is_classified(
     )
 
     with pytest.raises(LocalFileStagingError) as exc_info:
-        adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+        adapter.transfer_to_staging(_operation(source_file))
 
     assert exc_info.value.validation_code == "ROBOCOPY_PROCESS_CLEANUP_FAILED"
     assert supervisor.process is not None
@@ -694,7 +696,7 @@ def test_robocopy_staging_transfer_clears_inbox_after_containment_failure(
     )
 
     with pytest.raises(LocalFileStagingError) as exc_info:
-        adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+        adapter.transfer_to_staging(_operation(source_file))
 
     assert exc_info.value.validation_code == "ROBOCOPY_PROCESS_CONTAINMENT_FAILED"
     assert supervisor.launch_plans
@@ -719,13 +721,13 @@ def test_robocopy_staging_transfer_rejects_fatal_exit_code(tmp_path: Path) -> No
     )
 
     with pytest.raises(LocalFileStagingError) as exc_info:
-        adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+        adapter.transfer_to_staging(_operation(source_file))
 
     assert exc_info.value.validation_code == "ROBOCOPY_TRANSFER_FAILED"
     assert not (tmp_path / "work" / "inbox" / "object-a").exists()
 
     supervisor.exit_code = 1
-    evidence = adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+    evidence = adapter.transfer_to_staging(_operation(source_file))
 
     assert evidence.transfer_state == "ROBOCOPY_EXIT_1_COPIED_TRANSFERRED_TO_STAGING"
     assert (tmp_path / "staging" / "object-a.payload").read_bytes() == b"image-bytes"
@@ -750,7 +752,7 @@ def test_robocopy_staging_transfer_rejects_invalid_negative_exit_code(
     )
 
     with pytest.raises(LocalFileStagingError) as exc_info:
-        adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+        adapter.transfer_to_staging(_operation(source_file))
 
     assert exc_info.value.validation_code == "ROBOCOPY_TRANSFER_FAILED"
     assert not (tmp_path / "staging" / "object-a.payload").exists()
@@ -774,7 +776,7 @@ def test_robocopy_staging_transfer_records_nonfatal_extra_exit_flag(
         executable_resolver=_FakeExecutableResolver(_resolved_executable(tmp_path)),
     )
 
-    evidence = adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+    evidence = adapter.transfer_to_staging(_operation(source_file))
 
     assert (
         evidence.transfer_state
@@ -805,7 +807,7 @@ def test_robocopy_staging_transfer_blocks_extra_inbox_content_despite_nonfatal_e
     )
 
     with pytest.raises(LocalFileStagingError) as exc_info:
-        adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+        adapter.transfer_to_staging(_operation(source_file))
 
     assert exc_info.value.validation_code == "STAGING_MANIFEST_MISMATCH"
     assert not (tmp_path / "staging" / "object-a.payload").exists()
@@ -832,13 +834,13 @@ def test_robocopy_staging_transfer_clears_empty_inbox_after_manifest_mismatch(
     )
 
     with pytest.raises(LocalFileStagingError) as exc_info:
-        adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+        adapter.transfer_to_staging(_operation(source_file))
 
     assert exc_info.value.validation_code == "STAGING_MANIFEST_MISMATCH"
     assert not (tmp_path / "work" / "inbox" / "object-a").exists()
 
     supervisor.copy_manifest_files = True
-    evidence = adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+    evidence = adapter.transfer_to_staging(_operation(source_file))
 
     assert evidence.transfer_state == "ROBOCOPY_EXIT_1_COPIED_TRANSFERRED_TO_STAGING"
     assert (tmp_path / "staging" / "object-a.payload").read_bytes() == b"image-bytes"
@@ -866,7 +868,7 @@ def test_robocopy_staging_transfer_preserves_type_mismatch_after_manifest_mismat
     )
 
     with pytest.raises(LocalFileStagingError) as exc_info:
-        adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+        adapter.transfer_to_staging(_operation(source_file))
 
     assert exc_info.value.validation_code == "STAGING_MANIFEST_MISMATCH"
     assert (tmp_path / "work" / "inbox" / "object-a" / "A.jpg").is_dir()
@@ -890,9 +892,36 @@ def test_robocopy_staging_transfer_rejects_changed_source_bytes(tmp_path: Path) 
     )
 
     with pytest.raises(LocalFileStagingError) as exc_info:
-        adapter.transfer_to_staging(_operation(source_file.read_bytes()))
+        adapter.transfer_to_staging(_operation(source_file))
 
     assert exc_info.value.validation_code == "ROBOCOPY_STAGING_SOURCE_CHANGED"
+    assert not (tmp_path / "work" / "inbox" / "object-a").exists()
+
+
+def test_robocopy_staging_transfer_rejects_source_identity_drift_during_child(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_file = source_root / "Pictures" / "A.jpg"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"image-bytes")
+    target_root.mkdir()
+    adapter = RobocopyStagingTransferAdapter(
+        root_resolver=_RootResolver(source_root=source_root, target_root=target_root),
+        staging_root=tmp_path / "staging",
+        robocopy_work_root=tmp_path / "work",
+        process_supervisor=_FakeRobocopySupervisor(
+            exit_code=1,
+            mutate_source_after_copy=b"other-bytes",
+        ),
+        executable_resolver=_FakeExecutableResolver(_resolved_executable(tmp_path)),
+    )
+
+    with pytest.raises(LocalFileStagingError) as exc_info:
+        adapter.transfer_to_staging(_operation(source_file))
+
+    assert exc_info.value.validation_code == "LOCAL_STAGING_SOURCE_IDENTITY_CHANGED"
     assert not (tmp_path / "work" / "inbox" / "object-a").exists()
 
 
@@ -941,6 +970,7 @@ class _FakeRobocopySupervisor:
         wait_error: Exception | None = None,
         terminate_error: Exception | None = None,
         close_error: Exception | None = None,
+        mutate_source_after_copy: bytes | None = None,
     ) -> None:
         self.exit_code = exit_code
         self.copied_payload = copied_payload
@@ -950,6 +980,7 @@ class _FakeRobocopySupervisor:
         self.wait_error = wait_error
         self.terminate_error = terminate_error
         self.close_error = close_error
+        self.mutate_source_after_copy = mutate_source_after_copy
         self.launch_plans: list[object] = []
         self.process: _FakeRobocopyProcess | None = None
 
@@ -970,6 +1001,13 @@ class _FakeRobocopySupervisor:
                 (staging_inbox / file_name).write_bytes(payload)
             for extra_name, extra_payload in self.extra_inbox_files.items():
                 (staging_inbox / extra_name).write_bytes(extra_payload)
+            if self.mutate_source_after_copy is not None:
+                (source_parent / file_name).write_bytes(self.mutate_source_after_copy)
+                current = (source_parent / file_name).stat()
+                os.utime(
+                    source_parent / file_name,
+                    ns=(current.st_atime_ns, current.st_mtime_ns + 1_000_000_000),
+                )
         self.process = _FakeRobocopyProcess(
             exit_code=self.exit_code,
             wait_error=self.wait_error,
@@ -1040,7 +1078,8 @@ class _RootResolver:
         return None
 
 
-def _operation(source_payload: bytes) -> RecoveryOperation:
+def _operation(source_file: Path) -> RecoveryOperation:
+    source_payload = source_file.read_bytes()
     operation = planned_recovery_operation(
         run_id="run-a",
         run_target_id="run-a-target-0000",
@@ -1058,6 +1097,14 @@ def _operation(source_payload: bytes) -> RecoveryOperation:
         source_endpoint_id="source-a",
         source_endpoint_revision_id="source-rev-a",
         source_relative_path="Pictures/A.jpg",
+        planned_bytes=len(source_payload),
+        source_precondition_json=SourceFilePrecondition(
+            snapshot_id="source-snapshot-a",
+            snapshot_entry_id="source-entry-a",
+            relative_path="Pictures/A.jpg",
+            size_bytes=len(source_payload),
+            identity_fingerprint_hash=stable_file_identity_hash(source_file.stat()),
+        ).to_json(),
     )
     return replace(
         operation,

@@ -218,6 +218,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_current_read_hash_evidence",
                 statements=CATALOG_CURRENT_READ_HASH_EVIDENCE,
             ),
+            SqliteMigration(
+                version=37,
+                name="catalog_source_file_preconditions",
+                statements=CATALOG_SOURCE_FILE_PRECONDITIONS,
+            ),
         ),
     )
 
@@ -260,6 +265,11 @@ def recovery_migration_plan() -> SqliteMigrationPlan:
                 version=7,
                 name="recovery_operation_planned_bytes",
                 statements=RECOVERY_OPERATION_PLANNED_BYTES,
+            ),
+            SqliteMigration(
+                version=8,
+                name="recovery_source_file_preconditions",
+                statements=RECOVERY_SOURCE_FILE_PRECONDITIONS,
             ),
         ),
     )
@@ -1483,6 +1493,65 @@ CATALOG_CURRENT_READ_HASH_EVIDENCE = (
     CREATE INDEX idx_backup_analysis_requests_started_run
         ON backup_analysis_requests (started_run_id)
         WHERE started_run_id IS NOT NULL
+    """,
+)
+
+CATALOG_SOURCE_FILE_PRECONDITIONS = (
+    """
+    ALTER TABLE file_entries
+        ADD COLUMN identity_fingerprint_hash TEXT
+        CHECK (
+            identity_fingerprint_hash IS NULL
+            OR (
+                length(identity_fingerprint_hash) = 64
+                AND identity_fingerprint_hash NOT GLOB '*[^0-9a-f]*'
+            )
+        )
+    """,
+    """
+    ALTER TABLE plan_operation_seal_details
+        ADD COLUMN source_relative_path TEXT
+    """,
+    """
+    ALTER TABLE plan_operation_seal_details
+        ADD COLUMN source_precondition_json TEXT
+    """,
+    """
+    CREATE TRIGGER trg_snapshot_v2_requires_file_identity
+    BEFORE UPDATE OF immutable, snapshot_schema_version ON snapshots
+    WHEN NEW.immutable = 1
+        AND NEW.snapshot_schema_version >= 2
+        AND EXISTS (
+            SELECT 1
+            FROM file_entries AS entries
+            WHERE entries.snapshot_id = NEW.id
+                AND entries.object_type = 'file'
+                AND entries.identity_fingerprint_hash IS NULL
+        )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_V2_REQUIRES_FILE_IDENTITY');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_plan_operation_v3_requires_source_precondition
+    BEFORE INSERT ON plan_seal_details
+    WHEN NEW.operation_schema_version >= 3
+        AND EXISTS (
+            SELECT 1
+            FROM plan_operation_seal_details AS details
+            INNER JOIN planned_operations AS operations
+                ON operations.plan_id = details.plan_id
+                AND operations.id = details.operation_id
+            WHERE details.plan_id = NEW.plan_id
+                AND operations.operation_type = 'COPY_NEW'
+                AND (
+                    details.source_relative_path IS NULL
+                    OR details.source_precondition_json IS NULL
+                )
+        )
+    BEGIN
+        SELECT RAISE(ABORT, 'COPY_PLAN_OPERATION_REQUIRES_SOURCE_PRECONDITION');
+    END
     """,
 )
 
@@ -3477,5 +3546,12 @@ RECOVERY_OPERATION_PLANNED_BYTES = (
     ALTER TABLE recovery_operations
     ADD COLUMN planned_bytes INTEGER NOT NULL DEFAULT 0
         CHECK (planned_bytes >= 0)
+    """,
+)
+
+RECOVERY_SOURCE_FILE_PRECONDITIONS = (
+    """
+    ALTER TABLE recovery_operations
+        ADD COLUMN source_precondition_json TEXT
     """,
 )

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, ClassVar, SupportsInt, cast
 from ctypes import wintypes
 
+from mediasync_home.adapters.file_identity import stable_file_identity_hash
 from mediasync_home.adapters.local_endpoint_classifier import CONTROL_DIRECTORY_NAME
 from mediasync_home.adapters.reparse_guard import (
     LocalFilesystemReparsePathProbe,
@@ -274,7 +275,10 @@ class LocalFilesystemSnapshotScanner:
                     case_context.case_mode,
                 )
                 try:
-                    child_stat = child.stat(follow_symlinks=False)
+                    child_stat = os.stat(
+                        queued.path / child.name,
+                        follow_symlinks=False,
+                    )
                 except OSError:
                     issues.append(
                         _issue(
@@ -346,6 +350,7 @@ class LocalFilesystemSnapshotScanner:
                             comparison_key,
                             object_type="file",
                             size_bytes=int(child_stat.st_size),
+                            identity_fingerprint_hash=stable_file_identity_hash(child_stat),
                         )
                     )
                     continue
@@ -483,6 +488,7 @@ def _entry(
     *,
     object_type: str,
     size_bytes: int | None = None,
+    identity_fingerprint_hash: str | None = None,
 ) -> SnapshotFileEntry:
     digest = hashlib.sha256(
         f"{snapshot_id}\0{relative_path}".encode("utf-8")
@@ -493,6 +499,7 @@ def _entry(
         comparison_key=comparison_key,
         object_type=object_type,
         size_bytes=size_bytes,
+        identity_fingerprint_hash=identity_fingerprint_hash,
     )
 
 

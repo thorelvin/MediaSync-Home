@@ -143,6 +143,24 @@ invariants:
     hash_schema_version: 1
     fingerprint_must_be_stable: true
     immutable: true
+  - id: SRC-001_SOURCE_FILE_PRECONDITION
+    requirement_id: SRC-001
+    assertion: >
+      Every operation-schema-v3 copy binds the source path, file type, byte
+      count and stable scanner identity into the sealed plan and recovery
+      journal; transfer validates that identity before and after reading.
+    snapshot_table: file_entries
+    snapshot_identity_column: identity_fingerprint_hash
+    snapshot_schema_version: 2
+    plan_table: plan_operation_seal_details
+    plan_source_path_column: source_relative_path
+    plan_precondition_column: source_precondition_json
+    operation_schema_version: 3
+    recovery_table: recovery_operations
+    recovery_precondition_column: source_precondition_json
+    precondition_schema_version: 1
+    checksum_bound: true
+    before_and_after_transfer_validation: true
   - id: DB-007_PARENT_SCOPE_COMPOSITE_KEYS
     requirement_id: DB-007
     assertion: Security-relevant child rows are bound to their parent scope with composite keys.

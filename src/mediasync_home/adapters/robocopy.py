@@ -57,6 +57,7 @@ _DISCARD_ROBOCOPY_INBOX_ERROR_CODES = frozenset(
         "ROBOCOPY_PROCESS_CLEANUP_FAILED",
         "ROBOCOPY_PROCESS_TERMINATION_FAILED",
         "ROBOCOPY_PROCESS_WAIT_FAILED",
+        "LOCAL_STAGING_SOURCE_IDENTITY_CHANGED",
         "ROBOCOPY_STAGING_SOURCE_CHANGED",
         "ROBOCOPY_TRANSFER_FAILED",
         "ROBOCOPY_TRANSFER_TIMED_OUT",
@@ -242,6 +243,7 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
                 "ROBOCOPY_STAGING_SOURCE_FILE_MISSING",
                 "Refresh analysis because the planned source file is no longer readable.",
             )
+        self._validate_source_identity(operation, source_path)
         inbox = self._robocopy_inbox_path(operation)
         if inbox.exists():
             raise LocalFileStagingError(
@@ -283,6 +285,7 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
                 command_plan=command_plan,
                 exit_code=self._run_robocopy(command_plan.launch_plan),
             )
+            self._validate_source_identity(operation, source_path)
             if result.failed or result.exit_code > self._profile.success_max_exit_code:
                 raise LocalFileStagingError(
                     "ROBOCOPY_TRANSFER_FAILED",

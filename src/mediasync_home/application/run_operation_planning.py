@@ -20,6 +20,10 @@ from mediasync_home.application.recovery_operations import (
     planned_recovery_operation,
 )
 from mediasync_home.application.runs import RunState, RunStore, RunTargetState, StartedRunTarget
+from mediasync_home.application.source_preconditions import (
+    SourceFilePrecondition,
+    SourceFilePreconditionError,
+)
 from mediasync_home.domain.capabilities import MutationPermit
 
 
@@ -201,12 +205,27 @@ def _planned_recovery_operation(
     source_endpoint_id: str | None = None
     source_endpoint_revision_id: str | None = None
     source_relative_path: str | None = None
+    source_precondition_json: str | None = None
     if operation.operation_type is PlanOperationType.COPY_NEW:
         if source_endpoint is None:
             raise RunTargetOperationPlanningError("PLAN_OPERATION_PLANNING_REQUIRES_SINGLE_SOURCE")
         source_endpoint_id = source_endpoint.endpoint_id
         source_endpoint_revision_id = source_endpoint.endpoint_revision_id
-        source_relative_path = operation.target_relative_path
+        source_relative_path = operation.source_relative_path
+        source_precondition_json = operation.source_precondition_json
+        try:
+            precondition = SourceFilePrecondition.from_json(source_precondition_json)
+        except SourceFilePreconditionError as exc:
+            raise RunTargetOperationPlanningError(exc.validation_code) from exc
+        if (
+            source_relative_path is None
+            or precondition.snapshot_id != source_endpoint.snapshot_id
+            or precondition.relative_path != source_relative_path
+            or precondition.size_bytes != operation.planned_bytes
+        ):
+            raise RunTargetOperationPlanningError(
+                "PLAN_OPERATION_SOURCE_PRECONDITION_MISMATCH"
+            )
     return planned_recovery_operation(
         run_id=permit.run_id,
         run_target_id=permit.run_target_id,
@@ -229,6 +248,7 @@ def _planned_recovery_operation(
         source_endpoint_id=source_endpoint_id,
         source_endpoint_revision_id=source_endpoint_revision_id,
         source_relative_path=source_relative_path,
+        source_precondition_json=source_precondition_json,
     )
 
 
@@ -293,6 +313,7 @@ def _operation_binding_validation_code(plan: SealedPlan) -> str | None:
         endpoint.endpoint_id
         for endpoint in _writable_target_endpoints(plan)
     }
+    source_endpoint = _single_source_endpoint(plan)
     for operation in plan.operations:
         if operation.operation_type not in MUTATING_OPERATION_TYPES:
             continue
@@ -300,6 +321,27 @@ def _operation_binding_validation_code(plan: SealedPlan) -> str | None:
             return "PLAN_OPERATION_MISSING_TARGET_ENDPOINT"
         if operation.target_endpoint_id not in writable_endpoint_ids:
             return "PLAN_OPERATION_TARGET_ENDPOINT_NOT_FOUND"
+        if operation.operation_type is PlanOperationType.COPY_NEW:
+            if (
+                plan.operation_schema_version < 3
+                or operation.source_relative_path is None
+                or operation.source_precondition_json is None
+            ):
+                return "PLAN_OPERATION_SOURCE_PRECONDITION_MISSING"
+            if source_endpoint is None:
+                return "PLAN_OPERATION_PLANNING_REQUIRES_SINGLE_SOURCE"
+            try:
+                precondition = SourceFilePrecondition.from_json(
+                    operation.source_precondition_json
+                )
+            except SourceFilePreconditionError as exc:
+                return exc.validation_code
+            if (
+                precondition.snapshot_id != source_endpoint.snapshot_id
+                or precondition.relative_path != operation.source_relative_path
+                or precondition.size_bytes != operation.planned_bytes
+            ):
+                return "PLAN_OPERATION_SOURCE_PRECONDITION_MISMATCH"
     return None
 
 

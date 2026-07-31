@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from mediasync_home.adapters.file_identity import stable_file_identity_hash
 from mediasync_home.adapters.local_snapshot_scanner import (
     LocalFilesystemSnapshotScanner,
 )
@@ -77,6 +78,27 @@ def test_local_snapshot_scanner_enumerates_nested_tree_deterministically(
         ("Photos/Empty", "directory", None),
         ("Photos/Image.jpg", "file", 5),
     ]
+    assert all(
+        entry.identity_fingerprint_hash is not None
+        for entry in first.entries
+        if entry.object_type == "file"
+    )
+    assert all(
+        entry.identity_fingerprint_hash is None
+        for entry in first.entries
+        if entry.object_type != "file"
+    )
+    identities = {
+        entry.relative_path: entry.identity_fingerprint_hash
+        for entry in first.entries
+        if entry.object_type == "file"
+    }
+    assert identities == {
+        "Readme.txt": stable_file_identity_hash((root / "Readme.txt").stat()),
+        "Photos/Image.jpg": stable_file_identity_hash(
+            (root / "Photos" / "Image.jpg").stat()
+        ),
+    }
     assert [item.relative_path for item in first.coverage] == [
         ".",
         "Photos",

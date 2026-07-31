@@ -128,9 +128,11 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
                         risk_level,
                         target_endpoint_id,
                         target_relative_path,
+                        source_relative_path,
+                        source_precondition_json,
                         planned_bytes
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         plan.plan_id,
@@ -143,6 +145,8 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
                         operation.risk_level.value,
                         operation.target_endpoint_id,
                         operation.target_relative_path,
+                        operation.source_relative_path,
+                        operation.source_precondition_json,
                         operation.planned_bytes,
                     ),
                 )
@@ -362,6 +366,8 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
                 details.risk_level,
                 details.target_endpoint_id,
                 details.target_relative_path,
+                details.source_relative_path,
+                details.source_precondition_json,
                 details.planned_bytes
             FROM plan_operation_seal_details AS details
             INNER JOIN planned_operations AS operations
@@ -384,7 +390,9 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
                 risk_level=PlanRiskLevel(str(row[7])),
                 target_endpoint_id=None if row[8] is None else str(row[8]),
                 target_relative_path=None if row[9] is None else str(row[9]),
-                planned_bytes=int(row[10]),
+                source_relative_path=None if row[10] is None else str(row[10]),
+                source_precondition_json=None if row[11] is None else str(row[11]),
+                planned_bytes=int(row[12]),
             )
             for row in rows
         )

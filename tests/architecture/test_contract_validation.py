@@ -136,6 +136,23 @@ def test_database_contract_rejects_mutable_initial_plan_terminal_evidence() -> N
         validate_contracts.validate_database_contract(document)
 
 
+def test_database_contract_rejects_unbound_source_precondition() -> None:
+    yaml = _yaml_loader()
+    document = validate_contracts.load_yaml(
+        validate_contracts.ROOT / "schema/database-contract.yaml",
+        yaml,
+    )
+    document = copy.deepcopy(document)
+    invariant = _database_invariant(document, "SRC-001_SOURCE_FILE_PRECONDITION")
+    invariant["checksum_bound"] = False
+
+    with pytest.raises(
+        validate_contracts.ContractValidationError,
+        match="source-file precondition contract drifted",
+    ):
+        validate_contracts.validate_database_contract(document)
+
+
 def test_database_contract_rejects_missing_immutable_revision_table() -> None:
     yaml = _yaml_loader()
     document = validate_contracts.load_yaml(

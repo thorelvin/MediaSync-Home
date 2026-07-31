@@ -57,6 +57,7 @@ def test_sqlite_snapshot_entry_batch_is_idempotent_and_preserves_case_collisions
                 comparison_key="readme.txt",
                 object_type="file",
                 size_bytes=64,
+                identity_fingerprint_hash="b" * 64,
             ),
             SnapshotFileEntry(
                 entry_id="file-a",
@@ -64,6 +65,7 @@ def test_sqlite_snapshot_entry_batch_is_idempotent_and_preserves_case_collisions
                 comparison_key="readme.txt",
                 object_type="file",
                 size_bytes=32,
+                identity_fingerprint_hash="a" * 64,
             ),
         )
         assert store.load_directory_coverage("snapshot-a") == _complete_root_coverage()
@@ -520,6 +522,7 @@ def _case_collision_batch(
                 comparison_key="readme.txt",
                 object_type="file",
                 size_bytes=32,
+                identity_fingerprint_hash="a" * 64,
             ),
             SnapshotFileEntry(
                 entry_id="file-b",
@@ -527,6 +530,7 @@ def _case_collision_batch(
                 comparison_key="readme.txt",
                 object_type="file",
                 size_bytes=64,
+                identity_fingerprint_hash="b" * 64,
             ),
         ),
         coverage_updates=_complete_root_coverage(coverage_state),
@@ -545,6 +549,7 @@ def _alpha_batch():
                 comparison_key="alpha.txt",
                 object_type="file",
                 size_bytes=16,
+                identity_fingerprint_hash="c" * 64,
             ),
         ),
     )

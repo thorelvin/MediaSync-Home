@@ -9,6 +9,10 @@ from mediasync_home.generated.contract_types import (
     RECOVERY_OPERATION_TERMINAL_PHASES,
     RecoveryOperationPhase as RecoveryOperationPhase,
 )
+from mediasync_home.application.source_preconditions import (
+    SourceFilePrecondition,
+    SourceFilePreconditionError,
+)
 
 
 HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -53,6 +57,7 @@ class RecoveryOperation:
     source_endpoint_id: str | None = None
     source_endpoint_revision_id: str | None = None
     source_relative_path: str | None = None
+    source_precondition_json: str | None = None
     source_guard_kind: str | None = None
     source_guard_evidence_hash: str | None = None
     source_hash_evidence_kind: str | None = None
@@ -250,6 +255,7 @@ def planned_recovery_operation(
     source_endpoint_id: str | None = None,
     source_endpoint_revision_id: str | None = None,
     source_relative_path: str | None = None,
+    source_precondition_json: str | None = None,
 ) -> RecoveryOperation:
     operation = RecoveryOperation(
         run_id=run_id,
@@ -272,6 +278,7 @@ def planned_recovery_operation(
         source_endpoint_id=source_endpoint_id,
         source_endpoint_revision_id=source_endpoint_revision_id,
         source_relative_path=source_relative_path,
+        source_precondition_json=source_precondition_json,
     )
     validate_recovery_operation(operation)
     return operation
@@ -305,6 +312,17 @@ def validate_recovery_operation(operation: RecoveryOperation) -> None:
         operation.source_relative_path
     ):
         raise RecoveryOperationViolation("RECOVERY_OPERATION_REQUIRES_RELATIVE_SOURCE_PATH")
+    if operation.source_precondition_json is not None:
+        try:
+            source_precondition = SourceFilePrecondition.from_json(
+                operation.source_precondition_json
+            )
+        except SourceFilePreconditionError as exc:
+            raise RecoveryOperationViolation(exc.validation_code) from exc
+        if source_precondition.relative_path != operation.source_relative_path:
+            raise RecoveryOperationViolation(
+                "RECOVERY_OPERATION_SOURCE_PRECONDITION_MISMATCH"
+            )
     _validate_hash("RECOVERY_OPERATION_REQUIRES_SOURCE_GUARD_HASH", operation.source_guard_evidence_hash)
     _validate_hash("RECOVERY_OPERATION_REQUIRES_SOURCE_PATH_CHAIN_HASH", operation.source_path_chain_hash)
     _validate_hash("RECOVERY_OPERATION_REQUIRES_SOURCE_CASE_CONTEXT_HASH", operation.source_case_context_hash)

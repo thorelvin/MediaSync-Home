@@ -459,7 +459,13 @@ class SqliteInitialBackupPlanMaterializer:
     ) -> tuple[SnapshotFileEntry, ...]:
         rows = self._connection.execute(
             """
-            SELECT id, relative_path, comparison_key, object_type, size_bytes
+            SELECT
+                id,
+                relative_path,
+                comparison_key,
+                object_type,
+                size_bytes,
+                identity_fingerprint_hash
             FROM file_entries
             WHERE snapshot_id = ?
             ORDER BY comparison_key, relative_path, id
@@ -473,6 +479,7 @@ class SqliteInitialBackupPlanMaterializer:
                 comparison_key=str(row[2]),
                 object_type=str(row[3]),
                 size_bytes=None if row[4] is None else int(row[4]),
+                identity_fingerprint_hash=None if row[5] is None else str(row[5]),
             )
             for row in rows
         )

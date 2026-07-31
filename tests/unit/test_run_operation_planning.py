@@ -21,6 +21,7 @@ from mediasync_home.application.recovery_operations import (
     RecoveryTargetPreconditionKind,
 )
 from mediasync_home.application.run_operation_planning import plan_run_target_recovery_operations
+from mediasync_home.application.source_preconditions import SourceFilePrecondition
 from mediasync_home.application.runs import (
     RunState,
     RunStore,
@@ -60,6 +61,7 @@ def test_plan_run_target_recovery_operations_records_mutating_plan_operations() 
     assert operation.source_endpoint_id == "source-a"
     assert operation.source_endpoint_revision_id == "source-rev-a"
     assert operation.source_relative_path == "Pictures/A.jpg"
+    assert operation.source_precondition_json == _source_precondition()
     assert recovery_operations.payloads == (
         {
             "operation_type": "COPY_NEW",
@@ -201,6 +203,22 @@ def test_plan_run_target_recovery_operations_requires_matching_plan_checksum() -
 
     assert outcome.planned is False
     assert outcome.validation_codes == ("PLAN_CHECKSUM_MISMATCH",)
+
+
+def test_plan_run_target_recovery_operations_rejects_source_snapshot_mismatch() -> None:
+    plan = _sealed_plan(source_snapshot_id="stale-source-snapshot")
+    run = replace(_executing_run(), plan_checksum=plan.plan_checksum)
+
+    outcome = plan_run_target_recovery_operations(
+        permit=_permit(),
+        runs=_SingleRunStore(run),
+        plans=_SinglePlanStore(plan),
+        recovery_operations=_FakeRecoveryOperationStore(),
+        process_instance_id="host-a",
+    )
+
+    assert outcome.planned is False
+    assert outcome.validation_codes == ("PLAN_OPERATION_SOURCE_PRECONDITION_MISMATCH",)
 
 
 def test_plan_run_target_recovery_operations_selects_bound_multi_target_operations() -> None:
@@ -375,6 +393,7 @@ def _sealed_plan(
     reason_code: str = "COPY_NEW",
     target_precondition_kind: TargetPreconditionKind = TargetPreconditionKind.ABSENT,
     endpoint_generation: int = 1,
+    source_snapshot_id: str = "source-snapshot-a",
 ) -> SealedPlan:
     return seal_plan(
         plan_id="plan-a",
@@ -394,6 +413,10 @@ def _sealed_plan(
                 stable_order_key="020:Pictures/A.jpg",
                 target_precondition_kind=target_precondition_kind,
                 target_relative_path="Pictures/A.jpg",
+                source_relative_path="Pictures/A.jpg",
+                source_precondition_json=_source_precondition(
+                    snapshot_id=source_snapshot_id
+                ),
                 planned_bytes=128,
                 reason_code=reason_code,
                 risk_level=PlanRiskLevel.LOW,
@@ -475,6 +498,8 @@ def _multi_target_plan() -> SealedPlan:
                 target_precondition_kind=TargetPreconditionKind.ABSENT,
                 target_endpoint_id="target-a",
                 target_relative_path="Pictures/A.jpg",
+                source_relative_path="Pictures/A.jpg",
+                source_precondition_json=_source_precondition(),
                 planned_bytes=128,
                 reason_code="COPY_NEW",
                 risk_level=PlanRiskLevel.LOW,
@@ -488,12 +513,24 @@ def _multi_target_plan() -> SealedPlan:
                 target_precondition_kind=TargetPreconditionKind.ABSENT,
                 target_endpoint_id="target-b",
                 target_relative_path="Pictures/A.jpg",
+                source_relative_path="Pictures/A.jpg",
+                source_precondition_json=_source_precondition(),
                 planned_bytes=128,
                 reason_code="COPY_NEW",
                 risk_level=PlanRiskLevel.LOW,
             ),
         ),
     )
+
+
+def _source_precondition(*, snapshot_id: str = "source-snapshot-a") -> str:
+    return SourceFilePrecondition(
+        snapshot_id=snapshot_id,
+        snapshot_entry_id="source-entry-a",
+        relative_path="Pictures/A.jpg",
+        size_bytes=128,
+        identity_fingerprint_hash="a" * 64,
+    ).to_json()
 
 
 def _permit() -> MutationPermit:

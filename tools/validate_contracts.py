@@ -700,6 +700,33 @@ def _validate_current_read_hash_evidence_invariant(
         fail("HASH-001 current-read hash evidence must be immutable")
 
 
+def _validate_source_file_precondition_invariant(
+    invariant: dict[str, Any],
+) -> None:
+    if invariant.get("requirement_id") != "SRC-001":
+        fail("source-file precondition invariant must reference SRC-001")
+    expected = {
+        "snapshot_table": "file_entries",
+        "snapshot_identity_column": "identity_fingerprint_hash",
+        "snapshot_schema_version": 2,
+        "plan_table": "plan_operation_seal_details",
+        "plan_source_path_column": "source_relative_path",
+        "plan_precondition_column": "source_precondition_json",
+        "operation_schema_version": 3,
+        "recovery_table": "recovery_operations",
+        "recovery_precondition_column": "source_precondition_json",
+        "precondition_schema_version": 1,
+        "checksum_bound": True,
+        "before_and_after_transfer_validation": True,
+    }
+    drifted = sorted(
+        key for key, expected_value in expected.items()
+        if invariant.get(key) != expected_value
+    )
+    if drifted:
+        fail(f"SRC-001 source-file precondition contract drifted: {drifted}")
+
+
 def validate_state_machines(document: dict[str, Any]) -> int:
     if document.get("schema_version") != 1:
         fail("state-machines.yaml schema_version must be 1")
@@ -781,6 +808,7 @@ def validate_database_contract(document: dict[str, Any]) -> int:
         "DB-006_JOB_HEADS_ARE_SEPARATE",
         "DB-007_PARENT_SCOPE_COMPOSITE_KEYS",
         "HASH-001_CURRENT_READ_HASH_EVIDENCE",
+        "SRC-001_SOURCE_FILE_PRECONDITION",
         "SYNC-002_INITIAL_BACKUP_PLAN_MATERIALIZATION",
     }
     missing = sorted(required_ids - set(invariant_by_id))
@@ -817,6 +845,9 @@ def validate_database_contract(document: dict[str, Any]) -> int:
     )
     _validate_current_read_hash_evidence_invariant(
         invariant_by_id["HASH-001_CURRENT_READ_HASH_EVIDENCE"]
+    )
+    _validate_source_file_precondition_invariant(
+        invariant_by_id["SRC-001_SOURCE_FILE_PRECONDITION"]
     )
     _validate_parent_scope_invariant(invariant_by_id["DB-007_PARENT_SCOPE_COMPOSITE_KEYS"])
     return len(invariants)

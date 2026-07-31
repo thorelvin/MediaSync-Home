@@ -1,5 +1,18 @@
 # Implementeringsstatus
 
+Oppdatering 2026-07-31: Kildebytes er nå bundet til analysen som opprettet
+planen. Snapshot schema 2 og catalog schema 37 lagrer et stabilt
+identitetsfingerprint for hver kildefil. Operation schema 3 forsegler eksakt
+snapshotpost, relativ sti, filtype, størrelse og identitet i planchecksumen og
+fører samme precondition videre til recovery schema 8. Lokal transfer validerer
+identiteten før åpning, holder filhåndtaket gjennom hashlesingen, sammenligner
+`fstat` før og etter lesing og kontrollerer kilden igjen etter kopiering.
+Robocopy-kjøring kontrollerer samme identitet rett før child-start og etter
+child-exit før inboxen kan publiseres. Endring av kilden etter analyse eller
+under transfer stopper operasjonen uten å publisere målfilen. Et kildehåndtak
+holdt gjennom hele den eksterne Robocopy-prosessen og bredere SMB-fault injection
+gjenstår som Windows-spesifikk hardening.
+
 Oppdatering 2026-07-31: Gjentatte backuper skiller nå dokumentert identiske
 filer fra reelle endringer. Catalog schema 36 lagrer append-only
 `CURRENT_READ_HASH`-evidens for eksakte immutable snapshotposter. Den lokale

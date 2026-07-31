@@ -118,9 +118,10 @@ class SqliteSnapshotEntryStore(
                         relative_path,
                         comparison_key,
                         object_type,
-                        size_bytes
+                        size_bytes,
+                        identity_fingerprint_hash
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         batch.snapshot_id,
@@ -130,6 +131,7 @@ class SqliteSnapshotEntryStore(
                         entry.comparison_key,
                         entry.object_type,
                         entry.size_bytes,
+                        entry.identity_fingerprint_hash,
                     ),
                 )
             for coverage in batch.coverage_updates:
@@ -224,7 +226,13 @@ class SqliteSnapshotEntryStore(
     def load_snapshot_entries(self, snapshot_id: str) -> tuple[SnapshotFileEntry, ...]:
         rows = self._connection.execute(
             """
-            SELECT id, relative_path, comparison_key, object_type, size_bytes
+            SELECT
+                id,
+                relative_path,
+                comparison_key,
+                object_type,
+                size_bytes,
+                identity_fingerprint_hash
             FROM file_entries
             WHERE snapshot_id = ?
             ORDER BY relative_path, id
@@ -238,6 +246,7 @@ class SqliteSnapshotEntryStore(
                 comparison_key=str(row[2]),
                 object_type=str(row[3]),
                 size_bytes=None if row[4] is None else int(row[4]),
+                identity_fingerprint_hash=None if row[5] is None else str(row[5]),
             )
             for row in rows
         )

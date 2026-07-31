@@ -9,9 +9,10 @@ from typing import Protocol
 
 HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
-SNAPSHOT_SCHEMA_VERSION = 1
+SNAPSHOT_SCHEMA_VERSION = 2
 SNAPSHOT_CHECKSUM_ALGORITHM = "SHA-256"
-SNAPSHOT_SERIALIZER_VERSION = "0B-SNAPSHOT-CANONICAL-JSON-V1"
+SNAPSHOT_SERIALIZER_VERSION = "0B-SNAPSHOT-CANONICAL-JSON-V2"
+LEGACY_SNAPSHOT_SERIALIZER_VERSION = "0B-SNAPSHOT-CANONICAL-JSON-V1"
 SNAPSHOT_COMPLETE_COVERAGE_STATE = "COMPLETE"
 MAX_SNAPSHOT_ENTRY_PAGE_LIMIT = 1000
 MAX_SNAPSHOT_COVERAGE_PAGE_LIMIT = 1000
@@ -41,6 +42,7 @@ class SnapshotFileEntry:
     comparison_key: str
     object_type: str
     size_bytes: int | None = None
+    identity_fingerprint_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -292,6 +294,7 @@ def snapshot_seal(
     issues: tuple[SnapshotIssue, ...],
     batches: tuple[SnapshotBatchSummary, ...],
     case_collision_group_count: int,
+    snapshot_schema_version: int = SNAPSHOT_SCHEMA_VERSION,
 ) -> SealedSnapshot:
     ordered_entries = tuple(sorted(entries, key=lambda entry: (entry.relative_path, entry.entry_id)))
     ordered_coverage = tuple(sorted(coverage, key=lambda item: item.relative_path))
@@ -304,6 +307,7 @@ def snapshot_seal(
         issues=ordered_issues,
         batches=ordered_batches,
         case_collision_group_count=case_collision_group_count,
+        snapshot_schema_version=snapshot_schema_version,
     )
     entry_count = len(ordered_entries)
     total_bytes = sum(entry.size_bytes or 0 for entry in ordered_entries)
@@ -316,12 +320,14 @@ def snapshot_seal(
         entry_count=entry_count,
         total_bytes=total_bytes,
         case_collision_group_count=case_collision_group_count,
+        snapshot_schema_version=snapshot_schema_version,
     )
+    serializer_version = _serializer_version(snapshot_schema_version)
     sealed = SealedSnapshot(
         snapshot_id=snapshot_id,
-        snapshot_schema_version=SNAPSHOT_SCHEMA_VERSION,
+        snapshot_schema_version=snapshot_schema_version,
         checksum_algorithm=SNAPSHOT_CHECKSUM_ALGORITHM,
-        serializer_version=SNAPSHOT_SERIALIZER_VERSION,
+        serializer_version=serializer_version,
         snapshot_checksum=checksum,
         entry_count=entry_count,
         total_bytes=total_bytes,
@@ -353,6 +359,7 @@ def verify_snapshot_checksum(
             issues=issues,
             batches=batches,
             case_collision_group_count=snapshot.case_collision_group_count,
+            snapshot_schema_version=snapshot.snapshot_schema_version,
         )
     except SnapshotMaterializationError:
         return False
@@ -452,7 +459,7 @@ def validate_sealed_snapshot(snapshot: SealedSnapshot) -> None:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_REQUIRES_SCHEMA_VERSION")
     if snapshot.checksum_algorithm != SNAPSHOT_CHECKSUM_ALGORITHM:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_REQUIRES_CHECKSUM_ALGORITHM")
-    if snapshot.serializer_version != SNAPSHOT_SERIALIZER_VERSION:
+    if snapshot.serializer_version != _serializer_version(snapshot.snapshot_schema_version):
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_REQUIRES_SERIALIZER_VERSION")
     if HASH_PATTERN.fullmatch(snapshot.snapshot_checksum) is None:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_REQUIRES_CHECKSUM")
@@ -505,6 +512,11 @@ def validate_snapshot_entry_batch(batch: SnapshotEntryBatch) -> None:
             raise SnapshotMaterializationError("SNAPSHOT_ENTRY_REQUIRES_OBJECT_TYPE")
         if entry.size_bytes is not None and entry.size_bytes < 0:
             raise SnapshotMaterializationError("SNAPSHOT_ENTRY_SIZE_MUST_BE_NON_NEGATIVE")
+        if (
+            entry.identity_fingerprint_hash is not None
+            and HASH_PATTERN.fullmatch(entry.identity_fingerprint_hash) is None
+        ):
+            raise SnapshotMaterializationError("SNAPSHOT_ENTRY_IDENTITY_FINGERPRINT_INVALID")
     _validate_directory_coverage(batch.coverage_updates)
     _validate_snapshot_issues(batch.issues)
 
@@ -528,6 +540,7 @@ def _payload_hash(
             {
                 "comparison_key": entry.comparison_key,
                 "entry_id": entry.entry_id,
+                "identity_fingerprint_hash": entry.identity_fingerprint_hash,
                 "object_type": entry.object_type,
                 "relative_path": entry.relative_path,
                 "size_bytes": entry.size_bytes,
@@ -553,7 +566,9 @@ def _snapshot_checksum(
     entry_count: int,
     total_bytes: int,
     case_collision_group_count: int,
+    snapshot_schema_version: int,
 ) -> str:
+    serializer_version = _serializer_version(snapshot_schema_version)
     payload = {
         "batch_count": len(batches),
         "batches": [
@@ -573,13 +588,10 @@ def _snapshot_checksum(
         "coverage": [_directory_coverage_payload(item) for item in coverage],
         "directory_coverage_count": len(coverage),
         "entries": [
-            {
-                "comparison_key": entry.comparison_key,
-                "entry_id": entry.entry_id,
-                "object_type": entry.object_type,
-                "relative_path": entry.relative_path,
-                "size_bytes": entry.size_bytes,
-            }
+            _snapshot_entry_payload(
+                entry,
+                include_identity=snapshot_schema_version >= 2,
+            )
             for entry in entries
         ],
         "entry_count": entry_count,
@@ -587,9 +599,9 @@ def _snapshot_checksum(
         "issue_count": len(issues),
         "issues": [_snapshot_issue_payload(issue) for issue in issues],
         "blocking_issue_count": sum(1 for issue in issues if issue.blocks_destructive_actions),
-        "serializer_version": SNAPSHOT_SERIALIZER_VERSION,
+        "serializer_version": serializer_version,
         "snapshot_id": snapshot_id,
-        "snapshot_schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "snapshot_schema_version": snapshot_schema_version,
         "total_bytes": total_bytes,
     }
     return hashlib.sha256(
@@ -605,11 +617,21 @@ def _validate_snapshot_seal_inputs(
     issues: tuple[SnapshotIssue, ...],
     batches: tuple[SnapshotBatchSummary, ...],
     case_collision_group_count: int,
+    snapshot_schema_version: int,
 ) -> None:
     if not snapshot_id.strip():
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_REQUIRES_SNAPSHOT_ID")
     if case_collision_group_count < 0:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_CASE_GROUP_COUNT_MUST_BE_NON_NEGATIVE")
+    _serializer_version(snapshot_schema_version)
+    if snapshot_schema_version >= 2 and any(
+        entry.object_type == "file"
+        and HASH_PATTERN.fullmatch(entry.identity_fingerprint_hash or "") is None
+        for entry in entries
+    ):
+        raise SnapshotMaterializationError(
+            "SNAPSHOT_SEAL_REQUIRES_FILE_IDENTITY_FINGERPRINT"
+        )
     validate_snapshot_entry_batch(
         SnapshotEntryBatch(
             snapshot_id=snapshot_id,
@@ -651,6 +673,31 @@ def _validate_snapshot_batch_summaries(batches: tuple[SnapshotBatchSummary, ...]
             raise SnapshotMaterializationError("SNAPSHOT_SEAL_BATCH_ISSUE_COUNT_MUST_BE_NON_NEGATIVE")
         if batch.approximate_bytes < 0:
             raise SnapshotMaterializationError("SNAPSHOT_SEAL_BATCH_BYTES_MUST_BE_NON_NEGATIVE")
+
+
+def _serializer_version(snapshot_schema_version: int) -> str:
+    if snapshot_schema_version == 1:
+        return LEGACY_SNAPSHOT_SERIALIZER_VERSION
+    if snapshot_schema_version == SNAPSHOT_SCHEMA_VERSION:
+        return SNAPSHOT_SERIALIZER_VERSION
+    raise SnapshotMaterializationError("SNAPSHOT_SEAL_SCHEMA_VERSION_UNSUPPORTED")
+
+
+def _snapshot_entry_payload(
+    entry: SnapshotFileEntry,
+    *,
+    include_identity: bool,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "comparison_key": entry.comparison_key,
+        "entry_id": entry.entry_id,
+        "object_type": entry.object_type,
+        "relative_path": entry.relative_path,
+        "size_bytes": entry.size_bytes,
+    }
+    if include_identity:
+        payload["identity_fingerprint_hash"] = entry.identity_fingerprint_hash
+    return payload
 
 
 def _validate_directory_coverage(coverage_updates: tuple[SnapshotDirectoryCoverage, ...]) -> None:

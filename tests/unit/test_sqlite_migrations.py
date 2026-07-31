@@ -57,8 +57,18 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
             34,
             35,
             36,
+            37,
         ]
-    assert [migration.version for migration in recovery.migrations] == [1, 2, 3, 4, 5, 6, 7]
+    assert [migration.version for migration in recovery.migrations] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+    ]
     assert catalog.migrations[0].name == "catalog_core_contract_skeleton"
     assert catalog.migrations[1].name == "catalog_standard_backup_drafts"
     assert catalog.migrations[2].name == "catalog_standard_backup_job_revisions"
@@ -98,6 +108,7 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
     assert catalog.migrations[33].name == "catalog_run_stop_requests"
     assert catalog.migrations[34].name == "catalog_backup_analysis_requests"
     assert catalog.migrations[35].name == "catalog_current_read_hash_evidence"
+    assert catalog.migrations[36].name == "catalog_source_file_preconditions"
     assert recovery.migrations[0].name == "recovery_journal_skeleton"
     assert recovery.migrations[1].name == "recovery_lease_counters"
     assert recovery.migrations[2].name == "recovery_resource_leases"
@@ -105,6 +116,7 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
     assert recovery.migrations[4].name == "recovery_operation_journal"
     assert recovery.migrations[5].name == "recovery_operation_kind_and_plan_sequence"
     assert recovery.migrations[6].name == "recovery_operation_planned_bytes"
+    assert recovery.migrations[7].name == "recovery_source_file_preconditions"
 
 
 def test_migration_plan_requires_contiguous_versions() -> None:

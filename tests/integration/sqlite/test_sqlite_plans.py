@@ -27,6 +27,7 @@ from mediasync_home.application.plans import (
     seal_plan,
     verify_plan_checksum,
 )
+from mediasync_home.application.source_preconditions import SourceFilePrecondition
 
 
 def test_sqlite_plan_store_persists_sealed_plan(tmp_path: Path) -> None:
@@ -315,6 +316,8 @@ def _sealed_plan() -> SealedPlan:
                 stable_order_key="020:Pictures/A.jpg",
                 target_precondition_kind=TargetPreconditionKind.ABSENT,
                 target_relative_path="Pictures/A.jpg",
+                source_relative_path="Pictures/A.jpg",
+                source_precondition_json=_source_precondition(),
                 planned_bytes=128,
                 reason_code="COPY_NEW",
                 risk_level=PlanRiskLevel.LOW,
@@ -333,6 +336,16 @@ def _sealed_plan() -> SealedPlan:
         ),
         dependencies=(PlanDependency(before_operation_id="op-copy", after_operation_id="op-skip"),),
     )
+
+
+def _source_precondition() -> str:
+    return SourceFilePrecondition(
+        snapshot_id="source-snapshot-a",
+        snapshot_entry_id="source-entry-a",
+        relative_path="Pictures/A.jpg",
+        size_bytes=128,
+        identity_fingerprint_hash="a" * 64,
+    ).to_json()
 
 
 def _operation_page_plan() -> SealedPlan:

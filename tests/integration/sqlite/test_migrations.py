@@ -34,7 +34,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 36
+        assert current_schema_version(connection, plan.store) == 37
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -75,7 +75,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
                 "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 36
+        assert _row_count(connection, "schema_migrations") == 37
         assert _column_names(connection, "endpoint_revisions") >= {"generation"}
         assert _column_names(connection, "snapshots") >= {"endpoint_generation"}
         assert _column_names(connection, "plan_endpoints") >= {"endpoint_generation"}
@@ -359,6 +359,8 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "trg_case_collision_members_no_insert_after_snapshot_immutable",
             "trg_snapshots_seal_insert_requires_checksum",
             "trg_snapshots_seal_update_requires_checksum",
+            "trg_snapshot_v2_requires_file_identity",
+            "trg_plan_operation_v3_requires_source_precondition",
         }
         assert _column_names(connection, "snapshots") >= {
             "complete",
@@ -367,6 +369,11 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "snapshot_checksum",
             "scan_error_count",
             "volatile_directory_count",
+        }
+        assert "identity_fingerprint_hash" in _column_names(connection, "file_entries")
+        assert _column_names(connection, "plan_operation_seal_details") >= {
+            "source_relative_path",
+            "source_precondition_json",
         }
         assert _column_names(connection, "endpoint_revisions") >= {
             "control_area_id",
@@ -767,7 +774,7 @@ def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(tmp_path
 
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 7
+        assert current_schema_version(connection, plan.store) == 8
         assert _table_names(connection) >= {
             "lease_counters",
             "resource_leases",
@@ -788,6 +795,10 @@ def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(tmp_path
                 """
             )
         assert "trg_recovery_intent_segments_immutable_after_durable" in _trigger_names(connection)
+        assert "source_precondition_json" in _column_names(
+            connection,
+            "recovery_operations",
+        )
 
 
 def test_migration_runner_rejects_wrong_store_identity(tmp_path: Path) -> None:
@@ -850,7 +861,7 @@ def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> N
                 name,
                 migration_checksum
             )
-                    VALUES ('catalog', 37, 'future_migration', ?)
+                    VALUES ('catalog', 38, 'future_migration', ?)
             """,
             ("f" * 64,),
         )
@@ -957,8 +968,8 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
         preflight = inspect_sqlite_migration_state(connection, plan)
 
         assert preflight.initialized
-        assert preflight.current_version == 36
-        assert preflight.target_version == 36
+        assert preflight.current_version == 37
+        assert preflight.target_version == 37
         assert preflight.checksum_backfill_required
         assert "migration_checksum" not in _column_names(
             connection,

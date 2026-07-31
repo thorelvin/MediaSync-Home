@@ -5,10 +5,12 @@ import json
 import os
 import re
 import shutil
+import stat
 from pathlib import Path
 from uuid import uuid4
 
 from mediasync_home.adapters.endpoint_leases import EndpointLeaseUnavailable, EndpointRootResolver
+from mediasync_home.adapters.file_identity import stable_file_identity_hash
 from mediasync_home.adapters.reparse_guard import (
     LocalReparseGuard,
     ReparseGuard,
@@ -35,6 +37,10 @@ from mediasync_home.application.run_staging import (
     TargetPreconditionEvidence,
 )
 from mediasync_home.application.safe_paths import SafePathViolation, parse_endpoint_relative_path
+from mediasync_home.application.source_preconditions import (
+    SourceFilePrecondition,
+    SourceFilePreconditionError,
+)
 from mediasync_home.domain.capabilities import MutationPermit
 
 
@@ -72,13 +78,22 @@ class LocalFileStagingTransferAdapter:
                 "LOCAL_STAGING_SOURCE_FILE_MISSING",
                 "Refresh analysis because the planned source file is no longer readable.",
             )
-        fingerprint = _fingerprint_file(source_path)
+        fingerprint = _fingerprint_source_file(
+            source_path,
+            precondition=_source_precondition(operation),
+        )
         return SourceValidationEvidence(
             fingerprint_json=_canonical_json(fingerprint),
             hash_evidence_kind="SHA256_CURRENT_SOURCE_FILE",
         )
 
     def bind_source_stability(self, operation: RecoveryOperation) -> SourceStabilityEvidence:
+        if operation.operation_kind is RecoveryOperationKind.COPY_NEW:
+            precondition = _source_precondition(operation)
+            return SourceStabilityEvidence(
+                guard_kind="PLAN_IDENTITY_AND_OPEN_READ_FSTAT_V1",
+                guard_evidence_hash=precondition.identity_fingerprint_hash,
+            )
         content_hash = _expected_content_hash(
             operation.expected_source_fingerprint_json,
             validation_code="LOCAL_STAGING_REQUIRES_SOURCE_FINGERPRINT",
@@ -237,7 +252,11 @@ class LocalFileStagingTransferAdapter:
         source_path = self._source_path(operation)
         temp_path = payload_path.with_name(f".{payload_path.name}.{uuid4().hex}.tmp")
         try:
-            observed = _copy_file_with_hash(source=source_path, destination=temp_path)
+            observed = _copy_file_with_hash(
+                source=source_path,
+                destination=temp_path,
+                precondition=_source_precondition(operation),
+            )
             if observed != expected:
                 raise LocalFileStagingError(
                     "LOCAL_STAGING_SOURCE_CHANGED",
@@ -284,7 +303,10 @@ class LocalFileStagingTransferAdapter:
                 "LOCAL_STAGING_HASH_MISMATCH",
                 "Restage the source file before publishing commit intent.",
             )
-        current_source = _fingerprint_file(self._source_path(operation))
+        current_source = _fingerprint_source_file(
+            self._source_path(operation),
+            precondition=_source_precondition(operation),
+        )
         if current_source != expected:
             raise LocalFileStagingError(
                 "LOCAL_STAGING_SOURCE_CHANGED_AFTER_TRANSFER",
@@ -383,6 +405,23 @@ class LocalFileStagingTransferAdapter:
                 "Refresh endpoint adoption before reading source content.",
             ) from exc
         return path
+
+    def _validate_source_identity(
+        self,
+        operation: RecoveryOperation,
+        source_path: Path,
+    ) -> None:
+        precondition = _source_precondition(operation)
+        try:
+            with source_path.open("rb", buffering=0) as stream:
+                _require_source_identity(os.fstat(stream.fileno()), precondition)
+        except LocalFileStagingError:
+            raise
+        except OSError as exc:
+            raise LocalFileStagingError(
+                "LOCAL_STAGING_SOURCE_FILE_UNREADABLE",
+                "Close applications using the file and refresh the backup analysis.",
+            ) from exc
 
     def _target_root(self, *, permit: MutationPermit, operation: RecoveryOperation) -> Path:
         return self._resolve_root(
@@ -577,10 +616,16 @@ def _expected_target_fingerprint(raw_payload: str) -> dict[str, object]:
     return {"byte_count": byte_count, "content_hash": content_hash}
 
 
-def _copy_file_with_hash(*, source: Path, destination: Path) -> dict[str, object]:
+def _copy_file_with_hash(
+    *,
+    source: Path,
+    destination: Path,
+    precondition: SourceFilePrecondition,
+) -> dict[str, object]:
     digest = hashlib.sha256()
     byte_count = 0
     with source.open("rb") as reader, destination.open("xb") as writer:
+        _require_source_identity(os.fstat(reader.fileno()), precondition)
         while True:
             chunk = reader.read(1024 * 1024)
             if not chunk:
@@ -590,6 +635,7 @@ def _copy_file_with_hash(*, source: Path, destination: Path) -> dict[str, object
             writer.write(chunk)
         writer.flush()
         os.fsync(writer.fileno())
+        _require_source_identity(os.fstat(reader.fileno()), precondition)
     return {"byte_count": byte_count, "content_hash": digest.hexdigest()}
 
 
@@ -604,6 +650,70 @@ def _fingerprint_file(path: Path) -> dict[str, object]:
             digest.update(chunk)
             byte_count += len(chunk)
     return {"byte_count": byte_count, "content_hash": digest.hexdigest()}
+
+
+def _fingerprint_source_file(
+    path: Path,
+    *,
+    precondition: SourceFilePrecondition,
+) -> dict[str, object]:
+    digest = hashlib.sha256()
+    byte_count = 0
+    try:
+        with path.open("rb", buffering=0) as handle:
+            _require_source_identity(os.fstat(handle.fileno()), precondition)
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                byte_count += len(chunk)
+            _require_source_identity(os.fstat(handle.fileno()), precondition)
+    except LocalFileStagingError:
+        raise
+    except OSError as exc:
+        raise LocalFileStagingError(
+            "LOCAL_STAGING_SOURCE_FILE_UNREADABLE",
+            "Close applications using the file and refresh the backup analysis.",
+        ) from exc
+    return {"byte_count": byte_count, "content_hash": digest.hexdigest()}
+
+
+def _source_precondition(operation: RecoveryOperation) -> SourceFilePrecondition:
+    try:
+        precondition = SourceFilePrecondition.from_json(operation.source_precondition_json)
+    except SourceFilePreconditionError as exc:
+        raise LocalFileStagingError(exc.validation_code, exc.next_action) from exc
+    if (
+        operation.source_relative_path != precondition.relative_path
+        or operation.planned_bytes != precondition.size_bytes
+    ):
+        raise LocalFileStagingError(
+            "LOCAL_STAGING_SOURCE_PRECONDITION_MISMATCH",
+            "Refresh analysis before copying this source file.",
+        )
+    return precondition
+
+
+def _require_source_identity(
+    value: os.stat_result,
+    precondition: SourceFilePrecondition,
+) -> None:
+    if not stat.S_ISREG(value.st_mode):
+        raise LocalFileStagingError(
+            "LOCAL_STAGING_SOURCE_TYPE_CHANGED",
+            "Refresh analysis because the source is no longer a regular file.",
+        )
+    if int(value.st_size) != precondition.size_bytes:
+        raise LocalFileStagingError(
+            "LOCAL_STAGING_SOURCE_SIZE_CHANGED",
+            "Refresh analysis because the source file size changed.",
+        )
+    if stable_file_identity_hash(value) != precondition.identity_fingerprint_hash:
+        raise LocalFileStagingError(
+            "LOCAL_STAGING_SOURCE_IDENTITY_CHANGED",
+            "Refresh analysis because the source file changed after it was scanned.",
+        )
 
 
 def _canonical_json(payload: dict[str, object]) -> str:

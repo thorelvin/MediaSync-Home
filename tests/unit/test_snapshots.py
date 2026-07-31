@@ -278,6 +278,7 @@ def test_snapshot_seal_checksum_is_deterministic_and_verifiable() -> None:
                     comparison_key="readme.txt",
                     object_type="file",
                     size_bytes=31,
+                    identity_fingerprint_hash="a" * 64,
                 ),
                 batch.entries[1],
             ),
@@ -383,6 +384,7 @@ def _case_collision_batch(
                 comparison_key="readme.txt",
                 object_type="file",
                 size_bytes=32,
+                identity_fingerprint_hash="a" * 64,
             ),
             SnapshotFileEntry(
                 entry_id="file-b",
@@ -390,6 +392,7 @@ def _case_collision_batch(
                 comparison_key="readme.txt",
                 object_type="file",
                 size_bytes=64,
+                identity_fingerprint_hash="b" * 64,
             ),
         ),
         coverage_updates=_complete_root_coverage() if coverage is None else coverage,

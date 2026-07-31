@@ -4,6 +4,8 @@ from dataclasses import replace
 
 import pytest
 
+from tests.support.source_preconditions import source_precondition_json
+
 from mediasync_home.application.plans import (
     PlanEndpoint,
     PlanEndpointRole,
@@ -582,6 +584,8 @@ def _copy_operation() -> PlanOperation:
         stable_order_key="020:Pictures/A.jpg",
         target_precondition_kind=TargetPreconditionKind.ABSENT,
         target_relative_path="Pictures/A.jpg",
+        source_relative_path="Pictures/A.jpg",
+        source_precondition_json=source_precondition_json(),
         planned_bytes=128,
         reason_code="COPY_NEW",
         risk_level=PlanRiskLevel.LOW,

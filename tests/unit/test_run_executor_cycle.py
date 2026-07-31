@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Mapping, cast
 
+from tests.support.source_preconditions import source_precondition_json
+
 from mediasync_home.application.catalog_handoff import (
     FinalFileCatalogHandoff,
     FinalFileCatalogHandoffStore,
@@ -1405,6 +1407,8 @@ def _sealed_plan() -> SealedPlan:
                 stable_order_key="020:Pictures/A.jpg",
                 target_precondition_kind=TargetPreconditionKind.ABSENT,
                 target_relative_path="Pictures/A.jpg",
+                source_relative_path="Pictures/A.jpg",
+                source_precondition_json=source_precondition_json(),
                 planned_bytes=128,
                 reason_code="COPY_NEW",
                 risk_level=PlanRiskLevel.LOW,

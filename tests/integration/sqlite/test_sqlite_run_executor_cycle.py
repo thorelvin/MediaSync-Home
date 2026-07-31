@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 
 from tests.support.sqlite_catalog import insert_default_filter_set_version
+from tests.support.source_preconditions import source_precondition_for_file
 
 from mediasync_home.adapters.final_commit import LocalResolvingFinalCommitAdapter
 from mediasync_home.adapters.staging import LocalFileStagingTransferAdapter
@@ -160,7 +161,7 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
             root_resolver=SqliteEndpointRootResolver(catalog_connection),
             staging_root=staging_root,
         )
-        plan = _sealed_plan()
+        plan = _sealed_plan(source_file=source_root / "Pictures" / "A.jpg")
         plans.save_sealed_plan(plan)
         start_run_from_sealed_plan(
             command=parse_start_run_command(
@@ -256,7 +257,9 @@ def test_sqlite_run_executor_cycle_creates_parent_before_copying_nested_file(
             root_resolver=SqliteEndpointRootResolver(catalog_connection),
             staging_root=staging_root,
         )
-        plan = _sealed_directory_plan()
+        plan = _sealed_directory_plan(
+            source_file=source_root / "Pictures" / "A.jpg"
+        )
         plans.save_sealed_plan(plan)
         outcome = start_run_from_sealed_plan(
             command=parse_start_run_command(
@@ -372,6 +375,7 @@ def test_sqlite_run_executor_cycle_replaces_existing_target_from_match_fingerpri
             staging_root=staging_root,
         )
         plan = _sealed_plan(
+            source_file=source_root / "Pictures" / "A.jpg",
             planned_bytes=len(new_payload),
             reason_code="REPLACE_CHANGED",
             target_precondition_kind=TargetPreconditionKind.MATCH_FINGERPRINT,
@@ -481,6 +485,7 @@ def test_sqlite_run_executor_cycle_quarantines_empty_directory_before_file_commi
             staging_root=staging_root,
         )
         plan = _sealed_plan(
+            source_file=source_root / "Pictures" / "A.jpg",
             planned_bytes=len(payload),
             reason_code="COPY_OVER_EMPTY_DIRECTORY",
             target_precondition_kind=TargetPreconditionKind.DIRECTORY_EMPTY,
@@ -743,6 +748,7 @@ def _insert_receipt(connection: sqlite3.Connection) -> None:
 
 def _sealed_plan(
     *,
+    source_file: Path,
     planned_bytes: int = 128,
     reason_code: str = "COPY_NEW",
     target_precondition_kind: TargetPreconditionKind = TargetPreconditionKind.ABSENT,
@@ -762,6 +768,11 @@ def _sealed_plan(
                 stable_order_key="020:Pictures/A.jpg",
                 target_precondition_kind=target_precondition_kind,
                 target_relative_path="Pictures/A.jpg",
+                source_relative_path="Pictures/A.jpg",
+                source_precondition_json=source_precondition_for_file(
+                    source_file,
+                    relative_path="Pictures/A.jpg",
+                ),
                 planned_bytes=planned_bytes,
                 reason_code=reason_code,
                 risk_level=PlanRiskLevel.LOW,
@@ -770,7 +781,7 @@ def _sealed_plan(
     )
 
 
-def _sealed_directory_plan() -> SealedPlan:
+def _sealed_directory_plan(*, source_file: Path) -> SealedPlan:
     return seal_plan(
         plan_id="plan-a",
         analysis_id="analysis-a",
@@ -801,6 +812,11 @@ def _sealed_directory_plan() -> SealedPlan:
                 stable_order_key="020:Pictures/A.jpg",
                 target_precondition_kind=TargetPreconditionKind.ABSENT,
                 target_relative_path="Pictures/A.jpg",
+                source_relative_path="Pictures/A.jpg",
+                source_precondition_json=source_precondition_for_file(
+                    source_file,
+                    relative_path="Pictures/A.jpg",
+                ),
                 planned_bytes=5,
                 reason_code="COPY_NEW",
                 risk_level=PlanRiskLevel.LOW,

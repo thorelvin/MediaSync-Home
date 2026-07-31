@@ -20,6 +20,7 @@ from mediasync_home.application.plans import (
     validate_plan_operation_page_query,
     verify_plan_checksum,
 )
+from mediasync_home.application.source_preconditions import SourceFilePrecondition
 
 
 def test_seal_plan_creates_deterministic_checksum_and_summary() -> None:
@@ -66,6 +67,32 @@ def test_plan_checksum_changes_when_operation_payload_changes() -> None:
         job_id="job-a",
         job_revision_id="job-rev-a",
         operations=(replace(_copy_operation(), target_relative_path="Pictures/Other.jpg"),),
+    )
+
+    assert changed.plan_checksum != base.plan_checksum
+
+
+def test_plan_checksum_covers_source_file_identity() -> None:
+    base = seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        operations=(_copy_operation(),),
+    )
+    changed = seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        operations=(
+            replace(
+                _copy_operation(),
+                source_precondition_json=_source_precondition(
+                    identity_fingerprint_hash="b" * 64
+                ),
+            ),
+        ),
     )
 
     assert changed.plan_checksum != base.plan_checksum
@@ -157,6 +184,19 @@ def test_mutating_plan_operation_requires_target_precondition() -> None:
                     _copy_operation(),
                     target_precondition_kind=TargetPreconditionKind.NONE,
                 ),
+            ),
+        )
+
+
+def test_copy_plan_operation_requires_source_precondition() -> None:
+    with pytest.raises(PlanSealViolation, match="SOURCE_PRECONDITION_MISSING"):
+        seal_plan(
+            plan_id="plan-a",
+            analysis_id="analysis-a",
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            operations=(
+                replace(_copy_operation(), source_precondition_json=None),
             ),
         )
 
@@ -294,10 +334,22 @@ def _copy_operation() -> PlanOperation:
         stable_order_key="020:Pictures/A.jpg",
         target_precondition_kind=TargetPreconditionKind.ABSENT,
         target_relative_path="Pictures/A.jpg",
+        source_relative_path="Pictures/A.jpg",
+        source_precondition_json=_source_precondition(),
         planned_bytes=128,
         reason_code="COPY_NEW",
         risk_level=PlanRiskLevel.LOW,
     )
+
+
+def _source_precondition(*, identity_fingerprint_hash: str = "a" * 64) -> str:
+    return SourceFilePrecondition(
+        snapshot_id="source-snapshot-a",
+        snapshot_entry_id="source-entry-a",
+        relative_path="Pictures/A.jpg",
+        size_bytes=128,
+        identity_fingerprint_hash=identity_fingerprint_hash,
+    ).to_json()
 
 
 def _target_endpoint() -> PlanEndpoint:

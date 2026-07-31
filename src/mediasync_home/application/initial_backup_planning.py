@@ -22,6 +22,7 @@ from mediasync_home.application.plans import (
     seal_plan,
 )
 from mediasync_home.application.snapshots import SnapshotFileEntry
+from mediasync_home.application.source_preconditions import SourceFilePrecondition
 
 
 class InitialBackupPlanningError(ValueError):
@@ -428,6 +429,7 @@ def _plan_entry(
             reason_code="COPY_NEW",
             risk_level=PlanRiskLevel.LOW,
             planned_bytes=source_entry.size_bytes or 0,
+            source_snapshot_id=source_snapshot_id,
         )
     if target_entry.object_type == "file":
         if (
@@ -460,6 +462,7 @@ def _plan_entry(
             reason_code="REPLACE_WITH_VERSION",
             risk_level=PlanRiskLevel.MEDIUM,
             planned_bytes=source_entry.size_bytes or 0,
+            source_snapshot_id=source_snapshot_id,
         )
     if target_entry.object_type == "directory" and target_descendant_count == 0:
         return _operation(
@@ -474,6 +477,7 @@ def _plan_entry(
             reason_code="REPLACE_EMPTY_DIRECTORY_WITH_FILE",
             risk_level=PlanRiskLevel.HIGH,
             planned_bytes=source_entry.size_bytes or 0,
+            source_snapshot_id=source_snapshot_id,
         )
     return _blocked_operation(
         plan_id=plan_id,
@@ -499,9 +503,30 @@ def _operation(
     reason_code: str,
     risk_level: PlanRiskLevel,
     planned_bytes: int = 0,
+    source_snapshot_id: str | None = None,
 ) -> PlanOperation:
     phase = 10 if operation_type is PlanOperationType.CREATE_DIRECTORY else 20
     target_order = -1 if target_ordinal is None else target_ordinal
+    source_relative_path: str | None = None
+    source_precondition_json: str | None = None
+    if operation_type is PlanOperationType.COPY_NEW:
+        if (
+            source_snapshot_id is None
+            or entry.size_bytes is None
+            or entry.identity_fingerprint_hash is None
+        ):
+            raise InitialBackupPlanningError(
+                "INITIAL_BACKUP_PLAN_SOURCE_PRECONDITION_MISSING",
+                "Refresh the source snapshot before planning file copies.",
+            )
+        source_relative_path = entry.relative_path
+        source_precondition_json = SourceFilePrecondition(
+            snapshot_id=source_snapshot_id,
+            snapshot_entry_id=entry.entry_id,
+            relative_path=entry.relative_path,
+            size_bytes=entry.size_bytes,
+            identity_fingerprint_hash=entry.identity_fingerprint_hash,
+        ).to_json()
     return PlanOperation(
         operation_id=_operation_id(
             plan_id,
@@ -521,6 +546,8 @@ def _operation(
         risk_level=risk_level,
         target_endpoint_id=target_endpoint_id,
         target_relative_path=entry.relative_path,
+        source_relative_path=source_relative_path,
+        source_precondition_json=source_precondition_json,
         planned_bytes=planned_bytes,
     )
 

@@ -19,6 +19,7 @@ from mediasync_home.adapters.robocopy import (
     classify_robocopy_exit_code,
     write_robocopy_batch_manifest,
 )
+from mediasync_home.adapters.file_identity import stable_file_identity_hash
 from mediasync_home.application.process_supervision import (
     ChildContainmentPolicy,
     HandleInheritancePolicy,
@@ -28,6 +29,7 @@ from mediasync_home.application.recovery_operations import (
     RecoveryTargetPreconditionKind,
     planned_recovery_operation,
 )
+from mediasync_home.application.source_preconditions import SourceFilePrecondition
 
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="live Robocopy evidence requires Windows")
@@ -52,7 +54,7 @@ def test_live_robocopy_adapter_runs_contained_and_publishes_manifested_payload(
         profile=RobocopyTransferProfile(timeout_seconds=15.0),
     )
 
-    evidence = adapter.transfer_to_staging(_operation(payload))
+    evidence = adapter.transfer_to_staging(_operation(source_file))
 
     assert evidence.transfer_state == "ROBOCOPY_EXIT_1_COPIED_TRANSFERRED_TO_STAGING"
     assert (staging_root / "object-live.payload").read_bytes() == payload
@@ -151,7 +153,8 @@ class _RootResolver:
         return None
 
 
-def _operation(source_payload: bytes) -> RecoveryOperation:
+def _operation(source_file: Path) -> RecoveryOperation:
+    source_payload = source_file.read_bytes()
     operation = planned_recovery_operation(
         run_id="run-live",
         run_target_id="run-live-target-0000",
@@ -169,6 +172,14 @@ def _operation(source_payload: bytes) -> RecoveryOperation:
         source_endpoint_id="source-a",
         source_endpoint_revision_id="source-rev-a",
         source_relative_path="Pictures/A live file.txt",
+        planned_bytes=len(source_payload),
+        source_precondition_json=SourceFilePrecondition(
+            snapshot_id="source-snapshot-live",
+            snapshot_entry_id="source-entry-live",
+            relative_path="Pictures/A live file.txt",
+            size_bytes=len(source_payload),
+            identity_fingerprint_hash=stable_file_identity_hash(source_file.stat()),
+        ).to_json(),
     )
     return replace(
         operation,

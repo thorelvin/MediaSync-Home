@@ -29,6 +29,7 @@ IGNORED_SCAN_DIRS = {
     "venv",
 }
 LOCAL_RUNTIME_ARTIFACT_DIR_PREFIXES = ("local-unsigned",)
+GENERATED_PACKAGE_DIR_SUFFIXES = (".build", ".dist", ".onefile-build")
 LOCAL_RUNTIME_ARTIFACT_DIR_NAMES = {
     "package-desktop-final-state",
     "package-host-direct-state",
@@ -114,6 +115,11 @@ def _is_ignored_scan_path(relative_parts: tuple[str, ...]) -> bool:
         return True
     if len(relative_parts) < 2 or relative_parts[0] != "artifacts":
         return False
+    if any(
+        part.endswith(GENERATED_PACKAGE_DIR_SUFFIXES)
+        for part in relative_parts[1:-1]
+    ):
+        return True
     artifact_name = relative_parts[1]
     if artifact_name in LOCAL_RUNTIME_ARTIFACT_DIR_NAMES:
         return True

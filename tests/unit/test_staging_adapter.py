@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from mediasync_home.adapters.staging import (
     LocalFileStagingError,
     LocalFileStagingTransferAdapter,
 )
+from mediasync_home.adapters.file_identity import stable_file_identity_hash
 from mediasync_home.adapters.reparse_guard import LocalReparseGuard, ReparseInspection
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
@@ -19,6 +21,7 @@ from mediasync_home.application.recovery_operations import (
     planned_recovery_operation,
 )
 from mediasync_home.application.directory_artifacts import DIRECTORY_MARKER_NAME
+from mediasync_home.application.source_preconditions import SourceFilePrecondition
 from mediasync_home.domain.capabilities import MutationPermit, _issue_mutation_permit
 
 
@@ -159,6 +162,67 @@ def test_local_staging_materializes_verified_directory_marker(tmp_path: Path) ->
     assert verification.fingerprint_json == source.fingerprint_json
 
 
+def test_local_staging_copies_only_plan_bound_source_identity(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    staging_root = tmp_path / "staging"
+    source_file = source_root / "Pictures" / "A.jpg"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"image-bytes")
+    target_root.mkdir()
+    adapter = LocalFileStagingTransferAdapter(
+        root_resolver=_SourceAndTargetRootResolver(
+            source_root=source_root,
+            target_root=target_root,
+        ),
+        staging_root=staging_root,
+    )
+    operation = _source_operation(source_file)
+
+    validation = adapter.validate_source_file(operation)
+    operation = replace(
+        operation,
+        expected_source_fingerprint_json=validation.fingerprint_json,
+    )
+    stability = adapter.bind_source_stability(operation)
+    allocation = adapter.allocate_staging_object(operation)
+    operation = replace(operation, staging_object_id=allocation.staging_object_id)
+    adapter.transfer_to_staging(operation)
+    verification = adapter.verify_staging_artifact(operation)
+
+    assert stability.guard_kind == "PLAN_IDENTITY_AND_OPEN_READ_FSTAT_V1"
+    assert stability.guard_evidence_hash == stable_file_identity_hash(source_file.stat())
+    assert (staging_root / f"{allocation.staging_object_id}.payload").read_bytes() == b"image-bytes"
+    assert verification.fingerprint_json == validation.fingerprint_json
+
+
+def test_local_staging_rejects_source_changed_after_sealed_analysis(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_file = source_root / "Pictures" / "A.jpg"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"image-bytes")
+    target_root.mkdir()
+    operation = _source_operation(source_file)
+    original_mtime_ns = source_file.stat().st_mtime_ns
+    source_file.write_bytes(b"other-bytes")
+    os.utime(
+        source_file,
+        ns=(source_file.stat().st_atime_ns, original_mtime_ns + 1_000_000_000),
+    )
+    adapter = LocalFileStagingTransferAdapter(
+        root_resolver=_SourceAndTargetRootResolver(
+            source_root=source_root,
+            target_root=target_root,
+        )
+    )
+
+    with pytest.raises(LocalFileStagingError) as exc_info:
+        adapter.validate_source_file(operation)
+
+    assert exc_info.value.validation_code == "LOCAL_STAGING_SOURCE_IDENTITY_CHANGED"
+
+
 class _RootResolver:
     def __init__(self, *, target_root: Path) -> None:
         self._target_root = target_root
@@ -177,6 +241,31 @@ class _RootResolver:
         ):
             return self._target_root
         return None
+
+
+class _SourceAndTargetRootResolver(_RootResolver):
+    def __init__(self, *, source_root: Path, target_root: Path) -> None:
+        super().__init__(target_root=target_root)
+        self._source_root = source_root
+
+    def resolve_endpoint_root(
+        self,
+        *,
+        resource_key: str,
+        endpoint_id: str,
+        endpoint_revision_id: str,
+    ) -> Path | None:
+        if (
+            resource_key == "endpoint:source-a"
+            and endpoint_id == "source-a"
+            and endpoint_revision_id == "source-rev-a"
+        ):
+            return self._source_root
+        return super().resolve_endpoint_root(
+            resource_key=resource_key,
+            endpoint_id=endpoint_id,
+            endpoint_revision_id=endpoint_revision_id,
+        )
 
 
 class _OverlayProbe:
@@ -207,6 +296,36 @@ def _operation(target_precondition_kind: RecoveryTargetPreconditionKind) -> Reco
         fencing_token=1,
         final_relative_path="Pictures/A.jpg",
         target_precondition_kind=target_precondition_kind,
+    )
+
+
+def _source_operation(source_file: Path) -> RecoveryOperation:
+    size_bytes = source_file.stat().st_size
+    return planned_recovery_operation(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+        operation_id="op-a",
+        target_endpoint_id="target-a",
+        target_endpoint_revision_id="target-rev-a",
+        endpoint_generation=1,
+        owner_installation_id="owner-a",
+        ownership_epoch=1,
+        lease_id="lease-a",
+        lease_resource_key="endpoint:target-a",
+        fencing_token=1,
+        final_relative_path="Pictures/A.jpg",
+        target_precondition_kind=RecoveryTargetPreconditionKind.ABSENT,
+        planned_bytes=size_bytes,
+        source_endpoint_id="source-a",
+        source_endpoint_revision_id="source-rev-a",
+        source_relative_path="Pictures/A.jpg",
+        source_precondition_json=SourceFilePrecondition(
+            snapshot_id="snapshot-a",
+            snapshot_entry_id="entry-a",
+            relative_path="Pictures/A.jpg",
+            size_bytes=size_bytes,
+            identity_fingerprint_hash=stable_file_identity_hash(source_file.stat()),
+        ).to_json(),
     )
 
 

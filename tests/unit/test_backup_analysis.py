@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from tests.support.source_preconditions import source_precondition_json
+
 from mediasync_home.application.backup_analysis import (
     BackupAnalysisRequest,
     BackupAnalysisRequestState,
@@ -424,6 +426,11 @@ def _plan(
                 risk_level=risk_level,
                 target_endpoint_id="target-a",
                 target_relative_path="A.txt",
+                source_relative_path="A.txt",
+                source_precondition_json=source_precondition_json(
+                    relative_path="A.txt",
+                    size_bytes=100,
+                ),
                 planned_bytes=100,
             ),
         ),

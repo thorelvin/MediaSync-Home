@@ -7,6 +7,8 @@ from typing import TypeVar
 
 import pytest
 
+from tests.support.source_preconditions import source_precondition_json
+
 from mediasync_home.application.activity_read_models import (
     RunActivityReadModelStore,
     RunActivitySummary,
@@ -2747,6 +2749,8 @@ def _sealed_plan() -> SealedPlan:
                 stable_order_key="020:Pictures/A.jpg",
                 target_precondition_kind=TargetPreconditionKind.ABSENT,
                 target_relative_path="Pictures/A.jpg",
+                source_relative_path="Pictures/A.jpg",
+                source_precondition_json=source_precondition_json(),
                 planned_bytes=128,
                 reason_code="COPY_NEW",
                 risk_level=PlanRiskLevel.LOW,
@@ -2800,6 +2804,8 @@ def _sealed_plan_for_operation_pages() -> SealedPlan:
                 stable_order_key="010:Pictures/A.jpg",
                 target_precondition_kind=TargetPreconditionKind.ABSENT,
                 target_relative_path="Pictures/A.jpg",
+                source_relative_path="Pictures/A.jpg",
+                source_precondition_json=source_precondition_json(),
                 planned_bytes=128,
                 reason_code="COPY_NEW",
                 risk_level=PlanRiskLevel.LOW,
@@ -2824,6 +2830,8 @@ def _sealed_plan_for_endpoint_pages() -> SealedPlan:
                 stable_order_key="010:Pictures/A.jpg",
                 target_precondition_kind=TargetPreconditionKind.ABSENT,
                 target_relative_path="Pictures/A.jpg",
+                source_relative_path="Pictures/A.jpg",
+                source_precondition_json=source_precondition_json(),
                 planned_bytes=128,
                 reason_code="COPY_NEW",
                 risk_level=PlanRiskLevel.LOW,

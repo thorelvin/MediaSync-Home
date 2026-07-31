@@ -8,6 +8,12 @@ def test_handoff_scan_ignores_only_local_runtime_artifact_patterns() -> None:
         ("artifacts", "local-unsigned-final3", "__main__.build", "clcache.txt")
     )
     assert _is_ignored_scan_path(
+        ("artifacts", "0b", "packaged-runtime", "__main__.build", "scons-debug.py")
+    )
+    assert _is_ignored_scan_path(
+        ("artifacts", "0b", "packaged-runtime", "__main__.dist", "LICENSE.txt")
+    )
+    assert _is_ignored_scan_path(
         ("artifacts", "package-manual-state", "state-migration.intent.json")
     )
     assert _is_ignored_scan_path(("artifacts", "package-manual-host.stdout.log"))

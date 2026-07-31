@@ -387,6 +387,7 @@ def _entry(
         comparison_key=comparison_key,
         object_type=object_type,
         size_bytes=size,
+        identity_fingerprint_hash="a" * 64 if object_type == "file" else None,
     )
 
 

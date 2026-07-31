@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from tests.support.sqlite_catalog import insert_default_filter_set_version
+from tests.support.source_preconditions import source_precondition_json
 
 from mediasync_home.adapters.final_verification import LocalFinalArtifactVerificationAdapter
 from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
@@ -684,6 +685,8 @@ def _sealed_plan() -> SealedPlan:
                 stable_order_key="020:Pictures/A.jpg",
                 target_precondition_kind=TargetPreconditionKind.ABSENT,
                 target_relative_path="Pictures/A.jpg",
+                source_relative_path="Pictures/A.jpg",
+                source_precondition_json=source_precondition_json(),
                 planned_bytes=128,
                 reason_code="COPY_NEW",
                 risk_level=PlanRiskLevel.LOW,

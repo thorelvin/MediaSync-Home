@@ -6,9 +6,14 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Mapping, Protocol
 
+from mediasync_home.application.source_preconditions import (
+    SourceFilePrecondition,
+    SourceFilePreconditionError,
+)
+
 
 PLAN_SCHEMA_VERSION = 1
-OPERATION_SCHEMA_VERSION = 2
+OPERATION_SCHEMA_VERSION = 3
 PLANNER_VERSION = "0B-plan-sealer-skeleton"
 PLAN_CHECKSUM_ALGORITHM = "SHA-256"
 PLAN_SERIALIZER_VERSION = "0B-CANONICAL-JSON-V1"
@@ -66,6 +71,8 @@ class PlanOperation:
     risk_level: PlanRiskLevel
     target_endpoint_id: str | None = None
     target_relative_path: str | None = None
+    source_relative_path: str | None = None
+    source_precondition_json: str | None = None
     planned_bytes: int = 0
 
 
@@ -435,6 +442,7 @@ def _validate_operations(
         elif operation.operation_type in MUTATING_OPERATION_TYPES and writable_endpoint_ids:
             raise PlanSealViolation("MUTATING_PLAN_OPERATION_REQUIRES_TARGET_ENDPOINT")
         _validate_target_precondition(operation)
+        _validate_source_precondition(operation)
 
 
 def _validate_endpoints(endpoints: tuple[PlanEndpoint, ...]) -> None:
@@ -493,6 +501,26 @@ def _validate_target_precondition(operation: PlanOperation) -> None:
             raise PlanSealViolation("MUTATING_PLAN_OPERATION_REQUIRES_TARGET_RELATIVE_PATH")
     if operation.target_relative_path is not None and _looks_absolute_path(operation.target_relative_path):
         raise PlanSealViolation("PLAN_OPERATION_TARGET_PATH_MUST_BE_RELATIVE")
+
+
+def _validate_source_precondition(operation: PlanOperation) -> None:
+    if operation.operation_type is not PlanOperationType.COPY_NEW:
+        if operation.source_relative_path is not None or operation.source_precondition_json is not None:
+            raise PlanSealViolation("NONCOPY_PLAN_OPERATION_HAS_SOURCE_PRECONDITION")
+        return
+    if operation.source_relative_path is None or not operation.source_relative_path.strip():
+        raise PlanSealViolation("COPY_PLAN_OPERATION_REQUIRES_SOURCE_PATH")
+    if _looks_absolute_path(operation.source_relative_path):
+        raise PlanSealViolation("PLAN_OPERATION_SOURCE_PATH_MUST_BE_RELATIVE")
+    try:
+        precondition = SourceFilePrecondition.from_json(operation.source_precondition_json)
+    except SourceFilePreconditionError as exc:
+        raise PlanSealViolation(exc.validation_code) from exc
+    if (
+        precondition.relative_path != operation.source_relative_path
+        or precondition.size_bytes != operation.planned_bytes
+    ):
+        raise PlanSealViolation("PLAN_OPERATION_SOURCE_PRECONDITION_MISMATCH")
 
 
 def _looks_absolute_path(path: str) -> bool:
@@ -593,6 +621,7 @@ def _canonical_payload(
             _operation_payload(
                 operation,
                 include_target_endpoint=operation_schema_version >= 2,
+                include_source_precondition=operation_schema_version >= 3,
             )
             for operation in operations
         ],
@@ -610,6 +639,7 @@ def _operation_payload(
     operation: PlanOperation,
     *,
     include_target_endpoint: bool,
+    include_source_precondition: bool,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "execution_phase": operation.execution_phase,
@@ -625,6 +655,9 @@ def _operation_payload(
     }
     if include_target_endpoint:
         payload["target_endpoint_id"] = operation.target_endpoint_id
+    if include_source_precondition:
+        payload["source_relative_path"] = operation.source_relative_path
+        payload["source_precondition_json"] = operation.source_precondition_json
     return payload
 
 
