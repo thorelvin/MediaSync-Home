@@ -579,6 +579,7 @@ _NB_TO_EN = {
     "Dekningsadvarsel": "Coverage warning",
     "Ekstra filer på målet beholdes": "Extra files on the target are kept",
     "Fortsett": "Continue",
+    "Fortsett backupen når du er klar.": "Resume the backup when you are ready.",
     "Følg fremdrift per mål.": "Follow progress per target.",
     "Følg opp NAS etter aktiv kopiering.": "Follow up NAS after active copying.",
     "Gjenoppretter": "Recovering",
@@ -613,6 +614,7 @@ _NB_TO_EN = {
     "Kontroller backupen når analysefunksjonen er tilgjengelig.": (
         "Check the backup when analysis is available."
     ),
+    "Kontroller målet og prøv igjen.": "Check the target and retry.",
     "Kontroller resultatet før neste backup.": "Check the result before the next backup.",
     "Kontrollerer": "Checking",
     "Klar til kontroll": "Ready for review",
@@ -621,6 +623,9 @@ _NB_TO_EN = {
     "Kontrakt": "Contract",
     "Kopierer": "Copying",
     "Kopiering pågår.": "Copying is in progress.",
+    "Kjør backupen på nytt når målet er klart.": (
+        "Run the backup again when the target is ready."
+    ),
     "Lag din første backup": "Create your first backup",
     "Lav": "Low",
     "Lokal forhåndsvisning": "Local preview",
@@ -653,6 +658,7 @@ _NB_TO_EN = {
     "Kun forhåndsvisning": "Preview only",
     "Se gjennom blokkeringen før ny kjøring.": "Review the block before a new run.",
     "Se gjennom målfeilen.": "Review the target error.",
+    "Se gjennom målresultatet.": "Review the target result.",
     "Sist sikkerhetskopiert": "Last backed up",
     "Skrivebeskyttet lokal forhåndsvisning": "Read-only local preview",
     "Skrivebeskyttet målendepunkt": "Read-only target endpoint",

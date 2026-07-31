@@ -31,6 +31,11 @@ overskriver derfor ikke det siste vellykkede tidspunktet. Dashboardets
 og lokalisert dato/tid, eller eksplisitt **Ingen vellykket backup**. SQLite-
 integrasjonen beviser historisk suksess under en nyere revalidering, og GUI-
 dekningen beviser tre mål ved 900×560, språkbytte og null horisontal overflow.
+Den separate **Neste handling**-dimensjonen beholder jobbanbefalingen og viser
+i tillegg én målidentifisert, lokalisert handling bare for mål som venter,
+kontrolleres, kopierer, er pauset, frakoblet, avbrutt, har varsler eller er
+blokkert. Tre mål med ulike feil-/ventetilstander reflowes i samme kompakte
+norsk/engelsk GUI-bevis uten å skjule en handling.
 
 Oppdatering 2026-07-31: Catalog schema 40 materialiserer nå durable
 `run_attempts`, immutable `operation_attempts` og immutable

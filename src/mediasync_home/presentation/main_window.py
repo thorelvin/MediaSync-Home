@@ -2864,7 +2864,7 @@ class MediaSyncWindow(QMainWindow):
                 texts.target_freshness,
                 self._format_target_freshness(state.target_statuses),
             ),
-            (texts.next_action, state.recommended_action),
+            (texts.next_action, self._format_recommended_actions(state)),
         )
         for row, (label, value) in zip(self._activity_dimension_rows, values, strict=False):
             row.setText(f"{label}: {self._display(value)}")
@@ -2893,6 +2893,15 @@ class MediaSyncWindow(QMainWindow):
                 f"{target.name}: {self._display(target.freshness_label)} · "
                 f"{last_success}"
             )
+        return "\n".join(lines)
+
+    def _format_recommended_actions(self, state: BackupJobStatusViewState) -> str:
+        lines = [self._display(state.recommended_action)]
+        no_action = self._display("Ingen handling kreves nå.")
+        for target in state.target_statuses:
+            action = self._display(target.recommended_action)
+            if action != no_action:
+                lines.append(f"{target.name}: {action}")
         return "\n".join(lines)
 
     def _apply_plan_operation_preview_state(self, state: PlanOperationPreviewState) -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
 from mediasync_home.ipc.protocol import IpcResponse
 from mediasync_home.presentation.view_models.backup_setup import (
@@ -399,3 +401,55 @@ def test_activity_overview_view_model_renders_latest_run_status() -> None:
     assert state.job_status.target_statuses[0].last_success_utc == (
         "2026-07-19T12:05:00.000Z"
     )
+    assert state.job_status.target_statuses[0].recommended_action == (
+        "Kontrollerer måltilgang."
+    )
+
+
+@pytest.mark.parametrize(
+    ("target_state", "expected_action"),
+    (
+        ("PENDING", "Venter på målbehandling."),
+        ("ACQUIRING_LEASE", "Kontrollerer måltilgang."),
+        ("REVALIDATING", "Kontrollerer måltilgang."),
+        ("WAITING_FOR_ENDPOINT", "Kontroller målet og prøv igjen."),
+        ("EXECUTING", "Kopiering pågår."),
+        ("PAUSED", "Fortsett backupen når du er klar."),
+        ("NEEDS_REVIEW", "Se gjennom målresultatet."),
+        ("SUCCEEDED", "Ingen handling kreves nå."),
+        ("SUCCEEDED_WITH_WARNINGS", "Se gjennom målresultatet."),
+        ("CANCELLED", "Kjør backupen på nytt når målet er klart."),
+        ("FAILED", "Se gjennom målfeilen."),
+        ("BLOCKED", "Se gjennom målfeilen."),
+        ("RECOVERY_REQUIRED", "Se gjennom målfeilen."),
+    ),
+)
+def test_activity_overview_maps_target_specific_next_actions(
+    target_state: str,
+    expected_action: str,
+) -> None:
+    response = IpcResponse.accepted(
+        {
+            "activity_overview": {
+                "read_model_available": True,
+                "runs": [
+                    {
+                        "run_id": "run-a",
+                        "job_id": "job-a",
+                        "state": "EXECUTING",
+                        "targets": [
+                            {
+                                "endpoint_id": "target-a",
+                                "state": target_state,
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+    )
+
+    state = activity_overview_from_response(response)
+
+    assert state.job_status is not None
+    assert state.job_status.target_statuses[0].recommended_action == expected_action

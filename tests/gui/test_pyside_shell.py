@@ -1059,6 +1059,7 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         )
         assert "Siste vellykkede:" in activity_rows[2].text()
         assert "19.07.2026" in activity_rows[2].text()
+        assert "target-a: Kontrollerer måltilgang." in activity_rows[3].text()
         assert language is not None
         assert language.menu() is not None
         language.menu().actions()[1].trigger()
@@ -1094,6 +1095,7 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         )
         assert "Last successful:" in activity_rows[2].text()
         assert "2026-07-19" in activity_rows[2].text()
+        assert "target-a: Checking target access." in activity_rows[3].text()
 
         language.menu().actions()[0].trigger()
 
@@ -1124,6 +1126,7 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert activity_rows[2].text().startswith(
             "Ferskhet per mål: target-a: Sist sikkerhetskopiert"
         )
+        assert "target-a: Kontrollerer måltilgang." in activity_rows[3].text()
     finally:
         window.close()
         window.deleteLater()
@@ -1748,6 +1751,7 @@ def test_activity_bar_wraps_exact_freshness_for_three_targets(qapp) -> None:
         activity_scroll = window.findChild(QScrollArea, "activityScrollArea")
         rows = window.findChildren(QLabel, "activityDimensionLabel")
         freshness = rows[2]
+        actions = rows[3]
         language = window.findChild(QToolButton, "languageSelectorButton")
 
         assert activity_scroll is not None
@@ -1760,6 +1764,10 @@ def test_activity_bar_wraps_exact_freshness_for_three_targets(qapp) -> None:
         assert "19.07.2026" in freshness.text()
         assert "18.07.2026" in freshness.text()
         assert freshness.height() >= freshness.heightForWidth(freshness.width())
+        assert "target-a: Kontrollerer måltilgang." in actions.text()
+        assert "target-b: Kontroller målet og prøv igjen." in actions.text()
+        assert "target-c: Se gjennom målfeilen." in actions.text()
+        assert actions.height() >= actions.heightForWidth(actions.width())
 
         assert language.menu() is not None
         language.menu().actions()[1].trigger()
@@ -1773,6 +1781,10 @@ def test_activity_bar_wraps_exact_freshness_for_three_targets(qapp) -> None:
         assert "2026-07-19" in freshness.text()
         assert "2026-07-18" in freshness.text()
         assert freshness.height() >= freshness.heightForWidth(freshness.width())
+        assert "target-a: Checking target access." in actions.text()
+        assert "target-b: Check the target and retry." in actions.text()
+        assert "target-c: Review the target error." in actions.text()
+        assert actions.height() >= actions.heightForWidth(actions.width())
     finally:
         window.close()
         window.deleteLater()
@@ -2647,6 +2659,7 @@ class _FakeMultiTargetFreshnessDashboardEngineClient(_FakeDashboardEngineClient)
                     "run_target_id": "run-a-target-0001",
                     "endpoint_id": "target-b",
                     "endpoint_revision_id": "target-rev-b",
+                    "state": "WAITING_FOR_ENDPOINT",
                     "last_success_utc": "2026-07-18T11:05:00.000Z",
                 },
                 {
@@ -2654,6 +2667,7 @@ class _FakeMultiTargetFreshnessDashboardEngineClient(_FakeDashboardEngineClient)
                     "run_target_id": "run-a-target-0002",
                     "endpoint_id": "target-c",
                     "endpoint_revision_id": "target-rev-c",
+                    "state": "FAILED",
                     "last_success_utc": None,
                 },
             )

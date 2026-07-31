@@ -924,8 +924,16 @@ def _target_next_action(state: RunTargetState) -> str:
         return "Venter på målbehandling."
     if state in {RunTargetState.ACQUIRING_LEASE, RunTargetState.REVALIDATING}:
         return "Kontrollerer måltilgang."
+    if state is RunTargetState.WAITING_FOR_ENDPOINT:
+        return "Kontroller målet og prøv igjen."
     if state is RunTargetState.EXECUTING:
         return "Kopiering pågår."
+    if state is RunTargetState.PAUSED:
+        return "Fortsett backupen når du er klar."
+    if state in {RunTargetState.NEEDS_REVIEW, RunTargetState.SUCCEEDED_WITH_WARNINGS}:
+        return "Se gjennom målresultatet."
+    if state is RunTargetState.CANCELLED:
+        return "Kjør backupen på nytt når målet er klart."
     if state in {RunTargetState.FAILED, RunTargetState.BLOCKED, RunTargetState.RECOVERY_REQUIRED}:
         return "Se gjennom målfeilen."
     return "Ingen handling kreves nå."
