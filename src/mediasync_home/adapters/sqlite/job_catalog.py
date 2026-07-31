@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from typing import Any
@@ -30,11 +31,17 @@ class SqliteJobCatalogError(ValueError):
     pass
 
 
+FILTER_SET_INITIAL_VERSION = 1
+FILTER_RULES_SCHEMA_VERSION = 1
+
+
 class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
     def save_standard_backup_job(self, job: SealedStandardBackupJob) -> None:
+        if job.filter_set_version != FILTER_SET_INITIAL_VERSION:
+            raise SqliteJobCatalogError("FILTER_SET_INITIAL_VERSION_INVALID")
         outer_transaction = self._connection.in_transaction
         try:
             if not outer_transaction:
@@ -51,12 +58,42 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                 """,
                 (job.job_id, job.filter_set_id),
             )
+            filter_rules_json = _serialize_filter_rules(job.defaults)
             self._connection.execute(
                 """
-                INSERT INTO job_revisions (job_id, id, filter_set_id)
-                    VALUES (?, ?, ?)
+                INSERT INTO filter_set_versions (
+                    job_id,
+                    filter_set_id,
+                    version,
+                    rules_hash,
+                    rules_json
+                )
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (job.job_id, job.job_revision_id, job.filter_set_id),
+                (
+                    job.job_id,
+                    job.filter_set_id,
+                    job.filter_set_version,
+                    hashlib.sha256(filter_rules_json.encode("utf-8")).hexdigest(),
+                    filter_rules_json,
+                ),
+            )
+            self._connection.execute(
+                """
+                INSERT INTO job_revisions (
+                    job_id,
+                    id,
+                    filter_set_id,
+                    filter_set_version
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    job.job_id,
+                    job.job_revision_id,
+                    job.filter_set_id,
+                    job.filter_set_version,
+                ),
             )
             self._connection.execute(
                 """
@@ -113,7 +150,8 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                 details.source_name,
                 details.source_path_label,
                 details.defaults_json,
-                details.targets_json
+                details.targets_json,
+                revisions.filter_set_version
             FROM standard_backup_job_revision_details AS details
             INNER JOIN job_revisions AS revisions
                 ON revisions.job_id = details.job_id
@@ -139,7 +177,8 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                 details.source_name,
                 details.source_path_label,
                 details.defaults_json,
-                details.targets_json
+                details.targets_json,
+                revisions.filter_set_version
             FROM standard_backup_job_revision_details AS details
             INNER JOIN job_revisions AS revisions
                 ON revisions.job_id = details.job_id
@@ -168,7 +207,8 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                 details.source_name,
                 details.source_path_label,
                 details.defaults_json,
-                details.targets_json
+                details.targets_json,
+                revisions.filter_set_version
             FROM standard_backup_job_revision_details AS details
             INNER JOIN job_revisions AS revisions
                 ON revisions.job_id = details.job_id
@@ -194,7 +234,8 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                 revisions.filter_set_id,
                 details.source_name,
                 details.source_path_label,
-                details.targets_json
+                details.targets_json,
+                revisions.filter_set_version
             FROM standard_backup_job_revision_details AS details
             INNER JOIN job_revisions AS revisions
                 ON revisions.job_id = details.job_id
@@ -219,7 +260,8 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                 details.source_name,
                 details.source_path_label,
                 details.defaults_json,
-                details.targets_json
+                details.targets_json,
+                revisions.filter_set_version
             FROM standard_backup_job_revision_details AS details
             INNER JOIN job_revisions AS revisions
                 ON revisions.job_id = details.job_id
@@ -276,6 +318,7 @@ def _job_from_row(row: sqlite3.Row | tuple[object, ...]) -> SealedStandardBackup
         source_path_label=str(row[7]),
         defaults=_deserialize_defaults(str(row[8])),
         targets=_deserialize_targets(str(row[9])),
+        filter_set_version=_required_int(row[10]),
     )
 
 
@@ -294,6 +337,7 @@ def _job_summary_from_row(row: sqlite3.Row | tuple[object, ...]) -> StandardBack
             )
             for target in _deserialize_targets(str(row[5]))
         ),
+        filter_set_version=_required_int(row[6]),
     )
 
 
@@ -314,6 +358,7 @@ def _job_detail_from_row(row: sqlite3.Row | tuple[object, ...]) -> StandardBacku
             )
             for target in targets
         ),
+        filter_set_version=_required_int(row[7]),
     )
 
 
@@ -332,6 +377,17 @@ def _serialize_defaults(defaults: StandardBackupDefaults) -> str:
             "retention": defaults.retention.value,
             "extra_files": defaults.extra_files.value,
             "performance": defaults.performance.value,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _serialize_filter_rules(defaults: StandardBackupDefaults) -> str:
+    return json.dumps(
+        {
+            "preset": defaults.file_selection.value,
+            "schema_version": FILTER_RULES_SCHEMA_VERSION,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -406,3 +462,9 @@ def _optional_str(value: object) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _required_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SqliteJobCatalogError("STANDARD_BACKUP_JOB_FILTER_VERSION_INVALID")
+    return value

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -70,8 +71,28 @@ def test_sqlite_catalog_persists_standard_backup_job_from_draft(tmp_path: Path) 
         assert catalog.load_standard_backup_job_by_idempotency_key("idempotency-a") == outcome.job
         assert _row_count(connection, "jobs") == 1
         assert _row_count(connection, "job_revisions") == 1
+        assert _row_count(connection, "filter_set_versions") == 1
+        assert _row_count(connection, "job_revision_filter_bindings") == 1
         assert _row_count(connection, "job_heads") == 1
         assert _row_count(connection, "standard_backup_job_revision_details") == 1
+        assert connection.execute(
+            """
+            SELECT version, rules_hash, rules_json
+            FROM filter_set_versions
+            WHERE job_id = 'job-a' AND filter_set_id = 'filter-a'
+            """
+        ).fetchone() == (
+            1,
+            "5b551f66adfe79a9e025a369c44e76ece00928588f965a93fe6cdcfbdb1e4a9b",
+            '{"preset":"ALL_USER_FILES","schema_version":1}',
+        )
+        assert connection.execute(
+            """
+            SELECT filter_set_id, filter_set_version
+            FROM job_revision_filter_bindings
+            WHERE job_id = 'job-a' AND job_revision_id = 'job-rev-a'
+            """
+        ).fetchone() == ("filter-a", 1)
         assert _scalar(connection, "SELECT active_revision_id FROM job_heads WHERE job_id = 'job-a'") == "job-rev-a"
         assert id_factory.calls == 1
 
@@ -297,6 +318,7 @@ def test_sqlite_catalog_loads_active_standard_backup_job_detail(tmp_path: Path) 
         assert detail.job_id == "job-a"
         assert detail.job_revision_id == "job-rev-a"
         assert detail.filter_set_id == "filter-a"
+        assert detail.filter_set_version == 1
         assert detail.source_path_label == "C:/Users/Ada/Pictures"
         assert detail.defaults.retention.value == "THIRTY_DAYS"
         assert detail.targets[0].name == "USB 1"
@@ -351,6 +373,23 @@ def test_sqlite_catalog_requires_source_draft_row(tmp_path: Path) -> None:
                     defaults=StandardBackupJobDraft.new("draft-a").defaults,
                 )
             )
+
+
+def test_sqlite_catalog_requires_initial_filter_version(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        catalog = SqliteStandardBackupJobCatalog(connection)
+
+        with pytest.raises(
+            SqliteJobCatalogError,
+            match="FILTER_SET_INITIAL_VERSION_INVALID",
+        ):
+            catalog.save_standard_backup_job(
+                replace(_sealed_job_b(), filter_set_version=2)
+            )
+
+        assert _row_count(connection, "jobs") == 0
 
 
 def _prepare_catalog(connection: sqlite3.Connection, database: Path) -> None:

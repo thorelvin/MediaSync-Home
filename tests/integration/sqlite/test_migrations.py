@@ -21,6 +21,9 @@ from mediasync_home.adapters.sqlite.migrations import (
     recovery_migration_plan,
 )
 
+FILTER_RULES_JSON = '{"preset":"ALL_USER_FILES","schema_version":1}'
+FILTER_RULES_HASH = "5b551f66adfe79a9e025a369c44e76ece00928588f965a93fe6cdcfbdb1e4a9b"
+
 
 def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
@@ -31,7 +34,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 27
+        assert current_schema_version(connection, plan.store) == 28
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -58,13 +61,15 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "trigger_occurrences",
             "schedules",
             "external_resource_state",
+            "filter_set_versions",
             "final_file_catalog_handoffs",
+            "job_revision_filter_bindings",
             "runs",
             "run_targets",
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 27
+        assert _row_count(connection, "schema_migrations") == 28
         assert _column_names(connection, "schema_migrations") >= {
             "store",
             "version",
@@ -90,6 +95,12 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "trg_job_revisions_no_delete",
             "trg_filter_sets_no_update_after_use",
             "trg_filter_sets_no_delete_after_use",
+            "trg_filter_set_versions_no_update",
+            "trg_filter_set_versions_no_delete",
+            "trg_job_revisions_filter_version_required",
+            "trg_job_revisions_bind_filter_version",
+            "trg_job_revision_filter_bindings_no_update",
+            "trg_job_revision_filter_bindings_no_delete",
             "trg_standard_backup_job_revision_details_no_update",
             "trg_standard_backup_job_revision_details_no_delete",
             "trg_standard_backup_job_endpoint_bindings_identity_immutable",
@@ -108,6 +119,27 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "job_revisions",
             ("job_id", "active_revision_id"),
             ("job_id", "id"),
+        )
+        assert _foreign_key(
+            connection,
+            "filter_set_versions",
+            "filter_sets",
+            ("job_id", "filter_set_id"),
+            ("job_id", "id"),
+        )
+        assert _foreign_key(
+            connection,
+            "job_revision_filter_bindings",
+            "job_revisions",
+            ("job_id", "job_revision_id"),
+            ("job_id", "id"),
+        )
+        assert _foreign_key(
+            connection,
+            "job_revision_filter_bindings",
+            "filter_set_versions",
+            ("job_id", "filter_set_id", "filter_set_version"),
+            ("job_id", "filter_set_id", "version"),
         )
         assert _foreign_key(
             connection,
@@ -405,6 +437,78 @@ def test_catalog_revision_rows_are_immutable_but_heads_can_advance(tmp_path: Pat
         with pytest.raises(sqlite3.IntegrityError, match="FILTER_SET_IMMUTABLE"):
             connection.execute(
                 "DELETE FROM filter_sets WHERE job_id = 'job-a' AND id = 'filter-a'"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="FILTER_SET_VERSION_IMMUTABLE"):
+            connection.execute(
+                """
+                UPDATE filter_set_versions
+                SET rules_json = '{"schema_version":1}'
+                WHERE job_id = 'job-a'
+                    AND filter_set_id = 'filter-a'
+                    AND version = 1
+                """
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="FILTER_SET_VERSION_IMMUTABLE"):
+            connection.execute(
+                """
+                DELETE FROM filter_set_versions
+                WHERE job_id = 'job-a'
+                    AND filter_set_id = 'filter-a'
+                    AND version = 1
+                """
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="JOB_REVISION_FILTER_BINDING_IMMUTABLE",
+        ):
+            connection.execute(
+                """
+                UPDATE job_revision_filter_bindings
+                SET filter_set_version = 2
+                WHERE job_id = 'job-a' AND job_revision_id = 'job-rev-a'
+                """
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="JOB_REVISION_FILTER_BINDING_IMMUTABLE",
+        ):
+            connection.execute(
+                """
+                DELETE FROM job_revision_filter_bindings
+                WHERE job_id = 'job-a' AND job_revision_id = 'job-rev-a'
+                """
+            )
+        connection.execute(
+            """
+            INSERT INTO filter_sets (job_id, id, description)
+            VALUES ('job-a', 'filter-without-version', 'Missing version')
+            """
+        )
+        connection.execute(
+            "INSERT INTO jobs (id, kind) VALUES ('job-b', 'multi_target_backup')"
+        )
+        connection.execute(
+            """
+            INSERT INTO filter_sets (job_id, id, description)
+            VALUES ('job-b', 'filter-without-version', 'Other parent')
+            """
+        )
+        _insert_filter_version(
+            connection,
+            job_id="job-b",
+            filter_set_id="filter-without-version",
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="FILTER_SET_VERSION_NOT_FOUND"):
+            connection.execute(
+                """
+                INSERT INTO job_revisions (
+                    job_id,
+                    id,
+                    filter_set_id,
+                    filter_set_version
+                )
+                VALUES ('job-a', 'job-rev-missing-filter-version', 'filter-without-version', 1)
+                """
             )
 
         connection.execute(
@@ -722,7 +826,7 @@ def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> N
                 name,
                 migration_checksum
             )
-            VALUES ('catalog', 28, 'future_migration', ?)
+                VALUES ('catalog', 29, 'future_migration', ?)
             """,
             ("f" * 64,),
         )
@@ -829,8 +933,8 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
         preflight = inspect_sqlite_migration_state(connection, plan)
 
         assert preflight.initialized
-        assert preflight.current_version == 27
-        assert preflight.target_version == 27
+        assert preflight.current_version == 28
+        assert preflight.target_version == 28
         assert preflight.checksum_backfill_required
         assert "migration_checksum" not in _column_names(
             connection,
@@ -870,6 +974,58 @@ def test_migration_preflight_rejects_unmanaged_nonempty_schema(tmp_path: Path) -
         assert _table_names(connection) == {"unknown_owner"}
 
 
+def test_catalog_filter_version_migration_backfills_existing_revisions(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    plan = catalog_migration_plan()
+    version_27_plan = replace(plan, migrations=plan.migrations[:27])
+    with sqlite3.connect(database) as connection:
+        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_migrations(connection, version_27_plan)
+        connection.execute(
+            "INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')"
+        )
+        connection.execute(
+            """
+            INSERT INTO filter_sets (job_id, id, description)
+            VALUES ('job-a', 'filter-a', 'standard backup defaults')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO job_revisions (job_id, id, filter_set_id)
+            VALUES ('job-a', 'job-rev-a', 'filter-a')
+            """
+        )
+        connection.commit()
+
+        apply_sqlite_migrations(connection, plan)
+
+        assert connection.execute(
+            """
+            SELECT version, rules_hash, rules_json
+            FROM filter_set_versions
+            WHERE job_id = 'job-a' AND filter_set_id = 'filter-a'
+            """
+        ).fetchone() == (1, FILTER_RULES_HASH, FILTER_RULES_JSON)
+        assert connection.execute(
+            """
+            SELECT filter_set_id, filter_set_version
+            FROM job_revisions
+            WHERE job_id = 'job-a' AND id = 'job-rev-a'
+            """
+        ).fetchone() == ("filter-a", 1)
+        assert connection.execute(
+            """
+            SELECT filter_set_id, filter_set_version
+            FROM job_revision_filter_bindings
+            WHERE job_id = 'job-a' AND job_revision_id = 'job-rev-a'
+            """
+        ).fetchone() == ("filter-a", 1)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
 def _insert_catalog_parent_rows(connection: sqlite3.Connection) -> None:
     connection.execute("INSERT INTO endpoints (id) VALUES ('endpoint-a')")
     connection.execute(
@@ -886,6 +1042,7 @@ def _insert_catalog_parent_rows(connection: sqlite3.Connection) -> None:
     )
     connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')")
     connection.execute("INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')")
+    _insert_filter_version(connection, job_id="job-a", filter_set_id="filter-a")
     connection.execute(
         """
         INSERT INTO job_revisions (job_id, id, filter_set_id)
@@ -944,6 +1101,8 @@ def _insert_immutable_revision_rows(connection: sqlite3.Connection) -> None:
             ("filter-b", "Filter B"),
         ),
     )
+    _insert_filter_version(connection, job_id="job-a", filter_set_id="filter-a")
+    _insert_filter_version(connection, job_id="job-a", filter_set_id="filter-b")
     connection.executemany(
         """
         INSERT INTO job_revisions (job_id, id, filter_set_id)
@@ -1018,6 +1177,27 @@ def _insert_immutable_revision_rows(connection: sqlite3.Connection) -> None:
             'REGISTRATION_PENDING'
         )
         """
+    )
+
+
+def _insert_filter_version(
+    connection: sqlite3.Connection,
+    *,
+    job_id: str,
+    filter_set_id: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO filter_set_versions (
+            job_id,
+            filter_set_id,
+            version,
+            rules_hash,
+            rules_json
+        )
+        VALUES (?, ?, 1, ?, ?)
+        """,
+        (job_id, filter_set_id, FILTER_RULES_HASH, FILTER_RULES_JSON),
     )
 
 

@@ -5,6 +5,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+from tests.support.sqlite_catalog import insert_default_filter_set_version
+
 from mediasync_home.adapters.final_commit import LocalResolvingFinalCommitAdapter
 from mediasync_home.adapters.staging import LocalFileStagingTransferAdapter
 from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
@@ -511,6 +513,11 @@ def _insert_plan_parent_rows(
 ) -> None:
     connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')")
     connection.execute("INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')")
+    insert_default_filter_set_version(
+        connection,
+        job_id="job-a",
+        filter_set_id="filter-a",
+    )
     connection.execute(
         """
         INSERT INTO job_revisions (job_id, id, filter_set_id)

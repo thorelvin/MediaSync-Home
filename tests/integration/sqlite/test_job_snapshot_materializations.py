@@ -4,6 +4,8 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from tests.support.sqlite_catalog import insert_default_filter_set_version
+
 from mediasync_home.adapters.local_snapshot_scanner import (
     LocalFilesystemSnapshotScanner,
 )
@@ -344,6 +346,11 @@ def _insert_active_job_with_endpoints(
     )
     connection.execute(
         "INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')"
+    )
+    insert_default_filter_set_version(
+        connection,
+        job_id="job-a",
+        filter_set_id="filter-a",
     )
     connection.execute(
         """

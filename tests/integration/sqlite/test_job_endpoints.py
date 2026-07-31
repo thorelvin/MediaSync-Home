@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.sqlite_catalog import insert_default_filter_set_version
+
 from mediasync_home.adapters.sqlite.connection_policy import (
     apply_sqlite_connection_policy,
     catalog_critical_writer_policy,
@@ -187,6 +189,11 @@ def _insert_job_revision(
     connection.execute(
         "INSERT INTO filter_sets (job_id, id) VALUES (?, ?)",
         (job.job_id, job.filter_set_id),
+    )
+    insert_default_filter_set_version(
+        connection,
+        job_id=job.job_id,
+        filter_set_id=job.filter_set_id,
     )
     connection.execute(
         "INSERT INTO job_revisions (job_id, id, filter_set_id) VALUES (?, ?, ?)",

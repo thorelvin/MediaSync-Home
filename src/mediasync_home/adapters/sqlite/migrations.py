@@ -173,6 +173,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_immutable_revision_guards",
                 statements=CATALOG_IMMUTABLE_REVISION_GUARDS,
             ),
+            SqliteMigration(
+                version=28,
+                name="catalog_filter_set_versions",
+                statements=CATALOG_FILTER_SET_VERSIONS,
+            ),
         ),
     )
 
@@ -1768,6 +1773,138 @@ CATALOG_IMMUTABLE_REVISION_GUARDS = (
     BEFORE DELETE ON standard_backup_job_endpoint_bindings
     BEGIN
         SELECT RAISE(ABORT, 'JOB_REVISION_BINDING_IMMUTABLE');
+    END
+    """,
+)
+
+CATALOG_FILTER_SET_VERSIONS = (
+    """
+    ALTER TABLE job_revisions
+    ADD COLUMN filter_set_version INTEGER NOT NULL DEFAULT 1
+        CHECK (filter_set_version >= 1)
+    """,
+    """
+    CREATE TABLE filter_set_versions (
+        job_id TEXT NOT NULL,
+        filter_set_id TEXT NOT NULL,
+        version INTEGER NOT NULL CHECK (version >= 1),
+        rules_hash TEXT NOT NULL
+            CHECK (
+                length(rules_hash) = 64
+                AND rules_hash = lower(rules_hash)
+                AND rules_hash NOT GLOB '*[^0-9a-f]*'
+            ),
+        rules_json TEXT NOT NULL CHECK (json_valid(rules_json)),
+        created_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        PRIMARY KEY (job_id, filter_set_id, version),
+        FOREIGN KEY (job_id, filter_set_id)
+            REFERENCES filter_sets (job_id, id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    INSERT INTO filter_set_versions (
+        job_id,
+        filter_set_id,
+        version,
+        rules_hash,
+        rules_json
+    )
+    SELECT
+        job_id,
+        id,
+        1,
+        '5b551f66adfe79a9e025a369c44e76ece00928588f965a93fe6cdcfbdb1e4a9b',
+        '{"preset":"ALL_USER_FILES","schema_version":1}'
+    FROM filter_sets
+    """,
+    """
+    CREATE TABLE job_revision_filter_bindings (
+        job_id TEXT NOT NULL,
+        job_revision_id TEXT NOT NULL,
+        filter_set_id TEXT NOT NULL,
+        filter_set_version INTEGER NOT NULL CHECK (filter_set_version >= 1),
+        PRIMARY KEY (job_id, job_revision_id),
+        FOREIGN KEY (job_id, job_revision_id)
+            REFERENCES job_revisions (job_id, id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (job_id, filter_set_id, filter_set_version)
+            REFERENCES filter_set_versions (job_id, filter_set_id, version)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    INSERT INTO job_revision_filter_bindings (
+        job_id,
+        job_revision_id,
+        filter_set_id,
+        filter_set_version
+    )
+    SELECT
+        job_id,
+        id,
+        filter_set_id,
+        filter_set_version
+    FROM job_revisions
+    """,
+    """
+    CREATE TRIGGER trg_job_revisions_filter_version_required
+    BEFORE INSERT ON job_revisions
+    WHEN NOT EXISTS (
+        SELECT 1
+        FROM filter_set_versions
+        WHERE job_id = NEW.job_id
+            AND filter_set_id = NEW.filter_set_id
+            AND version = NEW.filter_set_version
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'FILTER_SET_VERSION_NOT_FOUND');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_job_revisions_bind_filter_version
+    AFTER INSERT ON job_revisions
+    BEGIN
+        INSERT INTO job_revision_filter_bindings (
+            job_id,
+            job_revision_id,
+            filter_set_id,
+            filter_set_version
+        )
+        VALUES (
+            NEW.job_id,
+            NEW.id,
+            NEW.filter_set_id,
+            NEW.filter_set_version
+        );
+    END
+    """,
+    """
+    CREATE TRIGGER trg_filter_set_versions_no_update
+    BEFORE UPDATE ON filter_set_versions
+    BEGIN
+        SELECT RAISE(ABORT, 'FILTER_SET_VERSION_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_filter_set_versions_no_delete
+    BEFORE DELETE ON filter_set_versions
+    BEGIN
+        SELECT RAISE(ABORT, 'FILTER_SET_VERSION_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_job_revision_filter_bindings_no_update
+    BEFORE UPDATE ON job_revision_filter_bindings
+    BEGIN
+        SELECT RAISE(ABORT, 'JOB_REVISION_FILTER_BINDING_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_job_revision_filter_bindings_no_delete
+    BEFORE DELETE ON job_revision_filter_bindings
+    BEGIN
+        SELECT RAISE(ABORT, 'JOB_REVISION_FILTER_BINDING_IMMUTABLE');
     END
     """,
 )

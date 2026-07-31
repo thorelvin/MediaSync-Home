@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from tests.support.sqlite_catalog import insert_default_filter_set_version
+
 from mediasync_home.adapters.sqlite.command_receipts import SqliteCommandReceiptStore
 from mediasync_home.adapters.sqlite.connection_policy import (
     apply_sqlite_connection_policy,
@@ -186,6 +188,11 @@ def _prepare_recovery(connection: sqlite3.Connection, database: Path) -> None:
 def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
     connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')")
     connection.execute("INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')")
+    insert_default_filter_set_version(
+        connection,
+        job_id="job-a",
+        filter_set_id="filter-a",
+    )
     connection.execute(
         """
         INSERT INTO job_revisions (job_id, id, filter_set_id)

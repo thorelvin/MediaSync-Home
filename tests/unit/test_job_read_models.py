@@ -103,9 +103,10 @@ def test_backup_job_detail_query_returns_exact_job_revision_payload() -> None:
         "found": True,
         "job": {
             "job_id": "job-a",
-            "job_revision_id": "job-a-rev",
-            "filter_set_id": "job-a-filter",
-            "title": "job-a source",
+                "job_revision_id": "job-a-rev",
+                "filter_set_id": "job-a-filter",
+                "filter_set_version": 1,
+                "title": "job-a source",
             "source_name": "job-a source",
             "source_path_label": "C:/Data/job-a",
             "configured_target_count": 1,

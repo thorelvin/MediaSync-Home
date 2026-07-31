@@ -219,7 +219,7 @@ Uforanderlig, kanonisk jobbkonfigurasjon.
 - unik `(job_id, id)`
 - unik `(job_id, configuration_hash)` når identisk revisjon ikke skal dupliseres
 - sammensatt FK `(job_id, filter_set_id) REFERENCES filter_sets(job_id, id)`
-- sammensatt FK `(filter_set_id, filter_set_version) REFERENCES filter_set_versions(filter_set_id, version)`
+- eksakt versionbinding fra `(job_id, id, filter_set_id, filter_set_version)` til `filter_set_versions` gjennom direkte sammensatt FK eller en immutable parent-scoped bindingstabell med samme effekt
 
 Bindende `CHECK`/domenevalidering:
 
@@ -337,12 +337,16 @@ Muterbar read model per jobb/mål, adskilt fra konfigurasjonsrevisjon.
 
 #### `filter_set_versions`
 
-- `filter_set_id TEXT NOT NULL REFERENCES filter_sets(id) ON DELETE RESTRICT`
+- `job_id TEXT NOT NULL`
+- `filter_set_id TEXT NOT NULL`
 - `version INTEGER NOT NULL`
 - `rules_hash TEXT NOT NULL`
 - `rules_json TEXT NOT NULL`
 - `created_utc TEXT NOT NULL`
-- primærnøkkel `(filter_set_id, version)`
+- primærnøkkel `(job_id, filter_set_id, version)`
+- sammensatt FK `(job_id, filter_set_id) REFERENCES filter_sets(job_id, id) ON DELETE RESTRICT`
+
+0B-implementasjonsnote: Catalog migration 28 legger `filter_set_version` på den eksisterende, allerede bredt refererte `job_revisions`-tabellen og bruker `job_revision_filter_bindings` som den faktiske composite-FK-broen. Broen har én rad per `(job_id, job_revision_id)`, refererer både jobbrevisjonen og `(job_id, filter_set_id, filter_set_version)`, opprettes av en database-trigger etter bare en gyldig versionlookup og er immutable mot update/delete. `filter_set_versions` er også append-only. Migrationen backfiller alle eldre filtersett og revisjoner til versjon 1 med kanonisk `{"preset":"ALL_USER_FILES","schema_version":1}` og matching SHA-256; nye standard-jobber persisterer samme rulespayload før revisjonen.
 
 #### `analyses`
 

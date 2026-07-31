@@ -44,6 +44,7 @@ class StandardBackupJobSummary:
     source_name: str
     source_path_label: str
     targets: tuple[StandardBackupTargetSummary, ...]
+    filter_set_version: int = 1
 
     def to_dict(self) -> dict[str, object]:
         independent_device_ids = {
@@ -53,6 +54,7 @@ class StandardBackupJobSummary:
             "job_id": self.job_id,
             "job_revision_id": self.job_revision_id,
             "filter_set_id": self.filter_set_id,
+            "filter_set_version": self.filter_set_version,
             "title": self.source_name,
             "source_name": self.source_name,
             "source_path_label": self.source_path_label,
@@ -71,6 +73,7 @@ class StandardBackupJobDetail:
     source_path_label: str
     targets: tuple[StandardBackupTargetSummary, ...]
     defaults: StandardBackupDefaults
+    filter_set_version: int = 1
 
     def to_dict(self) -> dict[str, object]:
         independent_device_ids = {
@@ -80,6 +83,7 @@ class StandardBackupJobDetail:
             "job_id": self.job_id,
             "job_revision_id": self.job_revision_id,
             "filter_set_id": self.filter_set_id,
+            "filter_set_version": self.filter_set_version,
             "title": self.source_name,
             "source_name": self.source_name,
             "source_path_label": self.source_path_label,

@@ -65,6 +65,7 @@ class SealedStandardBackupJob:
     source_path_label: str
     targets: tuple[SealedStandardBackupTarget, ...]
     defaults: StandardBackupDefaults
+    filter_set_version: int = 1
 
 
 @dataclass(frozen=True)

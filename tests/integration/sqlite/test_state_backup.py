@@ -65,8 +65,8 @@ def test_sqlite_state_backup_set_captures_verified_catalog_recovery_pair(
     assert (backup_dir / BACKUP_SET_INTENT_FILENAME).is_file()
     assert (backup_dir / BACKUP_SET_MANIFEST_FILENAME).is_file()
     assert [entry.store.value for entry in manifest.stores] == ["catalog", "recovery"]
-    assert [entry.schema_version for entry in manifest.stores] == [27, 5]
-    assert [entry.migration_count for entry in manifest.stores] == [27, 5]
+    assert [entry.schema_version for entry in manifest.stores] == [28, 5]
+    assert [entry.migration_count for entry in manifest.stores] == [28, 5]
     assert all(entry.quick_check == "ok" for entry in manifest.stores)
     assert all(entry.foreign_key_violations == 0 for entry in manifest.stores)
     assert all(len(entry.sha256) == 64 for entry in manifest.stores)

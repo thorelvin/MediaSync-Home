@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.sqlite_catalog import insert_default_filter_set_version
+
 from mediasync_home.adapters import local_host_locator as local_host_locator_module
 from mediasync_home.adapters.local_host_locator import (
     clear_stale_local_engine_host_publication,
@@ -922,7 +924,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.recovery_connection is not None
         assert runtime.installation_state is not None
         assert runtime.installation_state.product_channel == "local-preview"
-        assert runtime.installation_state.catalog_schema_version == 27
+        assert runtime.installation_state.catalog_schema_version == 28
         assert runtime.installation_state.recovery_schema_version == 5
         assert runtime.installation_state.ipc_protocol_major == 1
         assert runtime.snapshot_materialization_refresh is not None
@@ -957,7 +959,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
             runtime.run_executor_recovery_object_cleanup_port
             is runtime.run_executor_final_commit_port
         )
-        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 27
+        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 28
         assert current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY) == 5
         assert runtime.startup_reconciliation is not None
         assert runtime.startup_reconciliation.reconciler_instance_id == "host-new"
@@ -2293,6 +2295,11 @@ def _observed_task_scheduler_definition(
 def _insert_task_scheduler_plan_parent_rows(connection: sqlite3.Connection) -> None:
     connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')")
     connection.execute("INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')")
+    insert_default_filter_set_version(
+        connection,
+        job_id="job-a",
+        filter_set_id="filter-a",
+    )
     connection.execute(
         """
         INSERT INTO job_revisions (job_id, id, filter_set_id)

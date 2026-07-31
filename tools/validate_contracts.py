@@ -59,6 +59,24 @@ REQUIRED_DATABASE_PARENT_SCOPE_FKS = {
     ),
     ("job_heads", ("job_id", "active_revision_id"), "job_revisions", ("job_id", "id")),
     ("job_revisions", ("job_id", "filter_set_id"), "filter_sets", ("job_id", "id")),
+    (
+        "filter_set_versions",
+        ("job_id", "filter_set_id"),
+        "filter_sets",
+        ("job_id", "id"),
+    ),
+    (
+        "job_revision_filter_bindings",
+        ("job_id", "job_revision_id"),
+        "job_revisions",
+        ("job_id", "id"),
+    ),
+    (
+        "job_revision_filter_bindings",
+        ("job_id", "filter_set_id", "filter_set_version"),
+        "filter_set_versions",
+        ("job_id", "filter_set_id", "version"),
+    ),
     ("analyses", ("job_id", "job_revision_id"), "job_revisions", ("job_id", "id")),
     (
         "analysis_targets",
@@ -446,6 +464,8 @@ def _validate_immutable_revision_invariant(invariant: dict[str, Any]) -> None:
     )
     expected_immutable_tables = {
         "endpoint_revisions",
+        "filter_set_versions",
+        "job_revision_filter_bindings",
         "job_revisions",
         "standard_backup_job_revision_details",
     }

@@ -51,6 +51,8 @@ invariants:
     assertion: Sealed revision content cannot be updated or deleted in place.
     always_immutable_tables:
       - endpoint_revisions
+      - filter_set_versions
+      - job_revision_filter_bindings
       - job_revisions
       - standard_backup_job_revision_details
     immutable_after_reference:
@@ -90,6 +92,18 @@ invariants:
         child_columns: [job_id, filter_set_id]
         parent_table: filter_sets
         parent_columns: [job_id, id]
+      - child_table: filter_set_versions
+        child_columns: [job_id, filter_set_id]
+        parent_table: filter_sets
+        parent_columns: [job_id, id]
+      - child_table: job_revision_filter_bindings
+        child_columns: [job_id, job_revision_id]
+        parent_table: job_revisions
+        parent_columns: [job_id, id]
+      - child_table: job_revision_filter_bindings
+        child_columns: [job_id, filter_set_id, filter_set_version]
+        parent_table: filter_set_versions
+        parent_columns: [job_id, filter_set_id, version]
       - child_table: analyses
         child_columns: [job_id, job_revision_id]
         parent_table: job_revisions
