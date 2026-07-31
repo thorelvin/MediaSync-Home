@@ -64,6 +64,21 @@ def test_plan_preview_view_model_renders_bounded_operation_rows() -> None:
     ]
     assert [row.risk_label for row in state.rows] == ["Low", "Low"]
     assert [row.target_endpoint_id for row in state.rows] == ["target-a", "target-b"]
+    assert [row.operation_type for row in state.rows] == [
+        "CREATE_DIRECTORY",
+        "COPY_NEW",
+    ]
+    assert [row.target_relative_path for row in state.rows] == [
+        "Photos",
+        "Photos/2026/a.jpg",
+    ]
+    assert [row.planned_bytes for row in state.rows] == [0, 2048]
+    assert state.limit == 2
+    assert state.next_cursor == {
+        "execution_phase": 20,
+        "stable_order_key": "photos/2026",
+        "operation_id": "op-b",
+    }
 
 
 def test_plan_preview_view_model_handles_unavailable_read_model() -> None:

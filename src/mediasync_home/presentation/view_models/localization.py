@@ -309,6 +309,62 @@ class ShellText:
     def activity_backup(self) -> str:
         return "Backup" if self.language_tooltip_prefix == "Language" else "Backup"
 
+    @property
+    def file_results(self) -> str:
+        return "File results" if self.language_tooltip_prefix == "Language" else "Filresultater"
+
+    @property
+    def file_results_unavailable(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "File results are not available."
+        return "Filresultater er ikke tilgjengelige."
+
+    @property
+    def file_results_empty(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "This backup has no file results to show."
+        return "Denne backupen har ingen filresultater å vise."
+
+    @property
+    def file_audit_not_found(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "No persisted audit evidence was found for this operation."
+        return "Ingen lagret revisjonsevidens ble funnet for denne operasjonen."
+
+    @property
+    def file_result(self) -> str:
+        return "Result" if self.language_tooltip_prefix == "Language" else "Resultat"
+
+    @property
+    def verification(self) -> str:
+        return "Verification" if self.language_tooltip_prefix == "Language" else "Verifisering"
+
+    @property
+    def durability(self) -> str:
+        return "Durability" if self.language_tooltip_prefix == "Language" else "Varig lagring"
+
+    @property
+    def attempts(self) -> str:
+        return "Attempts" if self.language_tooltip_prefix == "Language" else "Forsøk"
+
+    @property
+    def last_error(self) -> str:
+        return "Last error" if self.language_tooltip_prefix == "Language" else "Siste feil"
+
+    @property
+    def file_attempts(self) -> str:
+        return "Attempt history" if self.language_tooltip_prefix == "Language" else "Forsøkshistorikk"
+
+    @property
+    def no_terminal_outcome(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "No terminal outcome yet"
+        return "Ingen avsluttende resultat ennå"
+
+    @property
+    def no_error(self) -> str:
+        return "None" if self.language_tooltip_prefix == "Language" else "Ingen"
+
 
 NB_TEXT = ShellText(
     local_preview="Lokal forhåndsvisning",

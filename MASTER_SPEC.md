@@ -5185,6 +5185,15 @@ ikke denne retryflyten.
 - sammensatt FK `(run_id, run_target_id) REFERENCES run_targets(run_id, id)`
 - sammensatt FK `(plan_id, operation_id) REFERENCES planned_operations(plan_id, id)`
 
+0B-implementasjonsnote: Catalog schema 40 oppretter `run_attempts`,
+`operation_attempts` og `operation_outcomes` med parent-scope-FK-ene over.
+Attempt- og outcome-rader er append-only med update-/delete-triggere. Engine
+Host avleder dem idempotent fra recoveryjournalens events; eventen skrives
+først, og catalog-avstemming skjer i neste executorsteg og ved startup-resume
+før målterminalisering. Derfor kan et prosesskrasj mellom de to databasene
+repareres uten å finne opp nytt bevis. Bounded `QUERY_OPERATION_AUDIT` leser
+forsøk og outcome per `(run_id, operation_id)`.
+
 #### `hash_cache`
 
 - `id INTEGER PRIMARY KEY`
@@ -8198,7 +8207,8 @@ pre-migration-30 pending-jobbreparasjon og SMB-bevis gjenstår.
 - Implementer transfer, stagingflush/verifisering og no-overwrite commit for **nye filer bare**.
 - Implementer endpoint owner/epoch/lease/token, `MutationPermit`, `SourceReadGuard` eller forseglet post-transfer-hashfallback, source-/target-/parent-/case-revalidation og bounded immutable intentsegmenter gjennom hele commitflyten; segmentene kjedes med checksum, bruker bare relative stier/persistente ID-er og publiseres varig før første mutasjon.
 - Implementer catalog ↔ recovery handoff for run start/outcome og recoveryfasene, pause/stopp og idempotent attemptrestart.
-- Implementer operation attempts, outcomes og audit.
+- Implementer operation attempts, outcomes og audit. 0B-grunnlaget er levert i
+  catalog schema 40 med recovery-avstemming og bounded IPC-read model.
 - Mål mot direkte Robocopy.
 
 #### Kvalitetsport

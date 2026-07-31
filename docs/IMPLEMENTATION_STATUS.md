@@ -10,7 +10,13 @@ avstemming før et catalog-recorded mål kan fullføres. Et krasj mellom recover
 event og catalog-write repareres derfor i neste bounded pass. Parent-scope-FK-er
 binder radene til samme run, plan, mål og planoperasjon. Bounded
 `QUERY_OPERATION_AUDIT` eksponerer målsti, forsøk og sluttresultat uten at GUI
-leser SQLite direkte. Full interaktiv fil-drilldown i Historikk gjenstår.
+leser SQLite direkte. **Historikk** viser nå en bounded, keyset-paginert liste
+over den valgte backupkjøringens forseglede planoperasjoner. Valg av én fil
+henter bare den eksakte auditposten og viser sluttresultat, fullført tid,
+overførte byte, assurance, durability, siste feil og opptil 25 forsøk. Et
+transient feilforsøk etterfulgt av suksess vises som to separate, tidsstemplete
+rader. Kontrollaktiviteter skjuler filseksjonen, språkbytte bevarer valgt fil,
+og 900×560-dekning verifiserer at lange filstier ikke gir horisontal clipping.
 
 Oppdatering 2026-07-31: Utilgjengelige og opptatte mål går nå i en varig,
 ikke-destruktiv ventetilstand i stedet for å blokkere hele kjøringen. Catalog

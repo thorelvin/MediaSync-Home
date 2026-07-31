@@ -90,7 +90,9 @@ QListWidget#navigationRail::item:selected {{
 }}
 
 QListWidget#jobsList,
-QListWidget#historyList {{
+QListWidget#historyList,
+QListWidget#historyOperationList,
+QListWidget#historyAttemptList {{
     background: {tokens.surface};
     border: {tokens.border_hairline}px solid {tokens.border};
     border-radius: {tokens.radius_sm}px;
@@ -98,14 +100,17 @@ QListWidget#historyList {{
 }}
 
 QListWidget#jobsList::item,
-QListWidget#historyList::item {{
+QListWidget#historyList::item,
+QListWidget#historyOperationList::item,
+QListWidget#historyAttemptList::item {{
     min-height: {list_height}px;
     padding: {tokens.space_2}px {tokens.space_3}px;
     border-bottom: {tokens.border_hairline}px solid {tokens.border};
 }}
 
 QListWidget#jobsList::item:selected,
-QListWidget#historyList::item:selected {{
+QListWidget#historyList::item:selected,
+QListWidget#historyOperationList::item:selected {{
     background: {tokens.selection};
     color: {tokens.text};
 }}
@@ -155,7 +160,9 @@ QLabel#jobDetailTitle {{
     font-weight: 600;
 }}
 
-QLabel#historyDetailTitle {{
+QLabel#historyDetailTitle,
+QLabel#historyOperationHeading,
+QLabel#historyOperationDetailTitle {{
     font-weight: 600;
 }}
 

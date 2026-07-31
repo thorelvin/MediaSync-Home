@@ -93,6 +93,11 @@ from mediasync_home.presentation.view_models.localization import (
     settings_text,
     shell_text,
 )
+from mediasync_home.presentation.view_models.operation_audit import (
+    OperationAuditViewState,
+    empty_operation_audit_state,
+    operation_audit_from_response,
+)
 from mediasync_home.presentation.view_models.plan_preview import (
     PlanOperationPreviewState,
     empty_plan_operation_preview_state,
@@ -154,6 +159,16 @@ class HistoryTimelineProvider(Protocol):
         job_id: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
+    ) -> IpcResponse: ...
+
+
+class OperationAuditProvider(Protocol):
+    def get_operation_audit(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        limit: int | None = None,
     ) -> IpcResponse: ...
 
 
@@ -328,6 +343,8 @@ class MediaSyncWindow(QMainWindow):
         self._snapshot_health_preview_state = empty_snapshot_health_preview_state()
         self._cataloged_files_preview_state = empty_cataloged_files_preview_state()
         self._history_timeline_state = empty_history_timeline_state()
+        self._history_operation_page_state = empty_plan_operation_preview_state()
+        self._history_operation_audit_state = empty_operation_audit_state()
         self._engine_status_state = initial_state
         self._subtitle_label: QLabel | None = None
         self._navigation: QListWidget | None = None
@@ -369,6 +386,25 @@ class MediaSyncWindow(QMainWindow):
         self._history_detail_values: dict[str, QLabel] = {}
         self._history_target_heading: QLabel | None = None
         self._history_target_rows: list[QLabel] = []
+        self._history_operation_activity_key: str | None = None
+        self._history_operation_run_id: str | None = None
+        self._history_operation_plan_id: str | None = None
+        self._history_operation_list: QListWidget | None = None
+        self._history_operation_empty_label: QLabel | None = None
+        self._history_operation_heading: QLabel | None = None
+        self._history_operation_header: QWidget | None = None
+        self._history_operation_page_label: QLabel | None = None
+        self._history_operation_previous_button: QToolButton | None = None
+        self._history_operation_next_button: QToolButton | None = None
+        self._history_operation_page_limit = 25
+        self._history_operation_page_index = 0
+        self._history_operation_page_cursors: list[dict[str, object] | None] = [None]
+        self._selected_history_operation_id: str | None = None
+        self._history_operation_detail_title: QLabel | None = None
+        self._history_operation_detail_labels: dict[str, QLabel] = {}
+        self._history_operation_detail_values: dict[str, QLabel] = {}
+        self._history_attempt_heading: QLabel | None = None
+        self._history_attempt_list: QListWidget | None = None
         self._dashboard_detail_layout: QBoxLayout | None = None
         self._setup_stepper_layout: QGridLayout | None = None
         self._compact_dashboard_layout: bool | None = None
@@ -931,6 +967,7 @@ class MediaSyncWindow(QMainWindow):
             for target_row in self._history_target_rows:
                 target_row.clear()
                 target_row.setVisible(False)
+            self._set_history_operation_activity(None)
             self._refresh_dashboard_geometry()
             return
 
@@ -1005,7 +1042,398 @@ class MediaSyncWindow(QMainWindow):
                 )
             target_row.setText(f"{target.endpoint_id} · {target_detail}")
             target_row.setVisible(True)
+        self._set_history_operation_activity(activity)
         self._refresh_dashboard_geometry()
+
+    def _set_history_operation_activity(
+        self,
+        activity: HistoryActivityViewState | None,
+    ) -> None:
+        if (
+            activity is None
+            or activity.activity_kind != "BACKUP"
+            or activity.run_id is None
+            or activity.plan_id is None
+        ):
+            self._history_operation_activity_key = None
+            self._history_operation_run_id = None
+            self._history_operation_plan_id = None
+            self._history_operation_page_state = empty_plan_operation_preview_state()
+            self._history_operation_audit_state = empty_operation_audit_state()
+            self._selected_history_operation_id = None
+            self._history_operation_page_index = 0
+            self._history_operation_page_cursors = [None]
+            self._set_history_operation_widgets_visible(False)
+            return
+
+        activity_key = f"{activity.run_id}:{activity.plan_id}"
+        self._set_history_operation_widgets_visible(True)
+        if activity_key == self._history_operation_activity_key:
+            if (
+                self._selected_navigation_index == 2
+                and self._history_operation_page_state.plan_id != activity.plan_id
+            ):
+                self._refresh_history_operation_page()
+            else:
+                self._apply_history_operation_page_state(
+                    self._history_operation_page_state
+                )
+            return
+
+        self._history_operation_activity_key = activity_key
+        self._history_operation_run_id = activity.run_id
+        self._history_operation_plan_id = activity.plan_id
+        self._history_operation_page_index = 0
+        self._history_operation_page_cursors = [None]
+        self._selected_history_operation_id = None
+        self._history_operation_audit_state = empty_operation_audit_state(
+            run_id=activity.run_id
+        )
+        if self._selected_navigation_index == 2:
+            self._refresh_history_operation_page()
+        else:
+            self._apply_history_operation_page_state(
+                self._history_operation_page_state
+            )
+
+    def _refresh_history_operation_page(self) -> None:
+        plan_id = self._history_operation_plan_id
+        if (
+            plan_id is None
+            or self._engine_client is None
+            or not hasattr(self._engine_client, "get_plan_operations")
+        ):
+            self._history_operation_page_state = empty_plan_operation_preview_state()
+            self._apply_history_operation_page_state(
+                self._history_operation_page_state
+            )
+            return
+        provider = cast(PlanOperationsProvider, self._engine_client)
+        cursor = self._history_operation_page_cursors[
+            self._history_operation_page_index
+        ]
+        self._history_operation_page_state = plan_operation_preview_from_response(
+            provider.get_plan_operations(
+                plan_id=plan_id,
+                limit=self._history_operation_page_limit,
+                after=cursor,
+            )
+        )
+        self._apply_history_operation_page_state(self._history_operation_page_state)
+
+    def _apply_history_operation_page_state(
+        self,
+        state: PlanOperationPreviewState,
+    ) -> None:
+        operation_list = self._history_operation_list
+        if operation_list is None:
+            return
+        operation_list.blockSignals(True)
+        operation_list.clear()
+        selected_row = -1
+        for index, row in enumerate(state.rows):
+            path = row.target_relative_path or row.operation_id
+            operation_type = self._history_operation_type_label(row.operation_type)
+            target = row.target_endpoint_id or self._texts().target
+            item = QListWidgetItem(
+                f"{operation_type} · {path}\n"
+                f"{target} · {_format_bytes(row.planned_bytes)}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, row.operation_id)
+            item.setToolTip(path)
+            item.setSizeHint(QSize(0, 58))
+            operation_list.addItem(item)
+            if row.operation_id == self._selected_history_operation_id:
+                selected_row = index
+
+        operation_ids = {row.operation_id for row in state.rows}
+        if self._selected_history_operation_id not in operation_ids:
+            self._selected_history_operation_id = (
+                state.rows[0].operation_id if state.rows else None
+            )
+            selected_row = 0 if state.rows else -1
+        if selected_row >= 0:
+            operation_list.setCurrentRow(selected_row)
+        operation_list.blockSignals(False)
+
+        has_rows = bool(state.rows)
+        operation_list.setVisible(state.read_model_available and has_rows)
+        operation_list.setEnabled(state.read_model_available)
+        self._set_history_operation_detail_widgets_visible(
+            state.read_model_available and has_rows
+        )
+        if self._history_operation_empty_label is not None:
+            self._history_operation_empty_label.setText(
+                self._texts().file_results_empty
+                if state.read_model_available
+                else self._texts().file_results_unavailable
+            )
+            self._history_operation_empty_label.setVisible(
+                not has_rows or not state.read_model_available
+            )
+        first = (
+            self._history_operation_page_index * self._history_operation_page_limit
+            + 1
+            if has_rows
+            else 0
+        )
+        last = first + len(state.rows) - 1 if has_rows else 0
+        if self._history_operation_page_label is not None:
+            self._history_operation_page_label.setText(f"{first}-{last}")
+        if self._history_operation_previous_button is not None:
+            self._history_operation_previous_button.setEnabled(
+                self._history_operation_page_index > 0
+            )
+            self._history_operation_previous_button.setToolTip(
+                self._texts().previous_page_tooltip
+            )
+            self._history_operation_previous_button.setAccessibleName(
+                self._texts().previous_page_tooltip
+            )
+        if self._history_operation_next_button is not None:
+            self._history_operation_next_button.setEnabled(
+                state.has_more_operations and state.next_cursor is not None
+            )
+            self._history_operation_next_button.setToolTip(
+                self._texts().next_page_tooltip
+            )
+            self._history_operation_next_button.setAccessibleName(
+                self._texts().next_page_tooltip
+            )
+
+        operation_id = self._selected_history_operation_id
+        run_id = self._history_operation_run_id
+        if operation_id is None or run_id is None:
+            self._history_operation_audit_state = empty_operation_audit_state(
+                run_id=run_id,
+                operation_id=operation_id,
+            )
+            self._apply_history_operation_audit_state(
+                self._history_operation_audit_state
+            )
+        elif (
+            self._history_operation_audit_state.run_id == run_id
+            and self._history_operation_audit_state.operation_id == operation_id
+        ):
+            self._apply_history_operation_audit_state(
+                self._history_operation_audit_state
+            )
+        else:
+            self._refresh_history_operation_audit(operation_id)
+        self._refresh_dashboard_geometry()
+
+    def _select_history_operation(
+        self,
+        current: QListWidgetItem | None,
+        previous: QListWidgetItem | None,
+    ) -> None:
+        del previous
+        if current is None:
+            return
+        operation_id = current.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(operation_id, str) or not operation_id:
+            return
+        if operation_id == self._selected_history_operation_id:
+            return
+        self._selected_history_operation_id = operation_id
+        self._refresh_history_operation_audit(operation_id)
+
+    def _refresh_history_operation_audit(self, operation_id: str) -> None:
+        run_id = self._history_operation_run_id
+        if (
+            run_id is None
+            or self._engine_client is None
+            or not hasattr(self._engine_client, "get_operation_audit")
+        ):
+            self._history_operation_audit_state = empty_operation_audit_state(
+                run_id=run_id,
+                operation_id=operation_id,
+            )
+        else:
+            provider = cast(OperationAuditProvider, self._engine_client)
+            self._history_operation_audit_state = operation_audit_from_response(
+                provider.get_operation_audit(
+                    run_id=run_id,
+                    operation_id=operation_id,
+                    limit=25,
+                )
+            )
+        self._apply_history_operation_audit_state(
+            self._history_operation_audit_state
+        )
+
+    def _apply_history_operation_audit_state(
+        self,
+        state: OperationAuditViewState,
+    ) -> None:
+        detail_title = self._history_operation_detail_title
+        attempt_list = self._history_attempt_list
+        if detail_title is None or attempt_list is None:
+            return
+        if not state.read_model_available:
+            detail_title.setText(self._texts().file_results_unavailable)
+        elif not state.found:
+            detail_title.setText(self._texts().file_audit_not_found)
+        else:
+            detail_title.setText(
+                state.target_relative_path or state.operation_id or self._texts().file_result
+            )
+
+        outcome = state.outcome
+        last_attempt_error = next(
+            (
+                attempt.error_code
+                for attempt in reversed(state.attempts)
+                if attempt.error_code is not None
+            ),
+            None,
+        )
+        values = {
+            "result": (
+                self._history_file_state_label(outcome.final_state)
+                if outcome is not None
+                else self._texts().no_terminal_outcome
+            ),
+            "finished": (
+                self._format_history_timestamp(outcome.completed_utc)
+                if outcome is not None
+                else "-"
+            ),
+            "transferred": (
+                _format_bytes(outcome.bytes_transferred)
+                if outcome is not None
+                else "-"
+            ),
+            "verification": (
+                self._history_evidence_label(outcome.assurance_level)
+                if outcome is not None
+                else "-"
+            ),
+            "durability": (
+                self._history_evidence_label(outcome.durability_level)
+                if outcome is not None
+                else "-"
+            ),
+            "attempts": str(len(state.attempts)) if state.found else "-",
+            "last_error": (
+                (outcome.error_code if outcome is not None else None)
+                or last_attempt_error
+                or self._texts().no_error
+            ),
+        }
+        for key, text in values.items():
+            label = self._history_operation_detail_values.get(key)
+            if label is not None:
+                label.setText(text)
+
+        attempt_list.clear()
+        for attempt in state.attempts:
+            result = self._history_file_state_label(attempt.state)
+            finished = self._format_history_timestamp(attempt.finished_utc)
+            detail = attempt.error_code or _format_bytes(attempt.bytes_transferred)
+            prefix = "Attempt" if self._selected_language_code is LanguageCode.ENGLISH else "Forsøk"
+            item = QListWidgetItem(
+                f"{prefix} {attempt.attempt_number} · {result}\n"
+                f"{finished} · {detail}"
+            )
+            item.setToolTip(attempt.error_code or result)
+            item.setSizeHint(QSize(0, 54))
+            attempt_list.addItem(item)
+        attempt_list.setVisible(bool(state.attempts))
+        if self._history_attempt_heading is not None:
+            self._history_attempt_heading.setVisible(bool(state.attempts))
+        self._refresh_dashboard_geometry()
+
+    def _show_previous_history_operation_page(self) -> None:
+        if self._history_operation_page_index <= 0:
+            return
+        self._history_operation_page_index -= 1
+        self._selected_history_operation_id = None
+        self._history_operation_audit_state = empty_operation_audit_state(
+            run_id=self._history_operation_run_id
+        )
+        self._refresh_history_operation_page()
+
+    def _show_next_history_operation_page(self) -> None:
+        state = self._history_operation_page_state
+        if not state.has_more_operations or state.next_cursor is None:
+            return
+        next_index = self._history_operation_page_index + 1
+        if next_index == len(self._history_operation_page_cursors):
+            self._history_operation_page_cursors.append(state.next_cursor)
+        else:
+            self._history_operation_page_cursors[next_index] = state.next_cursor
+            del self._history_operation_page_cursors[next_index + 1 :]
+        self._history_operation_page_index = next_index
+        self._selected_history_operation_id = None
+        self._history_operation_audit_state = empty_operation_audit_state(
+            run_id=self._history_operation_run_id
+        )
+        self._refresh_history_operation_page()
+
+    def _set_history_operation_widgets_visible(self, visible: bool) -> None:
+        widgets: tuple[QWidget | None, ...] = (
+            self._history_operation_header,
+            self._history_operation_heading,
+            self._history_operation_page_label,
+            self._history_operation_previous_button,
+            self._history_operation_next_button,
+            self._history_operation_list,
+            self._history_operation_empty_label,
+        )
+        for widget in widgets:
+            if widget is not None:
+                widget.setVisible(visible)
+        if not visible:
+            self._set_history_operation_detail_widgets_visible(False)
+
+    def _set_history_operation_detail_widgets_visible(self, visible: bool) -> None:
+        widgets: tuple[QWidget | None, ...] = (
+            self._history_operation_detail_title,
+            self._history_attempt_heading,
+            self._history_attempt_list,
+            *self._history_operation_detail_labels.values(),
+            *self._history_operation_detail_values.values(),
+        )
+        for widget in widgets:
+            if widget is not None:
+                widget.setVisible(visible)
+
+    def _history_operation_type_label(self, operation_type: str | None) -> str:
+        english = self._selected_language_code is LanguageCode.ENGLISH
+        labels = {
+            "COPY_NEW": ("Copy new", "Kopier ny"),
+            "CREATE_DIRECTORY": ("Create folder", "Opprett mappe"),
+            "REPLACE_VERSIONED": ("Replace with version", "Erstatt med versjon"),
+            "QUARANTINE": ("Quarantine", "Karantene"),
+        }
+        if operation_type is None:
+            return "Operation" if english else "Operasjon"
+        pair = labels.get(
+            operation_type,
+            (operation_type.replace("_", " ").title(), operation_type),
+        )
+        return pair[0] if english else pair[1]
+
+    def _history_file_state_label(self, state: str) -> str:
+        english = self._selected_language_code is LanguageCode.ENGLISH
+        labels = {
+            "SUCCEEDED": ("Completed", "Fullført"),
+            "FAILED": ("Failed", "Feilet"),
+            "SKIPPED": ("Skipped", "Hoppet over"),
+        }
+        pair = labels.get(state, (state.replace("_", " ").title(), state))
+        return pair[0] if english else pair[1]
+
+    def _history_evidence_label(self, value: str) -> str:
+        english = self._selected_language_code is LanguageCode.ENGLISH
+        labels = {
+            "FULL_HASH": ("Full content hash", "Full innholdshash"),
+            "DURABLE": ("Durably written", "Varig skrevet"),
+            "NOT_RECORDED": ("Not recorded", "Ikke registrert"),
+        }
+        pair = labels.get(value, (value.replace("_", " ").title(), value))
+        return pair[0] if english else pair[1]
 
     def _history_kind_label(self, activity_kind: str) -> str:
         return (
@@ -2900,6 +3328,113 @@ class MediaSyncWindow(QMainWindow):
             target_row.setVisible(False)
             self._history_target_rows.append(target_row)
             layout.addWidget(target_row, 12 + index, 1, 1, 2)
+
+        operation_header = QWidget()
+        operation_header_layout = QHBoxLayout(operation_header)
+        operation_header_layout.setContentsMargins(0, 10, 0, 0)
+        operation_header_layout.setSpacing(8)
+        operation_heading = QLabel(texts.file_results)
+        operation_heading.setObjectName("historyOperationHeading")
+        operation_header_layout.addWidget(operation_heading)
+        operation_header_layout.addStretch(1)
+        operation_previous = QToolButton()
+        operation_previous.setObjectName("historyOperationPreviousButton")
+        operation_previous.setIcon(self._icons.icon("back"))
+        operation_previous.setIconSize(QSize(18, 18))
+        operation_previous.setToolTip(texts.previous_page_tooltip)
+        operation_previous.setAccessibleName(texts.previous_page_tooltip)
+        operation_previous.clicked.connect(
+            self._show_previous_history_operation_page
+        )
+        operation_page_label = QLabel("0-0")
+        operation_page_label.setObjectName("mutedLabel")
+        operation_page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        operation_next = QToolButton()
+        operation_next.setObjectName("historyOperationNextButton")
+        operation_next.setIcon(self._icons.icon("next"))
+        operation_next.setIconSize(QSize(18, 18))
+        operation_next.setToolTip(texts.next_page_tooltip)
+        operation_next.setAccessibleName(texts.next_page_tooltip)
+        operation_next.clicked.connect(self._show_next_history_operation_page)
+        operation_header_layout.addWidget(operation_previous)
+        operation_header_layout.addWidget(operation_page_label)
+        operation_header_layout.addWidget(operation_next)
+        self._history_operation_header = operation_header
+        self._history_operation_heading = operation_heading
+        self._history_operation_previous_button = operation_previous
+        self._history_operation_page_label = operation_page_label
+        self._history_operation_next_button = operation_next
+        layout.addWidget(operation_header, 16, 0, 1, 3)
+
+        operation_list = QListWidget()
+        operation_list.setObjectName("historyOperationList")
+        operation_list.setAccessibleName(texts.file_results)
+        operation_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        operation_list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        operation_list.setWordWrap(True)
+        operation_list.setMinimumHeight(132)
+        operation_list.setMaximumHeight(220)
+        operation_list.currentItemChanged.connect(
+            self._select_history_operation
+        )
+        self._history_operation_list = operation_list
+        layout.addWidget(operation_list, 17, 0, 1, 3)
+
+        operation_empty = QLabel(texts.file_results_unavailable)
+        operation_empty.setObjectName("historyOperationEmptyLabel")
+        _configure_responsive_label(operation_empty)
+        self._history_operation_empty_label = operation_empty
+        layout.addWidget(operation_empty, 18, 0, 1, 3)
+
+        operation_detail_title = QLabel(texts.file_results_unavailable)
+        operation_detail_title.setObjectName("historyOperationDetailTitle")
+        _configure_responsive_label(operation_detail_title, selectable=True)
+        self._history_operation_detail_title = operation_detail_title
+        layout.addWidget(operation_detail_title, 19, 0, 1, 3)
+        operation_detail_rows = (
+            ("result", texts.file_result),
+            ("finished", texts.finished),
+            ("transferred", texts.transferred),
+            ("verification", texts.verification),
+            ("durability", texts.durability),
+            ("attempts", texts.attempts),
+            ("last_error", texts.last_error),
+        )
+        for row_index, (key, label_text) in enumerate(
+            operation_detail_rows,
+            start=20,
+        ):
+            label, value = _add_labeled_text_value(
+                layout,
+                row_index,
+                label_text,
+                "-",
+            )
+            label.setObjectName("historyOperationDetailLabel")
+            value.setObjectName(
+                f"historyOperationDetail{key.title().replace('_', '')}Value"
+            )
+            self._history_operation_detail_labels[key] = label
+            self._history_operation_detail_values[key] = value
+
+        attempt_heading = QLabel(texts.file_attempts)
+        attempt_heading.setObjectName("mutedLabel")
+        self._history_attempt_heading = attempt_heading
+        layout.addWidget(attempt_heading, 27, 0, 1, 3)
+        attempt_list = QListWidget()
+        attempt_list.setObjectName("historyAttemptList")
+        attempt_list.setAccessibleName(texts.file_attempts)
+        attempt_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        attempt_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        attempt_list.setWordWrap(True)
+        attempt_list.setMinimumHeight(112)
+        attempt_list.setMaximumHeight(190)
+        self._history_attempt_list = attempt_list
+        layout.addWidget(attempt_list, 28, 0, 1, 3)
         layout.setColumnStretch(1, 1)
         return panel
 
@@ -3967,6 +4502,8 @@ class MediaSyncWindow(QMainWindow):
             (self._activity_title_label, texts.activity),
             (self._activity_empty_label, texts.no_active_runs),
             (self._history_target_heading, texts.activity_targets),
+            (self._history_operation_heading, texts.file_results),
+            (self._history_attempt_heading, texts.file_attempts),
         ):
             if text_label is not None:
                 text_label.setText(text)
@@ -3986,6 +4523,22 @@ class MediaSyncWindow(QMainWindow):
             history_label = self._history_detail_labels.get(key)
             if history_label is not None:
                 history_label.setText(text)
+        for key, text in (
+            ("result", texts.file_result),
+            ("finished", texts.finished),
+            ("transferred", texts.transferred),
+            ("verification", texts.verification),
+            ("durability", texts.durability),
+            ("attempts", texts.attempts),
+            ("last_error", texts.last_error),
+        ):
+            operation_label = self._history_operation_detail_labels.get(key)
+            if operation_label is not None:
+                operation_label.setText(text)
+        if self._history_operation_list is not None:
+            self._history_operation_list.setAccessibleName(texts.file_results)
+        if self._history_attempt_list is not None:
+            self._history_attempt_list.setAccessibleName(texts.file_attempts)
         if self._workspace_heading is not None:
             self._workspace_heading.setText(self._current_navigation_label())
         self.apply_engine_status(self._engine_status_state)

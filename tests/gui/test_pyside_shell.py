@@ -1182,6 +1182,21 @@ def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) 
         detail_operations = window.findChild(QLabel, "historyDetailOperationsValue")
         detail_transferred = window.findChild(QLabel, "historyDetailTransferredValue")
         detail_speed = window.findChild(QLabel, "historyDetailAverageSpeedValue")
+        operation_list = window.findChild(QListWidget, "historyOperationList")
+        operation_title = window.findChild(QLabel, "historyOperationDetailTitle")
+        operation_result = window.findChild(
+            QLabel,
+            "historyOperationDetailResultValue",
+        )
+        operation_attempts = window.findChild(
+            QLabel,
+            "historyOperationDetailAttemptsValue",
+        )
+        operation_last_error = window.findChild(
+            QLabel,
+            "historyOperationDetailLastErrorValue",
+        )
+        attempt_list = window.findChild(QListWidget, "historyAttemptList")
         job_filter = window.findChild(QComboBox, "historyJobFilter")
         filter_buttons = {
             button.property("activityFilter"): button
@@ -1196,6 +1211,12 @@ def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) 
         assert detail_operations is not None
         assert detail_transferred is not None
         assert detail_speed is not None
+        assert operation_list is not None
+        assert operation_title is not None
+        assert operation_result is not None
+        assert operation_attempts is not None
+        assert operation_last_error is not None
+        assert attempt_list is not None
         assert job_filter is not None
         assert set(filter_buttons) == {"ALL", "CONTROLS", "BACKUPS"}
 
@@ -1212,6 +1233,24 @@ def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) 
         assert detail_operations.text() == "2 / 2"
         assert detail_transferred.text() == "1.0 KiB / 1.0 KiB"
         assert detail_speed.text() == "11 B/s"
+        assert operation_list.count() == 2
+        assert operation_title.text() == "Photos"
+        assert operation_result.text() == "Fullført"
+        assert operation_attempts.text() == "1"
+
+        QTest.mouseClick(
+            operation_list.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=operation_list.visualItemRect(operation_list.item(1)).center(),
+        )
+        qapp.processEvents()
+
+        assert provider.operation_audit_queries[-1][:2] == ("run-a", "op-b")
+        assert operation_title.text().endswith("a-very-long-file-name.jpg")
+        assert operation_result.text() == "Fullført"
+        assert operation_attempts.text() == "2"
+        assert operation_last_error.text() == "LOCAL_IO_TRANSIENT"
+        assert attempt_list.count() == 2
 
         QTest.mouseClick(
             history_list.viewport(),
@@ -1230,6 +1269,7 @@ def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) 
         assert detail_operations.text() == "0 planlagte endringer"
         assert detail_transferred.text() == "Ingen overføring under en kontroll"
         assert detail_speed.text() == "-"
+        assert operation_list.isHidden() is True
 
         window.refresh_engine_status()
         qapp.processEvents()
@@ -1316,6 +1356,63 @@ def test_history_workspace_pages_with_bounded_offsets(qapp) -> None:
         QTest.mouseClick(previous, Qt.MouseButton.LeftButton)
         qapp.processEvents()
         assert provider.history_queries[-1][3] == 0
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_history_file_results_page_with_bounded_plan_cursors(qapp) -> None:
+    provider = _FakePagedHistoryOperationsEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window.refresh_engine_status()
+        qapp.processEvents()
+        nav = window.findChild(QListWidget, "navigationRail")
+        operation_list = window.findChild(QListWidget, "historyOperationList")
+        previous = window.findChild(QToolButton, "historyOperationPreviousButton")
+        next_button = window.findChild(QToolButton, "historyOperationNextButton")
+
+        assert nav is not None
+        assert operation_list is not None
+        assert previous is not None
+        assert next_button is not None
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(2)).center(),
+        )
+        qapp.processEvents()
+
+        assert provider.operation_page_queries[-1] == ("plan-a", 25, None)
+        assert operation_list.count() == 1
+        assert operation_list.item(0).data(Qt.ItemDataRole.UserRole) == "op-a"
+        assert previous.isEnabled() is False
+        assert next_button.isEnabled() is True
+
+        QTest.mouseClick(next_button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert provider.operation_page_queries[-1][2] == {
+            "execution_phase": 20,
+            "stable_order_key": "photos/a.jpg",
+            "operation_id": "op-a",
+        }
+        assert operation_list.item(0).data(Qt.ItemDataRole.UserRole) == "op-z"
+        assert previous.isEnabled() is True
+        assert next_button.isEnabled() is False
+
+        QTest.mouseClick(previous, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert provider.operation_page_queries[-1] == ("plan-a", 25, None)
+        assert operation_list.item(0).data(Qt.ItemDataRole.UserRole) == "op-a"
     finally:
         window.close()
         window.deleteLater()
@@ -2319,6 +2416,7 @@ class _FakeHistoryEngineClient(_FakeDashboardEngineClient):
     def __init__(self) -> None:
         super().__init__()
         self.history_queries: list[tuple[str, str | None, int, int]] = []
+        self.operation_audit_queries: list[tuple[str, str, int]] = []
 
     def get_history_timeline(
         self,
@@ -2367,6 +2465,75 @@ class _FakeHistoryEngineClient(_FakeDashboardEngineClient):
             }
         )
 
+    def get_operation_audit(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        limit: int | None = None,
+    ) -> IpcResponse:
+        normalized_limit = limit or 25
+        self.operation_audit_queries.append(
+            (run_id, operation_id, normalized_limit)
+        )
+        retried = operation_id == "op-b"
+        path = (
+            "Photos/2026/a-directory-name-that-keeps-going/"
+            "a-very-long-file-name.jpg"
+            if retried
+            else "Photos"
+        )
+        attempts: list[dict[str, object]] = []
+        if retried:
+            attempts.append(
+                {
+                    "attempt_number": 1,
+                    "state": "FAILED",
+                    "finished_utc": "2026-07-20T12:00:05.000Z",
+                    "bytes_transferred": 0,
+                    "transfer_state": "NOT_TRANSFERRED",
+                    "assurance_level": "NOT_RECORDED",
+                    "durability_level": "NOT_RECORDED",
+                    "error_code": "LOCAL_IO_TRANSIENT",
+                }
+            )
+        attempts.append(
+            {
+                "attempt_number": 2 if retried else 1,
+                "state": "SUCCEEDED",
+                "finished_utc": "2026-07-20T12:00:08.000Z",
+                "bytes_transferred": 2048 if retried else 0,
+                "transfer_state": "TRANSFERRED_TO_STAGING",
+                "assurance_level": "FULL_HASH",
+                "durability_level": "DURABLE",
+                "error_code": None,
+            }
+        )
+        return IpcResponse.accepted(
+            {
+                "operation_audit": {
+                    "run_id": run_id,
+                    "run_target_id": "run-a-target-0000",
+                    "operation_id": operation_id,
+                    "target_relative_path": path,
+                    "limit": normalized_limit,
+                    "read_model_available": True,
+                    "found": True,
+                    "attempts": attempts,
+                    "outcome": {
+                        "final_state": "SUCCEEDED",
+                        "completed_utc": "2026-07-20T12:00:09.000Z",
+                        "bytes_transferred": 2048 if retried else 0,
+                        "transfer_state": "TRANSFERRED_TO_STAGING",
+                        "assurance_level": "FULL_HASH",
+                        "hash_evidence_kind": "CURRENT_READ_HASH",
+                        "durability_level": "DURABLE",
+                        "error_code": None,
+                    },
+                }
+            }
+        )
+
 
 class _FakePagedHistoryEngineClient(_FakeHistoryEngineClient):
     def get_history_timeline(
@@ -2400,6 +2567,62 @@ class _FakePagedHistoryEngineClient(_FakeHistoryEngineClient):
                     "activity_filter": normalized_filter,
                     "job_id": job_id,
                     "activities": [payload],
+                }
+            }
+        )
+
+
+class _FakePagedHistoryOperationsEngineClient(_FakeHistoryEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.operation_page_queries: list[
+            tuple[str, int, dict[str, object] | None]
+        ] = []
+
+    def get_plan_operations(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        normalized_limit = limit or 100
+        self.calls.append("get_plan_operations")
+        self.operation_page_queries.append((plan_id, normalized_limit, after))
+        first_page = after is None
+        operation_id = "op-a" if first_page else "op-z"
+        path = "Photos/a.jpg" if first_page else "Photos/z.jpg"
+        return IpcResponse.accepted(
+            {
+                "plan_operations": {
+                    "plan_id": plan_id,
+                    "limit": normalized_limit,
+                    "has_more": first_page,
+                    "read_model_available": True,
+                    "next_cursor": (
+                        {
+                            "execution_phase": 20,
+                            "stable_order_key": "photos/a.jpg",
+                            "operation_id": "op-a",
+                        }
+                        if first_page
+                        else None
+                    ),
+                    "operations": [
+                        {
+                            "operation_id": operation_id,
+                            "operation_type": "COPY_NEW",
+                            "sequence_no": 0 if first_page else 25,
+                            "execution_phase": 20,
+                            "stable_order_key": path.lower(),
+                            "target_precondition_kind": "ABSENT",
+                            "reason_code": "SOURCE_ONLY",
+                            "risk_level": "LOW",
+                            "target_endpoint_id": "target-a",
+                            "target_relative_path": path,
+                            "planned_bytes": 128,
+                        }
+                    ],
                 }
             }
         )

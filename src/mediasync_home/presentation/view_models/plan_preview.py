@@ -11,6 +11,9 @@ class PlanOperationPreviewRow:
     display_line: str
     risk_label: str
     target_endpoint_id: str | None = None
+    operation_type: str | None = None
+    target_relative_path: str | None = None
+    planned_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -21,6 +24,8 @@ class PlanOperationPreviewState:
     read_model_available: bool
     has_more_operations: bool
     rows: tuple[PlanOperationPreviewRow, ...]
+    limit: int = 100
+    next_cursor: dict[str, object] | None = None
 
 
 def empty_plan_operation_preview_state() -> PlanOperationPreviewState:
@@ -66,16 +71,19 @@ def plan_operation_preview_from_response(response: IpcResponse | None) -> PlanOp
         read_model_available=True,
         has_more_operations=has_more,
         rows=rows,
+        limit=_positive_int(page.get("limit")) or 100,
+        next_cursor=_next_cursor(page.get("next_cursor")),
     )
 
 
 def _preview_row(payload: dict[object, object]) -> PlanOperationPreviewRow:
     operation_id = _required_text(payload.get("operation_id")) or "operation"
-    operation_type = _operation_label(payload.get("operation_type"))
+    operation_type_code = _required_text(payload.get("operation_type"))
+    operation_type = _operation_label(operation_type_code)
     risk = _risk_label(payload.get("risk_level"))
     path = _required_text(payload.get("target_relative_path")) or _required_text(payload.get("reason_code")) or "item"
     target_endpoint_id = _required_text(payload.get("target_endpoint_id"))
-    planned_bytes = _non_negative_int(payload.get("planned_bytes"))
+    planned_bytes = _non_negative_int(payload.get("planned_bytes")) or 0
     suffix = f" - {_bytes_label(planned_bytes)}" if planned_bytes else ""
     target_suffix = f" -> {target_endpoint_id}" if target_endpoint_id is not None else ""
     return PlanOperationPreviewRow(
@@ -83,7 +91,30 @@ def _preview_row(payload: dict[object, object]) -> PlanOperationPreviewRow:
         display_line=f"{operation_type}: {path}{suffix}{target_suffix}",
         risk_label=risk,
         target_endpoint_id=target_endpoint_id,
+        operation_type=operation_type_code,
+        target_relative_path=_required_text(payload.get("target_relative_path")),
+        planned_bytes=planned_bytes,
     )
+
+
+def _next_cursor(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    execution_phase = _non_negative_int(value.get("execution_phase"))
+    stable_order_key = _required_text(value.get("stable_order_key"))
+    operation_id = _required_text(value.get("operation_id"))
+    if execution_phase is None or stable_order_key is None or operation_id is None:
+        return None
+    return {
+        "execution_phase": execution_phase,
+        "stable_order_key": stable_order_key,
+        "operation_id": operation_id,
+    }
+
+
+def _positive_int(value: object) -> int | None:
+    parsed = _non_negative_int(value)
+    return parsed if parsed is not None and parsed > 0 else None
 
 
 def _summary_label(*, plan_id: str | None, row_count: int, has_more: bool) -> str:
