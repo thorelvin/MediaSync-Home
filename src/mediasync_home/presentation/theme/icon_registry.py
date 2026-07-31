@@ -8,9 +8,12 @@ from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPen, QPixmap
 
 ICON_COLORS = {
     "activity": "#2563eb",
+    "add-target": "#14b8a6",
+    "back": "#94a3b8",
     "dashboard": "#0f766e",
     "history": "#9a6a12",
     "refresh": "#475569",
+    "remove-target": "#ef4444",
     "settings": "#64748b",
     "status-blocked": "#b42318",
     "status-ready": "#1f7a4d",
@@ -60,6 +63,23 @@ class IconRegistry:
             painter.drawLine(11, 8, 15, 18)
             painter.drawLine(15, 18, 18, 11)
             painter.drawLine(18, 11, 21, 11)
+        elif name == "add-target":
+            painter.drawLine(4, 8, 9, 8)
+            painter.drawLine(9, 8, 11, 10)
+            painter.drawLine(11, 10, 20, 10)
+            painter.drawRect(4, 8, 16, 11)
+            painter.drawLine(12, 12, 12, 17)
+            painter.drawLine(9, 15, 15, 15)
+        elif name == "remove-target":
+            painter.drawLine(7, 8, 17, 8)
+            painter.drawLine(10, 5, 14, 5)
+            painter.drawRect(8, 8, 8, 11)
+            painter.drawLine(11, 11, 11, 17)
+            painter.drawLine(14, 11, 14, 17)
+        elif name == "back":
+            painter.drawLine(19, 12, 6, 12)
+            painter.drawLine(6, 12, 11, 7)
+            painter.drawLine(6, 12, 11, 17)
         else:
             painter.drawEllipse(QRectF(5, 5, 14, 14))
             painter.drawLine(12, 7, 12, 13)

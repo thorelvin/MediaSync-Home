@@ -30,6 +30,9 @@ class ShellText:
     revision: str
     plan: str
     create_backup_tooltip: str
+    add_target_tooltip: str
+    remove_target_tooltip: str
+    back_tooltip: str
     job_detail_targets_heading: str
     engine_host: str
     scope: str
@@ -81,6 +84,9 @@ NB_TEXT = ShellText(
     create_backup_tooltip=(
         "Opprett jobb og registrer valgte mål som skrivbare MediaSync-endepunkter"
     ),
+    add_target_tooltip="Legg til målmappe",
+    remove_target_tooltip="Fjern målmappe",
+    back_tooltip="Tilbake",
     job_detail_targets_heading="Målsteder",
     engine_host="Engine Host",
     scope="Scope",
@@ -119,6 +125,9 @@ EN_TEXT = ShellText(
     create_backup_tooltip=(
         "Create the job and register selected targets as writable MediaSync endpoints"
     ),
+    add_target_tooltip="Add target folder",
+    remove_target_tooltip="Remove target folder",
+    back_tooltip="Back",
     job_detail_targets_heading="Target locations",
     engine_host="Engine Host",
     scope="Scope",
@@ -270,6 +279,7 @@ _EN_TO_NB.update(
         "Choose a target folder.": "Velg en målmappe.",
         "Choose source folder": "Velg kildemappe",
         "Choose target folder": "Velg målmappe",
+        "Continue with selected target folders.": "Fortsett med valgte målmapper.",
         "Completed and blocked runs will appear here.": (
             "Fullførte og blokkerte kjøringer vises her."
         ),

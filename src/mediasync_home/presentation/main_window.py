@@ -247,6 +247,12 @@ class MediaSyncWindow(QMainWindow):
         self._setup_target_value: QLabel | None = None
         self._setup_defaults_value: QLabel | None = None
         self._setup_retention_value: QLabel | None = None
+        self._setup_target_controls: QWidget | None = None
+        self._setup_target_rows: list[QWidget] = []
+        self._setup_target_path_labels: list[QLabel] = []
+        self._setup_remove_target_buttons: list[QToolButton] = []
+        self._setup_add_target_button: QToolButton | None = None
+        self._setup_back_button: QToolButton | None = None
         self._setup_primary_button: QPushButton | None = None
         self._job_detail_title: QLabel | None = None
         self._job_detail_source_label: QLabel | None = None
@@ -531,6 +537,13 @@ class MediaSyncWindow(QMainWindow):
             )
         if self._setup_retention_value is not None:
             self._setup_retention_value.setText(self._display(state.defaults.retention_label))
+        self._apply_setup_target_controls(state)
+        if self._setup_back_button is not None:
+            can_go_back = self._setup_can_go_back(state)
+            self._setup_back_button.setVisible(can_go_back)
+            self._setup_back_button.setEnabled(can_go_back)
+            self._setup_back_button.setToolTip(self._texts().back_tooltip)
+            self._setup_back_button.setAccessibleName(self._texts().back_tooltip)
         if self._setup_primary_button is not None:
             self._setup_primary_button.setText(self._display(state.primary_action_label))
             self._setup_primary_button.setEnabled(self._setup_primary_enabled(state))
@@ -538,15 +551,23 @@ class MediaSyncWindow(QMainWindow):
         self._refresh_dashboard_geometry()
 
     def _setup_primary_enabled(self, state: StandardBackupSetupViewState) -> bool:
-        if state.current_step is BackupSetupStep.REVIEW:
-            return state.can_create
-        return True
+        if state.current_step is BackupSetupStep.SOURCE:
+            return True
+        return state.can_continue
+
+    def _setup_can_go_back(self, state: StandardBackupSetupViewState) -> bool:
+        return (
+            state.current_step is not BackupSetupStep.SOURCE
+            and self._setup_request_id is None
+            and self._setup_draft.source_path_label == state.source_label
+            and len(self._setup_draft.targets) == state.configured_targets
+        )
 
     def _setup_primary_tooltip(self, state: StandardBackupSetupViewState) -> str:
         if state.current_step is BackupSetupStep.SOURCE:
             return self._display("Choose a source folder.")
         if state.current_step is BackupSetupStep.TARGETS:
-            return self._display("Choose a target folder.")
+            return self._display("Continue with selected target folders.")
         if state.current_step is BackupSetupStep.DEFAULTS:
             return self._display("Review safe defaults.")
         return self._texts().create_backup_tooltip
@@ -566,23 +587,8 @@ class MediaSyncWindow(QMainWindow):
             self._apply_local_preview_job_detail()
             return
         if step is BackupSetupStep.TARGETS:
-            selected = self._choose_directory(self._display("Choose target folder"))
-            if selected is None:
+            if not self._setup_state.can_continue:
                 return
-            targets = self._setup_draft.targets
-            if len(targets) < 3:
-                targets = (
-                    *targets,
-                    BackupTargetDraft(
-                        name=_display_name_for_path(selected),
-                        path_label=selected,
-                    ),
-                )
-            self._setup_draft = BackupSetupDraft(
-                source_name=self._setup_draft.source_name,
-                source_path_label=self._setup_draft.source_path_label,
-                targets=targets,
-            )
             self._apply_local_setup_draft(BackupSetupStep.DEFAULTS)
             self._apply_local_preview_job_detail()
             return
@@ -610,6 +616,99 @@ class MediaSyncWindow(QMainWindow):
                 return
             self._apply_local_preview_job_detail()
 
+    def _add_setup_target(self) -> None:
+        if (
+            self._setup_state.current_step is not BackupSetupStep.TARGETS
+            or len(self._setup_draft.targets) >= self._setup_state.max_targets
+        ):
+            return
+        selected = self._choose_directory(self._display("Choose target folder"))
+        if selected is None:
+            return
+        selected_key = _path_identity(selected)
+        if any(
+            _path_identity(target.path_label) == selected_key
+            for target in self._setup_draft.targets
+        ):
+            return
+        self._setup_draft = BackupSetupDraft(
+            source_name=self._setup_draft.source_name,
+            source_path_label=self._setup_draft.source_path_label,
+            targets=(
+                *self._setup_draft.targets,
+                BackupTargetDraft(
+                    name=_display_name_for_path(selected),
+                    path_label=selected,
+                ),
+            ),
+        )
+        self._apply_local_setup_draft(BackupSetupStep.TARGETS)
+        self._apply_local_preview_job_detail()
+
+    def _remove_setup_target(self, index: int) -> None:
+        if (
+            self._setup_state.current_step is not BackupSetupStep.TARGETS
+            or not 0 <= index < len(self._setup_draft.targets)
+        ):
+            return
+        self._setup_draft = BackupSetupDraft(
+            source_name=self._setup_draft.source_name,
+            source_path_label=self._setup_draft.source_path_label,
+            targets=(
+                *self._setup_draft.targets[:index],
+                *self._setup_draft.targets[index + 1 :],
+            ),
+        )
+        self._apply_local_setup_draft(BackupSetupStep.TARGETS)
+        self._apply_local_preview_job_detail()
+
+    def _handle_setup_back_action(self) -> None:
+        if self._setup_request_id is not None:
+            return
+        previous_step = {
+            BackupSetupStep.TARGETS: BackupSetupStep.SOURCE,
+            BackupSetupStep.DEFAULTS: BackupSetupStep.TARGETS,
+            BackupSetupStep.REVIEW: BackupSetupStep.DEFAULTS,
+        }.get(self._setup_state.current_step)
+        if previous_step is not None:
+            self._apply_local_setup_draft(previous_step)
+            self._apply_local_preview_job_detail()
+
+    def _apply_setup_target_controls(
+        self,
+        state: StandardBackupSetupViewState,
+    ) -> None:
+        controls = self._setup_target_controls
+        add_button = self._setup_add_target_button
+        if controls is None or add_button is None:
+            return
+        editing_targets = state.current_step is BackupSetupStep.TARGETS
+        controls.setVisible(editing_targets)
+        add_button.setVisible(editing_targets)
+        add_button.setEnabled(
+            editing_targets and state.configured_targets < state.max_targets
+        )
+        add_button.setToolTip(self._texts().add_target_tooltip)
+        add_button.setAccessibleName(self._texts().add_target_tooltip)
+        for index, (row, label, button) in enumerate(
+            zip(
+                self._setup_target_rows,
+                self._setup_target_path_labels,
+                self._setup_remove_target_buttons,
+                strict=True,
+            )
+        ):
+            has_target = index < len(self._setup_draft.targets)
+            row.setVisible(editing_targets and has_target)
+            if not has_target:
+                label.clear()
+                continue
+            target = self._setup_draft.targets[index]
+            label.setText(f"{target.name}: {target.path_label}")
+            remove_tooltip = f"{self._texts().remove_target_tooltip}: {target.name}"
+            button.setToolTip(remove_tooltip)
+            button.setAccessibleName(remove_tooltip)
+
     def _create_standard_backup_job(self) -> None:
         if self._engine_client is None:
             return
@@ -627,6 +726,8 @@ class MediaSyncWindow(QMainWindow):
         self._setup_draft_id = self._setup_draft_id or str(uuid4())
         self._setup_request_id = self._setup_request_id or str(uuid4())
         self._setup_idempotency_key = self._setup_idempotency_key or str(uuid4())
+        if self._setup_back_button is not None:
+            self._setup_back_button.hide()
         draft = StandardBackupJobDraft(
             draft_id=self._setup_draft_id,
             source_name=source_name,
@@ -1132,29 +1233,90 @@ class MediaSyncWindow(QMainWindow):
             self._display(state.target_label),
         )
         self._setup_target_value.setObjectName("setupTargetValue")
+        target_controls = QWidget()
+        target_controls.setObjectName("setupTargetControls")
+        target_controls_layout = QVBoxLayout(target_controls)
+        target_controls_layout.setContentsMargins(0, 0, 0, 0)
+        target_controls_layout.setSpacing(6)
+        for index in range(state.max_targets):
+            target_row = QWidget()
+            target_row.setObjectName(f"setupTargetRow{index + 1}")
+            target_row_layout = QHBoxLayout(target_row)
+            target_row_layout.setContentsMargins(0, 0, 0, 0)
+            target_row_layout.setSpacing(8)
+            target_path = QLabel()
+            target_path.setObjectName("setupTargetPathRow")
+            _configure_responsive_label(target_path, selectable=True)
+            remove_target = QToolButton()
+            remove_target.setObjectName("removeTargetButton")
+            remove_target.setIcon(self._icons.icon("remove-target"))
+            remove_target.setIconSize(QSize(20, 20))
+            remove_target.clicked.connect(
+                lambda checked=False, target_index=index: self._remove_setup_target(
+                    target_index
+                )
+            )
+            target_row_layout.addWidget(target_path, 1)
+            target_row_layout.addWidget(remove_target, 0, Qt.AlignmentFlag.AlignTop)
+            target_controls_layout.addWidget(target_row)
+            self._setup_target_rows.append(target_row)
+            self._setup_target_path_labels.append(target_path)
+            self._setup_remove_target_buttons.append(remove_target)
+        add_target = QToolButton()
+        add_target.setObjectName("addTargetButton")
+        add_target.setIcon(self._icons.icon("add-target"))
+        add_target.setIconSize(QSize(20, 20))
+        add_target.clicked.connect(self._add_setup_target)
+        target_controls_layout.addWidget(
+            add_target,
+            0,
+            Qt.AlignmentFlag.AlignLeft,
+        )
+        self._setup_target_controls = target_controls
+        self._setup_add_target_button = add_target
+        layout.addWidget(target_controls, 5, 1, 1, 2)
         self._setup_defaults_label, self._setup_defaults_value = _add_labeled_text_value(
             layout,
-            5,
+            6,
             texts.defaults,
             " · ".join(self._display(label) for label in state.defaults.summary()[:3]),
         )
         self._setup_defaults_value.setObjectName("setupDefaultsValue")
         self._setup_retention_label, self._setup_retention_value = _add_labeled_text_value(
             layout,
-            6,
+            7,
             texts.retention,
             self._display(state.defaults.retention_label),
         )
         self._setup_retention_value.setObjectName("setupRetentionValue")
 
+        back = QToolButton()
+        back.setObjectName("setupBackButton")
+        back.setIcon(self._icons.icon("back"))
+        back.setIconSize(QSize(20, 20))
+        back.setVisible(self._setup_can_go_back(state))
+        back.setEnabled(self._setup_can_go_back(state))
+        back.setToolTip(texts.back_tooltip)
+        back.setAccessibleName(texts.back_tooltip)
+        back.clicked.connect(self._handle_setup_back_action)
+        self._setup_back_button = back
         primary = QPushButton(self._display(state.primary_action_label))
         primary.setObjectName("createBackupButton")
         primary.setEnabled(self._setup_primary_enabled(state))
         primary.setToolTip(self._setup_primary_tooltip(state))
         primary.clicked.connect(self._handle_setup_primary_action)
         self._setup_primary_button = primary
-        layout.addWidget(primary, 7, 2)
+        actions = QWidget()
+        actions.setObjectName("setupActions")
+        actions_layout = QHBoxLayout(actions)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setSpacing(8)
+        actions_layout.addStretch(1)
+        actions_layout.addWidget(back)
+        actions_layout.addWidget(primary)
+        layout.addWidget(actions, 8, 0, 1, 3)
         layout.setColumnStretch(1, 1)
+        self._apply_setup_target_controls(state)
         return panel
 
     def _build_backup_job_detail_panel(self, state: BackupJobDetailViewState) -> QFrame:
@@ -1675,6 +1837,10 @@ def _refresh_style(widget: QWidget) -> None:
 def _display_name_for_path(path: str) -> str:
     parsed = Path(path)
     return parsed.name or str(parsed)
+
+
+def _path_identity(path: str) -> str:
+    return os.path.normcase(os.path.normpath(path)).casefold()
 
 
 def _flag_icon(language_code: str) -> QIcon:

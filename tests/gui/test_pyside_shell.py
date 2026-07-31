@@ -54,6 +54,9 @@ def test_icon_registry_returns_semantic_icons() -> None:
 
     assert not registry.icon("refresh").isNull()
     assert not registry.icon("status-ready").isNull()
+    assert not registry.icon("add-target").isNull()
+    assert not registry.icon("remove-target").isNull()
+    assert not registry.icon("back").isNull()
     with pytest.raises(KeyError):
         registry.icon("unknown")
 
@@ -71,6 +74,8 @@ def test_main_window_displays_engine_status(qapp) -> None:
         setup_panel = window.findChild(QWidget, "standardBackupPanel")
         setup_steps = window.findChildren(QLabel, "setupStepLabel")
         create_backup = window.findChild(QPushButton, "createBackupButton")
+        add_target = window.findChild(QToolButton, "addTargetButton")
+        setup_back = window.findChild(QToolButton, "setupBackButton")
         detail_panel = window.findChild(QWidget, "backupJobDetailPanel")
         detail_title = window.findChild(QLabel, "jobDetailTitle")
         plan_preview_title = window.findChild(QLabel, "planPreviewTitle")
@@ -120,6 +125,10 @@ def test_main_window_displays_engine_status(qapp) -> None:
         assert create_backup is not None
         assert create_backup.text() == "Fortsett"
         assert create_backup.isEnabled() is True
+        assert add_target is not None
+        assert add_target.isHidden() is True
+        assert setup_back is not None
+        assert setup_back.isHidden() is True
         assert detail_panel is not None
         assert detail_title is not None
         assert detail_title.text() == "Ingen lagret backupjobb"
@@ -145,6 +154,8 @@ def test_language_selector_updates_selected_flag(qapp) -> None:
         refresh = window.findChild(QPushButton, "refreshEngineButton")
         setup_steps = window.findChildren(QLabel, "setupStepLabel")
         create_backup = window.findChild(QPushButton, "createBackupButton")
+        add_target = window.findChild(QToolButton, "addTargetButton")
+        setup_back = window.findChild(QToolButton, "setupBackButton")
         detail_title = window.findChild(QLabel, "jobDetailTitle")
         plan_preview_title = window.findChild(QLabel, "planPreviewTitle")
         plan_endpoint_title = window.findChild(QLabel, "planEndpointTitle")
@@ -184,6 +195,10 @@ def test_language_selector_updates_selected_flag(qapp) -> None:
         ]
         assert create_backup is not None
         assert create_backup.text() == "Continue"
+        assert add_target is not None
+        assert add_target.toolTip() == "Add target folder"
+        assert setup_back is not None
+        assert setup_back.toolTip() == "Back"
         assert detail_title is not None
         assert detail_title.text() == "No saved backup job"
         assert plan_preview_title is not None
@@ -246,6 +261,8 @@ def test_setup_primary_button_collects_local_preview_draft(qapp) -> None:
         window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
 
         create_backup = window.findChild(QPushButton, "createBackupButton")
+        add_target = window.findChild(QToolButton, "addTargetButton")
+        setup_back = window.findChild(QToolButton, "setupBackButton")
         source = window.findChild(QLabel, "setupSourceValue")
         target = window.findChild(QLabel, "setupTargetValue")
         detail_title = window.findChild(QLabel, "jobDetailTitle")
@@ -259,6 +276,8 @@ def test_setup_primary_button_collects_local_preview_draft(qapp) -> None:
         assert detail_title is not None
         assert detail_source is not None
         assert chip is not None
+        assert add_target is not None
+        assert setup_back is not None
 
         QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
         qapp.processEvents()
@@ -266,13 +285,23 @@ def test_setup_primary_button_collects_local_preview_draft(qapp) -> None:
         assert source.text() == "C:/Users/Ada/Pictures"
         assert target.text() == "Ingen mål valgt"
         assert detail_title.text() == "Pictures"
+        assert create_backup.isEnabled() is False
+        assert create_backup.toolTip() == "Fortsett med valgte målmapper."
+        assert add_target.isVisible() is True
+        assert add_target.toolTip() == "Legg til målmappe"
+        assert setup_back.isVisible() is True
 
-        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(add_target, Qt.MouseButton.LeftButton)
         qapp.processEvents()
 
         assert target.text() == "1 mål: MediaSyncBackup"
+        assert create_backup.isEnabled() is True
         assert detail_source.text() == "C:/Users/Ada/Pictures"
         assert detail_targets[0].text() == "MediaSyncBackup: E:/MediaSyncBackup"
+
+        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert add_target.isHidden() is True
 
         QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
         qapp.processEvents()
@@ -312,17 +341,27 @@ def test_target_selection_reflows_without_horizontal_clipping(
         ]
         window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
         create_backup = window.findChild(QPushButton, "createBackupButton")
+        add_target = window.findChild(QToolButton, "addTargetButton")
+        setup_back = window.findChild(QToolButton, "setupBackButton")
+        target_paths = window.findChildren(QLabel, "setupTargetPathRow")
         dashboard_scroll = window.findChild(QScrollArea, "dashboardScrollArea")
         activity_scroll = window.findChild(QScrollArea, "activityScrollArea")
 
         assert create_backup is not None
+        assert add_target is not None
+        assert setup_back is not None
+        assert len(target_paths) == 3
         assert dashboard_scroll is not None
         assert activity_scroll is not None
         QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
         qapp.processEvents()
-        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(add_target, Qt.MouseButton.LeftButton)
         qapp.processEvents()
 
+        assert target_paths[0].text().endswith(
+            "CompleteComputerBackupTargetFolderWithoutBreaks"
+        )
+        assert target_paths[0].isVisible() is True
         assert window._dashboard_detail_layout is not None
         assert window._dashboard_detail_layout.direction() is QBoxLayout.Direction.TopToBottom
         assert window._setup_stepper_layout is not None
@@ -379,7 +418,7 @@ def test_directory_picker_is_parented_and_uses_visible_qt_dialog(qapp) -> None:
         window.deleteLater()
 
 
-def test_setup_primary_button_persists_reviewed_draft_through_engine(qapp) -> None:
+def test_setup_target_controls_persist_multiple_reviewed_targets(qapp) -> None:
     provider = _FakeBackupCreationEngineClient()
     window = build_main_window(
         initial_state=_ready_state(),
@@ -390,21 +429,67 @@ def test_setup_primary_button_persists_reviewed_draft_through_engine(qapp) -> No
     try:
         window.show()
         qapp.processEvents()
-        choices = ["C:/Users/Ada/Pictures", "E:/MediaSyncBackup"]
+        choices = [
+            "C:/Users/Ada/Pictures",
+            "E:/MediaSyncBackup",
+            "F:/OffsiteBackup",
+            "G:/TemporaryBackup",
+        ]
         window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
         create_backup = window.findChild(QPushButton, "createBackupButton")
+        add_target = window.findChild(QToolButton, "addTargetButton")
+        setup_back = window.findChild(QToolButton, "setupBackButton")
+        remove_targets = window.findChildren(QToolButton, "removeTargetButton")
+        target_paths = window.findChildren(QLabel, "setupTargetPathRow")
         engine_detail = window.findChild(QLabel, "engineDetailLabel")
 
         assert create_backup is not None
+        assert add_target is not None
+        assert setup_back is not None
+        assert len(remove_targets) == 3
+        assert len(target_paths) == 3
         assert engine_detail is not None
-        for _ in range(4):
-            QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        for _ in range(3):
+            QTest.mouseClick(add_target, Qt.MouseButton.LeftButton)
             qapp.processEvents()
+
+        assert add_target.isEnabled() is False
+        assert [label.text() for label in target_paths] == [
+            "MediaSyncBackup: E:/MediaSyncBackup",
+            "OffsiteBackup: F:/OffsiteBackup",
+            "TemporaryBackup: G:/TemporaryBackup",
+        ]
+
+        QTest.mouseClick(remove_targets[1], Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert add_target.isEnabled() is True
+        assert [label.text() for label in target_paths[:2]] == [
+            "MediaSyncBackup: E:/MediaSyncBackup",
+            "TemporaryBackup: G:/TemporaryBackup",
+        ]
+        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert add_target.isHidden() is True
+        QTest.mouseClick(setup_back, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert add_target.isVisible() is True
+        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
 
         assert provider.calls == ["connect", "create_standard_backup_job"]
         assert provider.draft is not None
         assert provider.draft.source_path_label == "C:/Users/Ada/Pictures"
-        assert provider.draft.targets[0].path_label == "E:/MediaSyncBackup"
+        assert [target.path_label for target in provider.draft.targets] == [
+            "E:/MediaSyncBackup",
+            "G:/TemporaryBackup",
+        ]
         assert provider.draft.can_create() is True
         assert engine_detail.text() == (
             "Backupjobben og registreringen av skrivbart mål ble lagret."
@@ -432,20 +517,29 @@ def test_failed_target_registration_keeps_review_and_retry_without_clipping(qapp
         ]
         window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
         create_backup = window.findChild(QPushButton, "createBackupButton")
+        add_target = window.findChild(QToolButton, "addTargetButton")
+        setup_back = window.findChild(QToolButton, "setupBackButton")
         target = window.findChild(QLabel, "setupTargetValue")
         engine_detail = window.findChild(QLabel, "engineDetailLabel")
         dashboard_scroll = window.findChild(QScrollArea, "dashboardScrollArea")
 
         assert create_backup is not None
+        assert add_target is not None
+        assert setup_back is not None
         assert target is not None
         assert engine_detail is not None
         assert dashboard_scroll is not None
-        for _ in range(4):
+        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        QTest.mouseClick(add_target, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        for _ in range(3):
             QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
             qapp.processEvents()
 
         assert create_backup.text() == "Prøv målregistrering igjen"
         assert create_backup.isEnabled() is True
+        assert setup_back.isHidden() is True
         assert target.text().startswith("1 mål:")
         assert "WRITABLE_ENDPOINT_PROBE_FAILED" in engine_detail.text()
         assert dashboard_scroll.horizontalScrollBar().maximum() == 0
@@ -526,6 +620,7 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         source = window.findChild(QLabel, "setupSourceValue")
         target = window.findChild(QLabel, "setupTargetValue")
         create_backup = window.findChild(QPushButton, "createBackupButton")
+        setup_back = window.findChild(QToolButton, "setupBackButton")
         activity_title = window.findChild(QLabel, "activityStatusTitle")
         activity_rows = window.findChildren(QLabel, "activityDimensionLabel")
         job_detail_title = window.findChild(QLabel, "jobDetailTitle")
@@ -563,6 +658,8 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert target.text() == "1 mål: USB 1"
         assert create_backup is not None
         assert create_backup.isEnabled() is True
+        assert setup_back is not None
+        assert setup_back.isHidden() is True
         assert job_detail_title is not None
         assert job_detail_title.text() == "Pictures"
         assert job_detail_source is not None

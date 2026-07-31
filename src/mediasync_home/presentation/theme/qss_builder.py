@@ -206,6 +206,38 @@ QToolButton#languageSelectorButton:focus {{
     border: {tokens.border_focus}px solid {tokens.focus};
 }}
 
+QToolButton#addTargetButton,
+QToolButton#removeTargetButton,
+QToolButton#setupBackButton {{
+    min-width: 32px;
+    max-width: 32px;
+    min-height: 32px;
+    max-height: 32px;
+    border-radius: {tokens.radius_sm}px;
+    border: {tokens.border_hairline}px solid {tokens.border};
+    background: {tokens.surface_alt};
+    padding: 0;
+}}
+
+QToolButton#addTargetButton:hover,
+QToolButton#removeTargetButton:hover,
+QToolButton#setupBackButton:hover {{
+    border-color: {tokens.accent};
+}}
+
+QToolButton#addTargetButton:focus,
+QToolButton#removeTargetButton:focus,
+QToolButton#setupBackButton:focus {{
+    border: {tokens.border_focus}px solid {tokens.focus};
+}}
+
+QToolButton#addTargetButton:disabled,
+QToolButton#removeTargetButton:disabled,
+QToolButton#setupBackButton:disabled {{
+    background: {tokens.surface};
+    border-color: {tokens.border};
+}}
+
 QMenu#languageSelectorMenu {{
     background: {tokens.surface};
     border: {tokens.border_hairline}px solid {tokens.border};
