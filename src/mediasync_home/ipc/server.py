@@ -100,6 +100,7 @@ from mediasync_home.application.runs import (
     evaluate_start_run,
     parse_run_control_command,
     parse_start_run_command,
+    request_run_stop_after_active_file,
     request_run_pause,
     resume_paused_run,
     start_run_from_sealed_plan,
@@ -606,6 +607,7 @@ class EngineHostIpcService:
         if command.command_name in {
             RunCommandName.PAUSE_RUN.value,
             RunCommandName.RESUME_RUN.value,
+            RunCommandName.STOP_RUN_AFTER_ACTIVE_FILE.value,
         }:
             return self._handle_run_control(command, identity)
         if command.command_name == TriggerCommandName.ENQUEUE_TRIGGER_OCCURRENCE.value:
@@ -1130,11 +1132,15 @@ class EngineHostIpcService:
 
         receipt = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
         self.command_receipt_store.update_command_receipt(receipt)
-        outcome = (
-            request_run_pause(command=command, runs=self.run_control_store)
-            if envelope.command_name == RunCommandName.PAUSE_RUN.value
-            else resume_paused_run(command=command, runs=self.run_control_store)
-        )
+        if envelope.command_name == RunCommandName.PAUSE_RUN.value:
+            outcome = request_run_pause(command=command, runs=self.run_control_store)
+        elif envelope.command_name == RunCommandName.RESUME_RUN.value:
+            outcome = resume_paused_run(command=command, runs=self.run_control_store)
+        else:
+            outcome = request_run_stop_after_active_file(
+                command=command,
+                runs=self.run_control_store,
+            )
         if not outcome.applied or outcome.run is None:
             receipt = transition_command_receipt(
                 receipt,

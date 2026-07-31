@@ -18,7 +18,9 @@ from mediasync_home.application.progress_read_models import (
 )
 from mediasync_home.application.runs import (
     RunState,
+    RunStopRequest,
     RunStore,
+    RunTargetStopProgress,
     RunTargetState,
     RunTriggerType,
     StartedRun,
@@ -234,6 +236,12 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                     row_version = row_version + 1
                 WHERE id = ?
                     AND state IN ('CREATED', 'QUEUED', 'PREFLIGHT', 'EXECUTING')
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM run_stop_requests
+                        WHERE run_stop_requests.run_id = runs.id
+                            AND run_stop_requests.state = 'PENDING'
+                    )
                 """,
                 (run_id,),
             )
@@ -371,6 +379,12 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                     row_version = row_version + 1
                 WHERE id = ?
                     AND state = 'PAUSED'
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM run_stop_requests
+                        WHERE run_stop_requests.run_id = runs.id
+                            AND run_stop_requests.state = 'PENDING'
+                    )
                     AND EXISTS (
                         SELECT 1
                         FROM run_targets
@@ -396,6 +410,350 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
             if isinstance(exc, SqliteRunStoreError):
                 raise
             raise SqliteRunStoreError("RUN_RESUME_FAILED") from exc
+
+    def request_run_stop_after_active_file(self, run_id: str) -> StartedRun | None:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            cursor = self._connection.execute(
+                """
+                INSERT INTO run_stop_requests (
+                    run_id,
+                    mode,
+                    state
+                )
+                SELECT id, 'AFTER_ACTIVE_FILE', 'PENDING'
+                FROM runs
+                WHERE id = ?
+                    AND state IN (
+                        'CREATED',
+                        'QUEUED',
+                        'PREFLIGHT',
+                        'EXECUTING',
+                        'PAUSING',
+                        'PAUSED'
+                    )
+                ON CONFLICT (run_id) DO NOTHING
+                """,
+                (run_id,),
+            )
+            if cursor.rowcount == 1:
+                self._connection.execute(
+                    """
+                    UPDATE runs
+                    SET row_version = row_version + 1
+                    WHERE id = ?
+                    """,
+                    (run_id,),
+                )
+            else:
+                existing = self.load_run_stop_request(run_id)
+                if existing is None:
+                    if not outer_transaction:
+                        self._connection.execute("ROLLBACK")
+                    return None
+            run = self.load_started_run(run_id)
+            if run is None:
+                raise SqliteRunStoreError("RUN_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return run
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_STOP_REQUEST_FAILED") from exc
+
+    def load_run_stop_request(self, run_id: str) -> RunStopRequest | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                run_id,
+                boundary_run_target_id,
+                boundary_operation_id
+            FROM run_stop_requests
+            WHERE run_id = ?
+                AND state = 'PENDING'
+            """,
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return RunStopRequest(
+            run_id=str(row[0]),
+            boundary_run_target_id=None if row[1] is None else str(row[1]),
+            boundary_operation_id=None if row[2] is None else str(row[2]),
+        )
+
+    def load_next_requested_run_stop(self) -> RunStopRequest | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                run_id,
+                boundary_run_target_id,
+                boundary_operation_id
+            FROM run_stop_requests
+            WHERE state = 'PENDING'
+            ORDER BY requested_utc, run_id
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            return None
+        return RunStopRequest(
+            run_id=str(row[0]),
+            boundary_run_target_id=None if row[1] is None else str(row[1]),
+            boundary_operation_id=None if row[2] is None else str(row[2]),
+        )
+
+    def bind_requested_run_stop_boundary(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        operation_id: str,
+    ) -> RunStopRequest | None:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            cursor = self._connection.execute(
+                """
+                UPDATE run_stop_requests
+                SET
+                    boundary_run_target_id = ?,
+                    boundary_operation_id = ?,
+                    row_version = row_version + 1
+                WHERE run_id = ?
+                    AND state = 'PENDING'
+                    AND boundary_run_target_id IS NULL
+                    AND boundary_operation_id IS NULL
+                """,
+                (run_target_id, operation_id, run_id),
+            )
+            if cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            request = self.load_run_stop_request(run_id)
+            if request is None:
+                raise SqliteRunStoreError("RUN_STOP_REQUEST_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return request
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_STOP_BOUNDARY_BIND_FAILED") from exc
+
+    def activate_requested_run_stop(self, run_id: str) -> StartedRun | None:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            run = self.load_started_run(run_id)
+            stop_request = self.load_run_stop_request(run_id)
+            if run is None or stop_request is None:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            if run.state is RunState.PAUSED:
+                if stop_request.boundary_run_target_id is None:
+                    if not outer_transaction:
+                        self._connection.execute("ROLLBACK")
+                    return None
+                target_cursor = self._connection.execute(
+                    """
+                    UPDATE run_targets
+                    SET
+                        state = 'PENDING',
+                        last_lease_id = NULL,
+                        last_ownership_epoch = NULL,
+                        last_fencing_token = NULL,
+                        row_version = row_version + 1
+                    WHERE run_id = ?
+                        AND id = ?
+                        AND state = 'PAUSED'
+                    """,
+                    (run_id, stop_request.boundary_run_target_id),
+                )
+                if target_cursor.rowcount != 1:
+                    if not outer_transaction:
+                        self._connection.execute("ROLLBACK")
+                    return None
+                self._connection.execute(
+                    """
+                    UPDATE runs
+                    SET
+                        state = 'QUEUED',
+                        row_version = row_version + 1
+                    WHERE id = ?
+                        AND state = 'PAUSED'
+                    """,
+                    (run_id,),
+                )
+            elif run.state is RunState.PAUSING:
+                active_state = self._connection.execute(
+                    """
+                    SELECT state
+                    FROM run_targets
+                    WHERE run_id = ?
+                        AND state IN ('EXECUTING', 'REVALIDATING', 'ACQUIRING_LEASE')
+                    ORDER BY
+                        CASE state
+                            WHEN 'EXECUTING' THEN 0
+                            WHEN 'REVALIDATING' THEN 1
+                            ELSE 2
+                        END
+                    LIMIT 1
+                    """,
+                    (run_id,),
+                ).fetchone()
+                next_state = (
+                    "EXECUTING"
+                    if active_state is not None and str(active_state[0]) == "EXECUTING"
+                    else "PREFLIGHT"
+                    if active_state is not None
+                    else "QUEUED"
+                )
+                self._connection.execute(
+                    """
+                    UPDATE runs
+                    SET
+                        state = ?,
+                        row_version = row_version + 1
+                    WHERE id = ?
+                        AND state = 'PAUSING'
+                    """,
+                    (next_state, run_id),
+                )
+            activated = self.load_started_run(run_id)
+            if activated is None:
+                raise SqliteRunStoreError("RUN_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return activated
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_STOP_ACTIVATION_FAILED") from exc
+
+    def finalize_requested_run_stop(
+        self,
+        *,
+        run_id: str,
+        target_progress: tuple[RunTargetStopProgress, ...],
+    ) -> StartedRun | None:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            run = self.load_started_run(run_id)
+            if run is None or self.load_run_stop_request(run_id) is None:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            progress_by_target = {item.run_target_id: item for item in target_progress}
+            for target in run.targets:
+                progress = progress_by_target.get(target.run_target_id)
+                completed_operations = max(
+                    target.completed_operations,
+                    0 if progress is None else progress.completed_operations,
+                )
+                completed_bytes = max(
+                    target.completed_bytes,
+                    0 if progress is None else progress.completed_bytes,
+                )
+                self._connection.execute(
+                    """
+                    UPDATE run_targets
+                    SET
+                        state = 'CANCELLED',
+                        completed_operations = ?,
+                        completed_bytes = ?,
+                        last_lease_id = NULL,
+                        last_ownership_epoch = NULL,
+                        last_fencing_token = NULL,
+                        finished_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        result_json = ?,
+                        row_version = row_version + 1
+                    WHERE run_id = ?
+                        AND id = ?
+                        AND state IN (
+                            'PENDING',
+                            'ACQUIRING_LEASE',
+                            'REVALIDATING',
+                            'EXECUTING',
+                            'PAUSED',
+                            'WAITING_FOR_ENDPOINT',
+                            'NEEDS_REVIEW'
+                        )
+                    """,
+                    (
+                        completed_operations,
+                        completed_bytes,
+                        _json_dump({"reason": "USER_STOP_AFTER_ACTIVE_FILE"}),
+                        run_id,
+                        target.run_target_id,
+                    ),
+                )
+            summary = dict(run.summary)
+            summary["result"] = "STOPPED"
+            summary["stop_mode"] = "AFTER_ACTIVE_FILE"
+            cursor = self._connection.execute(
+                """
+                UPDATE runs
+                SET
+                    state = 'CANCELLED',
+                    finished_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    summary_json = ?,
+                    row_version = row_version + 1
+                WHERE id = ?
+                    AND state IN (
+                        'CREATED',
+                        'QUEUED',
+                        'PREFLIGHT',
+                        'EXECUTING',
+                        'PAUSING',
+                        'PAUSED'
+                    )
+                """,
+                (_json_dump(summary), run_id),
+            )
+            if cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            self._connection.execute(
+                """
+                UPDATE run_stop_requests
+                SET
+                    state = 'APPLIED',
+                    applied_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    row_version = row_version + 1
+                WHERE run_id = ?
+                    AND state = 'PENDING'
+                """,
+                (run_id,),
+            )
+            stopped = self.load_started_run(run_id)
+            if stopped is None:
+                raise SqliteRunStoreError("RUN_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return stopped
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_STOP_FINALIZE_FAILED") from exc
 
     def load_next_runnable_run(self) -> StartedRun | None:
         return self._load_one(
@@ -581,6 +939,16 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
         target_rows = tuple(row for row in rows if row[12] is not None)
         if len(target_rows) > MAX_PROGRESS_SNAPSHOT_TARGETS:
             raise ProgressSnapshotQueryError("RUN_PROGRESS_TARGET_LIMIT_EXCEEDED")
+        stop_row = self._connection.execute(
+            """
+            SELECT state, row_version
+            FROM run_stop_requests
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        stop_requested = stop_row is not None and str(stop_row[0]) == "PENDING"
+        stop_sequence = 0 if stop_row is None else int(stop_row[1])
 
         targets = tuple(
             RunTargetProgressSnapshot(
@@ -604,7 +972,11 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
             job_id=str(row[1]),
             job_revision_id=str(row[2]),
             plan_id=str(row[3]),
-            sequence_no=int(row[11]) + sum(int(target_row[22]) for target_row in target_rows),
+            sequence_no=(
+                int(row[11])
+                + sum(int(target_row[22]) for target_row in target_rows)
+                + stop_sequence
+            ),
             state=state,
             terminal=state in _TERMINAL_RUN_STATES,
             started_utc=str(row[5]),
@@ -616,6 +988,7 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
             warning_count=int(row[9]),
             error_count=int(row[10]),
             targets=targets,
+            stop_requested=stop_requested,
         )
 
     def load_next_pending_run_target(self, run_id: str) -> StartedRunTarget | None:

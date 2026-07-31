@@ -203,6 +203,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_plan_operation_target_bindings",
                 statements=CATALOG_PLAN_OPERATION_TARGET_BINDINGS,
             ),
+            SqliteMigration(
+                version=34,
+                name="catalog_run_stop_requests",
+                statements=CATALOG_RUN_STOP_REQUESTS,
+            ),
         ),
     )
 
@@ -240,6 +245,11 @@ def recovery_migration_plan() -> SqliteMigrationPlan:
                 version=6,
                 name="recovery_operation_kind_and_plan_sequence",
                 statements=RECOVERY_OPERATION_KIND_AND_PLAN_SEQUENCE,
+            ),
+            SqliteMigration(
+                version=7,
+                name="recovery_operation_planned_bytes",
+                statements=RECOVERY_OPERATION_PLANNED_BYTES,
             ),
         ),
     )
@@ -1185,6 +1195,41 @@ CATALOG_RUN_START_SKELETON = (
     """
     CREATE INDEX idx_run_targets_state
         ON run_targets (state)
+    """,
+)
+
+CATALOG_RUN_STOP_REQUESTS = (
+    """
+    CREATE TABLE run_stop_requests (
+        run_id TEXT PRIMARY KEY,
+        mode TEXT NOT NULL CHECK (mode IN ('AFTER_ACTIVE_FILE')),
+        state TEXT NOT NULL CHECK (state IN ('PENDING', 'APPLIED')),
+        boundary_run_target_id TEXT,
+        boundary_operation_id TEXT,
+        requested_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        applied_utc TEXT,
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+        FOREIGN KEY (run_id) REFERENCES runs (id) ON DELETE RESTRICT,
+        FOREIGN KEY (run_id, boundary_run_target_id)
+            REFERENCES run_targets (run_id, id)
+            ON DELETE RESTRICT,
+        CHECK (
+            (boundary_run_target_id IS NULL AND boundary_operation_id IS NULL)
+            OR (
+                boundary_run_target_id IS NOT NULL
+                AND boundary_operation_id IS NOT NULL
+                AND length(trim(boundary_operation_id)) > 0
+            )
+        ),
+        CHECK (
+            (state = 'PENDING' AND applied_utc IS NULL)
+            OR (state = 'APPLIED' AND applied_utc IS NOT NULL)
+        )
+    )
+    """,
+    """
+    CREATE INDEX idx_run_stop_requests_state
+        ON run_stop_requests (state, requested_utc, run_id)
     """,
 )
 
@@ -3171,5 +3216,13 @@ RECOVERY_OPERATION_KIND_AND_PLAN_SEQUENCE = (
     """
     CREATE INDEX idx_recovery_operations_run_target_sequence
         ON recovery_operations (run_id, run_target_id, plan_sequence_no, operation_id)
+    """,
+)
+
+RECOVERY_OPERATION_PLANNED_BYTES = (
+    """
+    ALTER TABLE recovery_operations
+    ADD COLUMN planned_bytes INTEGER NOT NULL DEFAULT 0
+        CHECK (planned_bytes >= 0)
     """,
 )

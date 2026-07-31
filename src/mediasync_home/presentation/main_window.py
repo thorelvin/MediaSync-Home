@@ -259,6 +259,14 @@ class RunControlProvider(Protocol):
         idempotency_key: str,
     ) -> IpcResponse: ...
 
+    def stop_backup_after_active_file(
+        self,
+        *,
+        run_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse: ...
+
 
 class MediaSyncWindow(QMainWindow):
     def __init__(
@@ -400,9 +408,11 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_run_progress_state: QLabel | None = None
         self._jobs_run_progress_bar: QProgressBar | None = None
         self._jobs_run_progress_detail: QLabel | None = None
+        self._jobs_run_active_file: QLabel | None = None
         self._jobs_run_target_rows: list[QLabel] = []
         self._jobs_pause_button: QPushButton | None = None
         self._jobs_resume_button: QPushButton | None = None
+        self._jobs_stop_button: QPushButton | None = None
         self._engine_title_label: QLabel | None = None
         self._engine_scope_label: QLabel | None = None
         self._engine_contract_label: QLabel | None = None
@@ -1024,6 +1034,33 @@ class MediaSyncWindow(QMainWindow):
         pair = labels.get(state, (state.replace("_", " ").title(), state))
         return pair[0] if english else pair[1]
 
+    def _run_operation_phase_label(self, phase: str | None) -> str:
+        english = self._selected_language_code is LanguageCode.ENGLISH
+        labels = {
+            "PLANNED": ("Waiting", "Venter"),
+            "SOURCE_VALIDATED": ("Checking source", "Kontrollerer kilde"),
+            "SOURCE_STABILITY_BOUND": ("Checking source", "Kontrollerer kilde"),
+            "TARGET_PRECONDITION_VALIDATED": ("Preparing target", "Klargjør mål"),
+            "STAGING_ALLOCATED": ("Copying", "Kopierer"),
+            "TRANSFERRED": ("Making copy durable", "Sikrer kopien"),
+            "STAGING_DURABLE": ("Verifying copy", "Verifiserer kopi"),
+            "STAGING_VERIFIED": ("Safely placing file", "Setter inn fil trygt"),
+            "COMMIT_INTENT_RECORDED": ("Safely placing file", "Setter inn fil trygt"),
+            "COMMIT_PRECONDITIONS_REVALIDATED": (
+                "Safely placing file",
+                "Setter inn fil trygt",
+            ),
+            "OLD_TARGET_PRESERVED": ("Preserving version", "Bevarer versjon"),
+            "FILESYSTEM_APPLIED": ("Verifying final file", "Verifiserer sluttfil"),
+            "FINAL_DURABLE": ("Verifying final file", "Verifiserer sluttfil"),
+            "FINAL_VERIFIED": ("Recording result", "Registrerer resultat"),
+            "CATALOG_RECORDED": ("Cleaning temporary data", "Rydder midlertidige data"),
+        }
+        if phase is None:
+            return "Working" if english else "Arbeider"
+        pair = labels.get(phase, (phase.replace("_", " ").title(), phase))
+        return pair[0] if english else pair[1]
+
     def _format_history_timestamp(self, value: str) -> str:
         try:
             timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -1144,6 +1181,7 @@ class MediaSyncWindow(QMainWindow):
             self._jobs_run_progress_state,
             self._jobs_run_progress_bar,
             self._jobs_run_progress_detail,
+            self._jobs_run_active_file,
         )
         for widget in widgets:
             if widget is not None:
@@ -1155,6 +1193,8 @@ class MediaSyncWindow(QMainWindow):
                 self._jobs_pause_button.setVisible(False)
             if self._jobs_resume_button is not None:
                 self._jobs_resume_button.setVisible(False)
+            if self._jobs_stop_button is not None:
+                self._jobs_stop_button.setVisible(False)
             return
         if state.active:
             for start_button in (
@@ -1169,21 +1209,59 @@ class MediaSyncWindow(QMainWindow):
             self._jobs_run_progress_title.setText(self._texts().run_progress)
         if self._jobs_run_progress_state is not None:
             self._jobs_run_progress_state.setText(
-                self._history_state_label(state.state or "CREATED")
+                self._texts().stopping_after_active_file
+                if state.stop_requested
+                else self._history_state_label(state.state or "CREATED")
             )
         if self._jobs_run_progress_bar is not None:
-            maximum = max(state.planned_operations, 1)
+            if state.planned_bytes > 0:
+                maximum = 1000
+                value = min(
+                    int((state.transferred_bytes / state.planned_bytes) * maximum),
+                    maximum,
+                )
+                if state.active and value == maximum and not state.terminal:
+                    value = maximum - 1
+            else:
+                maximum = max(state.planned_operations, 1)
+                value = min(state.completed_operations, maximum)
             self._jobs_run_progress_bar.setRange(0, maximum)
-            self._jobs_run_progress_bar.setValue(
-                min(state.completed_operations, maximum)
-            )
+            self._jobs_run_progress_bar.setValue(value)
         if self._jobs_run_progress_detail is not None:
-            self._jobs_run_progress_detail.setText(
+            details = [
                 f"{state.completed_operations} / {state.planned_operations} "
-                f"{self._texts().operation_count} · "
-                f"{_format_bytes(state.completed_bytes)} / "
-                f"{_format_bytes(state.planned_bytes)}"
+                f"{self._texts().operation_count}",
+                f"{_format_bytes(state.transferred_bytes)} / "
+                f"{_format_bytes(state.planned_bytes)} {self._texts().transferred.lower()}",
+            ]
+            if state.bytes_per_second is not None:
+                details.append(_format_rate(state.bytes_per_second))
+            details.append(
+                (
+                    f"{_format_eta(state.eta_seconds)} {self._texts().remaining}"
+                    if state.eta_seconds is not None
+                    else self._texts().calculating_eta
+                )
             )
+            self._jobs_run_progress_detail.setText(" · ".join(details))
+        if self._jobs_run_active_file is not None:
+            active_path = state.active_relative_path
+            active_visible = visible and active_path is not None
+            if active_visible:
+                phase = self._run_operation_phase_label(state.active_phase)
+                active_size = (
+                    ""
+                    if state.active_planned_bytes is None
+                    else f" · {_format_bytes(state.active_planned_bytes)}"
+                )
+                self._jobs_run_active_file.setText(
+                    f"{self._texts().current_file}: {active_path}{active_size} · {phase}"
+                )
+                self._jobs_run_active_file.setToolTip(active_path or "")
+            else:
+                self._jobs_run_active_file.setText("")
+                self._jobs_run_active_file.setToolTip("")
+            self._jobs_run_active_file.setVisible(active_visible)
         for index, row in enumerate(self._jobs_run_target_rows):
             if index >= len(state.targets):
                 row.setText("")
@@ -1195,8 +1273,19 @@ class MediaSyncWindow(QMainWindow):
                 f"{target.completed_operations}/{target.planned_operations}"
             )
             row.setVisible(True)
-        pausable = state.state in {"CREATED", "QUEUED", "PREFLIGHT", "EXECUTING"}
-        resumable = state.state == "PAUSED"
+        pausable = (
+            not state.stop_requested
+            and state.state in {"CREATED", "QUEUED", "PREFLIGHT", "EXECUTING"}
+        )
+        resumable = not state.stop_requested and state.state == "PAUSED"
+        stoppable = state.active and state.state in {
+            "CREATED",
+            "QUEUED",
+            "PREFLIGHT",
+            "EXECUTING",
+            "PAUSING",
+            "PAUSED",
+        }
         if self._jobs_pause_button is not None:
             self._jobs_pause_button.setText(self._texts().pause_backup)
             self._jobs_pause_button.setToolTip(self._texts().pause_backup_tooltip)
@@ -1217,18 +1306,43 @@ class MediaSyncWindow(QMainWindow):
                 and self._engine_client is not None
                 and hasattr(self._engine_client, "resume_backup")
             )
+        if self._jobs_stop_button is not None:
+            self._jobs_stop_button.setText(
+                self._texts().stopping_after_active_file
+                if state.stop_requested
+                else self._texts().stop_after_active_file
+            )
+            self._jobs_stop_button.setToolTip(
+                self._texts().stop_after_active_file_tooltip
+            )
+            self._jobs_stop_button.setVisible(stoppable)
+            self._jobs_stop_button.setEnabled(
+                stoppable
+                and not state.stop_requested
+                and not self._run_control_pending
+                and self._engine_client is not None
+                and hasattr(self._engine_client, "stop_backup_after_active_file")
+            )
 
     def _pause_active_backup(self) -> None:
-        self._submit_run_control(pause=True)
+        self._submit_run_control("pause")
 
     def _resume_active_backup(self) -> None:
-        self._submit_run_control(pause=False)
+        self._submit_run_control("resume")
 
-    def _submit_run_control(self, *, pause: bool) -> None:
+    def _stop_active_backup_after_file(self) -> None:
+        self._submit_run_control("stop")
+
+    def _submit_run_control(self, action: str) -> None:
         run_id = self._active_run_id or self._run_progress_state.run_id
-        method_name = "pause_backup" if pause else "resume_backup"
+        method_name = {
+            "pause": "pause_backup",
+            "resume": "resume_backup",
+            "stop": "stop_backup_after_active_file",
+        }.get(action)
         if (
             run_id is None
+            or method_name is None
             or self._engine_client is None
             or not hasattr(self._engine_client, method_name)
             or self._run_control_pending
@@ -1239,19 +1353,24 @@ class MediaSyncWindow(QMainWindow):
         provider = cast(RunControlProvider, self._engine_client)
         request_id = str(uuid4())
         idempotency_key = str(uuid4())
-        response = (
-            provider.pause_backup(
+        if action == "pause":
+            response = provider.pause_backup(
                 run_id=run_id,
                 request_id=request_id,
                 idempotency_key=idempotency_key,
             )
-            if pause
-            else provider.resume_backup(
+        elif action == "resume":
+            response = provider.resume_backup(
                 run_id=run_id,
                 request_id=request_id,
                 idempotency_key=idempotency_key,
             )
-        )
+        else:
+            response = provider.stop_backup_after_active_file(
+                run_id=run_id,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+            )
         self._run_control_pending = False
         if response.status is IpcStatus.REJECTED:
             codes = response.payload.get("validation_codes")
@@ -1369,6 +1488,7 @@ class MediaSyncWindow(QMainWindow):
             self._setup_primary_button.setEnabled(self._setup_primary_enabled(state))
             self._setup_primary_button.setToolTip(self._setup_primary_tooltip(state))
         self._refresh_dashboard_geometry()
+        QTimer.singleShot(0, self._refresh_dashboard_geometry)
 
     def _setup_primary_enabled(self, state: StandardBackupSetupViewState) -> bool:
         if state.current_step is BackupSetupStep.SOURCE:
@@ -2204,13 +2324,33 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_run_progress_detail = progress_detail
         layout.addWidget(progress_detail, 11, 0, 1, 3)
 
+        active_file = QLabel()
+        active_file.setObjectName("jobsRunActiveFile")
+        active_file.setVisible(False)
+        _configure_responsive_label(active_file, selectable=True)
+        self._jobs_run_active_file = active_file
+        layout.addWidget(active_file, 12, 0, 1, 3)
+
         for index in range(3):
             row = QLabel()
             row.setObjectName("jobsRunTargetRow")
             row.setVisible(False)
             _configure_responsive_label(row)
             self._jobs_run_target_rows.append(row)
-            layout.addWidget(row, 12 + index, 0, 1, 3)
+            layout.addWidget(row, 13 + index, 0, 1, 3)
+
+        stop_button = QPushButton(texts.stop_after_active_file)
+        stop_button.setObjectName("jobsStopBackupButton")
+        stop_button.setToolTip(texts.stop_after_active_file_tooltip)
+        stop_button.setVisible(False)
+        stop_button.clicked.connect(self._stop_active_backup_after_file)
+        self._jobs_stop_button = stop_button
+        layout.addWidget(
+            stop_button,
+            16,
+            0,
+            alignment=Qt.AlignmentFlag.AlignLeft,
+        )
 
         pause_button = QPushButton(texts.pause_backup)
         pause_button.setObjectName("jobsPauseBackupButton")
@@ -2220,7 +2360,7 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_pause_button = pause_button
         layout.addWidget(
             pause_button,
-            15,
+            16,
             1,
             alignment=Qt.AlignmentFlag.AlignRight,
         )
@@ -2233,7 +2373,7 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_resume_button = resume_button
         layout.addWidget(
             resume_button,
-            15,
+            16,
             2,
             alignment=Qt.AlignmentFlag.AlignRight,
         )
@@ -2244,7 +2384,7 @@ class MediaSyncWindow(QMainWindow):
         start_backup.setVisible(False)
         start_backup.clicked.connect(self._start_selected_backup)
         self._jobs_start_backup_button = start_backup
-        layout.addWidget(start_backup, 16, 2)
+        layout.addWidget(start_backup, 17, 2)
         layout.setColumnStretch(1, 1)
         return panel
 
@@ -2708,12 +2848,22 @@ class MediaSyncWindow(QMainWindow):
         self._setup_target_value.setObjectName("setupTargetValue")
         target_controls = QWidget()
         target_controls.setObjectName("setupTargetControls")
+        target_controls.setMinimumWidth(0)
+        target_controls.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         target_controls_layout = QVBoxLayout(target_controls)
         target_controls_layout.setContentsMargins(0, 0, 0, 0)
         target_controls_layout.setSpacing(6)
         for index in range(state.max_targets):
             target_row = QWidget()
             target_row.setObjectName(f"setupTargetRow{index + 1}")
+            target_row.setMinimumWidth(0)
+            target_row.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Preferred,
+            )
             target_row_layout = QHBoxLayout(target_row)
             target_row_layout.setContentsMargins(0, 0, 0, 0)
             target_row_layout.setSpacing(8)
@@ -3616,6 +3766,20 @@ def _format_bytes(value: int) -> str:
             return f"{amount:.1f} {unit}"
         amount /= 1024
     return f"{int(value)} B"
+
+
+def _format_rate(bytes_per_second: float) -> str:
+    return f"{max(bytes_per_second, 0.0) / 1_000_000:.1f} MB/s"
+
+
+def _format_eta(seconds: int) -> str:
+    minutes = max(seconds, 0) // 60
+    if minutes < 1:
+        return "< 1 min"
+    hours, remaining_minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours} h {remaining_minutes} min"
+    return f"{remaining_minutes} min"
 
 
 def _refresh_style(widget: QWidget) -> None:

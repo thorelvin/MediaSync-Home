@@ -924,8 +924,8 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.recovery_connection is not None
         assert runtime.installation_state is not None
         assert runtime.installation_state.product_channel == "local-preview"
-        assert runtime.installation_state.catalog_schema_version == 33
-        assert runtime.installation_state.recovery_schema_version == 6
+        assert runtime.installation_state.catalog_schema_version == 34
+        assert runtime.installation_state.recovery_schema_version == 7
         assert runtime.installation_state.ipc_protocol_major == 1
         assert runtime.snapshot_materialization_refresh is not None
         assert runtime.snapshot_materialization_refresh.scanned_job_count == 0
@@ -963,8 +963,8 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
             runtime.run_executor_recovery_object_cleanup_port
             is runtime.run_executor_final_commit_port
         )
-        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 33
-        assert current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY) == 6
+        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 34
+        assert current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY) == 7
         assert runtime.startup_reconciliation is not None
         assert runtime.startup_reconciliation.reconciler_instance_id == "host-new"
         assert runtime.startup_reconciliation.recovery_operations is not None

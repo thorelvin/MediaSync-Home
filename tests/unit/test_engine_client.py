@@ -93,6 +93,17 @@ def test_engine_client_submits_pause_and_resume_run_controls() -> None:
     assert ipc_client.payload == {"run_id": "run-a"}
     assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
 
+    stop = client.stop_backup_after_active_file(
+        run_id="run-a",
+        request_id="stop-request",
+        idempotency_key="stop-key",
+    )
+
+    assert stop.reason is None
+    assert ipc_client.command_name == RunCommandName.STOP_RUN_AFTER_ACTIVE_FILE.value
+    assert ipc_client.payload == {"run_id": "run-a"}
+    assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
+
 
 def test_engine_client_returns_failed_reconnect_without_replaying_request() -> None:
     ipc_client = _RestartedHostIpcClient(

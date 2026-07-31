@@ -138,7 +138,7 @@ def test_main_window_displays_engine_status(qapp) -> None:
         ]
         assert setup_steps[0].property("stepState") == "current"
         assert create_backup is not None
-        assert create_backup.text() == "Fortsett"
+        assert create_backup.text() == "Velg kildemappe"
         assert create_backup.isEnabled() is True
         assert add_target is not None
         assert add_target.isHidden() is True
@@ -216,7 +216,7 @@ def test_language_selector_updates_selected_flag(qapp) -> None:
             "4. Review and create",
         ]
         assert create_backup is not None
-        assert create_backup.text() == "Continue"
+        assert create_backup.text() == "Choose source folder"
         assert add_target is not None
         assert add_target.toolTip() == "Add target folder"
         assert setup_back is not None
@@ -1284,7 +1284,7 @@ def test_start_backup_button_submits_sealed_plan_once(qapp) -> None:
         window.deleteLater()
 
 
-def test_jobs_page_shows_live_progress_and_pause_resume_controls(qapp) -> None:
+def test_jobs_page_shows_live_progress_and_run_controls(qapp) -> None:
     provider = _FakeRunControlDashboardEngineClient()
     window = build_main_window(
         initial_state=EngineStatusViewState.disconnected(),
@@ -1299,21 +1299,32 @@ def test_jobs_page_shows_live_progress_and_pause_resume_controls(qapp) -> None:
         qapp.processEvents()
         progress = window.findChild(QProgressBar, "jobsRunProgressBar")
         detail = window.findChild(QLabel, "jobsRunProgressDetail")
+        active_file = window.findChild(QLabel, "jobsRunActiveFile")
         pause = window.findChild(QPushButton, "jobsPauseBackupButton")
         resume = window.findChild(QPushButton, "jobsResumeBackupButton")
+        stop = window.findChild(QPushButton, "jobsStopBackupButton")
         start = window.findChild(QPushButton, "jobsStartBackupButton")
 
         assert progress is not None
         assert progress.isVisible()
-        assert progress.maximum() == 3
-        assert progress.value() == 1
+        assert progress.maximum() == 1000
+        assert progress.value() == 500
         assert detail is not None
         assert detail.text().startswith("1 / 3 operasjoner")
+        assert "0.0 MB/s" in detail.text()
+        assert "< 1 min igjen" in detail.text()
+        assert active_file is not None
+        assert active_file.isVisible()
+        assert "Photos/2026/current.jpg" in active_file.text()
+        assert "Kopierer" in active_file.text()
         assert pause is not None
         assert pause.isVisible()
         assert pause.isEnabled()
         assert resume is not None
         assert resume.isHidden()
+        assert stop is not None
+        assert stop.isVisible()
+        assert stop.isEnabled()
         assert start is not None
         assert start.isHidden()
 
@@ -1331,6 +1342,16 @@ def test_jobs_page_shows_live_progress_and_pause_resume_controls(qapp) -> None:
         assert provider.controls == ["pause", "resume"]
         assert pause.isVisible()
         assert resume.isHidden()
+
+        QTest.mouseClick(stop, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert provider.controls == ["pause", "resume", "stop"]
+        assert pause.isHidden()
+        assert resume.isHidden()
+        assert stop.isVisible()
+        assert stop.isEnabled() is False
+        assert stop.text() == "Stopper etter aktiv fil"
     finally:
         window.close()
         window.deleteLater()
@@ -1825,6 +1846,7 @@ class _FakeRunControlDashboardEngineClient(_FakeBackupStartDashboardEngineClient
         self.run_state = "EXECUTING"
         self.sequence_no = 1
         self.controls: list[str] = []
+        self.stop_requested = False
 
     def get_run_progress(
         self,
@@ -1844,8 +1866,16 @@ class _FakeRunControlDashboardEngineClient(_FakeBackupStartDashboardEngineClient
             "completed_operations": 1,
             "planned_bytes": 3072,
             "completed_bytes": 1024,
+            "transferred_operations": 1,
+            "transferred_bytes": 1536,
             "warning_count": 0,
             "error_count": 0,
+            "active_relative_path": "Photos/2026/current.jpg",
+            "active_phase": "STAGING_ALLOCATED",
+            "active_planned_bytes": 2048,
+            "bytes_per_second": 512.0,
+            "eta_seconds": 3,
+            "stop_requested": self.stop_requested,
             "targets": [
                 {
                     "endpoint_id": "target-a",
@@ -1905,6 +1935,23 @@ class _FakeRunControlDashboardEngineClient(_FakeBackupStartDashboardEngineClient
         self.sequence_no += 1
         return IpcResponse.accepted(
             {"applied": True, "run": {"run_id": run_id, "state": "QUEUED"}}
+        )
+
+    def stop_backup_after_active_file(
+        self,
+        *,
+        run_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        assert run_id == "run-a"
+        assert request_id
+        assert idempotency_key
+        self.controls.append("stop")
+        self.stop_requested = True
+        self.sequence_no += 1
+        return IpcResponse.accepted(
+            {"applied": True, "run": {"run_id": run_id, "state": "EXECUTING"}}
         )
 
 

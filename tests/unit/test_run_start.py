@@ -28,6 +28,7 @@ from mediasync_home.application.runs import (
     StartedRunTarget,
     parse_start_run_command,
     parse_run_control_command,
+    request_run_stop_after_active_file,
     request_run_pause,
     resume_paused_run,
     start_run_from_sealed_plan,
@@ -51,6 +52,7 @@ class InMemoryRunStore(RunStore):
     def __init__(self) -> None:
         self.runs: dict[str, StartedRun] = {}
         self.idempotency_keys: dict[str, str] = {}
+        self.stop_requests: set[str] = set()
 
     def save_started_run(self, run: StartedRun) -> None:
         self.runs[run.run_id] = run
@@ -161,6 +163,20 @@ class InMemoryRunStore(RunStore):
         self.runs[run_id] = updated
         return updated
 
+    def request_run_stop_after_active_file(self, run_id: str) -> StartedRun | None:
+        run = self.load_started_run(run_id)
+        if run is None or run.state not in {
+            RunState.CREATED,
+            RunState.QUEUED,
+            RunState.PREFLIGHT,
+            RunState.EXECUTING,
+            RunState.PAUSING,
+            RunState.PAUSED,
+        }:
+            return None
+        self.stop_requests.add(run_id)
+        return run
+
 
 class FixedRunIdFactory(RunIdFactory):
     def __init__(self) -> None:
@@ -251,6 +267,34 @@ def test_pause_request_waits_for_executor_boundary_and_resume_requeues_target() 
     assert resume.run.state is RunState.QUEUED
     assert resume.run.targets[0].state is RunTargetState.PENDING
     assert resume.run.targets[0].last_lease_id is None
+
+
+def test_stop_after_active_file_records_request_without_terminalizing_run() -> None:
+    plan = _sealed_plan()
+    runs = InMemoryRunStore()
+    started = start_run_from_sealed_plan(
+        command=_start_command(plan),
+        plans=InMemoryPlanStore(plan),
+        runs=runs,
+        id_factory=FixedRunIdFactory(),
+    ).run
+    assert started is not None
+    executing = replace(started, state=RunState.EXECUTING)
+    runs.runs[executing.run_id] = executing
+
+    outcome = request_run_stop_after_active_file(
+        command=RunControlCommand(
+            request_id="stop-request",
+            idempotency_key="stop-key",
+            run_id=executing.run_id,
+        ),
+        runs=runs,
+    )
+
+    assert outcome.applied
+    assert outcome.run is not None
+    assert outcome.run.state is RunState.EXECUTING
+    assert runs.stop_requests == {executing.run_id}
 
 
 def test_run_control_parser_and_state_preconditions_fail_closed() -> None:

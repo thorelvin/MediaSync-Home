@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 from mediasync_home.application.recovery_operations import (
     PRE_COMMIT_LEASE_REBIND_PHASES,
+    TERMINAL_PHASES,
     RecoveryOperation,
     RecoveryOperationKind,
     RecoveryOperationMetadata,
@@ -17,6 +18,7 @@ from mediasync_home.application.recovery_operations import (
     validate_recovery_operation,
     validate_recovery_phase_transition,
 )
+from mediasync_home.application.runs import RunTargetStopProgress
 
 
 class SqliteRecoveryOperationStoreError(ValueError):
@@ -607,6 +609,88 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         ).fetchall()
         return tuple(_operation_from_row(row) for row in rows)
 
+    def list_started_operations_for_run(
+        self,
+        *,
+        run_id: str,
+        limit: int,
+    ) -> tuple[RecoveryOperation, ...]:
+        if limit < 1:
+            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_REQUIRES_POSITIVE_LIMIT")
+        terminal_values = tuple(phase.value for phase in TERMINAL_PHASES)
+        placeholders = ", ".join("?" for _ in terminal_values)
+        rows = self._connection.execute(
+            f"""
+            SELECT
+                {RECOVERY_OPERATION_COLUMNS}
+            FROM recovery_operations
+            WHERE run_id = ?
+                AND phase <> 'PLANNED'
+                AND phase NOT IN ({placeholders})
+            ORDER BY plan_sequence_no, operation_id
+            LIMIT ?
+            """,
+            (run_id, *terminal_values, limit),
+        ).fetchall()
+        return tuple(_operation_from_row(row) for row in rows)
+
+    def list_planned_operations_for_run(
+        self,
+        *,
+        run_id: str,
+        exclude_operation_id: str | None,
+        limit: int,
+    ) -> tuple[RecoveryOperation, ...]:
+        if limit < 1:
+            raise SqliteRecoveryOperationStoreError("RECOVERY_OPERATION_REQUIRES_POSITIVE_LIMIT")
+        exclusion = "" if exclude_operation_id is None else "AND operation_id <> ?"
+        parameters: tuple[object, ...] = (
+            (run_id, limit)
+            if exclude_operation_id is None
+            else (run_id, exclude_operation_id, limit)
+        )
+        rows = self._connection.execute(
+            f"""
+            SELECT
+                {RECOVERY_OPERATION_COLUMNS}
+            FROM recovery_operations
+            WHERE run_id = ?
+                AND phase = 'PLANNED'
+                {exclusion}
+            ORDER BY run_target_id, plan_sequence_no, operation_id
+            LIMIT ?
+            """,
+            parameters,
+        ).fetchall()
+        return tuple(_operation_from_row(row) for row in rows)
+
+    def summarize_successful_operations_for_run(
+        self,
+        run_id: str,
+    ) -> tuple[RunTargetStopProgress, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                run_target_id,
+                count(*),
+                coalesce(sum(planned_bytes), 0)
+            FROM recovery_operations
+            WHERE run_id = ?
+                AND phase IN ('CATALOG_RECORDED', 'CLEANED')
+            GROUP BY run_target_id
+            ORDER BY run_target_id
+            """,
+            (run_id,),
+        ).fetchall()
+        return tuple(
+            RunTargetStopProgress(
+                run_target_id=str(row[0]),
+                completed_operations=int(row[1]),
+                completed_bytes=int(row[2]),
+            )
+            for row in rows
+        )
+
     def _operation_after_transition(
         self,
         operation: RecoveryOperation,
@@ -833,6 +917,7 @@ RECOVERY_OPERATION_COLUMN_NAMES = (
     "final_durability_state",
     "catalog_handoff_id",
     "last_error_code",
+    "planned_bytes",
 )
 RECOVERY_OPERATION_COLUMNS = ", ".join(RECOVERY_OPERATION_COLUMN_NAMES)
 RECOVERY_OPERATION_PLACEHOLDERS = ", ".join("?" for _ in RECOVERY_OPERATION_COLUMN_NAMES)
@@ -883,6 +968,7 @@ def _operation_values(operation: RecoveryOperation) -> tuple[object, ...]:
         operation.final_durability_state,
         operation.catalog_handoff_id,
         operation.last_error_code,
+        operation.planned_bytes,
     )
 
 
@@ -931,6 +1017,7 @@ def _operation_from_row(row: sqlite3.Row | tuple[Any, ...]) -> RecoveryOperation
         final_durability_state=None if row[40] is None else str(row[40]),
         catalog_handoff_id=None if row[41] is None else str(row[41]),
         last_error_code=None if row[42] is None else str(row[42]),
+        planned_bytes=int(row[43]),
     )
 
 

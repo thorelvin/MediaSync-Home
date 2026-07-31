@@ -28,8 +28,16 @@ class RunProgressViewState:
     completed_operations: int
     planned_bytes: int
     completed_bytes: int
+    transferred_operations: int
+    transferred_bytes: int
     warning_count: int
     error_count: int
+    active_relative_path: str | None
+    active_phase: str | None
+    active_planned_bytes: int | None
+    bytes_per_second: float | None
+    eta_seconds: int | None
+    stop_requested: bool
     targets: tuple[RunTargetProgressViewState, ...] = ()
     read_model_available: bool = False
     run_found: bool = False
@@ -50,8 +58,16 @@ def empty_run_progress_state() -> RunProgressViewState:
         completed_operations=0,
         planned_bytes=0,
         completed_bytes=0,
+        transferred_operations=0,
+        transferred_bytes=0,
         warning_count=0,
         error_count=0,
+        active_relative_path=None,
+        active_phase=None,
+        active_planned_bytes=None,
+        bytes_per_second=None,
+        eta_seconds=None,
+        stop_requested=False,
     )
 
 
@@ -104,8 +120,16 @@ def run_progress_from_response(
         completed_operations=_non_negative_int(snapshot.get("completed_operations")) or 0,
         planned_bytes=_non_negative_int(snapshot.get("planned_bytes")) or 0,
         completed_bytes=_non_negative_int(snapshot.get("completed_bytes")) or 0,
+        transferred_operations=_non_negative_int(snapshot.get("transferred_operations")) or 0,
+        transferred_bytes=_non_negative_int(snapshot.get("transferred_bytes")) or 0,
         warning_count=_non_negative_int(snapshot.get("warning_count")) or 0,
         error_count=_non_negative_int(snapshot.get("error_count")) or 0,
+        active_relative_path=_text(snapshot.get("active_relative_path")),
+        active_phase=_text(snapshot.get("active_phase")),
+        active_planned_bytes=_non_negative_int(snapshot.get("active_planned_bytes")),
+        bytes_per_second=_non_negative_float(snapshot.get("bytes_per_second")),
+        eta_seconds=_non_negative_int(snapshot.get("eta_seconds")),
+        stop_requested=bool(snapshot.get("stop_requested", False)),
         targets=targets,
         read_model_available=available,
         run_found=found,
@@ -140,3 +164,12 @@ def _non_negative_int(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
+
+
+def _non_negative_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    normalized = float(value)
+    if normalized < 0:
+        return None
+    return normalized

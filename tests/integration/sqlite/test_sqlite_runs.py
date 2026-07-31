@@ -45,13 +45,16 @@ from mediasync_home.application.runs import (
     RunIdFactory,
     RunIds,
     RunCommandName,
+    RunControlCommand,
     RunState,
+    RunTargetStopProgress,
     RunTargetState,
     StartedRun,
     acquire_run_target_lease,
     begin_next_run_target_preflight,
     complete_run_target_success,
     parse_start_run_command,
+    request_run_stop_after_active_file,
     start_run_from_sealed_plan,
 )
 from mediasync_home.application.runtime_status import startup_status
@@ -162,6 +165,156 @@ def test_sqlite_run_store_persists_started_run_from_sealed_plan(tmp_path: Path) 
         assert loaded.targets[0].planned_bytes == 128
         assert _row_count(connection, "runs") == 1
         assert _row_count(connection, "run_targets") == 1
+
+
+def test_sqlite_graceful_stop_request_binds_and_terminalizes_run(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        plans = SqlitePlanStore(connection)
+        runs = SqliteRunStore(connection)
+        plan = _sealed_plan()
+        plans.save_sealed_plan(plan)
+        started = start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        assert started.run is not None
+
+        requested = request_run_stop_after_active_file(
+            command=RunControlCommand(
+                request_id="stop-request-a",
+                idempotency_key="stop-idempotency-a",
+                run_id=started.run.run_id,
+            ),
+            runs=runs,
+        )
+        bound = runs.bind_requested_run_stop_boundary(
+            run_id=started.run.run_id,
+            run_target_id=started.run.targets[0].run_target_id,
+            operation_id="operation-a",
+        )
+        stopped = runs.finalize_requested_run_stop(
+            run_id=started.run.run_id,
+            target_progress=(
+                RunTargetStopProgress(
+                    run_target_id=started.run.targets[0].run_target_id,
+                    completed_operations=1,
+                    completed_bytes=128,
+                ),
+            ),
+        )
+
+        assert requested.applied
+        assert bound is not None
+        assert bound.boundary_operation_id == "operation-a"
+        assert stopped is not None
+        assert stopped.state is RunState.CANCELLED
+        assert stopped.targets[0].state is RunTargetState.CANCELLED
+        assert stopped.targets[0].completed_operations == 1
+        assert stopped.targets[0].completed_bytes == 128
+        assert runs.load_run_stop_request(started.run.run_id) is None
+        assert connection.execute(
+            "SELECT state FROM run_stop_requests WHERE run_id = ?",
+            (started.run.run_id,),
+        ).fetchone() == ("APPLIED",)
+
+
+def test_sqlite_graceful_stop_requeues_only_its_paused_boundary_target(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        plans = SqlitePlanStore(connection)
+        runs = SqliteRunStore(connection)
+        plan = _sealed_plan()
+        plans.save_sealed_plan(plan)
+        started = start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        ).run
+        assert started is not None
+        connection.execute("INSERT INTO endpoints (id) VALUES ('target-b')")
+        connection.execute(
+            """
+            INSERT INTO endpoint_revisions (endpoint_id, id, display_name, root_uri)
+            VALUES ('target-b', 'target-rev-b', 'NAS', 'file:///F:/Backup')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO run_targets (
+                id,
+                run_id,
+                endpoint_id,
+                endpoint_revision_id,
+                required_owner_installation_id,
+                required_ownership_epoch,
+                state,
+                lease_resource_key,
+                planned_operations,
+                planned_bytes
+            )
+            VALUES (
+                'run-a-target-0001',
+                'run-a',
+                'target-b',
+                'target-rev-b',
+                'owner-a',
+                1,
+                'PAUSED',
+                'endpoint:target-b',
+                1,
+                128
+            )
+            """
+        )
+        connection.execute("UPDATE runs SET state = 'PAUSED' WHERE id = 'run-a'")
+        connection.execute(
+            """
+            UPDATE run_targets
+            SET state = 'PAUSED'
+            WHERE id = 'run-a-target-0000'
+            """
+        )
+
+        requested = runs.request_run_stop_after_active_file("run-a")
+        bound = runs.bind_requested_run_stop_boundary(
+            run_id="run-a",
+            run_target_id="run-a-target-0001",
+            operation_id="operation-b",
+        )
+        activated = runs.activate_requested_run_stop("run-a")
+
+        assert requested is not None
+        assert bound is not None
+        assert activated is not None
+        assert activated.state is RunState.QUEUED
+        targets = {
+            target.run_target_id: target.state
+            for target in activated.targets
+        }
+        assert targets == {
+            "run-a-target-0000": RunTargetState.PAUSED,
+            "run-a-target-0001": RunTargetState.PENDING,
+        }
 
 
 def test_sqlite_run_pause_boundary_and_resume_force_fresh_lease(tmp_path: Path) -> None:

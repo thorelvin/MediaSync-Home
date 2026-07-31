@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Protocol
 
 from mediasync_home.application.runs import RunState, RunTargetState
 
 
-PROGRESS_SNAPSHOT_SCHEMA_VERSION = 1
+PROGRESS_SNAPSHOT_SCHEMA_VERSION = 2
 MAX_PROGRESS_SNAPSHOT_TARGETS = 32
 MAX_PROGRESS_QUERY_ID_LENGTH = 256
+MAX_PROGRESS_ACTIVE_PATH_LENGTH = 32767
 
 
 class ProgressSnapshotQueryError(ValueError):
@@ -77,6 +79,14 @@ class RunProgressSnapshot:
     warning_count: int
     error_count: int
     targets: tuple[RunTargetProgressSnapshot, ...]
+    transferred_operations: int = 0
+    transferred_bytes: int = 0
+    active_relative_path: str | None = None
+    active_phase: str | None = None
+    active_planned_bytes: int | None = None
+    bytes_per_second: float | None = None
+    eta_seconds: int | None = None
+    stop_requested: bool = False
     schema_version: int = PROGRESS_SNAPSHOT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -106,7 +116,24 @@ class RunProgressSnapshot:
             self.completed_bytes,
             self.warning_count,
             self.error_count,
+            self.transferred_operations,
+            self.transferred_bytes,
         )
+        if self.active_relative_path is not None and (
+            not self.active_relative_path
+            or len(self.active_relative_path) > MAX_PROGRESS_ACTIVE_PATH_LENGTH
+        ):
+            raise ProgressSnapshotQueryError("RUN_PROGRESS_ACTIVE_PATH_INVALID")
+        if self.active_phase is not None:
+            _validate_snapshot_text(self.active_phase, "RUN_PROGRESS_ACTIVE_PHASE_INVALID")
+        if self.active_planned_bytes is not None and self.active_planned_bytes < 0:
+            raise ProgressSnapshotQueryError("RUN_PROGRESS_ACTIVE_BYTES_INVALID")
+        if self.bytes_per_second is not None and (
+            not math.isfinite(self.bytes_per_second) or self.bytes_per_second < 0
+        ):
+            raise ProgressSnapshotQueryError("RUN_PROGRESS_SPEED_INVALID")
+        if self.eta_seconds is not None and self.eta_seconds < 0:
+            raise ProgressSnapshotQueryError("RUN_PROGRESS_ETA_INVALID")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -127,6 +154,14 @@ class RunProgressSnapshot:
             "warning_count": self.warning_count,
             "error_count": self.error_count,
             "targets": [target.to_dict() for target in self.targets],
+            "transferred_operations": self.transferred_operations,
+            "transferred_bytes": self.transferred_bytes,
+            "active_relative_path": self.active_relative_path,
+            "active_phase": self.active_phase,
+            "active_planned_bytes": self.active_planned_bytes,
+            "bytes_per_second": self.bytes_per_second,
+            "eta_seconds": self.eta_seconds,
+            "stop_requested": self.stop_requested,
         }
 
 

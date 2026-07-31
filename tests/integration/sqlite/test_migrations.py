@@ -34,7 +34,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 33
+        assert current_schema_version(connection, plan.store) == 34
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -69,10 +69,11 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "job_revision_filter_bindings",
             "runs",
             "run_targets",
+            "run_stop_requests",
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 33
+        assert _row_count(connection, "schema_migrations") == 34
         assert _column_names(connection, "endpoint_revisions") >= {"generation"}
         assert _column_names(connection, "snapshots") >= {"endpoint_generation"}
         assert _column_names(connection, "plan_endpoints") >= {"endpoint_generation"}
@@ -764,7 +765,7 @@ def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(tmp_path
 
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 6
+        assert current_schema_version(connection, plan.store) == 7
         assert _table_names(connection) >= {
             "lease_counters",
             "resource_leases",
@@ -847,7 +848,7 @@ def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> N
                 name,
                 migration_checksum
             )
-                    VALUES ('catalog', 34, 'future_migration', ?)
+                    VALUES ('catalog', 35, 'future_migration', ?)
             """,
             ("f" * 64,),
         )
@@ -954,8 +955,8 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
         preflight = inspect_sqlite_migration_state(connection, plan)
 
         assert preflight.initialized
-        assert preflight.current_version == 33
-        assert preflight.target_version == 33
+        assert preflight.current_version == 34
+        assert preflight.target_version == 34
         assert preflight.checksum_backfill_required
         assert "migration_checksum" not in _column_names(
             connection,

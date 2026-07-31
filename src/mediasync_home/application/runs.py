@@ -27,6 +27,7 @@ class RunCommandName(str, Enum):
     START_RUN = "START_RUN"
     PAUSE_RUN = "PAUSE_RUN"
     RESUME_RUN = "RESUME_RUN"
+    STOP_RUN_AFTER_ACTIVE_FILE = "STOP_RUN_AFTER_ACTIVE_FILE"
 
 
 class RunState(str, Enum):
@@ -168,6 +169,20 @@ class RunControlOutcome:
     validation_codes: tuple[str, ...]
     next_action: str
     run: StartedRun | None = None
+
+
+@dataclass(frozen=True)
+class RunStopRequest:
+    run_id: str
+    boundary_run_target_id: str | None = None
+    boundary_operation_id: str | None = None
+
+
+@dataclass(frozen=True)
+class RunTargetStopProgress:
+    run_target_id: str
+    completed_operations: int
+    completed_bytes: int
 
 
 @dataclass(frozen=True)
@@ -328,6 +343,8 @@ class RunControlStore(Protocol):
 
     def resume_paused_run(self, run_id: str) -> StartedRun | None: ...
 
+    def request_run_stop_after_active_file(self, run_id: str) -> StartedRun | None: ...
+
 
 class RunIdFactory(Protocol):
     def new_run_ids(self) -> RunIds: ...
@@ -463,6 +480,58 @@ def resume_paused_run(
         run=updated,
         validation_codes=(),
         next_action="The run is queued for endpoint lease reacquisition and revalidation.",
+    )
+
+
+def request_run_stop_after_active_file(
+    *,
+    command: RunControlCommand,
+    runs: RunControlStore,
+) -> RunControlOutcome:
+    run = runs.load_started_run(command.run_id)
+    if run is None:
+        return _run_control_rejected(
+            command.run_id,
+            "RUN_NOT_FOUND",
+            "Refresh backup activity before stopping the run.",
+        )
+    if run.state is RunState.CANCELLED:
+        return RunControlOutcome(
+            applied=True,
+            idempotent_replay=True,
+            run_id=run.run_id,
+            run=run,
+            validation_codes=(),
+            next_action="The run is already stopped.",
+        )
+    if run.state not in {
+        RunState.CREATED,
+        RunState.QUEUED,
+        RunState.PREFLIGHT,
+        RunState.EXECUTING,
+        RunState.PAUSING,
+        RunState.PAUSED,
+    }:
+        return _run_control_rejected(
+            run.run_id,
+            "RUN_NOT_STOPPABLE",
+            "Only an active or paused backup run can be stopped.",
+            run=run,
+        )
+    updated = runs.request_run_stop_after_active_file(run.run_id)
+    if updated is None:
+        return _run_control_rejected(
+            run.run_id,
+            "RUN_STOP_STATE_CONFLICT",
+            "Refresh run progress and retry stop.",
+        )
+    return RunControlOutcome(
+        applied=True,
+        idempotent_replay=False,
+        run_id=updated.run_id,
+        run=updated,
+        validation_codes=(),
+        next_action="The executor will stop after the active file reaches a safe boundary.",
     )
 
 

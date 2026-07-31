@@ -15,7 +15,6 @@ from mediasync_home.application.recovery_intents import RecoveryIntentSegmentSto
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
     RecoveryOperationPhase,
-    RecoveryOperationStore,
 )
 from mediasync_home.application.run_catalog_handoffs import record_next_run_target_catalog_handoff
 from mediasync_home.application.run_completion import (
@@ -51,6 +50,10 @@ from mediasync_home.application.run_staging import (
     RunTargetStagingPort,
     execute_next_run_target_staging_step,
 )
+from mediasync_home.application.run_stop import (
+    RunStopRecoveryOperationStore,
+    prepare_next_requested_run_stop,
+)
 from mediasync_home.application.runs import (
     EndpointLeaseAuthority,
     RunState,
@@ -62,6 +65,9 @@ from mediasync_home.domain.capabilities import MutationPermit
 
 
 class RunExecutorCycleAction(str, Enum):
+    RUN_STOP_BOUNDARY_BOUND = "RUN_STOP_BOUNDARY_BOUND"
+    RUN_STOP_CANCELLATION_ADVANCED = "RUN_STOP_CANCELLATION_ADVANCED"
+    RUN_STOPPED = "RUN_STOPPED"
     RUN_PAUSED = "RUN_PAUSED"
     PREFLIGHT_LEASE_ACQUIRED = "PREFLIGHT_LEASE_ACQUIRED"
     EXECUTION_STARTED = "EXECUTION_STARTED"
@@ -102,7 +108,10 @@ class RunExecutorCyclePumpOutcome:
     next_action: str
 
 
-class RunExecutorCycleRecoveryOperationStore(RecoveryOperationStore, Protocol):
+class RunExecutorCycleRecoveryOperationStore(
+    RunStopRecoveryOperationStore,
+    Protocol,
+):
     def list_operations_for_run_target_in_phase(
         self,
         *,
@@ -202,6 +211,60 @@ def execute_one_run_executor_cycle(
     recovery_object_cleanup_port: RecoveryObjectCleanupPort | None = None,
     staging_transfer_port: RunTargetStagingPort | None = None,
 ) -> RunExecutorCycleOutcome:
+    stopping = (
+        prepare_next_requested_run_stop(
+            runs=runs,
+            recovery_operations=recovery_operations,
+            process_instance_id=process_instance_id,
+        )
+        if hasattr(runs, "load_next_requested_run_stop")
+        and hasattr(recovery_operations, "list_started_operations_for_run")
+        else None
+    )
+    if stopping is not None and not stopping.idle:
+        if stopping.ready_to_finalize and stopping.run_id is not None:
+            for run_id, run_target_id in lease_registry.retained_run_target_keys():
+                if run_id == stopping.run_id:
+                    lease_registry.release_retained_run_target_lease(
+                        run_id=run_id,
+                        run_target_id=run_target_id,
+                    )
+            stopped = runs.finalize_requested_run_stop(
+                run_id=stopping.run_id,
+                target_progress=stopping.target_progress,
+            )
+            if stopped is None:
+                return _blocked(
+                    run_id=stopping.run_id,
+                    run_target_id=stopping.boundary_run_target_id,
+                    validation_codes=("RUN_STOP_FINALIZE_STATE_CONFLICT",),
+                    next_action="Reload run state before finalizing graceful stop.",
+                )
+            return _advanced(
+                action=RunExecutorCycleAction.RUN_STOPPED,
+                run_id=stopped.run_id,
+                run_target_id=stopping.boundary_run_target_id,
+                next_action="Run stopped after the active file reached a safe boundary.",
+            )
+        if stopping.advanced:
+            return _advanced(
+                action=(
+                    RunExecutorCycleAction.RUN_STOP_CANCELLATION_ADVANCED
+                    if stopping.cancelled_operations
+                    else RunExecutorCycleAction.RUN_STOP_BOUNDARY_BOUND
+                ),
+                run_id=stopping.run_id,
+                run_target_id=stopping.boundary_run_target_id,
+                next_action=stopping.next_action,
+            )
+        if stopping.validation_codes:
+            return _blocked(
+                run_id=stopping.run_id,
+                run_target_id=stopping.boundary_run_target_id,
+                validation_codes=stopping.validation_codes,
+                next_action=stopping.next_action,
+            )
+
     pausing = runs.load_next_pausing_run()
     if pausing is not None:
         for run_id, run_target_id in lease_registry.retained_run_target_keys():

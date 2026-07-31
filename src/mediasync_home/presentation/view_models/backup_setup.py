@@ -217,7 +217,11 @@ def build_standard_backup_setup_state(
         max_targets=3,
         defaults=defaults,
         primary_action_label=(
-            "Opprett og registrer" if current_step is BackupSetupStep.REVIEW else "Fortsett"
+            "Choose source folder"
+            if current_step is BackupSetupStep.SOURCE
+            else "Opprett og registrer"
+            if current_step is BackupSetupStep.REVIEW
+            else "Fortsett"
         ),
         can_continue=can_continue,
         can_create=can_create,

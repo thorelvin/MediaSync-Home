@@ -79,6 +79,7 @@ from mediasync_home.adapters.sqlite.outbox import SqliteOutboxStore
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
 from mediasync_home.adapters.sqlite.recovery_intents import SqliteRecoveryIntentSegmentStore
 from mediasync_home.adapters.sqlite.recovery_operations import SqliteRecoveryOperationStore
+from mediasync_home.adapters.sqlite.run_progress import SqliteRunProgressSnapshotStore
 from mediasync_home.adapters.sqlite.runs import SqliteRunStore
 from mediasync_home.adapters.sqlite.schedules import SqliteScheduleStore
 from mediasync_home.adapters.sqlite.snapshots import SqliteSnapshotEntryStore
@@ -123,6 +124,7 @@ from mediasync_home.application.run_executor import (
 from mediasync_home.application.clocks import ClockPort
 from mediasync_home.application.run_executor_cycle import (
     RunExecutorCyclePumpOutcome,
+    RunExecutorCycleRecoveryOperationStore,
     execute_bounded_run_executor_cycle,
 )
 from mediasync_home.application.host_locator import LocalEngineHostPublication
@@ -145,7 +147,6 @@ from mediasync_home.application.run_operation_planning import (
 )
 from mediasync_home.application.run_staging import RunTargetStagingPort
 from mediasync_home.application.run_intent_segments import (
-    RunTargetIntentOperationStore,
     RunTargetIntentSegmentOutcome,
     publish_run_target_recovery_intent_segment,
 )
@@ -366,7 +367,7 @@ class EngineHostRuntime:
     run_executor_lease_authority: EndpointLeaseAuthority | None = None
     run_executor_lease_registry: HeldRunTargetLeaseRegistry | None = None
     run_executor_plan_store: PlanStore | None = None
-    run_executor_recovery_operation_store: RunTargetIntentOperationStore | None = None
+    run_executor_recovery_operation_store: RunExecutorCycleRecoveryOperationStore | None = None
     run_executor_recovery_intent_segment_store: RecoveryIntentSegmentStore | None = None
     run_executor_catalog_handoff_store: FinalFileCatalogHandoffStore | None = None
     run_executor_staging_transfer_port: RunTargetStagingPort | None = None
@@ -1517,6 +1518,10 @@ def build_engine_host_runtime(
         catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
         resource_leases = SqliteResourceLeaseStore(recovery_connection)
         recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
+        run_progress = SqliteRunProgressSnapshotStore(
+            catalog_runs=runs,
+            recovery_connection=recovery_connection,
+        )
         recovery_intent_segments = SqliteRecoveryIntentSegmentStore(recovery_connection)
         endpoint_root_resolver = SqliteEndpointRootResolver(catalog_connection)
         run_executor_lease_authority = LocalResolvingEndpointLeaseAuthority(
@@ -1593,7 +1598,7 @@ def build_engine_host_runtime(
             run_id_factory=UuidRunIdFactory(),
             history_timeline_read_store=history,
             run_activity_read_store=runs,
-            run_progress_snapshot_store=runs,
+            run_progress_snapshot_store=run_progress,
             schedule_store=schedules,
             trigger_occurrence_store=trigger_occurrences,
             external_resource_state_store=external_resource_state,

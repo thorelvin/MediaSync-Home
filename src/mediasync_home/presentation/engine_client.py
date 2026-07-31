@@ -365,6 +365,20 @@ class EngineClient:
             idempotency_key=idempotency_key,
         )
 
+    def stop_backup_after_active_file(
+        self,
+        *,
+        run_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        return self._submit_run_control(
+            RunCommandName.STOP_RUN_AFTER_ACTIVE_FILE,
+            run_id=run_id,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
+
     def _submit_run_control(
         self,
         command_name: RunCommandName,

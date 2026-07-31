@@ -225,6 +225,7 @@ def _planned_recovery_operation(
         ),
         operation_kind=RecoveryOperationKind(operation.operation_type.value),
         plan_sequence_no=operation.sequence_no,
+        planned_bytes=operation.planned_bytes,
         source_endpoint_id=source_endpoint_id,
         source_endpoint_revision_id=source_endpoint_revision_id,
         source_relative_path=source_relative_path,

@@ -410,7 +410,8 @@ QProgressBar#jobsRunProgressBar::chunk {{
 }}
 
 QPushButton#jobsPauseBackupButton,
-QPushButton#jobsResumeBackupButton {{
+QPushButton#jobsResumeBackupButton,
+QPushButton#jobsStopBackupButton {{
     min-height: 32px;
     border-radius: {tokens.radius_sm}px;
     border: {tokens.border_hairline}px solid {tokens.border};
@@ -420,17 +421,20 @@ QPushButton#jobsResumeBackupButton {{
 }}
 
 QPushButton#jobsPauseBackupButton:hover,
-QPushButton#jobsResumeBackupButton:hover {{
+QPushButton#jobsResumeBackupButton:hover,
+QPushButton#jobsStopBackupButton:hover {{
     border-color: {tokens.accent};
 }}
 
 QPushButton#jobsPauseBackupButton:focus,
-QPushButton#jobsResumeBackupButton:focus {{
+QPushButton#jobsResumeBackupButton:focus,
+QPushButton#jobsStopBackupButton:focus {{
     border: {tokens.border_focus}px solid {tokens.focus};
 }}
 
 QPushButton#jobsPauseBackupButton:disabled,
-QPushButton#jobsResumeBackupButton:disabled {{
+QPushButton#jobsResumeBackupButton:disabled,
+QPushButton#jobsStopBackupButton:disabled {{
     color: {tokens.text_muted};
 }}
 

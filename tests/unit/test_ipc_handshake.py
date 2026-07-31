@@ -496,6 +496,7 @@ class _InMemoryRunStore(RunStore, RunActivityReadModelStore):
     def __init__(self) -> None:
         self.runs: dict[str, StartedRun] = {}
         self.idempotency_keys: dict[str, str] = {}
+        self.stop_requests: set[str] = set()
 
     def save_started_run(self, run: StartedRun) -> None:
         self.runs[run.run_id] = run
@@ -619,6 +620,20 @@ class _InMemoryRunStore(RunStore, RunActivityReadModelStore):
         )
         self.runs[run_id] = updated
         return updated
+
+    def request_run_stop_after_active_file(self, run_id: str) -> StartedRun | None:
+        run = self.load_started_run(run_id)
+        if run is None or run.state not in {
+            RunState.CREATED,
+            RunState.QUEUED,
+            RunState.PREFLIGHT,
+            RunState.EXECUTING,
+            RunState.PAUSING,
+            RunState.PAUSED,
+        }:
+            return None
+        self.stop_requests.add(run_id)
+        return run
 
 
 class _InMemoryTriggerOccurrenceStore(TriggerOccurrenceStore):
@@ -2321,6 +2336,19 @@ def test_enabled_pause_and_resume_commands_are_durable_and_idempotent() -> None:
     assert resumed is not None
     assert resumed.targets[0].state is RunTargetState.PENDING
     assert resumed.targets[0].last_lease_id is None
+
+    stop_payload = {"run_id": resumed.run_id}
+    stop = ipc_client.submit_command(
+        RunCommandName.STOP_RUN_AFTER_ACTIVE_FILE.value,
+        request_id="22222222-3333-4444-8555-666666666666",
+        idempotency_key="88888888-7777-4666-8555-444444444444",
+        payload=stop_payload,
+        payload_hash=payload_hash(stop_payload),
+    )
+
+    assert stop.status is IpcStatus.ACCEPTED
+    assert stop.payload["run"]["state"] == RunState.QUEUED.value
+    assert runs.stop_requests == {resumed.run_id}
 
 
 def test_enabled_start_run_replay_returns_existing_success_receipt() -> None:

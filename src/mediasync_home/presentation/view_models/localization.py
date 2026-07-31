@@ -128,12 +128,42 @@ class ShellText:
         return "Fortsett med ny kontroll av måltilgang"
 
     @property
+    def stop_after_active_file(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Stop after current file"
+        return "Stopp etter aktiv fil"
+
+    @property
+    def stop_after_active_file_tooltip(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Finish the current file safely, then stop the backup"
+        return "Fullfør aktiv fil trygt, og stopp deretter backupen"
+
+    @property
+    def stopping_after_active_file(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Stopping after current file"
+        return "Stopper etter aktiv fil"
+
+    @property
     def run_progress(self) -> str:
         return "Backup progress" if self.language_tooltip_prefix == "Language" else "Backupfremdrift"
 
     @property
     def operation_count(self) -> str:
         return "operations" if self.language_tooltip_prefix == "Language" else "operasjoner"
+
+    @property
+    def current_file(self) -> str:
+        return "Current file" if self.language_tooltip_prefix == "Language" else "Aktiv fil"
+
+    @property
+    def calculating_eta(self) -> str:
+        return "Calculating remaining time" if self.language_tooltip_prefix == "Language" else "Beregner gjenstående tid"
+
+    @property
+    def remaining(self) -> str:
+        return "remaining" if self.language_tooltip_prefix == "Language" else "igjen"
 
     @property
     def pause_requested(self) -> str:

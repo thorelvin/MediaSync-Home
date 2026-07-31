@@ -8,7 +8,9 @@ from mediasync_home.application.runs import (
     EndpointLeaseAuthority,
     EndpointLeaseRequest,
     LiveEndpointLease,
+    RunStopRequest,
     RunTargetExecutionStartOutcome,
+    RunTargetStopProgress,
     RunStore,
     RunTargetState,
     StartedRun,
@@ -39,6 +41,25 @@ class RunExecutorQueueStore(RunStore, Protocol):
     def load_next_pausing_run(self) -> StartedRun | None: ...
 
     def finalize_requested_run_pause(self, run_id: str) -> StartedRun | None: ...
+
+    def load_next_requested_run_stop(self) -> RunStopRequest | None: ...
+
+    def bind_requested_run_stop_boundary(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        operation_id: str,
+    ) -> RunStopRequest | None: ...
+
+    def activate_requested_run_stop(self, run_id: str) -> StartedRun | None: ...
+
+    def finalize_requested_run_stop(
+        self,
+        *,
+        run_id: str,
+        target_progress: tuple[RunTargetStopProgress, ...],
+    ) -> StartedRun | None: ...
 
     def load_next_revalidating_run_target_key(self) -> tuple[str, str] | None: ...
 
