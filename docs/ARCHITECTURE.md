@@ -681,6 +681,8 @@ Bindende sikkerhetsregler:
 - Python `pickle`, `marshal`, dynamisk import og vilkårlig objektserialisering er forbudt;
 - maksimal kommandoramme er 1 MiB, maksimal paginert queryrespons er 4 MiB og maksimal progresshendelse er 64 KiB;
 - serveren har maksimum for samtidige klienter, subscriptions, utestående requests og frames per sekund, samt handshake-, read-, write- og idle-timeout; overload gir strukturert avvisning uten ubegrenset buffering;
+- hver gyldig handshake, query og command har en UUID `request_id`; serveren ekkoer samme verdi i responsens toppnivå, og klienten validerer eksakt samsvar før responsen kvitteres eller payloaden godtas;
+- eneste compatibility-unntak er en eldre hosts ukorrelerte terminale `PROTOCOL_MISMATCH`/`SCHEMA_MISMATCH` under handshake; ingen suksesspayload eller ordinær feil godtas uten eksakt korrelasjon;
 - ukjente felter håndteres etter protokollens kompatibilitetsregel; ukjent obligatorisk felt eller nyere majorversjon blokkeres;
 - alle payloads valideres før de når application-laget;
 - ingen run-kommando inneholder en vilkårlig filsystemsti. Den refererer `job_id`, `plan_id`, `run_id` eller andre persisterte ID-er som Engine Host selv slår opp og revaliderer;
@@ -708,7 +710,18 @@ Kommandoenvelope:
 }
 ```
 
-`protocol_version` er wire-protokollens majorversjon. `schema_version` versjonerer kommandoenvelopens form. Eksempelets `payload_hash` er BLAKE3-256 over JCS-RFC8785-kanoniske UTF-8-bytes av `payload` alene og er identisk med `schema/examples/ipc-command.valid.json`.
+`protocol_version` er wire-protokollens majorversjon. Handshake-/sessionschemaet er
+versjon 2 etter innføringen av obligatorisk request correlation, mens
+`schema_version` i kommandoenvelopen fortsatt er command schema versjon 1 slik at
+transportoppgradering ikke endrer durable receipt-idempotens. Eksempelets
+`payload_hash` er BLAKE3-256 over JCS-RFC8785-kanoniske UTF-8-bytes av `payload`
+alene og er identisk med `schema/examples/ipc-command.valid.json`.
+
+`request_id` korrelerer ett konkret request/response-forsøk og gjenbrukes ikke
+automatisk av klienten for queries. Ved retry av en muterende kommando kan
+toppnivåets `request_id` derfor være nytt, mens et nested durable receipt fortsatt
+viser request-ID-en som først opprettet den autoritative receipten. Idempotens
+styres av `idempotency_key`, ikke av korrelasjons-ID-en.
 
 Alle muterende kommandoer skal:
 

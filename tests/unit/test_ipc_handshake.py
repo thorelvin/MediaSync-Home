@@ -111,12 +111,14 @@ from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
 from mediasync_home.ipc.protocol import (
+    COMMAND_SCHEMA_VERSION,
     MAX_FRAME_BYTES,
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
     IpcCommandEnvelope,
     IpcProtocolError,
     IpcReason,
+    IpcResponse,
     IpcStatus,
     decode_frame,
     encode_frame,
@@ -2035,7 +2037,10 @@ def test_enabled_create_standard_backup_job_replay_returns_existing_success_rece
 
     assert first.status is IpcStatus.ACCEPTED
     assert second.status is IpcStatus.ACCEPTED
+    assert first.request_id == REQUEST_ID_A
+    assert second.request_id == REQUEST_ID_B
     assert len(receipts.receipts) == 1
+    assert receipts.receipts[IDEMPOTENCY_KEY_A].schema_version == COMMAND_SCHEMA_VERSION
     assert id_factory.calls == 1
     assert second.payload["created"] is False
     assert second.payload["idempotent_replay"] is True
@@ -2378,13 +2383,67 @@ def test_query_requires_prior_handshake() -> None:
 
     assert response.status is IpcStatus.REJECTED
     assert response.reason is IpcReason.HANDSHAKE_REQUIRED
+    assert response.request_id is not None
+
+
+def test_in_process_client_correlates_each_request_with_a_distinct_uuid() -> None:
+    client = _client()
+
+    handshake = client.connect()
+    status = client.query_status()
+
+    assert handshake.request_id is not None
+    assert status.request_id is not None
+    assert handshake.request_id != status.request_id
+
+
+@pytest.mark.parametrize(
+    "response_payload",
+    [
+        {
+            "status": "ACCEPTED",
+            "reason": None,
+            "payload": {},
+        },
+        {
+            "status": "ACCEPTED",
+            "reason": None,
+            "payload": {},
+            "request_id": REQUEST_ID_B,
+        },
+    ],
+)
+def test_response_parser_rejects_missing_or_mismatched_request_correlation(
+    response_payload: dict[str, object],
+) -> None:
+    with pytest.raises(IpcProtocolError, match="request_id"):
+        IpcResponse.from_dict(
+            response_payload,
+            expected_request_id=REQUEST_ID_A,
+        )
+
+
+def test_response_parser_allows_only_uncorrelated_handshake_version_rejection() -> None:
+    response = IpcResponse.from_dict(
+        {
+            "status": "REJECTED",
+            "reason": "SCHEMA_MISMATCH",
+            "payload": {},
+        },
+        expected_request_id=REQUEST_ID_A,
+        allow_uncorrelated_version_rejection=True,
+    )
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.SCHEMA_MISMATCH
+    assert response.request_id is None
 
 
 def test_command_envelope_requires_versioned_hash_metadata() -> None:
     command = IpcCommandEnvelope.from_dict(
         {
             "protocol_version": PROTOCOL_VERSION,
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": COMMAND_SCHEMA_VERSION,
             "message_type": "COMMAND",
             "request_id": "44444444-4444-4444-8444-444444444444",
             "client_instance_id": "55555555-5555-4555-8555-555555555555",

@@ -24,7 +24,7 @@ def test_bootstrap_dispatches_each_process_role(role: ProcessRole) -> None:
         "ready": True,
         "role": role.value,
         "runtime_policy": None,
-        "schema_version": 1,
+        "schema_version": 2,
         "scope": "0B_NON_MUTATING_LOCAL_PREVIEW",
     }
     assert payload["runtime_policy"]["evaluated"] is True

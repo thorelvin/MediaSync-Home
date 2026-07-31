@@ -80,6 +80,7 @@ def test_named_pipe_handshake_uses_impersonated_client_identity_not_payload_clai
 
     assert response.status is IpcStatus.ACCEPTED
     assert response.reason is None
+    assert response.request_id is not None
     assert response.payload["verified_user_sid_hash"] == expected_identity.user_sid_hash
     assert response.payload["host_status"]["mutations_enabled"] is False
 
@@ -101,6 +102,9 @@ def test_named_pipe_status_query_succeeds_after_handshake() -> None:
 
     assert handshake.status is IpcStatus.ACCEPTED
     assert status.status is IpcStatus.ACCEPTED
+    assert handshake.request_id is not None
+    assert status.request_id is not None
+    assert handshake.request_id != status.request_id
     assert status.payload["host_status"]["role"] == ProcessRole.ENGINE_HOST.value
 
 
@@ -401,11 +405,13 @@ def test_named_pipe_does_not_wait_indefinitely_for_response_acknowledgment() -> 
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     handle = client._open()
+    request_id = str(uuid4())
     try:
         win32_named_pipe._write_message(
             handle,
             {
                 "message_type": "QUERY_STATUS",
+                "request_id": request_id,
                 "client_instance_id": client.client_instance_id,
             },
         )
@@ -418,6 +424,7 @@ def test_named_pipe_does_not_wait_indefinitely_for_response_acknowledgment() -> 
         win32_named_pipe._close_handle(handle)
 
     assert response["reason"] == IpcReason.HANDSHAKE_REQUIRED.value
+    assert response["request_id"] == request_id
     assert not thread.is_alive(), "missing response acknowledgment pinned the pipe server"
     if errors:
         raise errors[0]

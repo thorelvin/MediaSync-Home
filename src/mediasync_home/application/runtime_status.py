@@ -39,7 +39,7 @@ def startup_status(
         ready=True,
         mutations_enabled=False,
         protocol_version=1,
-        schema_version=1,
+        schema_version=2,
         scope="0B_NON_MUTATING_LOCAL_PREVIEW",
         runtime_policy=runtime_policy or RuntimePolicyStatus.not_evaluated(),
     )
@@ -56,7 +56,7 @@ def local_writable_status(
         ready=True,
         mutations_enabled=True,
         protocol_version=1,
-        schema_version=1,
+        schema_version=2,
         scope="0B_LOCAL_MUTATION_PREVIEW",
         runtime_policy=runtime_policy or RuntimePolicyStatus.not_evaluated(),
     )

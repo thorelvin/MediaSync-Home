@@ -20,7 +20,7 @@ def test_engine_status_view_model_formats_accepted_host_status() -> None:
     assert state.connection_label == "Connected"
     assert state.state_label == "Ready"
     assert state.status_kind == "ready"
-    assert state.protocol_label == "Protocol 1 / schema 1"
+    assert state.protocol_label == "Protocol 1 / schema 2"
     assert state.mutation_label == "Read-only local preview"
     assert state.ready is True
     assert state.mutations_enabled is False

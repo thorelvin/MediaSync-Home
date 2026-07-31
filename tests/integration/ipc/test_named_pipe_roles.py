@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -79,6 +79,7 @@ def test_engine_host_and_gui_roles_complete_non_mutating_status_roundtrip() -> N
 
     assert stderr == ""
     assert gui_response["status"] == "ACCEPTED"
+    assert str(UUID(gui_response["request_id"])) == gui_response["request_id"]
     assert gui_response["payload"]["host_status"]["role"] == "engine-host"
     assert gui_response["payload"]["host_status"]["mutations_enabled"] is False
     assert [event["event"] for event in host_events] == [

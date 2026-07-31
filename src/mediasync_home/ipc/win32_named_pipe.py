@@ -14,6 +14,7 @@ from uuid import uuid4
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
 from mediasync_home.ipc.protocol import (
+    COMMAND_SCHEMA_VERSION,
     MAX_FRAME_BYTES,
     MAX_QUERY_RESPONSE_BYTES,
     PROTOCOL_VERSION,
@@ -23,9 +24,10 @@ from mediasync_home.ipc.protocol import (
     IpcProtocolError,
     IpcReason,
     IpcResponse,
-    IpcStatus,
     decode_frame,
     encode_frame,
+    optional_request_id_from_frame,
+    request_id_from_frame,
 )
 from mediasync_home.ipc.server import EngineHostIpcService
 
@@ -651,6 +653,7 @@ class Win32NamedPipeServer:
                 "CreateNamedPipeW",
             )
             _connect_overlapped(pipe)
+            request: dict[str, Any] = {}
             try:
                 request = _read_message(
                     pipe,
@@ -659,7 +662,10 @@ class Win32NamedPipeServer:
                 identity = _client_identity_from_pipe(pipe)
                 response = self._dispatch(request, identity)
             except (IpcProtocolError, KeyError, TypeError, ValueError):
-                response = IpcResponse.rejected(IpcReason.INVALID_FRAME)
+                response = IpcResponse.rejected(
+                    IpcReason.INVALID_FRAME,
+                    request_id=optional_request_id_from_frame(request),
+                )
             except (ConnectionError, TimeoutError):
                 return
             except Win32PipeError as exc:
@@ -676,7 +682,10 @@ class Win32NamedPipeServer:
             except IpcProtocolError:
                 _write_message(
                     pipe,
-                    IpcResponse.rejected(IpcReason.INVALID_FRAME).to_dict(),
+                    IpcResponse.rejected(
+                        IpcReason.INVALID_FRAME,
+                        request_id=response.request_id,
+                    ).to_dict(),
                     limit=MAX_QUERY_RESPONSE_BYTES,
                     timeout_ms=self.response_timeout_ms,
                 )
@@ -708,6 +717,14 @@ class Win32NamedPipeServer:
             security.close()
 
     def _dispatch(
+        self,
+        request: dict[str, Any],
+        identity: VerifiedClientIdentity,
+    ) -> IpcResponse:
+        request_id = request_id_from_frame(request)
+        return self._dispatch_request(request, identity).correlated(request_id)
+
+    def _dispatch_request(
         self,
         request: dict[str, Any],
         identity: VerifiedClientIdentity,
@@ -1022,7 +1039,7 @@ class Win32NamedPipeClient:
             payload_hash = "6e46dd10defc9b56c29a6ec56b508c21f54c08192194e4df25bf36f0c9c3c279"
         envelope = IpcCommandEnvelope(
             protocol_version=PROTOCOL_VERSION,
-            schema_version=SCHEMA_VERSION,
+            schema_version=COMMAND_SCHEMA_VERSION,
             request_id=request_id or str(uuid4()),
             client_instance_id=self.client_instance_id,
             idempotency_key=idempotency_key or str(uuid4()),
@@ -1033,17 +1050,27 @@ class Win32NamedPipeClient:
         return self._roundtrip(envelope.to_dict())
 
     def _roundtrip(self, request: dict[str, Any]) -> IpcResponse:
+        wire_request = dict(request)
+        wire_request.setdefault("request_id", str(uuid4()))
+        request_id = request_id_from_frame(wire_request)
         handle = self._open()
         try:
             _write_message(
                 handle,
-                request,
+                wire_request,
                 timeout_ms=self.timeout_ms,
             )
             payload = _read_message(
                 handle,
                 limit=MAX_QUERY_RESPONSE_BYTES,
                 timeout_ms=self.timeout_ms,
+            )
+            response = IpcResponse.from_dict(
+                payload,
+                expected_request_id=request_id,
+                allow_uncorrelated_version_rejection=(
+                    wire_request.get("message_type") == "HANDSHAKE"
+                ),
             )
             _write_all(
                 handle,
@@ -1053,16 +1080,7 @@ class Win32NamedPipeClient:
             )
         finally:
             _close_handle(handle)
-        status = payload.get("status")
-        reason = payload.get("reason")
-        response_payload = payload.get("payload")
-        if not isinstance(response_payload, dict):
-            raise IpcProtocolError("pipe response payload must be an object")
-        return IpcResponse(
-            status=IpcStatus(status),
-            reason=None if reason is None else IpcReason(reason),
-            payload=response_payload,
-        )
+        return response
 
     def _open(self) -> HANDLE:
         deadline = time.monotonic() + self.timeout_ms / 1000

@@ -126,6 +126,7 @@ from mediasync_home.application.trigger_runs import (
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
 from mediasync_home.ipc.protocol import (
+    COMMAND_SCHEMA_VERSION,
     MAX_PROGRESS_EVENT_BYTES,
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
@@ -368,7 +369,10 @@ class EngineHostIpcService:
                 after_sequence_no=after_sequence_no,
             )
             response = IpcResponse.accepted({"run_progress": result.to_dict()})
-            encode_frame(response.to_dict(), limit=MAX_PROGRESS_EVENT_BYTES)
+            encode_frame(
+                response.correlated("00000000-0000-4000-8000-000000000000").to_dict(),
+                limit=MAX_PROGRESS_EVENT_BYTES,
+            )
         except (ProgressSnapshotQueryError, IpcProtocolError, TypeError, ValueError):
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         return response
@@ -529,7 +533,7 @@ class EngineHostIpcService:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         if command.protocol_version != PROTOCOL_VERSION:
             return IpcResponse.rejected(IpcReason.PROTOCOL_MISMATCH)
-        if command.schema_version != SCHEMA_VERSION:
+        if command.schema_version != COMMAND_SCHEMA_VERSION:
             return IpcResponse.rejected(IpcReason.SCHEMA_MISMATCH)
         self._expire_idle_clients(now)
         accepted_client = self._accepted_clients.get(command.client_instance_id)
