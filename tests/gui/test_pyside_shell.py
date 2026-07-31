@@ -362,7 +362,7 @@ def test_target_selection_reflows_without_horizontal_clipping(
     window = build_main_window(initial_state=_ready_state(), theme_mode=ThemeMode.DARK)
 
     try:
-        window.resize(window_width, window_height)
+        window.resize(1120, 700)
         window.show()
         qapp.processEvents()
         choices = [
@@ -400,6 +400,9 @@ def test_target_selection_reflows_without_horizontal_clipping(
         for _ in range(3):
             QTest.mouseClick(add_target, Qt.MouseButton.LeftButton)
             qapp.processEvents()
+        window.resize(window_width, window_height)
+        qapp.processEvents()
+        qapp.processEvents()
 
         assert target_paths[0].text().endswith(
             "CompleteComputerBackupTargetFolderWithoutBreaksOne"

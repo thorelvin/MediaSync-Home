@@ -525,6 +525,7 @@ class MediaSyncWindow(QMainWindow):
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._update_responsive_dashboard_layout()
+        QTimer.singleShot(0, self._ensure_setup_action_visible)
 
     def _texts(self) -> ShellText:
         return shell_text(self._selected_language_code)
