@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 
 import pytest
 
@@ -350,6 +351,35 @@ def test_setup_primary_button_collects_local_preview_draft(qapp) -> None:
         window.deleteLater()
 
 
+def test_disconnected_source_step_keeps_an_explicit_enabled_picker_action(qapp) -> None:
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.show()
+        qapp.processEvents()
+        window._apply_backup_setup_state(  # noqa: SLF001
+            replace(window._setup_state, primary_action_label="Fortsett")  # noqa: SLF001
+        )
+        selected_titles: list[str] = []
+        window._choose_directory = (  # type: ignore[method-assign]
+            lambda title: selected_titles.append(title) or None
+        )
+        source_action = window.findChild(QPushButton, "createBackupButton")
+
+        assert source_action is not None
+        assert source_action.text() == "Velg kildemappe"
+        assert source_action.isEnabled() is True
+        QTest.mouseClick(source_action, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert selected_titles == ["Velg kildemappe"]
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 @pytest.mark.parametrize(
     ("window_width", "window_height"),
     ((900, 560), (1000, 650), (1120, 700)),
@@ -381,6 +411,10 @@ def test_target_selection_reflows_without_horizontal_clipping(
         setup_back = window.findChild(QToolButton, "setupBackButton")
         source_path = window.findChild(QLabel, "setupSourceValue")
         target_paths = window.findChildren(QLabel, "setupTargetPathRow")
+        target_summary = window.findChild(QLabel, "setupTargetValue")
+        detail_title = window.findChild(QLabel, "jobDetailTitle")
+        detail_source = window.findChild(QLabel, "jobDetailSourceValue")
+        detail_targets = window.findChildren(QLabel, "jobDetailTargetRow")
         target_controls = window.findChild(QWidget, "setupTargetControls")
         setup_panel = window.findChild(QFrame, "standardBackupPanel")
         setup_actions = window.findChild(QWidget, "setupActions")
@@ -392,6 +426,10 @@ def test_target_selection_reflows_without_horizontal_clipping(
         assert setup_back is not None
         assert source_path is not None
         assert len(target_paths) == 3
+        assert target_summary is not None
+        assert detail_title is not None
+        assert detail_source is not None
+        assert len(detail_targets) == 3
         assert target_controls is not None
         assert setup_panel is not None
         assert setup_actions is not None
@@ -452,6 +490,23 @@ def test_target_selection_reflows_without_horizontal_clipping(
             assert target_position.y() >= 0
             assert target_position.x() + target_path.width() <= target_controls.width()
             assert target_position.y() + target_path.height() <= target_controls.height()
+        bounded_folder_labels = (
+            source_path,
+            target_summary,
+            detail_title,
+            detail_source,
+            *target_paths,
+            *detail_targets,
+        )
+        for label in bounded_folder_labels:
+            rendered_text = str(label.property("displayText"))
+            assert label.wordWrap() is False
+            assert label.minimumWidth() == 0
+            assert label.toolTip() == label.text()
+            assert (
+                label.fontMetrics().horizontalAdvance(rendered_text)
+                <= label.contentsRect().width()
+            )
         dashboard_page = dashboard_scroll.widget()
         assert dashboard_page is not None
         assert dashboard_page.height() >= dashboard_page.minimumSizeHint().height()
@@ -488,6 +543,8 @@ def test_directory_picker_is_parented_and_uses_visible_qt_dialog(qapp) -> None:
         assert dialog.windowTitle() == "Choose source folder"
         assert dialog.fileMode() is QFileDialog.FileMode.Directory
         assert dialog.acceptMode() is QFileDialog.AcceptMode.AcceptOpen
+        assert dialog.isModal() is True
+        assert dialog.windowModality() is Qt.WindowModality.WindowModal
         assert dialog.testOption(QFileDialog.Option.DontUseNativeDialog) is True
         assert dialog.testOption(QFileDialog.Option.ShowDirsOnly) is True
     finally:

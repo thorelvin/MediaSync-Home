@@ -561,7 +561,7 @@ class MediaSyncWindow(QMainWindow):
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._update_responsive_dashboard_layout()
-        QTimer.singleShot(0, self._ensure_setup_action_visible)
+        QTimer.singleShot(0, self._settle_setup_layout)
 
     def _texts(self) -> ShellText:
         return shell_text(self._selected_language_code)
@@ -2059,7 +2059,12 @@ class MediaSyncWindow(QMainWindow):
             self._setup_back_button.setToolTip(self._texts().back_tooltip)
             self._setup_back_button.setAccessibleName(self._texts().back_tooltip)
         if self._setup_primary_button is not None:
-            self._setup_primary_button.setText(self._display(state.primary_action_label))
+            action_label = (
+                "Choose source folder"
+                if state.current_step is BackupSetupStep.SOURCE
+                else state.primary_action_label
+            )
+            self._setup_primary_button.setText(self._display(action_label))
             self._setup_primary_button.setEnabled(self._setup_primary_enabled(state))
             self._setup_primary_button.setToolTip(self._setup_primary_tooltip(state))
         self._refresh_dashboard_geometry()
@@ -2344,6 +2349,8 @@ class MediaSyncWindow(QMainWindow):
     def _build_directory_picker(self, title: str) -> QFileDialog:
         dialog = QFileDialog(self)
         dialog.setObjectName("directoryPickerDialog")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setModal(True)
         dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
         dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
         dialog.setWindowTitle(title)
@@ -2358,16 +2365,38 @@ class MediaSyncWindow(QMainWindow):
             current_step=step,
         )
         self._apply_backup_setup_state(self._setup_state)
-        QTimer.singleShot(0, self._ensure_setup_action_visible)
+        QTimer.singleShot(0, self._settle_setup_layout)
+
+    def _settle_setup_layout(self) -> None:
+        self._refresh_dashboard_geometry()
+        self._ensure_setup_action_visible()
 
     def _ensure_setup_action_visible(self) -> None:
         if self._dashboard_scroll_area is None or self._setup_primary_button is None:
             return
-        self._dashboard_scroll_area.ensureWidgetVisible(
-            self._setup_primary_button,
-            0,
-            12,
+        scroll_area = self._dashboard_scroll_area
+        page = scroll_area.widget()
+        if page is None:
+            return
+        margin = 12
+        button_top = self._setup_primary_button.mapTo(
+            page,
+            self._setup_primary_button.rect().topLeft(),
+        ).y()
+        button_bottom = (
+            self._setup_primary_button.mapTo(
+                page,
+                self._setup_primary_button.rect().bottomLeft(),
+            ).y()
+            + 1
         )
+        scroll_bar = scroll_area.verticalScrollBar()
+        viewport_height = scroll_area.viewport().height()
+        current_value = scroll_bar.value()
+        if button_bottom - current_value > viewport_height - margin:
+            scroll_bar.setValue(button_bottom - viewport_height + margin)
+        elif button_top - current_value < margin:
+            scroll_bar.setValue(max(0, button_top - margin))
 
     def _apply_local_preview_job_detail(self) -> None:
         if self._setup_draft.source_path_label is None:
@@ -3021,17 +3050,20 @@ class MediaSyncWindow(QMainWindow):
         layout.setHorizontalSpacing(18)
         layout.setVerticalSpacing(8)
 
-        title = QLabel(self._display(state.title))
+        title = _ElidingPathLabel()
+        title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        title.setText(self._display(state.title))
         title.setObjectName("jobsDetailTitle")
-        _configure_responsive_label(title)
         self._jobs_detail_title = title
         layout.addWidget(title, 0, 0, 1, 3)
 
-        self._jobs_detail_source_label, self._jobs_detail_source_value = _add_labeled_text_value(
-            layout,
-            1,
-            texts.source,
-            self._display(state.source_label),
+        self._jobs_detail_source_label, self._jobs_detail_source_value = (
+            _add_labeled_eliding_path_value(
+                layout,
+                1,
+                texts.source,
+                self._display(state.source_label),
+            )
         )
         self._jobs_detail_source_value.setObjectName("jobsDetailSourceValue")
         self._jobs_detail_targets_label, self._jobs_detail_targets_value = _add_labeled_text_value(
@@ -3069,12 +3101,17 @@ class MediaSyncWindow(QMainWindow):
         layout.addWidget(target_heading, 6, 0)
         target_lines = state.target_lines or ("Ingen mål å vise.",)
         for index in range(3):
-            row = QLabel(self._display(target_lines[index]) if index < len(target_lines) else "")
-            row.setObjectName("jobsDetailTargetRow")
-            _configure_responsive_label(row, selectable=True)
-            row.setVisible(index < len(target_lines))
-            self._jobs_detail_target_rows.append(row)
-            layout.addWidget(row, 6 + index, 1, 1, 2)
+            target_row = _ElidingPathLabel()
+            target_row.setObjectName("jobsDetailTargetRow")
+            target_row.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            target_row.setText(
+                self._display(target_lines[index]) if index < len(target_lines) else ""
+            )
+            target_row.setVisible(index < len(target_lines))
+            self._jobs_detail_target_rows.append(target_row)
+            layout.addWidget(target_row, 6 + index, 1, 1, 2)
 
         progress_title = QLabel(texts.run_progress)
         progress_title.setObjectName("mutedLabel")
@@ -3734,11 +3771,13 @@ class MediaSyncWindow(QMainWindow):
             )
         )
         self._setup_source_value.setObjectName("setupSourceValue")
-        self._setup_target_label, self._setup_target_value = _add_labeled_text_value(
-            layout,
-            4,
-            texts.target,
-            self._display(state.target_label),
+        self._setup_target_label, self._setup_target_value = (
+            _add_labeled_eliding_path_value(
+                layout,
+                4,
+                texts.target,
+                self._display(state.target_label),
+            )
         )
         self._setup_target_value.setObjectName("setupTargetValue")
         target_controls = QWidget()
@@ -3845,17 +3884,20 @@ class MediaSyncWindow(QMainWindow):
         layout.setHorizontalSpacing(18)
         layout.setVerticalSpacing(8)
 
-        title = QLabel(self._display(state.title))
+        title = _ElidingPathLabel()
+        title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        title.setText(self._display(state.title))
         title.setObjectName("jobDetailTitle")
-        _configure_responsive_label(title)
         self._job_detail_title = title
         layout.addWidget(title, 0, 0, 1, 3)
 
-        self._job_detail_source_label, self._job_detail_source_value = _add_labeled_text_value(
-            layout,
-            1,
-            texts.source,
-            self._display(state.source_label),
+        self._job_detail_source_label, self._job_detail_source_value = (
+            _add_labeled_eliding_path_value(
+                layout,
+                1,
+                texts.source,
+                self._display(state.source_label),
+            )
         )
         self._job_detail_source_value.setObjectName("jobDetailSourceValue")
         self._job_detail_targets_label, self._job_detail_targets_value = _add_labeled_text_value(
@@ -3895,12 +3937,17 @@ class MediaSyncWindow(QMainWindow):
         self._job_detail_target_rows = []
         target_lines = state.target_lines or ("Ingen mål å vise.",)
         for index in range(3):
-            row = QLabel(self._display(target_lines[index]) if index < len(target_lines) else "")
-            row.setObjectName("jobDetailTargetRow")
-            _configure_responsive_label(row, selectable=True)
-            row.setVisible(index < len(target_lines))
-            self._job_detail_target_rows.append(row)
-            layout.addWidget(row, 6 + index, 1, 1, 2)
+            target_row = _ElidingPathLabel()
+            target_row.setObjectName("jobDetailTargetRow")
+            target_row.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            target_row.setText(
+                self._display(target_lines[index]) if index < len(target_lines) else ""
+            )
+            target_row.setVisible(index < len(target_lines))
+            self._job_detail_target_rows.append(target_row)
+            layout.addWidget(target_row, 6 + index, 1, 1, 2)
 
         start_backup = QPushButton(texts.start_backup)
         start_backup.setObjectName("startBackupButton")
@@ -4421,7 +4468,13 @@ class MediaSyncWindow(QMainWindow):
                 label.setMinimumHeight(required_height)
             layout.invalidate()
             layout.activate()
-            page.setMinimumHeight(max(0, layout.minimumSize().height()))
+            required_height = max(0, layout.minimumSize().height())
+            page.setMinimumHeight(required_height)
+            if scroll_area is not None:
+                page.resize(
+                    page.width(),
+                    max(required_height, scroll_area.viewport().height()),
+                )
         page.updateGeometry()
         if scroll_area is not None:
             scroll_area.updateGeometry()
