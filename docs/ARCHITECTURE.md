@@ -1199,7 +1199,7 @@ Oppstartsrekkefølge i Engine Host:
 1. ta singleton-mutex;
 2. sikre lokal datafolder og ACL;
 3. åpne databaser i kompatibilitetsmodus;
-4. verifisere migration checksums og schema-versjon;
+4. verifisere at migration history er et sammenhengende prefiks av runtimeplanen med matching navn og SHA-256 over eksakt migrationinnhold; en høyere lagret versjon enn runtime støtter blokkerer startup før ordinær writable drift;
 5. ta eksklusiv migrasjonslease ved behov og lage konsistent backup;
 6. kjøre migrasjon, `foreign_key_check`, quick/integrity-check etter policy;
 7. avstemme uferdige cross-store-handoffs, recoveryruns og target-side intentsegmenter;

@@ -8,6 +8,7 @@ from mediasync_home.adapters.sqlite.migrations import (
     SqliteMigrationPlan,
     SqliteMigrationViolation,
     catalog_migration_plan,
+    migration_checksum,
     recovery_migration_plan,
     validate_migration_plan,
 )
@@ -118,3 +119,20 @@ def test_migration_plan_rejects_empty_statements() -> None:
 
     with pytest.raises(SqliteMigrationViolation, match="MIGRATION_REQUIRES_STATEMENTS"):
         validate_migration_plan(plan)
+
+
+def test_migration_checksum_is_deterministic_and_statement_sensitive() -> None:
+    original = SqliteMigration(
+        version=1,
+        name="one",
+        statements=("CREATE TABLE example (id INTEGER PRIMARY KEY)",),
+    )
+    changed = SqliteMigration(
+        version=1,
+        name="one",
+        statements=("CREATE TABLE example (id TEXT PRIMARY KEY)",),
+    )
+
+    assert migration_checksum(original) == migration_checksum(original)
+    assert len(migration_checksum(original)) == 64
+    assert migration_checksum(original) != migration_checksum(changed)

@@ -1436,7 +1436,7 @@ Migrasjon av det autoritative state-settet er en restartbar epoch. Flyten under 
 1. Ta Engine Host singleton og eksklusiv migrasjonslease.
 2. Gå i quiesce: stans nye muterende commands, vent til alle filsystemoverganger er ved sikkert punkt og tøm writerkøer.
 3. Verifiser at ingen aktiv run/commitfase er uavklart; recovery kan ikke skjules av migrasjon.
-4. Les schemaet i alle valgte state stores read-only, avvis nyere unsupported epoch og verifiser alle historiske migration checksums.
+4. Les schemaet i alle valgte state stores read-only, avvis nyere unsupported epoch og verifiser alle historiske migration checksums. Runtime beregner SHA-256 over kanonisk JSON med migrationens versjon, navn og eksakte ordnede SQL-statements. En eksisterende lokal preview-database med eldre name-only metadata kan få checksumkolonnen backfillet én gang, men bare etter at versjoner/navn utgjør et komplett kjent prefiks uten hull eller nyere rader. Deretter er historikken databasebeskyttet mot `UPDATE`/`DELETE`, og enhver checksumdrift er fatal før nye migrasjoner kjøres.
 5. Opprett en lokal `migration-<epoch>.intent.json` via temp → flush → rename. Den inneholder før-/målversjoner, app-build, high-water per valgt store og forventede backupfiler.
 6. Ta en logical backup barrier. Lag SQLite Online Backup av hver valgt database mens writes er quiesced; skriv checksum, størrelse, schema og high-water til manifest. Ved flere filer er backupene et koordinert sett, men det påstås ikke cross-database atomisitet.
 7. Migrer én valgt database om gangen med separat transaksjon. Bruk expand → backfill → validate → contract; store backfills er restartbare og progressjournalførte.

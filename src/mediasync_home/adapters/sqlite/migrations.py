@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from dataclasses import dataclass
 
@@ -215,8 +217,8 @@ def validate_migration_plan(plan: SqliteMigrationPlan) -> None:
 
 def apply_sqlite_migrations(connection: sqlite3.Connection, plan: SqliteMigrationPlan) -> None:
     validate_migration_plan(plan)
-    _ensure_migration_metadata(connection, plan.store)
-    applied_versions = _applied_versions(connection, plan.store)
+    _ensure_migration_metadata(connection, plan)
+    applied_versions = _verified_applied_versions(connection, plan)
     for migration in plan.migrations:
         if migration.version in applied_versions:
             continue
@@ -225,7 +227,24 @@ def apply_sqlite_migrations(connection: sqlite3.Connection, plan: SqliteMigratio
 
 
 def current_schema_version(connection: sqlite3.Connection, store: SqliteStore) -> int:
-    _ensure_migration_metadata(connection, store)
+    metadata_tables = {
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+                AND name IN ('store_identity', 'schema_migrations')
+            """
+        ).fetchall()
+    }
+    if metadata_tables != {"store_identity", "schema_migrations"}:
+        return 0
+    identity = connection.execute(
+        "SELECT store FROM store_identity WHERE singleton = 1"
+    ).fetchone()
+    if identity is None or identity[0] != store.value:
+        raise SqliteMigrationViolation("MIGRATION_STORE_IDENTITY_MISMATCH")
     row = connection.execute(
         "SELECT max(version) FROM schema_migrations WHERE store = ?",
         (store.value,),
@@ -235,7 +254,25 @@ def current_schema_version(connection: sqlite3.Connection, store: SqliteStore) -
     return int(row[0])
 
 
-def _ensure_migration_metadata(connection: sqlite3.Connection, store: SqliteStore) -> None:
+def migration_checksum(migration: SqliteMigration) -> str:
+    payload = json.dumps(
+        {
+            "name": migration.name,
+            "statements": list(migration.statements),
+            "version": migration.version,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _ensure_migration_metadata(
+    connection: sqlite3.Connection,
+    plan: SqliteMigrationPlan,
+) -> None:
+    store = plan.store
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS store_identity (
@@ -250,6 +287,10 @@ def _ensure_migration_metadata(connection: sqlite3.Connection, store: SqliteStor
             store TEXT NOT NULL CHECK (store IN ('catalog', 'recovery')),
             version INTEGER NOT NULL,
             name TEXT NOT NULL,
+            migration_checksum TEXT NOT NULL CHECK (
+                length(migration_checksum) = 64
+                AND migration_checksum NOT GLOB '*[^0-9a-f]*'
+            ),
             applied_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             PRIMARY KEY (store, version),
             UNIQUE (store, name)
@@ -264,16 +305,185 @@ def _ensure_migration_metadata(connection: sqlite3.Connection, store: SqliteStor
     if row is None or row[0] != store.value:
         raise SqliteMigrationViolation("MIGRATION_STORE_IDENTITY_MISMATCH")
     connection.commit()
+    _upgrade_and_verify_migration_history(connection, plan)
 
 
-def _applied_versions(connection: sqlite3.Connection, store: SqliteStore) -> set[int]:
-    return {
-        int(row[0])
-        for row in connection.execute(
-            "SELECT version FROM schema_migrations WHERE store = ?",
-            (store.value,),
-        )
+def _upgrade_and_verify_migration_history(
+    connection: sqlite3.Connection,
+    plan: SqliteMigrationPlan,
+) -> None:
+    columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(schema_migrations)").fetchall()
     }
+    has_checksum_column = "migration_checksum" in columns
+    rows = _migration_history_rows(
+        connection,
+        plan.store,
+        has_checksum_column=has_checksum_column,
+    )
+    _validate_migration_history(
+        plan,
+        rows,
+        allow_missing_checksums=True,
+    )
+
+    needs_backfill = not has_checksum_column or any(row[2] is None for row in rows)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        if not has_checksum_column:
+            connection.execute(
+                "ALTER TABLE schema_migrations ADD COLUMN migration_checksum TEXT"
+            )
+        if needs_backfill:
+            migrations_by_version = {
+                migration.version: migration for migration in plan.migrations
+            }
+            for version, _name, checksum in rows:
+                if checksum is not None:
+                    continue
+                connection.execute(
+                    """
+                    UPDATE schema_migrations
+                    SET migration_checksum = ?
+                    WHERE store = ?
+                        AND version = ?
+                        AND migration_checksum IS NULL
+                    """,
+                    (
+                        migration_checksum(migrations_by_version[version]),
+                        plan.store.value,
+                        version,
+                    ),
+                )
+        _create_migration_history_guards(connection)
+        connection.execute("COMMIT")
+    except sqlite3.Error:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+
+    verified_rows = _migration_history_rows(
+        connection,
+        plan.store,
+        has_checksum_column=True,
+    )
+    _validate_migration_history(
+        plan,
+        verified_rows,
+        allow_missing_checksums=False,
+    )
+
+
+def _migration_history_rows(
+    connection: sqlite3.Connection,
+    store: SqliteStore,
+    *,
+    has_checksum_column: bool,
+) -> tuple[tuple[int, str, str | None], ...]:
+    foreign_store_row = connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE store != ? LIMIT 1",
+        (store.value,),
+    ).fetchone()
+    if foreign_store_row is not None:
+        raise SqliteMigrationViolation("MIGRATION_HISTORY_FOREIGN_STORE_ROW")
+    checksum_projection = "migration_checksum" if has_checksum_column else "NULL"
+    rows = connection.execute(
+        f"""
+        SELECT version, name, {checksum_projection}
+        FROM schema_migrations
+        WHERE store = ?
+        ORDER BY version
+        """,
+        (store.value,),
+    ).fetchall()
+    return tuple(
+        (
+            int(row[0]),
+            str(row[1]),
+            None if row[2] is None else str(row[2]),
+        )
+        for row in rows
+    )
+
+
+def _validate_migration_history(
+    plan: SqliteMigrationPlan,
+    rows: tuple[tuple[int, str, str | None], ...],
+    *,
+    allow_missing_checksums: bool,
+) -> None:
+    if rows and rows[-1][0] > len(plan.migrations):
+        raise SqliteMigrationViolation("MIGRATION_SCHEMA_NEWER_THAN_RUNTIME")
+    expected_versions = tuple(range(1, len(rows) + 1))
+    if tuple(row[0] for row in rows) != expected_versions:
+        raise SqliteMigrationViolation("MIGRATION_HISTORY_GAP")
+
+    migrations_by_version = {
+        migration.version: migration for migration in plan.migrations
+    }
+    for version, name, checksum in rows:
+        expected = migrations_by_version[version]
+        if name != expected.name:
+            raise SqliteMigrationViolation("MIGRATION_HISTORY_NAME_MISMATCH")
+        if checksum is None:
+            if allow_missing_checksums:
+                continue
+            raise SqliteMigrationViolation("MIGRATION_HISTORY_CHECKSUM_MISSING")
+        if checksum != migration_checksum(expected):
+            raise SqliteMigrationViolation("MIGRATION_HISTORY_CHECKSUM_MISMATCH")
+
+
+def _verified_applied_versions(
+    connection: sqlite3.Connection,
+    plan: SqliteMigrationPlan,
+) -> set[int]:
+    rows = _migration_history_rows(
+        connection,
+        plan.store,
+        has_checksum_column=True,
+    )
+    _validate_migration_history(
+        plan,
+        rows,
+        allow_missing_checksums=False,
+    )
+    return {row[0] for row in rows}
+
+
+def _create_migration_history_guards(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_schema_migrations_valid_insert
+        BEFORE INSERT ON schema_migrations
+        WHEN
+            NEW.store != (SELECT store FROM store_identity WHERE singleton = 1)
+            OR NEW.migration_checksum IS NULL
+            OR length(NEW.migration_checksum) != 64
+            OR NEW.migration_checksum GLOB '*[^0-9a-f]*'
+        BEGIN
+            SELECT RAISE(ABORT, 'schema migration history entry is invalid');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_schema_migrations_immutable_update
+        BEFORE UPDATE ON schema_migrations
+        BEGIN
+            SELECT RAISE(ABORT, 'schema migration history is immutable');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_schema_migrations_immutable_delete
+        BEFORE DELETE ON schema_migrations
+        BEGIN
+            SELECT RAISE(ABORT, 'schema migration history is immutable');
+        END
+        """
+    )
 
 
 def _apply_migration(
@@ -286,8 +496,21 @@ def _apply_migration(
         for statement in migration.statements:
             connection.execute(statement)
         connection.execute(
-            "INSERT INTO schema_migrations (store, version, name) VALUES (?, ?, ?)",
-            (store.value, migration.version, migration.name),
+            """
+            INSERT INTO schema_migrations (
+                store,
+                version,
+                name,
+                migration_checksum
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                store.value,
+                migration.version,
+                migration.name,
+                migration_checksum(migration),
+            ),
         )
         connection.execute("COMMIT")
     except sqlite3.Error:

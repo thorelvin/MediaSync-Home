@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from mediasync_home.adapters.sqlite.migrations import (
     apply_sqlite_migrations,
     catalog_migration_plan,
     current_schema_version,
+    migration_checksum,
     recovery_migration_plan,
 )
 
@@ -62,6 +64,26 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "store_identity",
         }
         assert _row_count(connection, "schema_migrations") == 26
+        assert _column_names(connection, "schema_migrations") >= {
+            "store",
+            "version",
+            "name",
+            "migration_checksum",
+            "applied_utc",
+        }
+        assert all(
+            checksum == migration_checksum(migration)
+            for checksum, migration in zip(
+                _migration_checksums(connection),
+                plan.migrations,
+                strict=True,
+            )
+        )
+        assert {
+            "trg_schema_migrations_valid_insert",
+            "trg_schema_migrations_immutable_update",
+            "trg_schema_migrations_immutable_delete",
+        } <= _trigger_names(connection)
         assert _foreign_key(
             connection,
             "endpoint_heads",
@@ -489,6 +511,178 @@ def test_migration_runner_rejects_wrong_store_identity(tmp_path: Path) -> None:
             apply_sqlite_migrations(connection, recovery_migration_plan())
 
 
+def test_migration_history_is_immutable_after_recording(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        apply_sqlite_migrations(connection, catalog_migration_plan())
+
+        with pytest.raises(sqlite3.IntegrityError, match="history is immutable"):
+            connection.execute(
+                "UPDATE schema_migrations SET name = 'changed' WHERE version = 1"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="history is immutable"):
+            connection.execute("DELETE FROM schema_migrations WHERE version = 1")
+
+
+def test_migration_runner_rejects_changed_historical_sql(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        plan = catalog_migration_plan()
+        apply_sqlite_migrations(connection, plan)
+        first = plan.migrations[0]
+        changed_plan = replace(
+            plan,
+            migrations=(
+                replace(first, statements=(*first.statements, "SELECT 1")),
+                *plan.migrations[1:],
+            ),
+        )
+
+        with pytest.raises(
+            SqliteMigrationViolation,
+            match="MIGRATION_HISTORY_CHECKSUM_MISMATCH",
+        ):
+            apply_sqlite_migrations(connection, changed_plan)
+
+
+def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        plan = catalog_migration_plan()
+        apply_sqlite_migrations(connection, plan)
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (
+                store,
+                version,
+                name,
+                migration_checksum
+            )
+            VALUES ('catalog', 27, 'future_migration', ?)
+            """,
+            ("f" * 64,),
+        )
+        connection.commit()
+
+        with pytest.raises(
+            SqliteMigrationViolation,
+            match="MIGRATION_SCHEMA_NEWER_THAN_RUNTIME",
+        ):
+            apply_sqlite_migrations(connection, plan)
+
+
+def test_migration_runner_rejects_legacy_history_gap_without_backfill(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        plan = catalog_migration_plan()
+        connection.execute(
+            """
+            CREATE TABLE store_identity (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                store TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO store_identity (singleton, store) VALUES (1, 'catalog')"
+        )
+        connection.execute(
+            """
+            CREATE TABLE schema_migrations (
+                store TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                applied_utc TEXT NOT NULL,
+                PRIMARY KEY (store, version),
+                UNIQUE (store, name)
+            )
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO schema_migrations (store, version, name, applied_utc)
+            VALUES ('catalog', ?, ?, '2026-07-31T00:00:00.000Z')
+            """,
+            (
+                (1, plan.migrations[0].name),
+                (3, plan.migrations[2].name),
+            ),
+        )
+        connection.commit()
+
+        with pytest.raises(
+            SqliteMigrationViolation,
+            match="MIGRATION_HISTORY_GAP",
+        ):
+            apply_sqlite_migrations(connection, plan)
+
+        assert "migration_checksum" not in _column_names(
+            connection,
+            "schema_migrations",
+        )
+
+
+def test_migration_runner_backfills_valid_legacy_history_checksums(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+        plan = catalog_migration_plan()
+        apply_sqlite_migrations(connection, plan)
+        for trigger_name in (
+            "trg_schema_migrations_valid_insert",
+            "trg_schema_migrations_immutable_update",
+            "trg_schema_migrations_immutable_delete",
+        ):
+            connection.execute(f"DROP TRIGGER {trigger_name}")
+        connection.execute("ALTER TABLE schema_migrations RENAME TO schema_migrations_current")
+        connection.execute(
+            """
+            CREATE TABLE schema_migrations (
+                store TEXT NOT NULL CHECK (store IN ('catalog', 'recovery')),
+                version INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                applied_utc TEXT NOT NULL,
+                PRIMARY KEY (store, version),
+                UNIQUE (store, name)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (store, version, name, applied_utc)
+            SELECT store, version, name, applied_utc
+            FROM schema_migrations_current
+            """
+        )
+        connection.execute("DROP TABLE schema_migrations_current")
+        connection.commit()
+
+        apply_sqlite_migrations(connection, plan)
+
+        assert len(_migration_checksums(connection)) == len(plan.migrations)
+        assert all(
+            checksum == migration_checksum(migration)
+            for checksum, migration in zip(
+                _migration_checksums(connection),
+                plan.migrations,
+                strict=True,
+            )
+        )
+        assert {
+            "trg_schema_migrations_valid_insert",
+            "trg_schema_migrations_immutable_update",
+            "trg_schema_migrations_immutable_delete",
+        } <= _trigger_names(connection)
+
+
 def _insert_catalog_parent_rows(connection: sqlite3.Connection) -> None:
     connection.execute("INSERT INTO endpoints (id) VALUES ('endpoint-a')")
     connection.execute(
@@ -554,6 +748,19 @@ def _row_count(connection: sqlite3.Connection, table: str) -> int:
     row = connection.execute(f"SELECT count(*) FROM {table}").fetchone()
     assert row is not None
     return int(row[0])
+
+
+def _migration_checksums(connection: sqlite3.Connection) -> tuple[str, ...]:
+    return tuple(
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT migration_checksum
+            FROM schema_migrations
+            ORDER BY version
+            """
+        )
+    )
 
 
 def _foreign_key(
