@@ -63,6 +63,106 @@ class ShellText:
     def backup_queued(self) -> str:
         return "Backup queued" if self.language_tooltip_prefix == "Language" else "Backup er lagt i kø"
 
+    @property
+    def history_activities(self) -> str:
+        return "Activity history" if self.language_tooltip_prefix == "Language" else "Aktivitetshistorikk"
+
+    @property
+    def all_activities(self) -> str:
+        return "All activities" if self.language_tooltip_prefix == "Language" else "Alle aktiviteter"
+
+    @property
+    def controls(self) -> str:
+        return "Controls" if self.language_tooltip_prefix == "Language" else "Kontroller"
+
+    @property
+    def backup_runs(self) -> str:
+        return "Backup runs" if self.language_tooltip_prefix == "Language" else "Backupkjøringer"
+
+    @property
+    def all_jobs(self) -> str:
+        return "All jobs" if self.language_tooltip_prefix == "Language" else "Alle jobber"
+
+    @property
+    def history_empty(self) -> str:
+        return (
+            "No activities match the selected filters."
+            if self.language_tooltip_prefix == "Language"
+            else "Ingen aktiviteter samsvarer med valgte filtre."
+        )
+
+    @property
+    def history_unavailable(self) -> str:
+        return (
+            "History is not available."
+            if self.language_tooltip_prefix == "Language"
+            else "Historikken er ikke tilgjengelig."
+        )
+
+    @property
+    def activity_type(self) -> str:
+        return "Type" if self.language_tooltip_prefix == "Language" else "Type"
+
+    @property
+    def status(self) -> str:
+        return "Status" if self.language_tooltip_prefix == "Language" else "Status"
+
+    @property
+    def started(self) -> str:
+        return "Started" if self.language_tooltip_prefix == "Language" else "Startet"
+
+    @property
+    def finished(self) -> str:
+        return "Finished" if self.language_tooltip_prefix == "Language" else "Fullført"
+
+    @property
+    def duration(self) -> str:
+        return "Duration" if self.language_tooltip_prefix == "Language" else "Varighet"
+
+    @property
+    def operations(self) -> str:
+        return "Operations" if self.language_tooltip_prefix == "Language" else "Operasjoner"
+
+    @property
+    def transferred(self) -> str:
+        return "Transferred" if self.language_tooltip_prefix == "Language" else "Overført"
+
+    @property
+    def average_speed(self) -> str:
+        return (
+            "Average speed"
+            if self.language_tooltip_prefix == "Language"
+            else "Gjennomsnittshastighet"
+        )
+
+    @property
+    def warnings_errors(self) -> str:
+        return (
+            "Warnings / errors"
+            if self.language_tooltip_prefix == "Language"
+            else "Varsler / feil"
+        )
+
+    @property
+    def trigger(self) -> str:
+        return "Trigger" if self.language_tooltip_prefix == "Language" else "Utløser"
+
+    @property
+    def identifiers(self) -> str:
+        return "Identifiers" if self.language_tooltip_prefix == "Language" else "Identifikatorer"
+
+    @property
+    def activity_targets(self) -> str:
+        return "Targets included" if self.language_tooltip_prefix == "Language" else "Mål som inngikk"
+
+    @property
+    def activity_control(self) -> str:
+        return "Control" if self.language_tooltip_prefix == "Language" else "Kontroll"
+
+    @property
+    def activity_backup(self) -> str:
+        return "Backup" if self.language_tooltip_prefix == "Language" else "Backup"
+
 
 NB_TEXT = ShellText(
     local_preview="Lokal forhåndsvisning",

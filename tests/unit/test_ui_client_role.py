@@ -103,6 +103,36 @@ def test_ui_pipe_action_queries_activity_overview_after_handshake() -> None:
     }
 
 
+def test_ui_pipe_action_queries_history_timeline_after_handshake() -> None:
+    client = _FakeGuiIpcClient()
+    args = build_parser().parse_args(
+        [
+            "--pipe-name",
+            "pipe-a",
+            "--query-history-timeline",
+            "--activity-filter",
+            "CONTROLS",
+            "--job-id",
+            "job-a",
+            "--limit",
+            "5",
+            "--offset",
+            "10",
+        ]
+    )
+
+    response = _run_pipe_action(args, client)
+
+    assert response.payload == {"history": "ok"}
+    assert client.calls == ("connect", "query_history_timeline")
+    assert client.history_query == {
+        "activity_filter": "CONTROLS",
+        "job_id": "job-a",
+        "limit": 5,
+        "offset": 10,
+    }
+
+
 def test_ui_pipe_action_queries_run_progress_after_handshake() -> None:
     client = _FakeGuiIpcClient()
     args = build_parser().parse_args(
@@ -568,6 +598,7 @@ class _FakeGuiIpcClient:
         self.overview_query: dict[str, object] | None = None
         self.backup_job_detail_query: dict[str, object] | None = None
         self.activity_query: dict[str, object] | None = None
+        self.history_query: dict[str, object] | None = None
         self.run_progress_query: dict[str, object] | None = None
         self.plan_operations_query: dict[str, object] | None = None
         self.plan_endpoints_query: dict[str, object] | None = None
@@ -618,6 +649,23 @@ class _FakeGuiIpcClient:
             "offset": offset,
         }
         return IpcResponse.accepted({"activity": "ok"})
+
+    def query_history_timeline(
+        self,
+        *,
+        activity_filter: str | None = None,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        self.calls = (*self.calls, "query_history_timeline")
+        self.history_query = {
+            "activity_filter": activity_filter,
+            "job_id": job_id,
+            "limit": limit,
+            "offset": offset,
+        }
+        return IpcResponse.accepted({"history": "ok"})
 
     def query_run_progress(
         self,

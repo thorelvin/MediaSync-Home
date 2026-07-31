@@ -943,6 +943,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.service.plan_store is not None
         assert runtime.service.plan_operation_read_store is not None
         assert runtime.service.plan_endpoint_read_store is not None
+        assert runtime.service.history_timeline_read_store is not None
         assert runtime.service.run_activity_read_store is not None
         assert runtime.service.run_progress_snapshot_store is not None
         assert runtime.service.schedule_store is not None
@@ -996,6 +997,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         overview = ipc_client.query_backup_overview(draft_id="draft-a")
         backup_job_detail = ipc_client.query_backup_job_detail(job_id="job-a")
         activity = ipc_client.query_activity_overview(limit=5)
+        history = ipc_client.query_history_timeline(limit=5)
         plan_operations = ipc_client.query_plan_operations(plan_id="plan-a", limit=5)
         plan_endpoints = ipc_client.query_plan_endpoints(plan_id="plan-a", limit=5)
         snapshot_entries = ipc_client.query_snapshot_entries(snapshot_id="snapshot-a", limit=5)
@@ -1030,6 +1032,10 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert activity.payload["activity_overview"]["read_model_available"] is True
         assert activity.payload["activity_overview"]["limit"] == 5
         assert activity.payload["activity_overview"]["runs"] == []
+        assert history.status is IpcStatus.ACCEPTED
+        assert history.payload["history_timeline"]["read_model_available"] is True
+        assert history.payload["history_timeline"]["limit"] == 5
+        assert history.payload["history_timeline"]["activities"] == []
         assert plan_operations.status is IpcStatus.ACCEPTED
         assert plan_operations.payload["plan_operations"]["read_model_available"] is True
         assert plan_operations.payload["plan_operations"]["limit"] == 5

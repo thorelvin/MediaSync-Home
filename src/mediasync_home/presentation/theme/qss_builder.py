@@ -86,20 +86,23 @@ QListWidget#navigationRail::item:selected {{
     color: {tokens.text};
 }}
 
-QListWidget#jobsList {{
+QListWidget#jobsList,
+QListWidget#historyList {{
     background: {tokens.surface};
     border: {tokens.border_hairline}px solid {tokens.border};
     border-radius: {tokens.radius_sm}px;
     outline: 0;
 }}
 
-QListWidget#jobsList::item {{
+QListWidget#jobsList::item,
+QListWidget#historyList::item {{
     min-height: 50px;
     padding: {tokens.space_2}px {tokens.space_3}px;
     border-bottom: {tokens.border_hairline}px solid {tokens.border};
 }}
 
-QListWidget#jobsList::item:selected {{
+QListWidget#jobsList::item:selected,
+QListWidget#historyList::item:selected {{
     background: {tokens.selection};
     color: {tokens.text};
 }}
@@ -113,6 +116,7 @@ QFrame#engineStatusPanel,
 QFrame#standardBackupPanel,
 QFrame#backupJobDetailPanel,
 QFrame#jobsDetailPanel,
+QFrame#historyDetailPanel,
 QFrame#componentGallery {{
     background: {tokens.panel};
     border: {tokens.border_hairline}px solid {tokens.border};
@@ -147,6 +151,14 @@ QLabel#jobDetailTitle {{
     font-weight: 600;
 }}
 
+QLabel#historyDetailTitle {{
+    font-weight: 600;
+}}
+
+QLabel#historyTargetRow {{
+    color: {tokens.text_muted};
+}}
+
 QLabel#planPreviewTitle,
 QLabel#planEndpointTitle,
 QLabel#snapshotHealthTitle {{
@@ -177,6 +189,7 @@ QFrame#activityBar {{
 
 QScrollArea#dashboardScrollArea,
 QScrollArea#jobsScrollArea,
+QScrollArea#historyScrollArea,
 QScrollArea#activityScrollArea,
 QWidget#activityContent {{
     background: transparent;
@@ -184,7 +197,8 @@ QWidget#activityContent {{
 }}
 
 QScrollArea#dashboardScrollArea > QWidget > QWidget,
-QScrollArea#jobsScrollArea > QWidget > QWidget {{
+QScrollArea#jobsScrollArea > QWidget > QWidget,
+QScrollArea#historyScrollArea > QWidget > QWidget {{
     background: {tokens.window_background};
 }}
 
@@ -231,7 +245,9 @@ QToolButton#addTargetButton,
 QToolButton#removeTargetButton,
 QToolButton#setupBackButton,
 QToolButton#jobsPreviousButton,
-QToolButton#jobsNextButton {{
+QToolButton#jobsNextButton,
+QToolButton#historyPreviousButton,
+QToolButton#historyNextButton {{
     min-width: 32px;
     max-width: 32px;
     min-height: 32px;
@@ -246,7 +262,9 @@ QToolButton#addTargetButton:hover,
 QToolButton#removeTargetButton:hover,
 QToolButton#setupBackButton:hover,
 QToolButton#jobsPreviousButton:hover,
-QToolButton#jobsNextButton:hover {{
+QToolButton#jobsNextButton:hover,
+QToolButton#historyPreviousButton:hover,
+QToolButton#historyNextButton:hover {{
     border-color: {tokens.accent};
 }}
 
@@ -254,7 +272,9 @@ QToolButton#addTargetButton:focus,
 QToolButton#removeTargetButton:focus,
 QToolButton#setupBackButton:focus,
 QToolButton#jobsPreviousButton:focus,
-QToolButton#jobsNextButton:focus {{
+QToolButton#jobsNextButton:focus,
+QToolButton#historyPreviousButton:focus,
+QToolButton#historyNextButton:focus {{
     border: {tokens.border_focus}px solid {tokens.focus};
 }}
 
@@ -262,7 +282,9 @@ QToolButton#addTargetButton:disabled,
 QToolButton#removeTargetButton:disabled,
 QToolButton#setupBackButton:disabled,
 QToolButton#jobsPreviousButton:disabled,
-QToolButton#jobsNextButton:disabled {{
+QToolButton#jobsNextButton:disabled,
+QToolButton#historyPreviousButton:disabled,
+QToolButton#historyNextButton:disabled {{
     background: {tokens.surface};
     border-color: {tokens.border};
 }}
@@ -279,6 +301,35 @@ QMenu#languageSelectorMenu::item {{
 
 QMenu#languageSelectorMenu::item:selected {{
     background: {tokens.selection};
+}}
+
+QPushButton#historyFilterButton {{
+    min-height: 30px;
+    border: {tokens.border_hairline}px solid {tokens.border};
+    border-radius: {tokens.radius_sm}px;
+    background: {tokens.surface_alt};
+    color: {tokens.text_muted};
+    padding: 0 {tokens.space_3}px;
+}}
+
+QPushButton#historyFilterButton:checked {{
+    border-color: {tokens.accent};
+    background: {tokens.selection};
+    color: {tokens.text};
+}}
+
+QPushButton#historyFilterButton:focus,
+QComboBox#historyJobFilter:focus {{
+    border: {tokens.border_focus}px solid {tokens.focus};
+}}
+
+QComboBox#historyJobFilter {{
+    min-height: 30px;
+    border: {tokens.border_hairline}px solid {tokens.border};
+    border-radius: {tokens.radius_sm}px;
+    background: {tokens.surface};
+    color: {tokens.text};
+    padding: 0 {tokens.space_3}px;
 }}
 
 QPushButton#createBackupButton,

@@ -1,5 +1,20 @@
 # Implementeringsstatus
 
+Oppdatering 2026-07-31: Navigasjonssiden **Historikk** er ikke lenger en
+placeholder. En ny bounded `QUERY_HISTORY_TIMELINE`-kontrakt samler immutable
+førstegangskontroller og backupkjøringer fra Engine Host i én tidsordnet side,
+med opptil 25 aktiviteter per query. Tidslinjen kan filtreres mellom alle
+aktiviteter, kontroller og backupkjøringer, samt per aktiv jobb, uten at GUI
+åpner SQLite. Hver rad viser faktisk jobb, mål, status og start; valgt detalj
+viser i tillegg slutt, varighet, operasjoner, byte, gjennomsnittshastighet,
+varsler/feil, trigger og autoritative
+run-/analysis-/planidentifikatorer. Valget bindes til `(activity_kind,
+activity_id)`, bevares ved refresh og nullstilles ved filter-/sidebytte.
+Tom/utilgjengelig tilstand, norsk/engelsk, forrige/neste side og lange
+målidentifikatorer er dekket ved 900×560 uten horisontal clipping. Lys/mørk
+referanse ligger i `docs/assets/history-workspace-light.png` og
+`docs/assets/history-workspace-dark.png`.
+
 Oppdatering 2026-07-31: Operation schema 2 og catalog migration 33 binder hver
 muterende forseglet planoperasjon til ett eksakt skrivbart mål og inkluderer
 bindingen i planchecksumen. Førstegangsplanleggeren støtter nå opptil tre mål,
@@ -40,8 +55,8 @@ Forseglede runnable planer kan startes fra denne siden uten checksum-/jobbdrift.
 Qt-interaksjonstester dekker to jobber med ulike planchecksums, sidebytte,
 selection preservation, køstatus, språkbytte og responsive labelhøyder ved
 900×560. Lys/mørk referanse ligger i `docs/assets/jobs-workspace-light.png` og
-`docs/assets/jobs-workspace-dark.png`. Neste produktflate er den fortsatt
-placeholder-baserte **Historikk**-siden.
+`docs/assets/jobs-workspace-dark.png`. Den neste placeholder-baserte
+produktflaten er **Innstillinger**.
 
 Forrige 0B-slice: En runnable forseglet førstegangsplan kan nå startes eksplisitt fra jobbdeltaljen. GUI sender plan-ID og checksum som `START_RUN`, beholder request-/idempotens-ID ved feil og viser køstatus etter aksept; catalog avviser samtidig en ny levende run for samme jobb. Journalførte `CREATE_DIRECTORY`-operasjoner har eksplisitt operation-kind og planrekkefølge, en deterministisk recovery-markør, atomisk lokal rename, restartverifisering, eget catalog-effect og kontrollert markøropprydding. Executor fullfører parent-directory før nested filer og kjeder flere durable intent-segmenter. Catalog migration 32 og recovery migration 6 oppgraderer eksisterende state. Integrasjonstesten kjører en directory-plus-file-plan helt til `COMPLETED`, og fault-window-testen beviser idempotent retry etter rename. Source-, target-, status- og planetiketter beholder den tidligere breddesensitive minimumshøyden, slik at valgte lange mål ikke klippes. Multi-target operation-binding, pre-migration-30 pending-jobbreparasjon og kontrollert fremmed-overtakelse gjenstår.
 

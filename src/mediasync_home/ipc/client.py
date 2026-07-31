@@ -89,6 +89,24 @@ class InProcessIpcClient:
             )
         )
 
+    def query_history_timeline(
+        self,
+        *,
+        activity_filter: str | None = None,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        return self._correlated_response(
+            self.service.query_history_timeline(
+                self.client_instance_id,
+                activity_filter=activity_filter,
+                job_id=job_id,
+                limit=limit,
+                offset=offset,
+            )
+        )
+
     def query_run_progress(
         self,
         *,

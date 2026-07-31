@@ -31,6 +31,11 @@ from mediasync_home.application.command_receipts import (
 )
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.external_resources import ExternalResourceStateStore
+from mediasync_home.application.history_read_models import (
+    HistoryTimelineQueryError,
+    HistoryTimelineReadModelStore,
+    query_history_timeline,
+)
 from mediasync_home.application.endpoint_registration import (
     EndpointClassificationRefreshReport,
 )
@@ -223,6 +228,7 @@ class EngineHostIpcService:
     initial_backup_plan_refresh: (
         Callable[[], InitialBackupPlanRefreshReport] | None
     ) = None
+    history_timeline_read_store: HistoryTimelineReadModelStore | None = None
     run_activity_read_store: RunActivityReadModelStore | None = None
     run_progress_snapshot_store: RunProgressSnapshotStore | None = None
     plan_operation_read_store: PlanOperationReadModelStore | None = None
@@ -364,6 +370,30 @@ class EngineHostIpcService:
         except ActivityOverviewQueryError:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         return IpcResponse.accepted({"activity_overview": overview.to_dict()})
+
+    def query_history_timeline(
+        self,
+        client_instance_id: str,
+        *,
+        activity_filter: str | None = None,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
+        try:
+            timeline = query_history_timeline(
+                history_store=self.history_timeline_read_store,
+                activity_filter=activity_filter,
+                job_id=job_id,
+                limit=limit,
+                offset=offset,
+            )
+        except HistoryTimelineQueryError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        return IpcResponse.accepted({"history_timeline": timeline.to_dict()})
 
     def query_run_progress(
         self,

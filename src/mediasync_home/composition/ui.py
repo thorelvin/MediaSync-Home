@@ -42,6 +42,15 @@ class GuiIpcClient(Protocol):
         offset: int | None = None,
     ) -> IpcResponse: ...
 
+    def query_history_timeline(
+        self,
+        *,
+        activity_filter: str | None = None,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse: ...
+
     def query_run_progress(
         self,
         *,
@@ -122,6 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--query-backup-overview", action="store_true")
     mode.add_argument("--query-backup-job-detail", action="store_true")
     mode.add_argument("--query-activity-overview", action="store_true")
+    mode.add_argument("--query-history-timeline", action="store_true")
     mode.add_argument("--query-run-progress", action="store_true")
     mode.add_argument("--query-plan-operations", action="store_true")
     mode.add_argument("--query-plan-endpoints", action="store_true")
@@ -132,6 +142,11 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--submit-command", metavar="NAME")
     parser.add_argument("--draft-id")
     parser.add_argument("--job-id")
+    parser.add_argument(
+        "--activity-filter",
+        choices=("ALL", "CONTROLS", "BACKUPS"),
+        default="ALL",
+    )
     parser.add_argument("--plan-id")
     parser.add_argument("--snapshot-id")
     parser.add_argument("--run-id")
@@ -210,6 +225,7 @@ def _pipe_action_requested(args: argparse.Namespace) -> bool:
         or args.query_backup_overview
         or args.query_backup_job_detail
         or args.query_activity_overview
+        or args.query_history_timeline
         or args.query_run_progress
         or args.query_plan_operations
         or args.query_plan_endpoints
@@ -243,6 +259,13 @@ def _run_pipe_action(args: argparse.Namespace, client: GuiIpcClient) -> IpcRespo
         return client.query_backup_job_detail(job_id=args.job_id or "")
     if args.query_activity_overview:
         return client.query_activity_overview(
+            job_id=args.job_id,
+            limit=args.limit,
+            offset=args.offset,
+        )
+    if args.query_history_timeline:
+        return client.query_history_timeline(
+            activity_filter=args.activity_filter,
             job_id=args.job_id,
             limit=args.limit,
             offset=args.offset,

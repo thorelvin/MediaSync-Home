@@ -753,6 +753,14 @@ class Win32NamedPipeServer:
                 limit=_optional_query_int(request.get("limit")),
                 offset=_optional_query_int(request.get("offset")),
             )
+        if message_type == "QUERY_HISTORY_TIMELINE":
+            return self.service.query_history_timeline(
+                str(request["client_instance_id"]),
+                activity_filter=_optional_query_str(request.get("activity_filter")),
+                job_id=_optional_query_str(request.get("job_id")),
+                limit=_optional_query_int(request.get("limit")),
+                offset=_optional_query_int(request.get("offset")),
+            )
         if message_type == "QUERY_RUN_PROGRESS":
             return self.service.query_run_progress(
                 str(request["client_instance_id"]),
@@ -882,6 +890,28 @@ class Win32NamedPipeClient:
             "message_type": "QUERY_ACTIVITY_OVERVIEW",
             "client_instance_id": self.client_instance_id,
         }
+        if job_id is not None:
+            request["job_id"] = job_id
+        if limit is not None:
+            request["limit"] = limit
+        if offset is not None:
+            request["offset"] = offset
+        return self._roundtrip(request)
+
+    def query_history_timeline(
+        self,
+        *,
+        activity_filter: str | None = None,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        request: dict[str, Any] = {
+            "message_type": "QUERY_HISTORY_TIMELINE",
+            "client_instance_id": self.client_instance_id,
+        }
+        if activity_filter is not None:
+            request["activity_filter"] = activity_filter
         if job_id is not None:
             request["job_id"] = job_id
         if limit is not None:

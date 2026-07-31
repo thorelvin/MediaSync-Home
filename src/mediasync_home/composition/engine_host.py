@@ -59,6 +59,7 @@ from mediasync_home.adapters.sqlite.endpoint_classifications import (
     SqliteEndpointClassificationRefresher,
 )
 from mediasync_home.adapters.sqlite.external_resources import SqliteExternalResourceStateStore
+from mediasync_home.adapters.sqlite.history import SqliteHistoryReadModelStore
 from mediasync_home.adapters.sqlite.job_catalog import SqliteStandardBackupJobCatalog
 from mediasync_home.adapters.sqlite.job_draft_store import SqliteJobDraftStore
 from mediasync_home.adapters.sqlite.job_endpoints import (
@@ -1509,6 +1510,7 @@ def build_engine_host_runtime(
             )
         )
         runs = SqliteRunStore(catalog_connection)
+        history = SqliteHistoryReadModelStore(catalog_connection)
         schedules = SqliteScheduleStore(catalog_connection)
         trigger_occurrences = SqliteTriggerOccurrenceStore(catalog_connection)
         external_resource_state = SqliteExternalResourceStateStore(catalog_connection)
@@ -1588,6 +1590,7 @@ def build_engine_host_runtime(
             plan_endpoint_read_store=plans,
             run_store=runs,
             run_id_factory=UuidRunIdFactory(),
+            history_timeline_read_store=history,
             run_activity_read_store=runs,
             run_progress_snapshot_store=runs,
             schedule_store=schedules,

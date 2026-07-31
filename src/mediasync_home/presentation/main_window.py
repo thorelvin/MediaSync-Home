@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol, cast
 from uuid import uuid4
@@ -12,6 +13,8 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap, QResizeEven
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QBoxLayout,
+    QButtonGroup,
+    QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
@@ -65,6 +68,12 @@ from mediasync_home.presentation.view_models.engine_status import (
     EngineStatusViewState,
     engine_status_from_response,
 )
+from mediasync_home.presentation.view_models.history import (
+    HistoryActivityViewState,
+    HistoryTimelineViewState,
+    empty_history_timeline_state,
+    history_timeline_from_response,
+)
 from mediasync_home.presentation.view_models.localization import (
     LanguageCode,
     ShellText,
@@ -114,6 +123,17 @@ class ActivityOverviewProvider(Protocol):
     def get_activity_overview(
         self,
         *,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse: ...
+
+
+class HistoryTimelineProvider(Protocol):
+    def get_history_timeline(
+        self,
+        *,
+        activity_filter: str | None = None,
         job_id: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
@@ -225,6 +245,7 @@ class MediaSyncWindow(QMainWindow):
         self._plan_endpoint_preview_state = empty_plan_endpoint_preview_state()
         self._snapshot_health_preview_state = empty_snapshot_health_preview_state()
         self._cataloged_files_preview_state = empty_cataloged_files_preview_state()
+        self._history_timeline_state = empty_history_timeline_state()
         self._engine_status_state = initial_state
         self._subtitle_label: QLabel | None = None
         self._navigation: QListWidget | None = None
@@ -245,6 +266,27 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_page_limit = 25
         self._jobs_page_offset = 0
         self._selected_job_id: str | None = None
+        self._history_page: QWidget | None = None
+        self._history_scroll_area: QScrollArea | None = None
+        self._history_title_label: QLabel | None = None
+        self._history_list: QListWidget | None = None
+        self._history_empty_label: QLabel | None = None
+        self._history_filter_group: QButtonGroup | None = None
+        self._history_filter_buttons: dict[str, QPushButton] = {}
+        self._history_job_filter: QComboBox | None = None
+        self._history_page_label: QLabel | None = None
+        self._history_previous_button: QToolButton | None = None
+        self._history_next_button: QToolButton | None = None
+        self._history_page_limit = 25
+        self._history_page_offset = 0
+        self._history_activity_filter = "ALL"
+        self._history_job_id: str | None = None
+        self._selected_history_activity_id: str | None = None
+        self._history_detail_title: QLabel | None = None
+        self._history_detail_labels: dict[str, QLabel] = {}
+        self._history_detail_values: dict[str, QLabel] = {}
+        self._history_target_heading: QLabel | None = None
+        self._history_target_rows: list[QLabel] = []
         self._dashboard_detail_layout: QBoxLayout | None = None
         self._setup_stepper_layout: QGridLayout | None = None
         self._compact_dashboard_layout: bool | None = None
@@ -406,6 +448,7 @@ class MediaSyncWindow(QMainWindow):
         self.apply_engine_status(engine_status_from_response(self._engine_client.get_status()))
         self._refresh_backup_overview()
         self._refresh_activity_overview()
+        self._refresh_history_timeline()
         self._refresh_cataloged_files_preview()
 
     def apply_engine_status(self, state: EngineStatusViewState) -> None:
@@ -446,6 +489,10 @@ class MediaSyncWindow(QMainWindow):
     def apply_cataloged_files_preview(self, state: CatalogedFilesPreviewState) -> None:
         self._cataloged_files_preview_state = state
         self._apply_cataloged_files_preview_state(state)
+
+    def apply_history_timeline(self, state: HistoryTimelineViewState) -> None:
+        self._history_timeline_state = state
+        self._apply_history_timeline_state(state)
 
     def _refresh_backup_overview(self) -> None:
         if self._engine_client is None or not hasattr(self._engine_client, "get_backup_overview"):
@@ -526,6 +573,7 @@ class MediaSyncWindow(QMainWindow):
             self._jobs_next_button.setAccessibleName(
                 self._texts().next_page_tooltip
             )
+        self._apply_history_job_filter_options(state)
         self._refresh_dashboard_geometry()
 
     def _select_job_item(
@@ -564,6 +612,384 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_page_offset += self._jobs_page_limit
         self._selected_job_id = None
         self._refresh_backup_overview()
+
+    def _refresh_history_timeline(self) -> None:
+        if self._engine_client is None or not hasattr(
+            self._engine_client,
+            "get_history_timeline",
+        ):
+            self.apply_history_timeline(empty_history_timeline_state())
+            return
+        provider = cast(HistoryTimelineProvider, self._engine_client)
+        state = history_timeline_from_response(
+            provider.get_history_timeline(
+                activity_filter=self._history_activity_filter,
+                job_id=self._history_job_id,
+                limit=self._history_page_limit,
+                offset=self._history_page_offset,
+            )
+        )
+        activity_ids = {activity.selection_key for activity in state.activities}
+        if self._selected_history_activity_id not in activity_ids:
+            self._selected_history_activity_id = state.selected_activity_id
+        self.apply_history_timeline(state)
+
+    def _apply_history_timeline_state(self, state: HistoryTimelineViewState) -> None:
+        history_list = self._history_list
+        if history_list is None:
+            return
+        history_list.blockSignals(True)
+        history_list.clear()
+        selected_row = -1
+        for index, activity in enumerate(state.activities):
+            kind = self._history_kind_label(activity.activity_kind)
+            status = self._history_state_label(activity.state)
+            started = self._format_history_timestamp(activity.started_utc)
+            target_count = len(activity.targets)
+            target_label = (
+                f"{target_count} {self._texts().target.lower()}"
+                if target_count == 1
+                else f"{target_count} {self._texts().activity_targets.lower()}"
+            )
+            item = QListWidgetItem(
+                f"{kind} · {activity.job_title}\n"
+                f"{status} · {started} · {target_label}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, activity.selection_key)
+            item.setToolTip(activity.job_id)
+            item.setSizeHint(QSize(0, 58))
+            history_list.addItem(item)
+            if activity.selection_key == self._selected_history_activity_id:
+                selected_row = index
+        if selected_row >= 0:
+            history_list.setCurrentRow(selected_row)
+        history_list.blockSignals(False)
+
+        has_activities = bool(state.activities)
+        history_list.setVisible(state.read_model_available and has_activities)
+        history_list.setEnabled(state.read_model_available)
+        if self._history_empty_label is not None:
+            self._history_empty_label.setText(
+                self._texts().history_empty
+                if state.read_model_available
+                else self._texts().history_unavailable
+            )
+            self._history_empty_label.setVisible(
+                not has_activities or not state.read_model_available
+            )
+        if self._history_page_label is not None:
+            first = state.offset + 1 if has_activities else 0
+            last = state.offset + len(state.activities)
+            self._history_page_label.setText(f"{first}-{last}")
+        if self._history_previous_button is not None:
+            self._history_previous_button.setEnabled(state.offset > 0)
+            self._history_previous_button.setToolTip(
+                self._texts().previous_page_tooltip
+            )
+            self._history_previous_button.setAccessibleName(
+                self._texts().previous_page_tooltip
+            )
+        if self._history_next_button is not None:
+            self._history_next_button.setEnabled(state.has_more)
+            self._history_next_button.setToolTip(self._texts().next_page_tooltip)
+            self._history_next_button.setAccessibleName(
+                self._texts().next_page_tooltip
+            )
+        selected = next(
+            (
+                activity
+                for activity in state.activities
+                if activity.selection_key == self._selected_history_activity_id
+            ),
+            None,
+        )
+        self._apply_history_activity_detail(selected)
+        self._refresh_dashboard_geometry()
+
+    def _select_history_item(
+        self,
+        current: QListWidgetItem | None,
+        previous: QListWidgetItem | None,
+    ) -> None:
+        del previous
+        if current is None:
+            return
+        selection_key = current.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(selection_key, str) or not selection_key:
+            return
+        self._selected_history_activity_id = selection_key
+        activity = next(
+            (
+                row
+                for row in self._history_timeline_state.activities
+                if row.selection_key == selection_key
+            ),
+            None,
+        )
+        self._apply_history_activity_detail(activity)
+
+    def _set_history_activity_filter(self, activity_filter: str) -> None:
+        if activity_filter not in {"ALL", "CONTROLS", "BACKUPS"}:
+            return
+        self._history_activity_filter = activity_filter
+        self._history_page_offset = 0
+        self._selected_history_activity_id = None
+        self._refresh_history_timeline()
+
+    def _set_history_job_filter(self, index: int) -> None:
+        if self._history_job_filter is None or index < 0:
+            return
+        job_id = self._history_job_filter.itemData(index, Qt.ItemDataRole.UserRole)
+        self._history_job_id = job_id if isinstance(job_id, str) and job_id else None
+        self._history_page_offset = 0
+        self._selected_history_activity_id = None
+        self._refresh_history_timeline()
+
+    def _show_previous_history_page(self) -> None:
+        if self._history_page_offset <= 0:
+            return
+        self._history_page_offset = max(
+            0,
+            self._history_page_offset - self._history_page_limit,
+        )
+        self._selected_history_activity_id = None
+        self._refresh_history_timeline()
+
+    def _show_next_history_page(self) -> None:
+        if not self._history_timeline_state.has_more:
+            return
+        self._history_page_offset += self._history_page_limit
+        self._selected_history_activity_id = None
+        self._refresh_history_timeline()
+
+    def _apply_history_job_filter_options(
+        self,
+        state: BackupOverviewViewState,
+    ) -> None:
+        job_filter = self._history_job_filter
+        if job_filter is None:
+            return
+        current_job_id = self._history_job_id
+        job_filter.blockSignals(True)
+        job_filter.clear()
+        job_filter.addItem(self._texts().all_jobs, None)
+        selected_index = 0
+        for job in state.jobs:
+            job_filter.addItem(job.title, job.job_id)
+            if job.job_id == current_job_id:
+                selected_index = job_filter.count() - 1
+        if current_job_id is not None and selected_index == 0:
+            job_filter.addItem(current_job_id, current_job_id)
+            selected_index = job_filter.count() - 1
+        job_filter.setCurrentIndex(selected_index)
+        job_filter.setAccessibleName(self._texts().all_jobs)
+        job_filter.blockSignals(False)
+
+    def _apply_history_activity_detail(
+        self,
+        activity: HistoryActivityViewState | None,
+    ) -> None:
+        if self._history_detail_title is None:
+            return
+        if activity is None:
+            self._history_detail_title.setText(self._texts().history_empty)
+            for empty_value_label in self._history_detail_values.values():
+                empty_value_label.setText("-")
+            for target_row in self._history_target_rows:
+                target_row.clear()
+                target_row.setVisible(False)
+            self._refresh_dashboard_geometry()
+            return
+
+        kind = self._history_kind_label(activity.activity_kind)
+        self._history_detail_title.setText(f"{kind} · {activity.job_title}")
+        finished = (
+            self._format_history_timestamp(activity.finished_utc)
+            if activity.finished_utc is not None
+            else ("In progress" if self._selected_language_code is LanguageCode.ENGLISH else "Pågår")
+        )
+        if activity.activity_kind == "CONTROL":
+            operations = (
+                f"{activity.planned_operations} planned changes"
+                if self._selected_language_code is LanguageCode.ENGLISH
+                else f"{activity.planned_operations} planlagte endringer"
+            )
+            transferred = (
+                "No transfer during a control"
+                if self._selected_language_code is LanguageCode.ENGLISH
+                else "Ingen overføring under en kontroll"
+            )
+        else:
+            operations = (
+                f"{activity.completed_operations} / "
+                f"{activity.planned_operations}"
+            )
+            transferred = (
+                f"{_format_bytes(activity.completed_bytes)} / "
+                f"{_format_bytes(activity.planned_bytes)}"
+            )
+        identifiers = " · ".join(
+            part
+            for part in (
+                f"run {activity.run_id}" if activity.run_id else None,
+                f"analysis {activity.analysis_id}" if activity.analysis_id else None,
+                f"plan {activity.plan_id}" if activity.plan_id else None,
+                f"revision {activity.job_revision_id}",
+            )
+            if part is not None
+        )
+        values = {
+            "activity_type": kind,
+            "status": self._history_state_label(activity.state),
+            "started": self._format_history_timestamp(activity.started_utc),
+            "finished": finished,
+            "duration": self._format_history_duration(activity.duration_seconds),
+            "operations": operations,
+            "transferred": transferred,
+            "average_speed": self._format_history_average_speed(activity),
+            "warnings_errors": (
+                f"{activity.warning_count} / {activity.error_count}"
+            ),
+            "trigger": self._format_history_trigger(activity.trigger_type),
+            "identifiers": identifiers,
+        }
+        for key, detail_text in values.items():
+            detail_value_label = self._history_detail_values.get(key)
+            if detail_value_label is not None:
+                detail_value_label.setText(detail_text)
+        for index, target_row in enumerate(self._history_target_rows):
+            if index >= len(activity.targets):
+                target_row.clear()
+                target_row.setVisible(False)
+                continue
+            target = activity.targets[index]
+            target_detail = self._target_state_label(target.state)
+            if activity.activity_kind == "BACKUP":
+                target_detail = (
+                    f"{target_detail} · "
+                    f"{target.completed_operations}/{target.planned_operations} · "
+                    f"{_format_bytes(target.completed_bytes)}"
+                )
+            target_row.setText(f"{target.endpoint_id} · {target_detail}")
+            target_row.setVisible(True)
+        self._refresh_dashboard_geometry()
+
+    def _history_kind_label(self, activity_kind: str) -> str:
+        return (
+            self._texts().activity_control
+            if activity_kind == "CONTROL"
+            else self._texts().activity_backup
+        )
+
+    def _history_state_label(self, state: str) -> str:
+        english = self._selected_language_code is LanguageCode.ENGLISH
+        labels = {
+            "SEALED": ("Ready for backup", "Klar for backup"),
+            "NO_CHANGES": ("No changes", "Ingen endringer"),
+            "BLOCKED": ("Action required", "Handling nødvendig"),
+            "FAILED": ("Failed", "Feilet"),
+            "CREATED": ("Created", "Opprettet"),
+            "QUEUED": ("Queued", "I kø"),
+            "PREFLIGHT": ("Checking targets", "Kontrollerer mål"),
+            "EXECUTING": ("Running", "Kjører"),
+            "PAUSING": ("Pausing", "Pauser"),
+            "PAUSED": ("Paused", "Pauset"),
+            "COMPLETED": ("Completed", "Fullført"),
+            "COMPLETED_WITH_WARNINGS": (
+                "Completed with warnings",
+                "Fullført med varsler",
+            ),
+            "PARTIAL_FAILURE": ("Partially completed", "Delvis fullført"),
+            "CANCELLED": ("Cancelled", "Avbrutt"),
+            "BLOCKED_BY_SAFETY": ("Blocked by safety", "Blokkert av sikkerhet"),
+            "RECOVERY_REQUIRED": (
+                "Recovery required",
+                "Gjenoppretting kreves",
+            ),
+        }
+        pair = labels.get(state, (state.replace("_", " ").title(), state))
+        return pair[0] if english else pair[1]
+
+    def _target_state_label(self, state: str) -> str:
+        english = self._selected_language_code is LanguageCode.ENGLISH
+        labels = {
+            "WRITABLE_READY": ("Writable and ready", "Skrivbar og klar"),
+            "REGISTRATION_PENDING": (
+                "Registration pending",
+                "Registrering venter",
+            ),
+            "READ_ONLY_READY": ("Read-only", "Skrivebeskyttet"),
+            "PENDING": ("Pending", "Venter"),
+            "ACQUIRING_LEASE": ("Acquiring access", "Henter tilgang"),
+            "REVALIDATING": ("Checking", "Kontrollerer"),
+            "EXECUTING": ("Running", "Kjører"),
+            "WAITING_FOR_ENDPOINT": ("Waiting for target", "Venter på mål"),
+            "NEEDS_REVIEW": ("Needs review", "Må vurderes"),
+            "SUCCEEDED": ("Completed", "Fullført"),
+            "SUCCEEDED_WITH_WARNINGS": (
+                "Completed with warnings",
+                "Fullført med varsler",
+            ),
+            "FAILED": ("Failed", "Feilet"),
+            "CANCELLED": ("Cancelled", "Avbrutt"),
+            "BLOCKED": ("Blocked", "Blokkert"),
+            "RECOVERY_REQUIRED": (
+                "Recovery required",
+                "Gjenoppretting kreves",
+            ),
+        }
+        pair = labels.get(state, (state.replace("_", " ").title(), state))
+        return pair[0] if english else pair[1]
+
+    def _format_history_timestamp(self, value: str) -> str:
+        try:
+            timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return value
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.astimezone()
+        if self._selected_language_code is LanguageCode.ENGLISH:
+            return timestamp.strftime("%Y-%m-%d %H:%M")
+        return timestamp.strftime("%d.%m.%Y %H:%M")
+
+    def _format_history_duration(self, seconds: int | None) -> str:
+        if seconds is None:
+            return "-"
+        minutes, remaining_seconds = divmod(seconds, 60)
+        hours, remaining_minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours} h {remaining_minutes} min"
+        if minutes:
+            return f"{minutes} min {remaining_seconds} s"
+        return f"{remaining_seconds} s"
+
+    def _format_history_average_speed(
+        self,
+        activity: HistoryActivityViewState,
+    ) -> str:
+        if (
+            activity.activity_kind != "BACKUP"
+            or activity.completed_bytes < 1
+            or activity.duration_seconds is None
+            or activity.duration_seconds < 1
+        ):
+            return "-"
+        return f"{_format_bytes(activity.completed_bytes // activity.duration_seconds)}/s"
+
+    def _format_history_trigger(self, trigger_type: str) -> str:
+        english = self._selected_language_code is LanguageCode.ENGLISH
+        labels = {
+            "MANUAL_LOCAL_PREVIEW": ("Manual", "Manuell"),
+            "INITIAL_JOB_SETUP": (
+                "Job creation control",
+                "Kontroll ved jobboppretting",
+            ),
+        }
+        pair = labels.get(
+            trigger_type,
+            (trigger_type.replace("_", " ").title(), trigger_type),
+        )
+        return pair[0] if english else pair[1]
 
     def _refresh_activity_overview(self) -> None:
         if self._engine_client is None or not hasattr(self._engine_client, "get_activity_overview"):
@@ -1277,7 +1703,11 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_page = jobs_page
         self._jobs_scroll_area = jobs_scroll
         stack.addWidget(jobs_scroll)
-        stack.addWidget(self._build_placeholder_page("History", "Completed and blocked runs will appear here."))
+        history_page = self._build_history_page()
+        history_scroll = _scrollable_page(history_page, "historyScrollArea")
+        self._history_page = history_page
+        self._history_scroll_area = history_scroll
+        stack.addWidget(history_scroll)
         stack.addWidget(
             self._build_placeholder_page("Settings", "Local preview settings will appear here.")
         )
@@ -1295,6 +1725,8 @@ class MediaSyncWindow(QMainWindow):
             self._workspace_heading.setText(self._current_navigation_label())
         if self._selected_navigation_index == 1 and self._engine_client is not None:
             self._refresh_backup_overview()
+        if self._selected_navigation_index == 2:
+            self._refresh_history_timeline()
 
     def _current_navigation_label(self) -> str:
         labels = (
@@ -1461,6 +1893,167 @@ class MediaSyncWindow(QMainWindow):
         start_backup.clicked.connect(self._start_selected_backup)
         self._jobs_start_backup_button = start_backup
         layout.addWidget(start_backup, 9, 2)
+        layout.setColumnStretch(1, 1)
+        return panel
+
+    def _build_history_page(self) -> QWidget:
+        texts = self._texts()
+        page = QWidget()
+        page.setObjectName("historyPage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        layout.setSizeConstraints(
+            QLayout.SizeConstraint.SetNoConstraint,
+            QLayout.SizeConstraint.SetMinAndMaxSize,
+        )
+
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
+        title = QLabel(texts.history_activities)
+        title.setObjectName("sectionTitle")
+        self._history_title_label = title
+        previous = QToolButton()
+        previous.setObjectName("historyPreviousButton")
+        previous.setIcon(self._icons.icon("back"))
+        previous.setIconSize(QSize(20, 20))
+        previous.setToolTip(texts.previous_page_tooltip)
+        previous.setAccessibleName(texts.previous_page_tooltip)
+        previous.setEnabled(False)
+        previous.clicked.connect(self._show_previous_history_page)
+        self._history_previous_button = previous
+        page_label = QLabel("0-0")
+        page_label.setObjectName("mutedLabel")
+        page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._history_page_label = page_label
+        next_button = QToolButton()
+        next_button.setObjectName("historyNextButton")
+        next_button.setIcon(self._icons.icon("next"))
+        next_button.setIconSize(QSize(20, 20))
+        next_button.setToolTip(texts.next_page_tooltip)
+        next_button.setAccessibleName(texts.next_page_tooltip)
+        next_button.setEnabled(False)
+        next_button.clicked.connect(self._show_next_history_page)
+        self._history_next_button = next_button
+        header_layout.addWidget(title)
+        header_layout.addStretch(1)
+        header_layout.addWidget(previous)
+        header_layout.addWidget(page_label)
+        header_layout.addWidget(next_button)
+        layout.addWidget(header)
+
+        filters = QWidget()
+        filters.setObjectName("historyFilters")
+        filter_layout = QGridLayout(filters)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(6)
+        filter_group = QButtonGroup(filters)
+        filter_group.setExclusive(True)
+        for column, (activity_filter, label) in enumerate((
+            ("ALL", texts.all_activities),
+            ("CONTROLS", texts.controls),
+            ("BACKUPS", texts.backup_runs),
+        )):
+            button = QPushButton(label)
+            button.setObjectName("historyFilterButton")
+            button.setCheckable(True)
+            button.setChecked(activity_filter == self._history_activity_filter)
+            button.setProperty("activityFilter", activity_filter)
+            button.clicked.connect(
+                lambda checked=False, value=activity_filter: (
+                    self._set_history_activity_filter(value) if checked else None
+                )
+            )
+            filter_group.addButton(button)
+            filter_layout.addWidget(button, 0, column)
+            filter_layout.setColumnStretch(column, 1)
+            self._history_filter_buttons[activity_filter] = button
+        self._history_filter_group = filter_group
+        job_filter = QComboBox()
+        job_filter.setObjectName("historyJobFilter")
+        job_filter.setAccessibleName(texts.all_jobs)
+        job_filter.addItem(texts.all_jobs, None)
+        job_filter.currentIndexChanged.connect(self._set_history_job_filter)
+        self._history_job_filter = job_filter
+        filter_layout.addWidget(job_filter, 1, 0, 1, 3)
+        layout.addWidget(filters)
+
+        history_list = QListWidget()
+        history_list.setObjectName("historyList")
+        history_list.setAccessibleName(texts.history_activities)
+        history_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        history_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        history_list.setWordWrap(True)
+        history_list.setMinimumHeight(148)
+        history_list.setMaximumHeight(232)
+        history_list.currentItemChanged.connect(self._select_history_item)
+        self._history_list = history_list
+        layout.addWidget(history_list)
+
+        empty = QLabel(texts.history_unavailable)
+        empty.setObjectName("historyEmptyLabel")
+        _configure_responsive_label(empty)
+        self._history_empty_label = empty
+        layout.addWidget(empty)
+        layout.addWidget(self._build_history_detail_panel())
+        layout.addStretch(1)
+        self._apply_history_timeline_state(self._history_timeline_state)
+        return page
+
+    def _build_history_detail_panel(self) -> QFrame:
+        texts = self._texts()
+        panel = QFrame()
+        panel.setObjectName("historyDetailPanel")
+        layout = QGridLayout(panel)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setHorizontalSpacing(18)
+        layout.setVerticalSpacing(8)
+
+        title = QLabel(texts.history_empty)
+        title.setObjectName("historyDetailTitle")
+        _configure_responsive_label(title)
+        self._history_detail_title = title
+        layout.addWidget(title, 0, 0, 1, 3)
+        detail_rows = (
+            ("activity_type", texts.activity_type),
+            ("status", texts.status),
+            ("started", texts.started),
+            ("finished", texts.finished),
+            ("duration", texts.duration),
+            ("operations", texts.operations),
+            ("transferred", texts.transferred),
+            ("average_speed", texts.average_speed),
+            ("warnings_errors", texts.warnings_errors),
+            ("trigger", texts.trigger),
+            ("identifiers", texts.identifiers),
+        )
+        for row_index, (key, label_text) in enumerate(detail_rows, start=1):
+            label, value = _add_labeled_text_value(
+                layout,
+                row_index,
+                label_text,
+                "-",
+            )
+            label.setObjectName("historyDetailLabel")
+            value.setObjectName(f"historyDetail{key.title().replace('_', '')}Value")
+            self._history_detail_labels[key] = label
+            self._history_detail_values[key] = value
+
+        target_heading = QLabel(texts.activity_targets)
+        target_heading.setObjectName("mutedLabel")
+        self._history_target_heading = target_heading
+        layout.addWidget(target_heading, 12, 0)
+        for index in range(3):
+            target_row = QLabel("")
+            target_row.setObjectName("historyTargetRow")
+            _configure_responsive_label(target_row, selectable=True)
+            target_row.setVisible(False)
+            self._history_target_rows.append(target_row)
+            layout.addWidget(target_row, 12 + index, 1, 1, 2)
         layout.setColumnStretch(1, 1)
         return panel
 
@@ -1993,6 +2586,10 @@ class MediaSyncWindow(QMainWindow):
             self._jobs_page,
             self._jobs_scroll_area,
         )
+        self._refresh_responsive_page_geometry(
+            self._history_page,
+            self._history_scroll_area,
+        )
 
     def _refresh_responsive_page_geometry(
         self,
@@ -2061,6 +2658,18 @@ class MediaSyncWindow(QMainWindow):
             self._jobs_title_label.setText(texts.saved_jobs)
         if self._jobs_list is not None:
             self._jobs_list.setAccessibleName(texts.saved_jobs)
+        if self._history_title_label is not None:
+            self._history_title_label.setText(texts.history_activities)
+        if self._history_list is not None:
+            self._history_list.setAccessibleName(texts.history_activities)
+        for activity_filter, label in (
+            ("ALL", texts.all_activities),
+            ("CONTROLS", texts.controls),
+            ("BACKUPS", texts.backup_runs),
+        ):
+            button = self._history_filter_buttons.get(activity_filter)
+            if button is not None:
+                button.setText(label)
         for text_label, text in (
             (self._setup_source_label, texts.source),
             (self._setup_target_label, texts.target),
@@ -2084,14 +2693,32 @@ class MediaSyncWindow(QMainWindow):
             (self._engine_mutation_label, texts.mutation_policy),
             (self._activity_title_label, texts.activity),
             (self._activity_empty_label, texts.no_active_runs),
+            (self._history_target_heading, texts.activity_targets),
         ):
             if text_label is not None:
                 text_label.setText(text)
+        for key, text in (
+            ("activity_type", texts.activity_type),
+            ("status", texts.status),
+            ("started", texts.started),
+            ("finished", texts.finished),
+            ("duration", texts.duration),
+            ("operations", texts.operations),
+            ("transferred", texts.transferred),
+            ("average_speed", texts.average_speed),
+            ("warnings_errors", texts.warnings_errors),
+            ("trigger", texts.trigger),
+            ("identifiers", texts.identifiers),
+        ):
+            history_label = self._history_detail_labels.get(key)
+            if history_label is not None:
+                history_label.setText(text)
         if self._workspace_heading is not None:
             self._workspace_heading.setText(self._current_navigation_label())
         self.apply_engine_status(self._engine_status_state)
         self._apply_backup_setup_state(self._setup_state)
         self._apply_jobs_overview_state(self._backup_overview_state)
+        self._apply_history_timeline_state(self._history_timeline_state)
         self._apply_backup_job_detail_state(self._job_detail_state)
         self._apply_job_status_state(self._job_status_state)
         self._apply_plan_operation_preview_state(self._plan_preview_state)
@@ -2154,6 +2781,17 @@ def _configure_responsive_label(label: QLabel, *, selectable: bool = False) -> N
     label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
     if selectable:
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+
+def _format_bytes(value: int) -> str:
+    amount = float(max(0, value))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if amount < 1024 or unit == "TiB":
+            if unit == "B":
+                return f"{int(amount)} {unit}"
+            return f"{amount:.1f} {unit}"
+        amount /= 1024
+    return f"{int(value)} B"
 
 
 def _refresh_style(widget: QWidget) -> None:

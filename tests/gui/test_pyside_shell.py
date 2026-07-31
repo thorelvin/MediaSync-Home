@@ -11,6 +11,7 @@ from PySide6.QtCore import QTimer, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QBoxLayout,
+    QComboBox,
     QFileDialog,
     QLabel,
     QListWidget,
@@ -921,6 +922,166 @@ def test_jobs_workspace_pages_without_losing_bounded_query_state(qapp) -> None:
         window.deleteLater()
 
 
+def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) -> None:
+    provider = _FakeHistoryEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window.refresh_engine_status()
+        qapp.processEvents()
+        nav = window.findChild(QListWidget, "navigationRail")
+        history_list = window.findChild(QListWidget, "historyList")
+        history_scroll = window.findChild(QScrollArea, "historyScrollArea")
+        detail_title = window.findChild(QLabel, "historyDetailTitle")
+        detail_status = window.findChild(QLabel, "historyDetailStatusValue")
+        detail_operations = window.findChild(QLabel, "historyDetailOperationsValue")
+        detail_transferred = window.findChild(QLabel, "historyDetailTransferredValue")
+        detail_speed = window.findChild(QLabel, "historyDetailAverageSpeedValue")
+        job_filter = window.findChild(QComboBox, "historyJobFilter")
+        filter_buttons = {
+            button.property("activityFilter"): button
+            for button in window.findChildren(QPushButton, "historyFilterButton")
+        }
+
+        assert nav is not None
+        assert history_list is not None
+        assert history_scroll is not None
+        assert detail_title is not None
+        assert detail_status is not None
+        assert detail_operations is not None
+        assert detail_transferred is not None
+        assert detail_speed is not None
+        assert job_filter is not None
+        assert set(filter_buttons) == {"ALL", "CONTROLS", "BACKUPS"}
+
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(2)).center(),
+        )
+        qapp.processEvents()
+
+        assert history_list.count() == 2
+        assert detail_title.text() == "Backup · Pictures"
+        assert detail_status.text() == "Fullført"
+        assert detail_operations.text() == "2 / 2"
+        assert detail_transferred.text() == "1.0 KiB / 1.0 KiB"
+        assert detail_speed.text() == "11 B/s"
+
+        QTest.mouseClick(
+            history_list.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=history_list.visualItemRect(history_list.item(1)).center(),
+        )
+        qapp.processEvents()
+
+        assert history_list.currentItem() is not None
+        assert (
+            history_list.currentItem().data(Qt.ItemDataRole.UserRole)
+            == "CONTROL:analysis-a"
+        )
+        assert detail_title.text() == "Kontroll · Pictures"
+        assert detail_status.text() == "Ingen endringer"
+        assert detail_operations.text() == "0 planlagte endringer"
+        assert detail_transferred.text() == "Ingen overføring under en kontroll"
+        assert detail_speed.text() == "-"
+
+        window.refresh_engine_status()
+        qapp.processEvents()
+        assert history_list.currentItem() is not None
+        assert (
+            history_list.currentItem().data(Qt.ItemDataRole.UserRole)
+            == "CONTROL:analysis-a"
+        )
+
+        QTest.mouseClick(
+            filter_buttons["CONTROLS"],
+            Qt.MouseButton.LeftButton,
+        )
+        qapp.processEvents()
+
+        assert provider.history_queries[-1][:2] == ("CONTROLS", None)
+        assert history_list.count() == 1
+        job_filter.setCurrentIndex(1)
+        qapp.processEvents()
+        assert provider.history_queries[-1][:2] == ("CONTROLS", "job-a")
+
+        language = window.findChild(QToolButton, "languageSelectorButton")
+        assert language is not None
+        assert language.menu() is not None
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+
+        assert filter_buttons["ALL"].text() == "All activities"
+        assert filter_buttons["CONTROLS"].text() == "Controls"
+        assert detail_title.text() == "Control · Pictures"
+        assert detail_status.text() == "No changes"
+        assert history_scroll.horizontalScrollBar().maximum() == 0
+        history_page = history_scroll.widget()
+        assert history_page is not None
+        for label in history_page.findChildren(QLabel):
+            if label.property("responsiveText") and not label.isHidden():
+                assert label.height() >= label.heightForWidth(label.width())
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_history_workspace_pages_with_bounded_offsets(qapp) -> None:
+    provider = _FakePagedHistoryEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.show()
+        window.refresh_engine_status()
+        qapp.processEvents()
+        nav = window.findChild(QListWidget, "navigationRail")
+        history_list = window.findChild(QListWidget, "historyList")
+        previous = window.findChild(QToolButton, "historyPreviousButton")
+        next_button = window.findChild(QToolButton, "historyNextButton")
+
+        assert nav is not None
+        assert history_list is not None
+        assert previous is not None
+        assert next_button is not None
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(2)).center(),
+        )
+        qapp.processEvents()
+        assert next_button.isEnabled() is True
+
+        QTest.mouseClick(next_button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert provider.history_queries[-1][3] == 25
+        assert history_list.count() == 1
+        assert (
+            history_list.item(0).data(Qt.ItemDataRole.UserRole)
+            == "BACKUP:run-z"
+        )
+        assert previous.isEnabled() is True
+        assert next_button.isEnabled() is False
+
+        QTest.mouseClick(previous, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert provider.history_queries[-1][3] == 0
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_component_gallery_is_development_only(qapp) -> None:
     window = build_main_window(
         initial_state=_ready_state(),
@@ -1609,6 +1770,149 @@ class _FakePagedJobsEngineClient(_FakeDashboardEngineClient):
         detail["job"] = job
         payload["backup_job_detail"] = detail
         return IpcResponse.accepted(payload)
+
+
+class _FakeHistoryEngineClient(_FakeDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.history_queries: list[tuple[str, str | None, int, int]] = []
+
+    def get_history_timeline(
+        self,
+        *,
+        activity_filter: str | None = None,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        normalized_filter = activity_filter or "ALL"
+        normalized_limit = limit or 25
+        normalized_offset = offset or 0
+        self.history_queries.append(
+            (
+                normalized_filter,
+                job_id,
+                normalized_limit,
+                normalized_offset,
+            )
+        )
+        activities = [
+            _history_activity_payload("run-a", kind="BACKUP"),
+            _history_activity_payload("analysis-a", kind="CONTROL"),
+        ]
+        if normalized_filter == "CONTROLS":
+            activities = activities[1:]
+        elif normalized_filter == "BACKUPS":
+            activities = activities[:1]
+        if job_id is not None:
+            activities = [
+                activity
+                for activity in activities
+                if activity["job_id"] == job_id
+            ]
+        return IpcResponse.accepted(
+            {
+                "history_timeline": {
+                    "read_model_available": True,
+                    "limit": normalized_limit,
+                    "offset": normalized_offset,
+                    "has_more": False,
+                    "activity_filter": normalized_filter,
+                    "job_id": job_id,
+                    "activities": activities,
+                }
+            }
+        )
+
+
+class _FakePagedHistoryEngineClient(_FakeHistoryEngineClient):
+    def get_history_timeline(
+        self,
+        *,
+        activity_filter: str | None = None,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        normalized_filter = activity_filter or "ALL"
+        normalized_limit = limit or 25
+        normalized_offset = offset or 0
+        self.history_queries.append(
+            (
+                normalized_filter,
+                job_id,
+                normalized_limit,
+                normalized_offset,
+            )
+        )
+        activity_id = "run-a" if normalized_offset == 0 else "run-z"
+        payload = _history_activity_payload(activity_id, kind="BACKUP")
+        return IpcResponse.accepted(
+            {
+                "history_timeline": {
+                    "read_model_available": True,
+                    "limit": normalized_limit,
+                    "offset": normalized_offset,
+                    "has_more": normalized_offset == 0,
+                    "activity_filter": normalized_filter,
+                    "job_id": job_id,
+                    "activities": [payload],
+                }
+            }
+        )
+
+
+def _history_activity_payload(
+    activity_id: str,
+    *,
+    kind: str,
+) -> dict[str, object]:
+    is_backup = kind == "BACKUP"
+    return {
+        "activity_id": activity_id,
+        "activity_kind": kind,
+        "job_id": "job-a",
+        "job_revision_id": "job-rev-a",
+        "job_title": "Pictures",
+        "run_id": activity_id if is_backup else None,
+        "analysis_id": None if is_backup else activity_id,
+        "plan_id": "plan-a" if is_backup else None,
+        "state": "COMPLETED" if is_backup else "NO_CHANGES",
+        "started_utc": (
+            "2026-07-20T12:00:00.000Z"
+            if is_backup
+            else "2026-07-20T11:00:00.000Z"
+        ),
+        "finished_utc": (
+            "2026-07-20T12:01:30.000Z"
+            if is_backup
+            else "2026-07-20T11:01:00.000Z"
+        ),
+        "planned_operations": 2 if is_backup else 0,
+        "completed_operations": 2 if is_backup else 0,
+        "planned_bytes": 1024 if is_backup else 0,
+        "completed_bytes": 1024 if is_backup else 0,
+        "warning_count": 0,
+        "error_count": 0,
+        "trigger_type": (
+            "MANUAL_LOCAL_PREVIEW" if is_backup else "INITIAL_JOB_SETUP"
+        ),
+        "targets": [
+            {
+                "endpoint_id": (
+                    "target-with-a-deliberately-long-stable-identifier-for-layout"
+                ),
+                "endpoint_revision_id": "target-rev-a",
+                "state": "SUCCEEDED" if is_backup else "WRITABLE_READY",
+                "planned_operations": 2 if is_backup else 0,
+                "completed_operations": 2 if is_backup else 0,
+                "planned_bytes": 1024 if is_backup else 0,
+                "completed_bytes": 1024 if is_backup else 0,
+                "warning_count": 0,
+                "error_count": 0,
+            }
+        ],
+    }
 
 
 class _FakePlanOnlyDashboardEngineClient(_FakeDashboardEngineClient):

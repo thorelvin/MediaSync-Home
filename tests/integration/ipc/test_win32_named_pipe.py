@@ -143,6 +143,27 @@ def test_named_pipe_activity_overview_query_succeeds_after_handshake() -> None:
     assert overview.payload["activity_overview"]["read_model_available"] is False
 
 
+def test_named_pipe_history_timeline_query_succeeds_after_handshake() -> None:
+    server, client = _server_and_client()
+
+    handshake = _roundtrip(server, client.connect)
+    timeline = _roundtrip(
+        server,
+        lambda: client.query_history_timeline(
+            activity_filter="CONTROLS",
+            job_id="job-a",
+            limit=5,
+            offset=0,
+        ),
+    )
+
+    assert handshake.status is IpcStatus.ACCEPTED
+    assert timeline.status is IpcStatus.ACCEPTED
+    assert timeline.payload["history_timeline"]["read_model_available"] is False
+    assert timeline.payload["history_timeline"]["activity_filter"] == "CONTROLS"
+    assert timeline.payload["history_timeline"]["job_id"] == "job-a"
+
+
 def test_named_pipe_run_progress_query_succeeds_after_handshake() -> None:
     server, client = _server_and_client()
 

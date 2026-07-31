@@ -38,6 +38,16 @@ class StatusIpcClient(Protocol):
     ) -> IpcResponse:
         pass
 
+    def query_history_timeline(
+        self,
+        *,
+        activity_filter: str | None = None,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        pass
+
     def query_run_progress(
         self,
         *,
@@ -154,6 +164,23 @@ class EngineClient:
     ) -> IpcResponse:
         return self._request_with_handshake_retry(
             lambda: self._ipc_client.query_activity_overview(
+                job_id=job_id,
+                limit=limit,
+                offset=offset,
+            )
+        )
+
+    def get_history_timeline(
+        self,
+        *,
+        activity_filter: str | None = None,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_history_timeline(
+                activity_filter=activity_filter,
                 job_id=job_id,
                 limit=limit,
                 offset=offset,
