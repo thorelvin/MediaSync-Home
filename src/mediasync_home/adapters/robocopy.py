@@ -54,6 +54,9 @@ HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _DISCARD_ROBOCOPY_INBOX_ERROR_CODES = frozenset(
     (
         "ROBOCOPY_PROCESS_CONTAINMENT_FAILED",
+        "ROBOCOPY_PROCESS_CLEANUP_FAILED",
+        "ROBOCOPY_PROCESS_TERMINATION_FAILED",
+        "ROBOCOPY_PROCESS_WAIT_FAILED",
         "ROBOCOPY_STAGING_SOURCE_CHANGED",
         "ROBOCOPY_TRANSFER_FAILED",
         "ROBOCOPY_TRANSFER_TIMED_OUT",
@@ -309,18 +312,56 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
                 "ROBOCOPY_PROCESS_CONTAINMENT_FAILED",
                 "Retry only after the transfer child can be contained before resume.",
             ) from exc
+        exit_code: int | None = None
+        failure: LocalFileStagingError | None = None
+        failure_cause: Exception | None = None
         try:
-            exit_code = process.wait(timeout_seconds=self._profile.timeout_seconds)
-            if exit_code is None:
-                with suppress(Exception):
-                    process.terminate(exit_code=ROBOCOPY_CONTAINMENT_TIMEOUT_EXIT_CODE)
-                raise LocalFileStagingError(
-                    "ROBOCOPY_TRANSFER_TIMED_OUT",
-                    "Retry the transfer with a smaller batch or after storage responsiveness recovers.",
+            try:
+                exit_code = process.wait(timeout_seconds=self._profile.timeout_seconds)
+            except Exception as exc:
+                failure = LocalFileStagingError(
+                    "ROBOCOPY_PROCESS_WAIT_FAILED",
+                    "Retry after the transfer child has been terminated and its staging is reconciled.",
                 )
-            return exit_code
+                failure_cause = exc
+            if exit_code is None:
+                if failure is None:
+                    failure = LocalFileStagingError(
+                        "ROBOCOPY_TRANSFER_TIMED_OUT",
+                        "Retry the transfer with a smaller batch or after storage responsiveness recovers.",
+                    )
+                try:
+                    process.terminate(exit_code=ROBOCOPY_CONTAINMENT_TIMEOUT_EXIT_CODE)
+                except Exception as exc:
+                    failure = LocalFileStagingError(
+                        "ROBOCOPY_PROCESS_TERMINATION_FAILED",
+                        "Block the transfer until the contained child is confirmed stopped.",
+                    )
+                    failure_cause = exc
         finally:
-            process.close()
+            try:
+                process.close()
+            except Exception as exc:
+                cleanup_cause: Exception = exc
+                try:
+                    process.terminate(exit_code=ROBOCOPY_CONTAINMENT_TIMEOUT_EXIT_CODE)
+                except Exception as terminate_exc:
+                    cleanup_cause = terminate_exc
+                try:
+                    process.close()
+                except Exception as retry_exc:
+                    cleanup_cause = retry_exc
+                failure = LocalFileStagingError(
+                    "ROBOCOPY_PROCESS_CLEANUP_FAILED",
+                    "Block the transfer until the Job Object and process handles are reconciled.",
+                )
+                failure_cause = cleanup_cause
+        if failure is not None:
+            if failure_cause is not None:
+                raise failure from failure_cause
+            raise failure
+        assert exit_code is not None
+        return exit_code
 
     def _robocopy_work_root_for(self, operation: RecoveryOperation) -> Path:
         if self._robocopy_work_root is not None:

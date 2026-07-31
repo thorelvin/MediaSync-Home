@@ -194,19 +194,35 @@ class ContainedTransferProcess:
         return self._api.get_exit_code_process(self._process_handle)
 
     def terminate(self, *, exit_code: int = 1) -> None:
-        if self._process_handle is not None:
-            self._api.terminate_process(self._process_handle, exit_code=exit_code)
-        self.close()
+        try:
+            if self._process_handle is not None:
+                self._api.terminate_process(self._process_handle, exit_code=exit_code)
+        finally:
+            self.close()
 
     def close(self) -> None:
+        failures: list[tuple[str, Exception]] = []
         if self._job_handle is not None:
             job_handle = self._job_handle
-            self._job_handle = None
-            self._api.close_handle(job_handle)
+            try:
+                self._api.close_handle(job_handle)
+            except Exception as exc:
+                failures.append(("job", exc))
+            else:
+                self._job_handle = None
         if self._process_handle is not None:
             process_handle = self._process_handle
-            self._process_handle = None
-            self._api.close_handle(process_handle)
+            try:
+                self._api.close_handle(process_handle)
+            except Exception as exc:
+                failures.append(("process", exc))
+            else:
+                self._process_handle = None
+        if failures:
+            failed_handles = ",".join(name for name, _exc in failures)
+            raise ProcessLaunchViolation(
+                f"TRANSFER_CHILD_HANDLE_CLOSE_FAILED:{failed_handles}"
+            ) from failures[0][1]
 
 
 class LocalSubprocessSupervisor:

@@ -213,6 +213,37 @@ def test_contained_transfer_process_wait_timeout_returns_none() -> None:
     process.close()
 
 
+@pytest.mark.parametrize("failed_handle", ("job", "process"))
+def test_contained_transfer_process_close_attempts_all_handles_and_can_retry(
+    failed_handle: str,
+) -> None:
+    api = _FakeWin32ProcessApi(fail_close_handles={failed_handle})
+    process = Win32JobObjectTransferSupervisor(api=api).start(_safe_transfer_plan())
+
+    with pytest.raises(
+        ProcessLaunchViolation,
+        match=f"TRANSFER_CHILD_HANDLE_CLOSE_FAILED:{failed_handle}",
+    ):
+        process.close()
+
+    assert api.calls[-2:] == ["close:job", "close:process"]
+
+    api.fail_close_handles.clear()
+    process.close()
+
+    assert api.calls[-1] == f"close:{failed_handle}"
+
+
+def test_contained_transfer_process_closes_handles_when_termination_fails() -> None:
+    api = _FakeWin32ProcessApi(fail_terminate=True)
+    process = Win32JobObjectTransferSupervisor(api=api).start(_safe_transfer_plan())
+
+    with pytest.raises(OSError, match="termination failed"):
+        process.terminate(exit_code=17)
+
+    assert api.calls[-3:] == ["terminate:process:17", "close:job", "close:process"]
+
+
 def test_local_subprocess_supervisor_rejects_unvalidated_shell_plan_before_spawn() -> None:
     plan = ProcessLaunchPlan(**(_safe_plan().__dict__ | {"shell": True}))
 
@@ -225,11 +256,15 @@ class _FakeWin32ProcessApi:
         self,
         *,
         fail_assign: bool = False,
+        fail_close_handles: set[str] | None = None,
+        fail_terminate: bool = False,
         wait_result: bool = True,
         exit_code: int = 259,
     ) -> None:
         self.calls: list[str] = []
         self.fail_assign = fail_assign
+        self.fail_close_handles = fail_close_handles or set()
+        self.fail_terminate = fail_terminate
         self.wait_result = wait_result
         self.exit_code = exit_code
 
@@ -276,10 +311,14 @@ class _FakeWin32ProcessApi:
     def terminate_process(self, process_handle: object, *, exit_code: int) -> None:
         assert process_handle == "process"
         self.calls.append(f"terminate:process:{exit_code}")
+        if self.fail_terminate:
+            raise OSError("termination failed")
 
     def close_handle(self, handle: object) -> None:
         assert handle in {"thread", "job", "process"}
         self.calls.append(f"close:{handle}")
+        if handle in self.fail_close_handles:
+            raise OSError(f"{handle} close failed")
 
 
 def _safe_transfer_plan() -> ProcessLaunchPlan:
