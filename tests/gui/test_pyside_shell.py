@@ -1035,8 +1035,10 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         )
         assert plan_preview_summary is not None
         assert plan_preview_summary.text() == "2 operasjoner fra plan-a."
-        assert plan_preview_rows[0].text() == "Lav: Opprett mappe: Photos"
-        assert plan_preview_rows[1].text() == "Lav: Kopier ny: Photos/2026/a.jpg - 2.0 KiB"
+        assert plan_preview_rows[0].text() == "Lav: Opprett mappe: Photos -> target-a"
+        assert plan_preview_rows[1].text() == (
+            "Lav: Kopier ny: Photos/2026/a.jpg - 2.0 KiB -> target-a"
+        )
         assert plan_endpoint_summary is not None
         assert plan_endpoint_summary.text() == "2 endepunkter fra plan-a."
         assert plan_endpoint_rows[0].text() == "Kildeendepunkt: source-a · snapshot source-snapshot-a"
@@ -1075,8 +1077,12 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert job_detail_plan.text().startswith("2 operations from plan-a.")
         assert job_detail_plan.text().endswith("Preview only")
         assert plan_preview_summary.text() == "2 operations from plan-a."
-        assert plan_preview_rows[0].text() == "Low: Create folder: Photos"
-        assert plan_preview_rows[1].text() == "Low: Copy new: Photos/2026/a.jpg - 2.0 KiB"
+        assert plan_preview_rows[0].text() == (
+            "Low: Create folder: Photos -> target-a"
+        )
+        assert plan_preview_rows[1].text() == (
+            "Low: Copy new: Photos/2026/a.jpg - 2.0 KiB -> target-a"
+        )
         assert plan_endpoint_summary.text() == "2 endpoints from plan-a."
         assert plan_endpoint_rows[0].text() == "Source endpoint: source-a · snapshot source-snapshot-a"
         assert plan_endpoint_rows[1].text() == "Target endpoint 1: target-a · snapshot target-snapshot-a"
@@ -1109,8 +1115,10 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert job_detail_revision.text() == "Revisjon: job-rev-a - Filter: filter-a"
         assert job_detail_plan.text().startswith("2 operasjoner fra plan-a.")
         assert plan_preview_summary.text() == "2 operasjoner fra plan-a."
-        assert plan_preview_rows[0].text() == "Lav: Opprett mappe: Photos"
-        assert plan_preview_rows[1].text() == "Lav: Kopier ny: Photos/2026/a.jpg - 2.0 KiB"
+        assert plan_preview_rows[0].text() == "Lav: Opprett mappe: Photos -> target-a"
+        assert plan_preview_rows[1].text() == (
+            "Lav: Kopier ny: Photos/2026/a.jpg - 2.0 KiB -> target-a"
+        )
         assert plan_endpoint_summary.text() == "2 endepunkter fra plan-a."
         assert plan_endpoint_rows[0].text() == "Kildeendepunkt: source-a · snapshot source-snapshot-a"
         assert plan_endpoint_rows[1].text() == "Målendepunkt 1: target-a · snapshot target-snapshot-a"
@@ -1246,6 +1254,108 @@ def test_jobs_workspace_pages_without_losing_bounded_query_state(qapp) -> None:
 
         assert provider.requested_offsets[-1] == 0
         assert jobs_list.item(0).data(Qt.ItemDataRole.UserRole) == "job-a"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_jobs_changes_workspace_filters_pages_and_localizes_without_clipping(
+    qapp,
+) -> None:
+    provider = _FakeChangesDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window.refresh_engine_status()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+        title = window.findChild(QLabel, "changesTitle")
+        banner = window.findChild(QLabel, "changesAttentionBanner")
+        target_filter = window.findChild(QComboBox, "changesTargetFilter")
+        risk_filter = window.findChild(QComboBox, "changesRiskFilter")
+        changes_list = window.findChild(QListWidget, "changesList")
+        next_button = window.findChild(QToolButton, "changesNextButton")
+        detail_reason = window.findChild(QLabel, "changesDetailReasonValue")
+        detail_precondition = window.findChild(
+            QLabel,
+            "changesDetailPreconditionValue",
+        )
+        detail_target = window.findChild(QLabel, "changesDetailTargetValue")
+        jobs_scroll = window.findChild(QScrollArea, "jobsScrollArea")
+        changes_panel = window.findChild(QFrame, "changesPanel")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert title is not None and title.text() == "Endringer"
+        assert banner is not None
+        assert banner.text() == (
+            "Krever oppmerksomhet: 1 blokkert, 3 må vurderes."
+        )
+        assert banner.property("attentionKind") == "blocked"
+        assert target_filter is not None
+        assert [target_filter.itemText(index) for index in range(3)] == [
+            "Alle mål",
+            "target-a",
+            "target-b",
+        ]
+        assert risk_filter is not None
+        assert [risk_filter.itemText(index) for index in range(3)] == [
+            "Alle endringer",
+            "Krever oppmerksomhet",
+            "Trygge endringer",
+        ]
+        assert changes_list is not None and changes_list.count() == 2
+        assert changes_list.item(0).text().startswith("Trygg · Kopier ny")
+        assert changes_list.item(1).text().startswith("Vurder · Kopier ny")
+
+        changes_list.setCurrentRow(1)
+        qapp.processEvents()
+        assert detail_reason is not None
+        assert detail_reason.text() == "TARGET_CONTENT_DIFFERS"
+        assert detail_precondition is not None
+        assert detail_precondition.text() == "Må samsvare med kontrollert fil"
+        assert detail_target is not None and detail_target.text() == "target-b"
+
+        assert next_button is not None and next_button.isEnabled()
+        QTest.mouseClick(next_button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert window._changes_page_index == 1
+        assert window._changes_page_label is not None
+        assert window._changes_page_label.text() == "Side 2"
+        assert changes_list.count() == 2
+        assert changes_list.item(0).text().startswith("Høy risiko · Utsatt")
+        assert changes_list.item(1).text().startswith("Blokkert · Blokkert")
+
+        risk_filter.setCurrentIndex(risk_filter.findData("ATTENTION"))
+        qapp.processEvents()
+        assert window._changes_page_index == 0
+        target_filter.setCurrentIndex(target_filter.findData("target-b"))
+        qapp.processEvents()
+        assert changes_list.count() == 2
+        assert all("target-b" in changes_list.item(index).text() for index in range(2))
+        assert provider.changes_queries[-1][3:] == (
+            "target-b",
+            ("MEDIUM", "HIGH", "BLOCKED"),
+        )
+
+        assert language is not None and language.menu() is not None
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+        assert title.text() == "Changes"
+        assert banner.text() == "Needs attention: 1 blocked, 3 require review."
+        assert risk_filter.itemText(1) == "Needs attention"
+        assert changes_list.item(0).text().startswith("Review · Copy new")
+        assert jobs_scroll is not None
+        assert jobs_scroll.horizontalScrollBar().maximum() == 0
+        assert changes_panel is not None
+        for label in changes_panel.findChildren(QLabel):
+            if label.property("responsiveText") and not label.isHidden():
+                assert label.height() >= label.heightForWidth(label.width())
     finally:
         window.close()
         window.deleteLater()
@@ -2156,43 +2266,68 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
         plan_id: str,
         limit: int | None = None,
         after: dict[str, object] | None = None,
+        target_endpoint_id: str | None = None,
+        risk_levels: tuple[str, ...] = (),
     ) -> IpcResponse:
-        del limit, after
+        del after
         self.calls.append("get_plan_operations")
+        operations = [
+            {
+                "operation_id": "op-a",
+                "operation_type": "CREATE_DIRECTORY",
+                "sequence_no": 0,
+                "execution_phase": 10,
+                "stable_order_key": "photos",
+                "target_precondition_kind": "ABSENT",
+                "reason_code": "TARGET_DIRECTORY_MISSING",
+                "risk_level": "LOW",
+                "target_endpoint_id": "target-a",
+                "target_relative_path": "Photos",
+                "planned_bytes": 0,
+            },
+            {
+                "operation_id": "op-b",
+                "operation_type": "COPY_NEW",
+                "sequence_no": 1,
+                "execution_phase": 20,
+                "stable_order_key": "photos/2026",
+                "target_precondition_kind": "ABSENT",
+                "reason_code": "SOURCE_ONLY",
+                "risk_level": "LOW",
+                "target_endpoint_id": "target-a",
+                "target_relative_path": "Photos/2026/a.jpg",
+                "planned_bytes": 2048,
+            },
+        ]
+        if target_endpoint_id is not None:
+            operations = [
+                operation
+                for operation in operations
+                if operation["target_endpoint_id"] == target_endpoint_id
+            ]
+        if risk_levels:
+            operations = [
+                operation
+                for operation in operations
+                if operation["risk_level"] in risk_levels
+            ]
         return IpcResponse.accepted(
             {
                 "plan_operations": {
                     "plan_id": plan_id,
-                    "limit": 3,
+                    "limit": limit or 25,
                     "has_more": False,
                     "read_model_available": True,
                     "next_cursor": None,
-                    "operations": [
-                        {
-                            "operation_id": "op-a",
-                            "operation_type": "CREATE_DIRECTORY",
-                            "sequence_no": 0,
-                            "execution_phase": 10,
-                            "stable_order_key": "photos",
-                            "target_precondition_kind": "ABSENT",
-                            "reason_code": "TARGET_DIRECTORY_MISSING",
-                            "risk_level": "LOW",
-                            "target_relative_path": "Photos",
-                            "planned_bytes": 0,
-                        },
-                        {
-                            "operation_id": "op-b",
-                            "operation_type": "COPY_NEW",
-                            "sequence_no": 1,
-                            "execution_phase": 20,
-                            "stable_order_key": "photos/2026",
-                            "target_precondition_kind": "ABSENT",
-                            "reason_code": "SOURCE_ONLY",
-                            "risk_level": "LOW",
-                            "target_relative_path": "Photos/2026/a.jpg",
-                            "planned_bytes": 2048,
-                        },
-                    ],
+                    "risk_counts": {
+                        "LOW": 2,
+                        "MEDIUM": 0,
+                        "HIGH": 0,
+                        "BLOCKED": 0,
+                    },
+                    "highest_risk": "LOW",
+                    "target_endpoint_ids": ["target-a"],
+                    "operations": operations,
                 }
             }
         )
@@ -2355,6 +2490,144 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                             "recorded_utc": "2026-07-20T12:00:00.000Z",
                         }
                     ],
+                }
+            }
+        )
+
+
+class _FakeChangesDashboardEngineClient(_FakeDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.changes_queries: list[
+            tuple[
+                str,
+                int,
+                dict[str, object] | None,
+                str | None,
+                tuple[str, ...],
+            ]
+        ] = []
+
+    def get_plan_operations(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        target_endpoint_id: str | None = None,
+        risk_levels: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        normalized_limit = limit or 25
+        self.calls.append("get_plan_operations")
+        self.changes_queries.append(
+            (
+                plan_id,
+                normalized_limit,
+                after,
+                target_endpoint_id,
+                risk_levels,
+            )
+        )
+        operations = [
+            {
+                "operation_id": "op-safe",
+                "operation_type": "COPY_NEW",
+                "sequence_no": 10,
+                "execution_phase": 10,
+                "stable_order_key": "photos/new.jpg",
+                "target_precondition_kind": "ABSENT",
+                "reason_code": "SOURCE_ONLY",
+                "risk_level": "LOW",
+                "target_endpoint_id": "target-a",
+                "target_relative_path": "Photos/new.jpg",
+                "planned_bytes": 1024,
+            },
+            {
+                "operation_id": "op-review",
+                "operation_type": "COPY_NEW",
+                "sequence_no": 20,
+                "execution_phase": 20,
+                "stable_order_key": "photos/review.jpg",
+                "target_precondition_kind": "MATCH_FINGERPRINT",
+                "reason_code": "TARGET_CONTENT_DIFFERS",
+                "risk_level": "MEDIUM",
+                "target_endpoint_id": "target-b",
+                "target_relative_path": "Photos/review.jpg",
+                "planned_bytes": 2048,
+            },
+            {
+                "operation_id": "op-high",
+                "operation_type": "DEFER_AUTOMATION_POLICY",
+                "sequence_no": 30,
+                "execution_phase": 30,
+                "stable_order_key": "photos/high.jpg",
+                "target_precondition_kind": "NONE",
+                "reason_code": "AUTOMATION_REVIEW_REQUIRED",
+                "risk_level": "HIGH",
+                "target_endpoint_id": "target-a",
+                "target_relative_path": "Photos/high.jpg",
+                "planned_bytes": 4096,
+            },
+            {
+                "operation_id": "op-blocked",
+                "operation_type": "BLOCK_ENDPOINT_CAPABILITIES_UNKNOWN",
+                "sequence_no": 40,
+                "execution_phase": 40,
+                "stable_order_key": "photos/blocked.jpg",
+                "target_precondition_kind": "NONE",
+                "reason_code": "ENDPOINT_CAPABILITIES_UNKNOWN",
+                "risk_level": "BLOCKED",
+                "target_endpoint_id": "target-b",
+                "target_relative_path": "Photos/blocked.jpg",
+                "planned_bytes": 0,
+            },
+        ]
+        if target_endpoint_id is not None:
+            operations = [
+                operation
+                for operation in operations
+                if operation["target_endpoint_id"] == target_endpoint_id
+            ]
+        if risk_levels:
+            operations = [
+                operation
+                for operation in operations
+                if operation["risk_level"] in risk_levels
+            ]
+        start = 0
+        if after is not None:
+            after_operation_id = after.get("operation_id")
+            for index, operation in enumerate(operations):
+                if operation["operation_id"] == after_operation_id:
+                    start = index + 1
+                    break
+        page_operations = operations[start : start + 2]
+        has_more = start + len(page_operations) < len(operations)
+        next_cursor = None
+        if has_more and page_operations:
+            last = page_operations[-1]
+            next_cursor = {
+                "execution_phase": last["execution_phase"],
+                "stable_order_key": last["stable_order_key"],
+                "operation_id": last["operation_id"],
+            }
+        return IpcResponse.accepted(
+            {
+                "plan_operations": {
+                    "plan_id": plan_id,
+                    "limit": normalized_limit,
+                    "has_more": has_more,
+                    "read_model_available": True,
+                    "next_cursor": next_cursor,
+                    "risk_counts": {
+                        "LOW": 1,
+                        "MEDIUM": 1,
+                        "HIGH": 1,
+                        "BLOCKED": 1,
+                    },
+                    "highest_risk": "BLOCKED",
+                    "target_endpoint_ids": ["target-a", "target-b"],
+                    "operations": page_operations,
                 }
             }
         )
@@ -3082,7 +3355,10 @@ class _FakePagedHistoryOperationsEngineClient(_FakeHistoryEngineClient):
         plan_id: str,
         limit: int | None = None,
         after: dict[str, object] | None = None,
+        target_endpoint_id: str | None = None,
+        risk_levels: tuple[str, ...] = (),
     ) -> IpcResponse:
+        del target_endpoint_id, risk_levels
         normalized_limit = limit or 100
         self.calls.append("get_plan_operations")
         self.operation_page_queries.append((plan_id, normalized_limit, after))
@@ -3105,6 +3381,14 @@ class _FakePagedHistoryOperationsEngineClient(_FakeHistoryEngineClient):
                         if first_page
                         else None
                     ),
+                    "risk_counts": {
+                        "LOW": 2,
+                        "MEDIUM": 0,
+                        "HIGH": 0,
+                        "BLOCKED": 0,
+                    },
+                    "highest_risk": "LOW",
+                    "target_endpoint_ids": ["target-a"],
                     "operations": [
                         {
                             "operation_id": operation_id,

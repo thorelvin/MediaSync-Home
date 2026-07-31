@@ -20,6 +20,14 @@ def test_plan_preview_view_model_renders_bounded_operation_rows() -> None:
                     "stable_order_key": "photos/2026",
                     "operation_id": "op-b",
                 },
+                "risk_counts": {
+                    "LOW": 8,
+                    "MEDIUM": 2,
+                    "HIGH": 1,
+                    "BLOCKED": 1,
+                },
+                "highest_risk": "BLOCKED",
+                "target_endpoint_ids": ["target-a", "target-b"],
                 "operations": [
                     {
                         "operation_id": "op-a",
@@ -73,6 +81,19 @@ def test_plan_preview_view_model_renders_bounded_operation_rows() -> None:
         "Photos/2026/a.jpg",
     ]
     assert [row.planned_bytes for row in state.rows] == [0, 2048]
+    assert [row.risk_level for row in state.rows] == ["LOW", "LOW"]
+    assert [row.reason_code for row in state.rows] == [
+        "TARGET_DIRECTORY_MISSING",
+        "SOURCE_ONLY",
+    ]
+    assert [row.target_precondition_kind for row in state.rows] == [
+        "ABSENT",
+        "ABSENT",
+    ]
+    assert state.operation_count == 12
+    assert state.attention_count == 4
+    assert state.highest_risk == "BLOCKED"
+    assert state.target_endpoint_ids == ("target-a", "target-b")
     assert state.limit == 2
     assert state.next_cursor == {
         "execution_phase": 20,

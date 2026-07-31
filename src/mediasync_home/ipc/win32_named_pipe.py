@@ -780,6 +780,10 @@ class Win32NamedPipeServer:
                 plan_id=str(request["plan_id"]),
                 limit=_optional_query_int(request.get("limit")),
                 after=_optional_query_object(request.get("after")),
+                target_endpoint_id=_optional_query_str(
+                    request.get("target_endpoint_id")
+                ),
+                risk_levels=_optional_query_str_tuple(request.get("risk_levels")),
             )
         if message_type == "QUERY_PLAN_ENDPOINTS":
             return self.service.query_plan_endpoints(
@@ -965,6 +969,8 @@ class Win32NamedPipeClient:
         plan_id: str,
         limit: int | None = None,
         after: dict[str, object] | None = None,
+        target_endpoint_id: str | None = None,
+        risk_levels: tuple[str, ...] = (),
     ) -> IpcResponse:
         request: dict[str, Any] = {
             "message_type": "QUERY_PLAN_OPERATIONS",
@@ -975,6 +981,10 @@ class Win32NamedPipeClient:
             request["limit"] = limit
         if after is not None:
             request["after"] = after
+        if target_endpoint_id is not None:
+            request["target_endpoint_id"] = target_endpoint_id
+        if risk_levels:
+            request["risk_levels"] = list(risk_levels)
         return self._roundtrip(request)
 
     def query_plan_endpoints(

@@ -109,6 +109,40 @@ def test_sqlite_plan_store_pages_operations_by_stable_order(tmp_path: Path) -> N
         assert second_page.next_cursor is None
 
 
+def test_sqlite_plan_store_filters_operations_and_returns_sealed_risk_metadata(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        store = SqlitePlanStore(connection)
+        store.save_sealed_plan(_filtered_operation_page_plan())
+
+        page = store.page_plan_operations(
+            PlanOperationPageQuery(
+                plan_id="plan-filtered",
+                limit=10,
+                target_endpoint_id="target-a",
+                risk_levels=(PlanRiskLevel.MEDIUM, PlanRiskLevel.BLOCKED),
+            )
+        )
+
+        assert [operation.operation_id for operation in page.operations] == [
+            "op-review",
+            "op-blocked",
+        ]
+        assert page.risk_counts == {
+            "LOW": 1,
+            "MEDIUM": 1,
+            "HIGH": 0,
+            "BLOCKED": 1,
+        }
+        assert page.highest_risk is PlanRiskLevel.BLOCKED
+        assert page.target_endpoint_ids == ("target-a",)
+        assert page.has_more is False
+
+
 def test_sqlite_plan_store_pages_endpoints_by_role_and_target_order(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
@@ -396,6 +430,53 @@ def _endpoint_page_plan() -> SealedPlan:
                 target_relative_path="Pictures/A.jpg",
             ),
         ),
+    )
+
+
+def _filtered_operation_page_plan() -> SealedPlan:
+    return seal_plan(
+        plan_id="plan-filtered",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(_target_endpoint(),),
+        operations=(
+            _filtered_operation("op-low", PlanRiskLevel.LOW, "Pictures/A.jpg"),
+            _filtered_operation(
+                "op-review",
+                PlanRiskLevel.MEDIUM,
+                "Pictures/B.jpg",
+            ),
+            _filtered_operation(
+                "op-blocked",
+                PlanRiskLevel.BLOCKED,
+                "Pictures/C.jpg",
+                target_endpoint_id=None,
+            ),
+        ),
+    )
+
+
+def _filtered_operation(
+    operation_id: str,
+    risk_level: PlanRiskLevel,
+    target_relative_path: str,
+    *,
+    target_endpoint_id: str | None = "target-a",
+) -> PlanOperation:
+    return PlanOperation(
+        operation_id=operation_id,
+        operation_type=PlanOperationType.SKIP_IDENTICAL,
+        sequence_no={"op-low": 10, "op-review": 20, "op-blocked": 30}[
+            operation_id
+        ],
+        execution_phase=10,
+        stable_order_key=target_relative_path,
+        target_precondition_kind=TargetPreconditionKind.NONE,
+        target_endpoint_id=target_endpoint_id,
+        target_relative_path=target_relative_path,
+        reason_code=operation_id.upper().replace("-", "_"),
+        risk_level=risk_level,
     )
 
 

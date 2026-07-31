@@ -14,6 +14,9 @@ class PlanOperationPreviewRow:
     operation_type: str | None = None
     target_relative_path: str | None = None
     planned_bytes: int = 0
+    risk_level: str | None = None
+    reason_code: str | None = None
+    target_precondition_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,25 @@ class PlanOperationPreviewState:
     rows: tuple[PlanOperationPreviewRow, ...]
     limit: int = 100
     next_cursor: dict[str, object] | None = None
+    low_risk_count: int = 0
+    medium_risk_count: int = 0
+    high_risk_count: int = 0
+    blocked_risk_count: int = 0
+    highest_risk: str | None = None
+    target_endpoint_ids: tuple[str, ...] = ()
+
+    @property
+    def operation_count(self) -> int:
+        return (
+            self.low_risk_count
+            + self.medium_risk_count
+            + self.high_risk_count
+            + self.blocked_risk_count
+        )
+
+    @property
+    def attention_count(self) -> int:
+        return self.medium_risk_count + self.high_risk_count + self.blocked_risk_count
 
 
 def empty_plan_operation_preview_state() -> PlanOperationPreviewState:
@@ -73,12 +95,19 @@ def plan_operation_preview_from_response(response: IpcResponse | None) -> PlanOp
         rows=rows,
         limit=_positive_int(page.get("limit")) or 100,
         next_cursor=_next_cursor(page.get("next_cursor")),
+        low_risk_count=_risk_count(page, "LOW"),
+        medium_risk_count=_risk_count(page, "MEDIUM"),
+        high_risk_count=_risk_count(page, "HIGH"),
+        blocked_risk_count=_risk_count(page, "BLOCKED"),
+        highest_risk=_required_text(page.get("highest_risk")),
+        target_endpoint_ids=_target_endpoint_ids(page.get("target_endpoint_ids")),
     )
 
 
 def _preview_row(payload: dict[object, object]) -> PlanOperationPreviewRow:
     operation_id = _required_text(payload.get("operation_id")) or "operation"
     operation_type_code = _required_text(payload.get("operation_type"))
+    risk_level = _required_text(payload.get("risk_level"))
     operation_type = _operation_label(operation_type_code)
     risk = _risk_label(payload.get("risk_level"))
     path = _required_text(payload.get("target_relative_path")) or _required_text(payload.get("reason_code")) or "item"
@@ -94,6 +123,28 @@ def _preview_row(payload: dict[object, object]) -> PlanOperationPreviewRow:
         operation_type=operation_type_code,
         target_relative_path=_required_text(payload.get("target_relative_path")),
         planned_bytes=planned_bytes,
+        risk_level=risk_level,
+        reason_code=_required_text(payload.get("reason_code")),
+        target_precondition_kind=_required_text(
+            payload.get("target_precondition_kind")
+        ),
+    )
+
+
+def _risk_count(page: dict[object, object], risk_level: str) -> int:
+    counts = page.get("risk_counts")
+    if not isinstance(counts, dict):
+        return 0
+    return _non_negative_int(counts.get(risk_level)) or 0
+
+
+def _target_endpoint_ids(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(
+        endpoint_id
+        for item in value
+        if (endpoint_id := _required_text(item)) is not None
     )
 
 

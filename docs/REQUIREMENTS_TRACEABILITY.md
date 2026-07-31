@@ -1,5 +1,24 @@
 # Kravsporbarhet
 
+Oppdatering 2026-07-31 for `SYNC-002`, `UX-002`, `UX-004` og `PERF-001`:
+Jobber viser nå en lokalisert **Endringer**-arbeidsflate over valgt forseglede
+plan. Planoperasjonsspørringen støtter validerte, parameteriserte mål- og
+risikofiltre, bounded keyset-sider og planens immutable risikotall/mål-ID-er.
+GUI-et holder høyst 25 rader, viser oppmerksomhetsoppsummering og eksakt
+årsakskode/precondition for valgt endring, og beholder filter/detalj ved
+språkbytte. 900×560-dekningen har null horisontal overflow. Virtuelle tabeller,
+cancellable bakgrunnsspørringer og `UiUpdateCoalescer` er fortsatt pending.
+Bevis: `src/mediasync_home/application/plans.py`,
+`src/mediasync_home/application/plan_read_models.py`,
+`src/mediasync_home/adapters/sqlite/plans.py`,
+`src/mediasync_home/ipc/`,
+`src/mediasync_home/presentation/view_models/plan_preview.py`,
+`src/mediasync_home/presentation/main_window.py`,
+`tests/unit/test_plan_read_models.py`,
+`tests/integration/sqlite/test_sqlite_plans.py`,
+`tests/integration/ipc/test_win32_named_pipe.py` og
+`tests/gui/test_pyside_shell.py`.
+
 Oppdatering 2026-07-31 for `UX-004`: Det terminale resultatkortet viser nå et
 stabilt, lokalisert **N av M mål fullført** basert på det autoritative
 run-snapshotet. Mål med suksess eller suksess med varsler teller som fullført;

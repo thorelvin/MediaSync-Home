@@ -190,6 +190,64 @@ class ShellText:
         return "Backup progress" if self.language_tooltip_prefix == "Language" else "Backupfremdrift"
 
     @property
+    def changes(self) -> str:
+        return "Changes" if self.language_tooltip_prefix == "Language" else "Endringer"
+
+    @property
+    def all_targets(self) -> str:
+        return "All targets" if self.language_tooltip_prefix == "Language" else "Alle mål"
+
+    @property
+    def all_changes(self) -> str:
+        return "All changes" if self.language_tooltip_prefix == "Language" else "Alle endringer"
+
+    @property
+    def attention_changes(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Needs attention"
+        return "Krever oppmerksomhet"
+
+    @property
+    def safe_changes(self) -> str:
+        return "Safe changes" if self.language_tooltip_prefix == "Language" else "Trygge endringer"
+
+    @property
+    def no_plan_changes(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "No checked changes are ready."
+        return "Ingen kontrollerte endringer er klare."
+
+    @property
+    def no_filtered_changes(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "No changes match these filters."
+        return "Ingen endringer samsvarer med filtrene."
+
+    @property
+    def decision(self) -> str:
+        return "Decision" if self.language_tooltip_prefix == "Language" else "Beslutning"
+
+    @property
+    def change_type(self) -> str:
+        return "Change" if self.language_tooltip_prefix == "Language" else "Endring"
+
+    @property
+    def path(self) -> str:
+        return "Path" if self.language_tooltip_prefix == "Language" else "Sti"
+
+    @property
+    def reason_code(self) -> str:
+        return "Reason code" if self.language_tooltip_prefix == "Language" else "Årsakskode"
+
+    @property
+    def precondition(self) -> str:
+        return "Precondition" if self.language_tooltip_prefix == "Language" else "Forhåndsvilkår"
+
+    @property
+    def planned_size(self) -> str:
+        return "Planned size" if self.language_tooltip_prefix == "Language" else "Planlagt størrelse"
+
+    @property
     def run_result(self) -> str:
         return "Backup result" if self.language_tooltip_prefix == "Language" else "Backupresultat"
 

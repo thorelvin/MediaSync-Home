@@ -75,6 +75,8 @@ class GuiIpcClient(Protocol):
         plan_id: str,
         limit: int | None = None,
         after: dict[str, object] | None = None,
+        target_endpoint_id: str | None = None,
+        risk_levels: tuple[str, ...] = (),
     ) -> IpcResponse: ...
 
     def query_plan_endpoints(
@@ -162,6 +164,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--snapshot-id")
     parser.add_argument("--run-id")
     parser.add_argument("--target-endpoint-id")
+    parser.add_argument(
+        "--risk-level",
+        action="append",
+        choices=("LOW", "MEDIUM", "HIGH", "BLOCKED"),
+    )
     parser.add_argument("--limit", type=int)
     parser.add_argument("--offset", type=int)
     parser.add_argument("--after-json")
@@ -291,6 +298,8 @@ def _run_pipe_action(args: argparse.Namespace, client: GuiIpcClient) -> IpcRespo
             plan_id=args.plan_id or "",
             limit=args.limit,
             after=_parse_after_json(args.after_json),
+            target_endpoint_id=args.target_endpoint_id,
+            risk_levels=tuple(args.risk_level or ()),
         )
     if args.query_plan_endpoints:
         return client.query_plan_endpoints(

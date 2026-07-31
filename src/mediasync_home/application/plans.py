@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Mapping, Protocol
 
@@ -150,6 +150,8 @@ class PlanOperationPageQuery:
     plan_id: str
     limit: int
     after: PlanOperationCursor | None = None
+    target_endpoint_id: str | None = None
+    risk_levels: tuple[PlanRiskLevel, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -173,6 +175,9 @@ class PlanOperationPage:
     operations: tuple[PlanOperationReadModel, ...]
     next_cursor: PlanOperationCursor | None
     has_more: bool
+    risk_counts: Mapping[str, int] = field(default_factory=dict)
+    highest_risk: PlanRiskLevel | None = None
+    target_endpoint_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -337,14 +342,19 @@ def validate_plan_operation_page_query(query: PlanOperationPageQuery) -> None:
         raise PlanSealViolation("PLAN_OPERATION_READ_LIMIT_MUST_BE_POSITIVE")
     if query.limit > MAX_PLAN_OPERATION_PAGE_LIMIT:
         raise PlanSealViolation("PLAN_OPERATION_READ_LIMIT_TOO_LARGE")
-    if query.after is None:
-        return
-    if query.after.execution_phase < 0:
-        raise PlanSealViolation("PLAN_OPERATION_READ_CURSOR_PHASE_MUST_BE_NON_NEGATIVE")
-    if not query.after.stable_order_key.strip():
-        raise PlanSealViolation("PLAN_OPERATION_READ_CURSOR_REQUIRES_STABLE_ORDER_KEY")
-    if not query.after.operation_id.strip():
-        raise PlanSealViolation("PLAN_OPERATION_READ_CURSOR_REQUIRES_OPERATION_ID")
+    if query.target_endpoint_id is not None and not query.target_endpoint_id.strip():
+        raise PlanSealViolation("PLAN_OPERATION_READ_TARGET_MUST_NOT_BE_BLANK")
+    if len(query.risk_levels) > len(PlanRiskLevel):
+        raise PlanSealViolation("PLAN_OPERATION_READ_RISK_FILTER_TOO_LARGE")
+    if len(set(query.risk_levels)) != len(query.risk_levels):
+        raise PlanSealViolation("PLAN_OPERATION_READ_RISK_FILTER_DUPLICATED")
+    if query.after is not None:
+        if query.after.execution_phase < 0:
+            raise PlanSealViolation("PLAN_OPERATION_READ_CURSOR_PHASE_MUST_BE_NON_NEGATIVE")
+        if not query.after.stable_order_key.strip():
+            raise PlanSealViolation("PLAN_OPERATION_READ_CURSOR_REQUIRES_STABLE_ORDER_KEY")
+        if not query.after.operation_id.strip():
+            raise PlanSealViolation("PLAN_OPERATION_READ_CURSOR_REQUIRES_OPERATION_ID")
 
 
 def validate_plan_endpoint_page_query(query: PlanEndpointPageQuery) -> None:

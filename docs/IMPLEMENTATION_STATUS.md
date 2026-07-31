@@ -1,5 +1,16 @@
 # Implementeringsstatus
 
+Oppdatering 2026-07-31: **Jobber** har nå en egen, lokalisert
+**Endringer**-arbeidsflate for den valgte jobbens gjeldende forseglede plan.
+Den viser immutable beslutningstall og oppmerksomhetsbanner, filtrerer
+autoritativt på mål og risikonivå i SQLite/IPC, blar med bounded keyset-cursor
+og materialiserer høyst 25 rader i GUI-et. Valgt endring viser beslutning,
+operasjonstype, mål, sti, rå årsakskode, målprecondition og planlagte byte.
+Norsk/engelsk språkbytte bevarer filtre og valgt detalj; to sider, to mål,
+safe/review/high/blocked og 900×560 uten horisontal overflow er dekket.
+Virtuelle millionradstabeller, cancellable bakgrunnsspørringer og
+`UiUpdateCoalescer` gjenstår.
+
 Oppdatering 2026-07-31: Terminale resultater i **Jobber** viser nå et stabilt,
 lokalisert sammendrag av hvor mange mål som ble fullført, for eksempel
 **2 av 3 mål fullført**. `SUCCEEDED` og `SUCCEEDED_WITH_WARNINGS` teller som

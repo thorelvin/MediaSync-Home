@@ -35,6 +35,9 @@ def test_plan_operation_query_reports_unavailable_store_with_normalized_bounds()
         "has_more": False,
         "read_model_available": False,
         "next_cursor": None,
+        "risk_counts": {},
+        "highest_risk": None,
+        "target_endpoint_ids": [],
         "operations": [],
     }
 
@@ -64,6 +67,8 @@ def test_plan_operation_query_returns_bounded_serializable_page() -> None:
             "stable_order_key": "000:start",
             "operation_id": "op-start",
         },
+        target_endpoint_id="target-a",
+        risk_levels=("LOW", "MEDIUM"),
     )
 
     assert store.queries == (
@@ -75,6 +80,8 @@ def test_plan_operation_query_returns_bounded_serializable_page() -> None:
                 stable_order_key="000:start",
                 operation_id="op-start",
             ),
+            target_endpoint_id="target-a",
+            risk_levels=(PlanRiskLevel.LOW, PlanRiskLevel.MEDIUM),
         ),
     )
     assert page.to_dict() == {
@@ -87,6 +94,9 @@ def test_plan_operation_query_returns_bounded_serializable_page() -> None:
             "stable_order_key": "010:Pictures/op-a.jpg",
             "operation_id": "op-a",
         },
+        "risk_counts": {"LOW": 2},
+        "highest_risk": "LOW",
+        "target_endpoint_ids": ["target-a"],
         "operations": [
             {
                 "operation_id": "op-a",
@@ -193,6 +203,27 @@ def test_plan_operation_query_rejects_invalid_bounds_or_cursor(
 
 
 @pytest.mark.parametrize(
+    ("target_endpoint_id", "risk_levels"),
+    [
+        (" ", ()),
+        (None, ("UNKNOWN",)),
+        (None, ("LOW", "LOW")),
+    ],
+)
+def test_plan_operation_query_rejects_invalid_filters(
+    target_endpoint_id: str | None,
+    risk_levels: tuple[str, ...],
+) -> None:
+    with pytest.raises(PlanOperationsQueryError):
+        query_plan_operations(
+            plan_read_store=None,
+            plan_id="plan-a",
+            target_endpoint_id=target_endpoint_id,
+            risk_levels=risk_levels,
+        )
+
+
+@pytest.mark.parametrize(
     ("plan_id", "limit", "after"),
     [
         (" ", None, None),
@@ -230,6 +261,9 @@ class _FakePlanOperationStore:
             operations=operations,
             has_more=len(self._operations) > query.limit,
             next_cursor=_cursor(operations[-1]) if len(self._operations) > query.limit else None,
+            risk_counts={"LOW": len(self._operations)},
+            highest_risk=PlanRiskLevel.LOW,
+            target_endpoint_ids=("target-a",),
         )
 
 

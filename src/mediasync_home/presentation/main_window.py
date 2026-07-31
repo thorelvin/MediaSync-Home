@@ -195,6 +195,8 @@ class PlanOperationsProvider(Protocol):
         plan_id: str,
         limit: int | None = None,
         after: dict[str, object] | None = None,
+        target_endpoint_id: str | None = None,
+        risk_levels: tuple[str, ...] = (),
     ) -> IpcResponse: ...
 
 
@@ -476,6 +478,26 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_pause_button: QPushButton | None = None
         self._jobs_resume_button: QPushButton | None = None
         self._jobs_stop_button: QPushButton | None = None
+        self._changes_plan_id: str | None = None
+        self._changes_page_state = empty_plan_operation_preview_state()
+        self._changes_page_limit = 25
+        self._changes_page_index = 0
+        self._changes_page_cursors: list[dict[str, object] | None] = [None]
+        self._changes_target_filter: str | None = None
+        self._changes_risk_filter = "ALL"
+        self._selected_changes_operation_id: str | None = None
+        self._changes_title_label: QLabel | None = None
+        self._changes_attention_banner: QLabel | None = None
+        self._changes_target_combo: QComboBox | None = None
+        self._changes_risk_combo: QComboBox | None = None
+        self._changes_list: QListWidget | None = None
+        self._changes_empty_label: QLabel | None = None
+        self._changes_page_label: QLabel | None = None
+        self._changes_previous_button: QToolButton | None = None
+        self._changes_next_button: QToolButton | None = None
+        self._changes_detail_title: QLabel | None = None
+        self._changes_detail_labels: dict[str, QLabel] = {}
+        self._changes_detail_values: dict[str, QLabel] = {}
         self._engine_title_label: QLabel | None = None
         self._engine_scope_label: QLabel | None = None
         self._engine_contract_label: QLabel | None = None
@@ -783,6 +805,7 @@ class MediaSyncWindow(QMainWindow):
             return
         if state is None or state.plan_id is None:
             self.apply_plan_operation_preview(empty_plan_operation_preview_state())
+            self._clear_changes_plan()
             self.apply_plan_endpoint_preview(empty_plan_endpoint_preview_state())
             self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
             return
@@ -1426,6 +1449,8 @@ class MediaSyncWindow(QMainWindow):
             "CREATE_DIRECTORY": ("Create folder", "Opprett mappe"),
             "REPLACE_VERSIONED": ("Replace with version", "Erstatt med versjon"),
             "QUARANTINE": ("Quarantine", "Karantene"),
+            "DEFER_AUTOMATION_POLICY": ("Deferred", "Utsatt"),
+            "BLOCK_ENDPOINT_CAPABILITIES_UNKNOWN": ("Blocked", "Blokkert"),
         }
         if operation_type is None:
             return "Operation" if english else "Operasjon"
@@ -1670,6 +1695,7 @@ class MediaSyncWindow(QMainWindow):
         self._apply_backup_job_detail_state(self._job_detail_state)
         if plan_id is None:
             self.apply_plan_operation_preview(empty_plan_operation_preview_state())
+            self._clear_changes_plan()
             self.apply_plan_endpoint_preview(empty_plan_endpoint_preview_state())
             self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
             return
@@ -2102,12 +2128,314 @@ class MediaSyncWindow(QMainWindow):
         self._refresh_snapshot_health_preview(endpoint_state.source_snapshot_id)
 
     def _refresh_plan_operation_preview(self, plan_id: str) -> None:
-        if self._engine_client is None or not hasattr(self._engine_client, "get_plan_operations"):
+        if plan_id != self._changes_plan_id:
+            self._changes_plan_id = plan_id
+            self._changes_target_filter = None
+            self._changes_risk_filter = "ALL"
+            self._reset_changes_paging()
+        self._refresh_changes_page()
+        self.apply_plan_operation_preview(
+            replace(
+                self._changes_page_state,
+                rows=self._changes_page_state.rows[:3],
+            )
+        )
+
+    def _refresh_changes_page(self) -> None:
+        plan_id = self._changes_plan_id
+        if (
+            plan_id is None
+            or self._engine_client is None
+            or not hasattr(self._engine_client, "get_plan_operations")
+        ):
+            self._changes_page_state = empty_plan_operation_preview_state()
+            self._apply_changes_page_state(self._changes_page_state)
             return
         provider = cast(PlanOperationsProvider, self._engine_client)
-        self.apply_plan_operation_preview(
-            plan_operation_preview_from_response(provider.get_plan_operations(plan_id=plan_id, limit=3))
+        cursor = self._changes_page_cursors[self._changes_page_index]
+        self._changes_page_state = plan_operation_preview_from_response(
+            provider.get_plan_operations(
+                plan_id=plan_id,
+                limit=self._changes_page_limit,
+                after=cursor,
+                target_endpoint_id=self._changes_target_filter,
+                risk_levels=self._changes_risk_levels(),
+            )
         )
+        self._apply_changes_page_state(self._changes_page_state)
+
+    def _clear_changes_plan(self) -> None:
+        self._changes_plan_id = None
+        self._changes_target_filter = None
+        self._changes_risk_filter = "ALL"
+        self._reset_changes_paging()
+        self._changes_page_state = empty_plan_operation_preview_state()
+        self._apply_changes_page_state(self._changes_page_state)
+
+    def _reset_changes_paging(self) -> None:
+        self._changes_page_index = 0
+        self._changes_page_cursors = [None]
+        self._selected_changes_operation_id = None
+
+    def _changes_risk_levels(self) -> tuple[str, ...]:
+        if self._changes_risk_filter == "ATTENTION":
+            return ("MEDIUM", "HIGH", "BLOCKED")
+        if self._changes_risk_filter == "SAFE":
+            return ("LOW",)
+        return ()
+
+    def _set_changes_target_filter(self, index: int) -> None:
+        combo = self._changes_target_combo
+        if combo is None or index < 0:
+            return
+        value = combo.itemData(index)
+        target_endpoint_id = value if isinstance(value, str) and value else None
+        if target_endpoint_id == self._changes_target_filter:
+            return
+        self._changes_target_filter = target_endpoint_id
+        self._reset_changes_paging()
+        self._refresh_changes_page()
+
+    def _set_changes_risk_filter(self, index: int) -> None:
+        combo = self._changes_risk_combo
+        if combo is None or index < 0:
+            return
+        value = combo.itemData(index)
+        risk_filter = value if isinstance(value, str) else "ALL"
+        if risk_filter == self._changes_risk_filter:
+            return
+        self._changes_risk_filter = risk_filter
+        self._reset_changes_paging()
+        self._refresh_changes_page()
+
+    def _show_previous_changes_page(self) -> None:
+        if self._changes_page_index <= 0:
+            return
+        self._changes_page_index -= 1
+        self._selected_changes_operation_id = None
+        self._refresh_changes_page()
+
+    def _show_next_changes_page(self) -> None:
+        cursor = self._changes_page_state.next_cursor
+        if not self._changes_page_state.has_more_operations or cursor is None:
+            return
+        next_index = self._changes_page_index + 1
+        if len(self._changes_page_cursors) <= next_index:
+            self._changes_page_cursors.append(cursor)
+        else:
+            self._changes_page_cursors[next_index] = cursor
+        self._changes_page_index = next_index
+        self._selected_changes_operation_id = None
+        self._refresh_changes_page()
+
+    def _changes_page_text(self) -> str:
+        number = self._changes_page_index + 1
+        if self._selected_language_code is LanguageCode.ENGLISH:
+            return f"Page {number}"
+        return f"Side {number}"
+
+    def _apply_changes_page_state(self, state: PlanOperationPreviewState) -> None:
+        self._apply_changes_target_options(state)
+        if self._changes_risk_combo is not None:
+            self._changes_risk_combo.blockSignals(True)
+            risk_index = self._changes_risk_combo.findData(
+                self._changes_risk_filter
+            )
+            self._changes_risk_combo.setCurrentIndex(max(0, risk_index))
+            self._changes_risk_combo.blockSignals(False)
+        if self._changes_attention_banner is not None:
+            self._changes_attention_banner.setText(
+                self._changes_attention_text(state)
+            )
+            self._changes_attention_banner.setProperty(
+                "attentionKind",
+                self._changes_attention_kind(state),
+            )
+            _refresh_style(self._changes_attention_banner)
+        if self._changes_page_label is not None:
+            self._changes_page_label.setText(self._changes_page_text())
+        if self._changes_previous_button is not None:
+            self._changes_previous_button.setEnabled(self._changes_page_index > 0)
+        if self._changes_next_button is not None:
+            self._changes_next_button.setEnabled(
+                state.has_more_operations and state.next_cursor is not None
+            )
+        changes_list = self._changes_list
+        if changes_list is None:
+            return
+        changes_list.blockSignals(True)
+        changes_list.clear()
+        selected_row = -1
+        for index, row in enumerate(state.rows):
+            path = row.target_relative_path or row.operation_id
+            target = row.target_endpoint_id or self._texts().target
+            item = QListWidgetItem(
+                f"{self._changes_risk_label(row.risk_level)} · "
+                f"{self._history_operation_type_label(row.operation_type)}\n"
+                f"{path} · {target}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, row.operation_id)
+            item.setToolTip(row.reason_code or path)
+            item.setSizeHint(QSize(0, 60))
+            changes_list.addItem(item)
+            if row.operation_id == self._selected_changes_operation_id:
+                selected_row = index
+        operation_ids = {row.operation_id for row in state.rows}
+        if self._selected_changes_operation_id not in operation_ids:
+            self._selected_changes_operation_id = (
+                state.rows[0].operation_id if state.rows else None
+            )
+            selected_row = 0 if state.rows else -1
+        if selected_row >= 0:
+            changes_list.setCurrentRow(selected_row)
+        changes_list.blockSignals(False)
+        has_rows = bool(state.rows)
+        changes_list.setVisible(state.read_model_available and has_rows)
+        if self._changes_empty_label is not None:
+            self._changes_empty_label.setText(
+                self._texts().no_filtered_changes
+                if state.read_model_available and state.plan_id is not None
+                else self._texts().no_plan_changes
+            )
+            self._changes_empty_label.setVisible(not has_rows)
+        self._apply_changes_detail(state)
+        self._refresh_dashboard_geometry()
+
+    def _apply_changes_target_options(
+        self,
+        state: PlanOperationPreviewState,
+    ) -> None:
+        combo = self._changes_target_combo
+        if combo is None:
+            return
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(self._texts().all_targets, None)
+        for target_endpoint_id in state.target_endpoint_ids:
+            combo.addItem(target_endpoint_id, target_endpoint_id)
+        selected_index = combo.findData(self._changes_target_filter)
+        if selected_index < 0:
+            self._changes_target_filter = None
+            selected_index = 0
+        combo.setCurrentIndex(selected_index)
+        combo.blockSignals(False)
+
+    def _select_changes_operation(
+        self,
+        current: QListWidgetItem | None,
+        previous: QListWidgetItem | None,
+    ) -> None:
+        del previous
+        if current is None:
+            return
+        operation_id = current.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(operation_id, str) or not operation_id:
+            return
+        self._selected_changes_operation_id = operation_id
+        self._apply_changes_detail(self._changes_page_state)
+
+    def _apply_changes_detail(self, state: PlanOperationPreviewState) -> None:
+        selected = next(
+            (
+                row
+                for row in state.rows
+                if row.operation_id == self._selected_changes_operation_id
+            ),
+            None,
+        )
+        if selected is None:
+            if self._changes_detail_title is not None:
+                self._changes_detail_title.setText(
+                    self._texts().no_filtered_changes
+                    if state.plan_id is not None
+                    else self._texts().no_plan_changes
+                )
+            for detail_value in self._changes_detail_values.values():
+                detail_value.setText("-")
+            return
+        if self._changes_detail_title is not None:
+            self._changes_detail_title.setText(
+                selected.target_relative_path or selected.operation_id
+            )
+        values: dict[str, str] = {
+            "decision": self._changes_risk_label(selected.risk_level),
+            "change": self._history_operation_type_label(selected.operation_type),
+            "target": selected.target_endpoint_id or "-",
+            "path": selected.target_relative_path or "-",
+            "reason": selected.reason_code or "-",
+            "precondition": self._changes_precondition_label(
+                selected.target_precondition_kind
+            ),
+            "size": _format_bytes(selected.planned_bytes),
+        }
+        for key, text_value in values.items():
+            detail = self._changes_detail_values.get(key)
+            if detail is not None:
+                detail.setText(text_value)
+
+    def _changes_attention_text(self, state: PlanOperationPreviewState) -> str:
+        if not state.read_model_available or state.plan_id is None:
+            return self._texts().no_plan_changes
+        if state.operation_count == 0:
+            return self._texts().no_filtered_changes
+        english = self._selected_language_code is LanguageCode.ENGLISH
+        if state.blocked_risk_count:
+            if english:
+                return (
+                    f"Needs attention: {state.blocked_risk_count} blocked, "
+                    f"{state.attention_count} require review."
+                )
+            return (
+                f"Krever oppmerksomhet: {state.blocked_risk_count} blokkert, "
+                f"{state.attention_count} må vurderes."
+            )
+        if state.attention_count:
+            if english:
+                return (
+                    f"{state.attention_count} of {state.operation_count} changes "
+                    "need attention."
+                )
+            return (
+                f"{state.attention_count} av {state.operation_count} endringer "
+                "krever oppmerksomhet."
+            )
+        if english:
+            return f"{state.operation_count} safe changes ready."
+        return f"{state.operation_count} trygge endringer er klare."
+
+    def _changes_attention_kind(self, state: PlanOperationPreviewState) -> str:
+        if state.blocked_risk_count:
+            return "blocked"
+        if state.attention_count:
+            return "warning"
+        if state.operation_count:
+            return "ready"
+        return "empty"
+
+    def _changes_risk_label(self, risk_level: str | None) -> str:
+        english = self._selected_language_code is LanguageCode.ENGLISH
+        labels = {
+            "LOW": ("Safe", "Trygg"),
+            "MEDIUM": ("Review", "Vurder"),
+            "HIGH": ("High risk", "Høy risiko"),
+            "BLOCKED": ("Blocked", "Blokkert"),
+        }
+        pair = labels.get(risk_level or "", ("Unknown", "Ukjent"))
+        return pair[0] if english else pair[1]
+
+    def _changes_precondition_label(self, precondition: str | None) -> str:
+        english = self._selected_language_code is LanguageCode.ENGLISH
+        labels = {
+            "ABSENT": ("Must not exist", "Må ikke finnes"),
+            "MATCH_FINGERPRINT": (
+                "Must match checked file",
+                "Må samsvare med kontrollert fil",
+            ),
+            "DIRECTORY_EMPTY": ("Folder must be empty", "Mappen må være tom"),
+            "NONE": ("None", "Ingen"),
+        }
+        pair = labels.get(precondition or "", ("Unknown", "Ukjent"))
+        return pair[0] if english else pair[1]
 
     def _refresh_plan_endpoint_preview(self, plan_id: str) -> PlanEndpointPreviewState:
         if self._engine_client is None or not hasattr(self._engine_client, "get_plan_endpoints"):
@@ -3198,6 +3526,7 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_empty_label = empty
         layout.addWidget(empty)
         layout.addWidget(self._build_jobs_detail_panel(self._job_detail_state))
+        layout.addWidget(self._build_changes_panel())
         layout.addStretch(1)
         self._apply_jobs_overview_state(self._backup_overview_state)
         return page
@@ -3366,6 +3695,126 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_start_backup_button = start_backup
         layout.addWidget(start_backup, 17, 2)
         layout.setColumnStretch(1, 1)
+        return panel
+
+    def _build_changes_panel(self) -> QFrame:
+        texts = self._texts()
+        panel = QFrame()
+        panel.setObjectName("changesPanel")
+        layout = QGridLayout(panel)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setHorizontalSpacing(12)
+        layout.setVerticalSpacing(10)
+
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
+        title = QLabel(texts.changes)
+        title.setObjectName("changesTitle")
+        self._changes_title_label = title
+        previous = QToolButton()
+        previous.setObjectName("changesPreviousButton")
+        previous.setIcon(self._icons.icon("back"))
+        previous.setIconSize(QSize(18, 18))
+        previous.setToolTip(texts.previous_page_tooltip)
+        previous.setAccessibleName(texts.previous_page_tooltip)
+        previous.clicked.connect(self._show_previous_changes_page)
+        self._changes_previous_button = previous
+        page_label = QLabel(self._changes_page_text())
+        page_label.setObjectName("mutedLabel")
+        page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._changes_page_label = page_label
+        next_button = QToolButton()
+        next_button.setObjectName("changesNextButton")
+        next_button.setIcon(self._icons.icon("next"))
+        next_button.setIconSize(QSize(18, 18))
+        next_button.setToolTip(texts.next_page_tooltip)
+        next_button.setAccessibleName(texts.next_page_tooltip)
+        next_button.clicked.connect(self._show_next_changes_page)
+        self._changes_next_button = next_button
+        header_layout.addWidget(title)
+        header_layout.addStretch(1)
+        header_layout.addWidget(previous)
+        header_layout.addWidget(page_label)
+        header_layout.addWidget(next_button)
+        layout.addWidget(header, 0, 0, 1, 2)
+
+        banner = QLabel(texts.no_plan_changes)
+        banner.setObjectName("changesAttentionBanner")
+        _configure_responsive_label(banner)
+        self._changes_attention_banner = banner
+        layout.addWidget(banner, 1, 0, 1, 2)
+
+        target_filter = QComboBox()
+        target_filter.setObjectName("changesTargetFilter")
+        target_filter.setAccessibleName(texts.target)
+        target_filter.addItem(texts.all_targets, None)
+        target_filter.currentIndexChanged.connect(self._set_changes_target_filter)
+        self._changes_target_combo = target_filter
+        risk_filter = QComboBox()
+        risk_filter.setObjectName("changesRiskFilter")
+        risk_filter.setAccessibleName(texts.decision)
+        risk_filter.addItem(texts.all_changes, "ALL")
+        risk_filter.addItem(texts.attention_changes, "ATTENTION")
+        risk_filter.addItem(texts.safe_changes, "SAFE")
+        risk_filter.currentIndexChanged.connect(self._set_changes_risk_filter)
+        self._changes_risk_combo = risk_filter
+        layout.addWidget(target_filter, 2, 0)
+        layout.addWidget(risk_filter, 2, 1)
+
+        changes_list = QListWidget()
+        changes_list.setObjectName("changesList")
+        changes_list.setAccessibleName(texts.changes)
+        changes_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        changes_list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        changes_list.setWordWrap(True)
+        changes_list.setMinimumHeight(150)
+        changes_list.setMaximumHeight(260)
+        changes_list.currentItemChanged.connect(self._select_changes_operation)
+        self._changes_list = changes_list
+        layout.addWidget(changes_list, 3, 0, 1, 2)
+
+        empty = QLabel(texts.no_plan_changes)
+        empty.setObjectName("changesEmptyLabel")
+        _configure_responsive_label(empty)
+        self._changes_empty_label = empty
+        layout.addWidget(empty, 4, 0, 1, 2)
+
+        detail_title = QLabel(texts.no_plan_changes)
+        detail_title.setObjectName("changesDetailTitle")
+        _configure_responsive_label(detail_title, selectable=True)
+        self._changes_detail_title = detail_title
+        layout.addWidget(detail_title, 5, 0, 1, 2)
+        for row_index, (key, label_text) in enumerate(
+            (
+                ("decision", texts.decision),
+                ("change", texts.change_type),
+                ("target", texts.target),
+                ("path", texts.path),
+                ("reason", texts.reason_code),
+                ("precondition", texts.precondition),
+                ("size", texts.planned_size),
+            ),
+            start=6,
+        ):
+            label, value = _add_labeled_text_value(
+                layout,
+                row_index,
+                label_text,
+                "-",
+            )
+            label.setObjectName("changesDetailLabel")
+            value.setObjectName(
+                f"changesDetail{key.title().replace('_', '')}Value"
+            )
+            self._changes_detail_labels[key] = label
+            self._changes_detail_values[key] = value
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 1)
+        self._apply_changes_page_state(self._changes_page_state)
         return panel
 
     def _build_history_page(self) -> QWidget:
@@ -4686,6 +5135,29 @@ class MediaSyncWindow(QMainWindow):
             self._jobs_title_label.setText(texts.saved_jobs)
         if self._jobs_list is not None:
             self._jobs_list.setAccessibleName(texts.saved_jobs)
+        if self._changes_title_label is not None:
+            self._changes_title_label.setText(texts.changes)
+        if self._changes_list is not None:
+            self._changes_list.setAccessibleName(texts.changes)
+        if self._changes_risk_combo is not None:
+            self._changes_risk_combo.setItemText(0, texts.all_changes)
+            self._changes_risk_combo.setItemText(1, texts.attention_changes)
+            self._changes_risk_combo.setItemText(2, texts.safe_changes)
+            self._changes_risk_combo.setAccessibleName(texts.decision)
+        if self._changes_target_combo is not None:
+            self._changes_target_combo.setAccessibleName(texts.target)
+        for changes_button in (
+            self._changes_previous_button,
+            self._changes_next_button,
+        ):
+            if changes_button is not None:
+                tooltip = (
+                    texts.previous_page_tooltip
+                    if changes_button is self._changes_previous_button
+                    else texts.next_page_tooltip
+                )
+                changes_button.setToolTip(tooltip)
+                changes_button.setAccessibleName(tooltip)
         if self._history_title_label is not None:
             self._history_title_label.setText(texts.history_activities)
         if self._history_list is not None:
@@ -4695,9 +5167,9 @@ class MediaSyncWindow(QMainWindow):
             ("CONTROLS", texts.controls),
             ("BACKUPS", texts.backup_runs),
         ):
-            button = self._history_filter_buttons.get(activity_filter)
-            if button is not None:
-                button.setText(label)
+            history_button = self._history_filter_buttons.get(activity_filter)
+            if history_button is not None:
+                history_button.setText(label)
         for text_label, text in (
             (self._setup_source_label, texts.source),
             (self._setup_target_label, texts.target),
@@ -4755,6 +5227,18 @@ class MediaSyncWindow(QMainWindow):
             operation_label = self._history_operation_detail_labels.get(key)
             if operation_label is not None:
                 operation_label.setText(text)
+        for key, text in (
+            ("decision", texts.decision),
+            ("change", texts.change_type),
+            ("target", texts.target),
+            ("path", texts.path),
+            ("reason", texts.reason_code),
+            ("precondition", texts.precondition),
+            ("size", texts.planned_size),
+        ):
+            changes_label = self._changes_detail_labels.get(key)
+            if changes_label is not None:
+                changes_label.setText(text)
         if self._history_operation_list is not None:
             self._history_operation_list.setAccessibleName(texts.file_results)
         if self._history_attempt_list is not None:
@@ -4768,6 +5252,7 @@ class MediaSyncWindow(QMainWindow):
         self._apply_backup_job_detail_state(self._job_detail_state)
         self._apply_job_status_state(self._job_status_state)
         self._apply_plan_operation_preview_state(self._plan_preview_state)
+        self._apply_changes_page_state(self._changes_page_state)
         self._apply_plan_endpoint_preview_state(self._plan_endpoint_preview_state)
         self._apply_snapshot_health_preview_state(self._snapshot_health_preview_state)
         self._apply_cataloged_files_preview_state(self._cataloged_files_preview_state)

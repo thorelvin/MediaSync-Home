@@ -33,6 +33,7 @@ QLabel#productTitle {{
 }}
 
 QLabel#sectionTitle,
+QLabel#changesTitle,
 QLabel#workspaceHeading {{
     font-size: {tokens.font_size_title}px;
     font-weight: 600;
@@ -90,6 +91,7 @@ QListWidget#navigationRail::item:selected {{
 }}
 
 QListWidget#jobsList,
+QListWidget#changesList,
 QListWidget#historyList,
 QListWidget#historyOperationList,
 QListWidget#historyAttemptList {{
@@ -100,6 +102,7 @@ QListWidget#historyAttemptList {{
 }}
 
 QListWidget#jobsList::item,
+QListWidget#changesList::item,
 QListWidget#historyList::item,
 QListWidget#historyOperationList::item,
 QListWidget#historyAttemptList::item {{
@@ -109,6 +112,7 @@ QListWidget#historyAttemptList::item {{
 }}
 
 QListWidget#jobsList::item:selected,
+QListWidget#changesList::item:selected,
 QListWidget#historyList::item:selected,
 QListWidget#historyOperationList::item:selected {{
     background: {tokens.selection};
@@ -124,6 +128,7 @@ QFrame#engineStatusPanel,
 QFrame#standardBackupPanel,
 QFrame#backupJobDetailPanel,
 QFrame#jobsDetailPanel,
+QFrame#changesPanel,
 QFrame#historyDetailPanel,
 QFrame#settingsSectionPanel,
 QFrame#componentGallery {{
@@ -161,9 +166,35 @@ QLabel#jobDetailTitle {{
 }}
 
 QLabel#historyDetailTitle,
+QLabel#changesDetailTitle,
 QLabel#historyOperationHeading,
 QLabel#historyOperationDetailTitle {{
     font-weight: 600;
+}}
+
+QLabel#changesAttentionBanner {{
+    padding: {tokens.space_2}px {tokens.space_3}px;
+    border: {tokens.border_hairline}px solid {tokens.border};
+    border-radius: {tokens.radius_sm}px;
+    background: {tokens.surface_alt};
+}}
+
+QLabel#changesAttentionBanner[attentionKind="ready"] {{
+    background: {tokens.success_surface};
+    border-color: {tokens.success};
+    color: {tokens.success};
+}}
+
+QLabel#changesAttentionBanner[attentionKind="warning"] {{
+    background: {tokens.warning_surface};
+    border-color: {tokens.warning};
+    color: {tokens.warning};
+}}
+
+QLabel#changesAttentionBanner[attentionKind="blocked"] {{
+    background: {tokens.danger_surface};
+    border-color: {tokens.danger};
+    color: {tokens.danger};
 }}
 
 QLabel#historyTargetRow {{

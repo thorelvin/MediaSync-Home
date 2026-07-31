@@ -249,7 +249,7 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
     def page_plan_operations(self, query: PlanOperationPageQuery) -> PlanOperationPage:
         validate_plan_operation_page_query(query)
         rows = self._connection.execute(
-            _plan_operation_page_sql(query.after),
+            _plan_operation_page_sql(query),
             (*_plan_operation_page_parameters(query), query.limit + 1),
         ).fetchall()
         page_rows = rows[: query.limit]
@@ -270,12 +270,54 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
             for row in page_rows
         )
         has_more = len(rows) > query.limit
+        risk_counts, highest_risk = self._load_plan_risk_summary(query.plan_id)
+        target_endpoint_ids = tuple(
+            str(row[0])
+            for row in self._connection.execute(
+                """
+                SELECT endpoint_id
+                FROM plan_endpoints
+                WHERE plan_id = ? AND role = 'TARGET_WRITABLE'
+                ORDER BY target_ordinal, endpoint_id
+                """,
+                (query.plan_id,),
+            ).fetchall()
+        )
         return PlanOperationPage(
             plan_id=query.plan_id,
             operations=operations,
             next_cursor=_plan_operation_cursor(operations[-1]) if has_more and operations else None,
             has_more=has_more,
+            risk_counts=risk_counts,
+            highest_risk=highest_risk,
+            target_endpoint_ids=target_endpoint_ids,
         )
+
+    def _load_plan_risk_summary(
+        self,
+        plan_id: str,
+    ) -> tuple[dict[str, int], PlanRiskLevel | None]:
+        row = self._connection.execute(
+            "SELECT risk_summary_json FROM plan_seal_details WHERE plan_id = ?",
+            (plan_id,),
+        ).fetchone()
+        if row is None:
+            return {}, None
+        summary = _json_object(str(row[0]))
+        raw_counts = summary.get("counts")
+        if not isinstance(raw_counts, dict):
+            raise SqlitePlanStoreError("SEALED_PLAN_RISK_SUMMARY_INVALID")
+        counts: dict[str, int] = {}
+        for risk in PlanRiskLevel:
+            value = raw_counts.get(risk.value, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise SqlitePlanStoreError("SEALED_PLAN_RISK_SUMMARY_INVALID")
+            counts[risk.value] = value
+        try:
+            highest = PlanRiskLevel(str(summary["highest"]))
+        except (KeyError, ValueError) as exc:
+            raise SqlitePlanStoreError("SEALED_PLAN_RISK_SUMMARY_INVALID") from exc
+        return counts, highest
 
     def page_plan_endpoints(self, query: PlanEndpointPageQuery) -> PlanEndpointPage:
         validate_plan_endpoint_page_query(query)
@@ -430,9 +472,16 @@ def _json_object(payload: str) -> dict[str, object]:
     return data
 
 
-def _plan_operation_page_sql(after: PlanOperationCursor | None) -> str:
+def _plan_operation_page_sql(query: PlanOperationPageQuery) -> str:
+    filter_clauses: list[str] = []
+    if query.target_endpoint_id is not None:
+        filter_clauses.append("details.target_endpoint_id = ?")
+    if query.risk_levels:
+        placeholders = ", ".join("?" for _ in query.risk_levels)
+        filter_clauses.append(f"details.risk_level IN ({placeholders})")
+    filter_clause = "".join(f"\n            AND {clause}" for clause in filter_clauses)
     cursor_clause = ""
-    if after is not None:
+    if query.after is not None:
         cursor_clause = """
             AND (
                 details.execution_phase > ?
@@ -465,6 +514,7 @@ def _plan_operation_page_sql(after: PlanOperationCursor | None) -> str:
             ON operations.plan_id = details.plan_id
             AND operations.id = details.operation_id
         WHERE details.plan_id = ?
+        {filter_clause}
         {cursor_clause}
         ORDER BY
             details.execution_phase,
@@ -476,6 +526,9 @@ def _plan_operation_page_sql(after: PlanOperationCursor | None) -> str:
 
 def _plan_operation_page_parameters(query: PlanOperationPageQuery) -> tuple[object, ...]:
     parameters: list[object] = [query.plan_id]
+    if query.target_endpoint_id is not None:
+        parameters.append(query.target_endpoint_id)
+    parameters.extend(risk.value for risk in query.risk_levels)
     if query.after is not None:
         parameters.extend(
             (

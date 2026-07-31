@@ -169,6 +169,12 @@ def test_ui_pipe_action_queries_plan_operations_after_handshake() -> None:
             "plan-a",
             "--limit",
             "5",
+            "--target-endpoint-id",
+            "target-a",
+            "--risk-level",
+            "MEDIUM",
+            "--risk-level",
+            "BLOCKED",
             "--after-json",
             (
                 '{"execution_phase":10,'
@@ -190,6 +196,8 @@ def test_ui_pipe_action_queries_plan_operations_after_handshake() -> None:
             "stable_order_key": "010:Pictures/A.jpg",
             "operation_id": "op-a",
         },
+        "target_endpoint_id": "target-a",
+        "risk_levels": ("MEDIUM", "BLOCKED"),
     }
 
 
@@ -695,12 +703,16 @@ class _FakeGuiIpcClient:
         plan_id: str,
         limit: int | None = None,
         after: dict[str, object] | None = None,
+        target_endpoint_id: str | None = None,
+        risk_levels: tuple[str, ...] = (),
     ) -> IpcResponse:
         self.calls = (*self.calls, "query_plan_operations")
         self.plan_operations_query = {
             "plan_id": plan_id,
             "limit": limit,
             "after": after,
+            "target_endpoint_id": target_endpoint_id,
+            "risk_levels": risk_levels,
         }
         return IpcResponse.accepted({"plan_operations": "ok"})
 

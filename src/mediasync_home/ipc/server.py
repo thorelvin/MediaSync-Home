@@ -473,6 +473,8 @@ class EngineHostIpcService:
         plan_id: str,
         limit: int | None = None,
         after: dict[str, object] | None = None,
+        target_endpoint_id: str | None = None,
+        risk_levels: tuple[str, ...] = (),
     ) -> IpcResponse:
         rejection = self._authorize_client_request(client_instance_id)
         if rejection is not None:
@@ -483,6 +485,8 @@ class EngineHostIpcService:
                 plan_id=plan_id,
                 limit=limit,
                 after=after,
+                target_endpoint_id=target_endpoint_id,
+                risk_levels=risk_levels,
             )
         except PlanOperationsQueryError:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)

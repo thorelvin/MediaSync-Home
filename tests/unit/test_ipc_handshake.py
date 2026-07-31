@@ -389,6 +389,18 @@ class _InMemoryPlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointRea
                     ),
                 )
             )
+        if query.target_endpoint_id is not None:
+            operations = tuple(
+                operation
+                for operation in operations
+                if operation.target_endpoint_id == query.target_endpoint_id
+            )
+        if query.risk_levels:
+            operations = tuple(
+                operation
+                for operation in operations
+                if operation.risk_level in query.risk_levels
+            )
         if query.after is not None:
             operations = tuple(
                 operation
@@ -404,6 +416,25 @@ class _InMemoryPlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointRea
             if has_more and page_operations
             else None,
             has_more=has_more,
+            risk_counts=(
+                dict(plan.risk_summary.get("counts", {}))
+                if plan is not None
+                else {}
+            ),
+            highest_risk=(
+                PlanRiskLevel(str(plan.risk_summary["highest"]))
+                if plan is not None
+                else None
+            ),
+            target_endpoint_ids=(
+                tuple(
+                    endpoint.endpoint_id
+                    for endpoint in plan.endpoints
+                    if endpoint.role is PlanEndpointRole.TARGET_WRITABLE
+                )
+                if plan is not None
+                else ()
+            ),
         )
 
     def page_plan_endpoints(self, query: PlanEndpointPageQuery) -> PlanEndpointPage:
@@ -1166,10 +1197,40 @@ def test_plan_operations_query_returns_bounded_sealed_operation_page() -> None:
         TargetPreconditionKind.ABSENT.value
     )
     assert first_page["operations"][0]["target_endpoint_id"] == "target-a"
+    assert first_page["risk_counts"] == {
+        "LOW": 2,
+        "MEDIUM": 0,
+        "HIGH": 0,
+        "BLOCKED": 0,
+    }
+    assert first_page["highest_risk"] == "LOW"
+    assert first_page["target_endpoint_ids"] == ["target-a"]
     assert second.status is IpcStatus.ACCEPTED
     assert second_page["has_more"] is False
     assert second_page["next_cursor"] is None
     assert [operation["operation_id"] for operation in second_page["operations"]] == ["op-b"]
+
+
+def test_plan_operations_query_applies_target_and_risk_filters() -> None:
+    service = _service()
+    service.plan_operation_read_store = _InMemoryPlanStore(
+        _sealed_plan_for_operation_pages()
+    )
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.query_plan_operations(
+        plan_id="plan-page",
+        target_endpoint_id="target-a",
+        risk_levels=("LOW",),
+    )
+
+    assert response.status is IpcStatus.ACCEPTED
+    page = response.payload["plan_operations"]
+    assert [operation["operation_id"] for operation in page["operations"]] == [
+        "op-a",
+        "op-b",
+    ]
 
 
 def test_plan_endpoints_query_requires_prior_handshake() -> None:

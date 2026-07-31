@@ -8,6 +8,7 @@ from mediasync_home.application.plans import (
     PlanOperationPageQuery,
     PlanOperationReadModel,
     PlanOperationReadModelStore,
+    PlanRiskLevel,
     PlanEndpointCursor,
     PlanEndpointPageQuery,
     PlanEndpointReadModel,
@@ -68,6 +69,9 @@ class PlanOperationsReadPage:
     read_model_available: bool
     operations: tuple[PlanOperationReadModel, ...] = ()
     next_cursor: PlanOperationCursor | None = None
+    risk_counts: Mapping[str, int] | None = None
+    highest_risk: PlanRiskLevel | None = None
+    target_endpoint_ids: tuple[str, ...] = ()
 
     @classmethod
     def unavailable(cls, *, query: PlanOperationPageQuery) -> "PlanOperationsReadPage":
@@ -85,6 +89,11 @@ class PlanOperationsReadPage:
             "has_more": self.has_more,
             "read_model_available": self.read_model_available,
             "next_cursor": _cursor_to_dict(self.next_cursor),
+            "risk_counts": dict(self.risk_counts or {}),
+            "highest_risk": (
+                None if self.highest_risk is None else self.highest_risk.value
+            ),
+            "target_endpoint_ids": list(self.target_endpoint_ids),
             "operations": [_operation_to_dict(operation) for operation in self.operations],
         }
 
@@ -120,8 +129,16 @@ def query_plan_operations(
     plan_id: str,
     limit: int | None = None,
     after: PlanOperationCursor | Mapping[str, object] | None = None,
+    target_endpoint_id: str | None = None,
+    risk_levels: tuple[str, ...] = (),
 ) -> PlanOperationsReadPage:
-    query = normalize_plan_operation_page_query(plan_id=plan_id, limit=limit, after=after)
+    query = normalize_plan_operation_page_query(
+        plan_id=plan_id,
+        limit=limit,
+        after=after,
+        target_endpoint_id=target_endpoint_id,
+        risk_levels=risk_levels,
+    )
     if plan_read_store is None:
         return PlanOperationsReadPage.unavailable(query=query)
 
@@ -136,6 +153,9 @@ def query_plan_operations(
         read_model_available=True,
         operations=page.operations,
         next_cursor=page.next_cursor,
+        risk_counts=page.risk_counts,
+        highest_risk=page.highest_risk,
+        target_endpoint_ids=page.target_endpoint_ids,
     )
 
 
@@ -162,17 +182,29 @@ def normalize_plan_operation_page_query(
     plan_id: str,
     limit: int | None,
     after: PlanOperationCursor | Mapping[str, object] | None,
+    target_endpoint_id: str | None = None,
+    risk_levels: tuple[str, ...] = (),
 ) -> PlanOperationPageQuery:
     try:
         query = PlanOperationPageQuery(
             plan_id=str(plan_id).strip(),
             limit=DEFAULT_PLAN_OPERATION_PAGE_LIMIT if limit is None else int(limit),
             after=_normalize_cursor(after),
+            target_endpoint_id=_optional_text(target_endpoint_id),
+            risk_levels=tuple(PlanRiskLevel(value) for value in risk_levels),
         )
         validate_plan_operation_page_query(query)
     except (KeyError, TypeError, ValueError, PlanSealViolation) as exc:
         raise PlanOperationsQueryError("PLAN_OPERATIONS_QUERY_INVALID") from exc
     return query
+
+
+def _optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("value must be text")
+    return value.strip()
 
 
 def _normalize_cursor(
