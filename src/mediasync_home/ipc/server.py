@@ -1194,6 +1194,7 @@ class EngineHostIpcService:
                 job_revision_id=job.job_revision_id,
                 state=BackupAnalysisRequestState.QUEUED,
                 requested_utc=_system_utc_now(),
+                start_when_safe=command.start_when_safe,
             )
         )
         receipt = transition_command_receipt(

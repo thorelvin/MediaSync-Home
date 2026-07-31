@@ -63,6 +63,9 @@ from mediasync_home.adapters.sqlite.endpoint_classifications import (
 )
 from mediasync_home.adapters.sqlite.external_resources import SqliteExternalResourceStateStore
 from mediasync_home.adapters.sqlite.history import SqliteHistoryReadModelStore
+from mediasync_home.adapters.sqlite.hash_evidence import (
+    SqliteCurrentReadHashEvidenceRefresher,
+)
 from mediasync_home.adapters.sqlite.job_catalog import SqliteStandardBackupJobCatalog
 from mediasync_home.adapters.sqlite.job_draft_store import SqliteJobDraftStore
 from mediasync_home.adapters.sqlite.job_endpoints import (
@@ -386,6 +389,9 @@ class EngineHostRuntime:
     backup_analysis_request_store: BackupAnalysisRequestStore | None = None
     backup_analysis_endpoint_refresher: SqliteEndpointClassificationRefresher | None = None
     backup_analysis_snapshot_refresher: SqliteJobSnapshotMaterializer | None = None
+    backup_analysis_hash_refresher: (
+        SqliteCurrentReadHashEvidenceRefresher | None
+    ) = None
     backup_analysis_plan_refresher: SqliteInitialBackupPlanMaterializer | None = None
     catalog_connection: sqlite3.Connection | None = None
     recovery_connection: sqlite3.Connection | None = None
@@ -416,7 +422,9 @@ class EngineHostRuntime:
             self.backup_analysis_request_store is None
             or self.backup_analysis_endpoint_refresher is None
             or self.backup_analysis_snapshot_refresher is None
+            or self.backup_analysis_hash_refresher is None
             or self.backup_analysis_plan_refresher is None
+            or self.run_executor_plan_store is None
             or self.run_executor_queue_store is None
         ):
             return None
@@ -430,7 +438,10 @@ class EngineHostRuntime:
                 )
             ),
             snapshots=self.backup_analysis_snapshot_refresher,
+            hash_evidence=self.backup_analysis_hash_refresher,
             plans=self.backup_analysis_plan_refresher,
+            plan_store=self.run_executor_plan_store,
+            run_id_factory=UuidRunIdFactory(),
             utc_now=self.clock.utc_now,
         )
 
@@ -1535,6 +1546,18 @@ def build_engine_host_runtime(
                 observed_utc=runtime_clock.utc_now(),
             )
         )
+        current_read_hash_refresher = SqliteCurrentReadHashEvidenceRefresher(
+            catalog_connection
+        )
+        for snapshot_result in snapshot_materialization_refresh.results:
+            if (
+                snapshot_result.state in {"SEALED", "REUSED"}
+                and snapshot_result.analysis_id is not None
+            ):
+                current_read_hash_refresher.refresh_current_read_hash_evidence(
+                    analysis_id=snapshot_result.analysis_id,
+                    observed_utc=runtime_clock.utc_now(),
+                )
         state_capacity_report = capacity_gate.latest_report()
         plans = SqlitePlanStore(catalog_connection)
         initial_backup_plan_materializer = SqliteInitialBackupPlanMaterializer(
@@ -1602,6 +1625,22 @@ def build_engine_host_runtime(
             recovery_resume_final_verifier=final_artifact_verifier,
             runs=runs,
         )
+
+        def refresh_job_snapshots_for_service() -> SnapshotMaterializationRefreshReport:
+            report = job_snapshot_materializer.refresh_job_snapshots(
+                observed_utc=runtime_clock.utc_now(),
+            )
+            for result in report.results:
+                if (
+                    result.state in {"SEALED", "REUSED"}
+                    and result.analysis_id is not None
+                ):
+                    current_read_hash_refresher.refresh_current_read_hash_evidence(
+                        analysis_id=result.analysis_id,
+                        observed_utc=runtime_clock.utc_now(),
+                    )
+            return report
+
         service = EngineHostIpcService(
             authorization,
             status=service_status,
@@ -1618,11 +1657,7 @@ def build_engine_host_runtime(
                     observed_utc=runtime_clock.utc_now(),
                 )
             ),
-            job_snapshot_refresh=lambda: (
-                job_snapshot_materializer.refresh_job_snapshots(
-                    observed_utc=runtime_clock.utc_now(),
-                )
-            ),
+            job_snapshot_refresh=refresh_job_snapshots_for_service,
             initial_backup_plan_refresh=lambda: (
                 initial_backup_plan_materializer.refresh_initial_backup_plans(
                     observed_utc=runtime_clock.utc_now(),
@@ -1692,6 +1727,7 @@ def build_engine_host_runtime(
         backup_analysis_request_store=backup_analysis_requests,
         backup_analysis_endpoint_refresher=endpoint_classification_refresher,
         backup_analysis_snapshot_refresher=job_snapshot_materializer,
+        backup_analysis_hash_refresher=current_read_hash_refresher,
         backup_analysis_plan_refresher=initial_backup_plan_materializer,
         catalog_connection=catalog_connection,
         recovery_connection=recovery_connection,

@@ -117,6 +117,18 @@ REQUIRED_DATABASE_PARENT_SCOPE_FKS = {
     ),
     ("file_entries", ("snapshot_id", "endpoint_id"), "snapshots", ("id", "endpoint_id")),
     (
+        "current_read_hash_evidence",
+        ("snapshot_id", "entry_id"),
+        "file_entries",
+        ("snapshot_id", "id"),
+    ),
+    (
+        "current_read_hash_evidence",
+        ("snapshot_id", "endpoint_id"),
+        "snapshots",
+        ("id", "endpoint_id"),
+    ),
+    (
         "case_collision_members",
         ("snapshot_id", "file_entry_id"),
         "file_entries",
@@ -493,6 +505,7 @@ def _validate_immutable_revision_invariant(invariant: dict[str, Any]) -> None:
         "job_revisions",
         "standard_backup_job_revision_details",
         "writable_endpoint_registrations",
+        "current_read_hash_evidence",
     }
     if immutable_tables != expected_immutable_tables:
         fail("ARC-005 always immutable tables drifted")
@@ -668,6 +681,25 @@ def _validate_initial_backup_plan_materialization_invariant(
         fail("initial backup plan materialization must not start a run automatically")
 
 
+def _validate_current_read_hash_evidence_invariant(
+    invariant: dict[str, Any],
+) -> None:
+    if invariant.get("requirement_id") != "HASH-001":
+        fail("current-read hash invariant must reference HASH-001")
+    if invariant.get("table") != "current_read_hash_evidence":
+        fail("HASH-001 current-read hash evidence table drifted")
+    if invariant.get("evidence_kind") != "CURRENT_READ_HASH":
+        fail("HASH-001 current-read evidence kind drifted")
+    if invariant.get("algorithm") != "BLAKE3-256":
+        fail("HASH-001 current-read hash algorithm drifted")
+    if invariant.get("hash_schema_version") != 1:
+        fail("HASH-001 current-read hash schema version drifted")
+    if invariant.get("fingerprint_must_be_stable") is not True:
+        fail("HASH-001 current-read fingerprints must remain stable")
+    if invariant.get("immutable") is not True:
+        fail("HASH-001 current-read hash evidence must be immutable")
+
+
 def validate_state_machines(document: dict[str, Any]) -> int:
     if document.get("schema_version") != 1:
         fail("state-machines.yaml schema_version must be 1")
@@ -748,6 +780,7 @@ def validate_database_contract(document: dict[str, Any]) -> int:
         "DB-006_ENDPOINT_HEADS_ARE_SEPARATE",
         "DB-006_JOB_HEADS_ARE_SEPARATE",
         "DB-007_PARENT_SCOPE_COMPOSITE_KEYS",
+        "HASH-001_CURRENT_READ_HASH_EVIDENCE",
         "SYNC-002_INITIAL_BACKUP_PLAN_MATERIALIZATION",
     }
     missing = sorted(required_ids - set(invariant_by_id))
@@ -781,6 +814,9 @@ def validate_database_contract(document: dict[str, Any]) -> int:
     )
     _validate_initial_backup_plan_materialization_invariant(
         invariant_by_id["SYNC-002_INITIAL_BACKUP_PLAN_MATERIALIZATION"]
+    )
+    _validate_current_read_hash_evidence_invariant(
+        invariant_by_id["HASH-001_CURRENT_READ_HASH_EVIDENCE"]
     )
     _validate_parent_scope_invariant(invariant_by_id["DB-007_PARENT_SCOPE_COMPOSITE_KEYS"])
     return len(invariants)

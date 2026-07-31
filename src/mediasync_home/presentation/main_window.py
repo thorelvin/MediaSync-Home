@@ -2066,7 +2066,17 @@ class MediaSyncWindow(QMainWindow):
         self._analysis_request_id = None
         self._analysis_idempotency_key = None
         terminal_state = state.analysis_request_state or "FAILED"
-        if terminal_state in {"SUCCEEDED", "NO_CHANGES"}:
+        started_run_id = state.analysis_request_started_run_id
+        if (
+            terminal_state == "SUCCEEDED"
+            and started_run_id is not None
+        ):
+            self._queued_backup_job_ids.add(job_id)
+            detail = self._texts().backup_queued
+            status_kind = "ready"
+            self._set_active_run(started_run_id)
+            self._poll_active_run_progress()
+        elif terminal_state in {"SUCCEEDED", "NO_CHANGES"}:
             detail = (
                 self._texts().no_backup_changes
                 if terminal_state == "NO_CHANGES"

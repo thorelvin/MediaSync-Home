@@ -41,6 +41,7 @@ def test_backup_analysis_request_lifecycle_and_interrupted_requeue(
                 job_revision_id="revision-a",
                 state=BackupAnalysisRequestState.QUEUED,
                 requested_utc="2026-07-31T10:00:00Z",
+                start_when_safe=True,
             )
         )
 
@@ -64,9 +65,11 @@ def test_backup_analysis_request_lifecycle_and_interrupted_requeue(
             reason_code="INITIAL_BACKUP_PLAN_NO_CHANGES",
             operation_count=0,
             planned_bytes=0,
+            started_run_id=None,
         )
 
         assert completed.state is BackupAnalysisRequestState.NO_CHANGES
+        assert completed.start_when_safe is True
         assert completed.row_version == 5
         assert (
             store.claim_next_backup_analysis(

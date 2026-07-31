@@ -345,7 +345,10 @@ class EngineClient:
         request_id: str,
         idempotency_key: str,
     ) -> IpcResponse:
-        payload: dict[str, object] = {"job_id": job_id}
+        payload: dict[str, object] = {
+            "job_id": job_id,
+            "start_when_safe": True,
+        }
         return self._request_with_handshake_retry(
             lambda: self._ipc_client.submit_command(
                 BackupAnalysisCommandName.CHECK_BACKUP.value,

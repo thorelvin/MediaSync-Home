@@ -5,6 +5,10 @@ import json
 from dataclasses import dataclass
 from typing import Protocol
 
+from mediasync_home.application.hash_evidence import (
+    CurrentReadHashEvidence,
+    compatible_current_read_hashes,
+)
 from mediasync_home.application.plans import (
     MUTATING_OPERATION_TYPES,
     PlanDependency,
@@ -39,6 +43,7 @@ class InitialBackupPlanningEndpoint:
     capabilities_hash: str
     entries: tuple[SnapshotFileEntry, ...]
     role: PlanEndpointRole
+    hash_evidence: tuple[CurrentReadHashEvidence, ...] = ()
     target_ordinal: int | None = None
     required_owner_installation_id: str | None = None
     required_ownership_epoch: int | None = None
@@ -254,6 +259,8 @@ def _plan_target(
         target.entries,
         target_case_mode=target.root_case_mode,
     )
+    source_hash_evidence = _hash_evidence_by_entry_id(source)
+    target_hash_evidence = _hash_evidence_by_entry_id(target)
     operations: list[PlanOperation] = []
     directory_operations: dict[str, str] = {}
     for entry in sorted(
@@ -275,6 +282,16 @@ def _plan_target(
             target_ordinal=target.target_ordinal,
             source_entry=entry,
             target_entry=target_entries.get(target_comparison_key),
+            source_snapshot_id=source.snapshot_id,
+            target_snapshot_id=target.snapshot_id,
+            source_hash_evidence=source_hash_evidence.get(entry.entry_id),
+            target_hash_evidence=(
+                None
+                if target_entries.get(target_comparison_key) is None
+                else target_hash_evidence.get(
+                    target_entries[target_comparison_key].entry_id
+                )
+            ),
             target_comparison_key=target_comparison_key,
             target_descendant_count=target_descendant_counts.get(target_comparison_key, 0),
             sequence_no=first_sequence_no + len(operations),
@@ -354,6 +371,10 @@ def _plan_entry(
     target_ordinal: int | None,
     source_entry: SnapshotFileEntry,
     target_entry: SnapshotFileEntry | None,
+    source_snapshot_id: str,
+    target_snapshot_id: str,
+    source_hash_evidence: CurrentReadHashEvidence | None,
+    target_hash_evidence: CurrentReadHashEvidence | None,
     target_comparison_key: str,
     target_descendant_count: int,
     sequence_no: int,
@@ -409,6 +430,24 @@ def _plan_entry(
             planned_bytes=source_entry.size_bytes or 0,
         )
     if target_entry.object_type == "file":
+        if (
+            source_entry.size_bytes is not None
+            and source_entry.size_bytes == target_entry.size_bytes
+            and compatible_current_read_hashes(
+                source_hash_evidence,
+                target_hash_evidence,
+                left_snapshot_id=source_snapshot_id,
+                left_entry_id=source_entry.entry_id,
+                right_snapshot_id=target_snapshot_id,
+                right_entry_id=target_entry.entry_id,
+                expected_size=source_entry.size_bytes,
+            )
+            and source_hash_evidence is not None
+            and target_hash_evidence is not None
+            and source_hash_evidence.content_hash
+            == target_hash_evidence.content_hash
+        ):
+            return None
         return _operation(
             plan_id=plan_id,
             target_endpoint_id=target_endpoint_id,
@@ -575,6 +614,26 @@ def _target_comparison_key(relative_path: str, target_case_mode: str) -> str:
     if target_case_mode == "CASE_INSENSITIVE":
         components = [component.casefold() for component in components]
     return "/".join(components)
+
+
+def _hash_evidence_by_entry_id(
+    endpoint: InitialBackupPlanningEndpoint,
+) -> dict[str, CurrentReadHashEvidence]:
+    result: dict[str, CurrentReadHashEvidence] = {}
+    entry_ids = {entry.entry_id for entry in endpoint.entries}
+    for evidence in endpoint.hash_evidence:
+        if (
+            evidence.snapshot_id != endpoint.snapshot_id
+            or evidence.endpoint_id != endpoint.endpoint_id
+            or evidence.entry_id not in entry_ids
+            or evidence.entry_id in result
+        ):
+            raise InitialBackupPlanningError(
+                "INITIAL_BACKUP_PLAN_HASH_EVIDENCE_INVALID",
+                "Refresh current file hash evidence before planning changes.",
+            )
+        result[evidence.entry_id] = evidence
+    return result
 
 
 def _plan_endpoint(

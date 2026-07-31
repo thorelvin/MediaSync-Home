@@ -34,7 +34,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 35
+        assert current_schema_version(connection, plan.store) == 36
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -70,11 +70,12 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(tmp_path:
             "runs",
             "run_targets",
             "run_stop_requests",
-            "backup_analysis_requests",
-            "schema_migrations",
+                "backup_analysis_requests",
+                "current_read_hash_evidence",
+                "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 35
+        assert _row_count(connection, "schema_migrations") == 36
         assert _column_names(connection, "endpoint_revisions") >= {"generation"}
         assert _column_names(connection, "snapshots") >= {"endpoint_generation"}
         assert _column_names(connection, "plan_endpoints") >= {"endpoint_generation"}
@@ -849,7 +850,7 @@ def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> N
                 name,
                 migration_checksum
             )
-                    VALUES ('catalog', 36, 'future_migration', ?)
+                    VALUES ('catalog', 37, 'future_migration', ?)
             """,
             ("f" * 64,),
         )
@@ -956,8 +957,8 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
         preflight = inspect_sqlite_migration_state(connection, plan)
 
         assert preflight.initialized
-        assert preflight.current_version == 35
-        assert preflight.target_version == 35
+        assert preflight.current_version == 36
+        assert preflight.target_version == 36
         assert preflight.checksum_backfill_required
         assert "migration_checksum" not in _column_names(
             connection,

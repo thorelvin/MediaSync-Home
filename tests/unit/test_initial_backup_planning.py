@@ -2,6 +2,12 @@ from __future__ import annotations
 
 import pytest
 
+from mediasync_home.application.hash_evidence import (
+    CURRENT_READ_HASH_ALGORITHM,
+    CURRENT_READ_HASH_SCHEMA_VERSION,
+    CurrentReadHashEvidence,
+    HashEvidenceKind,
+)
 from mediasync_home.application.initial_backup_planning import (
     InitialBackupPlanningEndpoint,
     InitialBackupPlanningError,
@@ -147,6 +153,73 @@ def test_initial_backup_plan_reports_no_changes_for_matching_directory_structure
     assert result.reason_code == "INITIAL_BACKUP_PLAN_NO_CHANGES"
 
 
+def test_current_read_hash_evidence_aggregates_identical_file_as_no_change() -> None:
+    source_entry = _entry("Readme.txt", "readme.txt", "file", size=7)
+    target_entry = _entry("Readme.txt", "readme.txt", "file", size=7)
+    source = _endpoint(
+        role=PlanEndpointRole.SOURCE,
+        endpoint_id="source-a",
+        entries=(source_entry,),
+        hash_evidence=(
+            _hash_evidence("source-a", source_entry, content_hash="a" * 64),
+        ),
+    )
+    target = _endpoint(
+        role=PlanEndpointRole.TARGET_WRITABLE,
+        endpoint_id="target-a",
+        target_ordinal=1,
+        entries=(target_entry,),
+        hash_evidence=(
+            _hash_evidence("target-a", target_entry, content_hash="a" * 64),
+        ),
+    )
+
+    result = build_initial_backup_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(source, target),
+    )
+
+    assert result.plan is None
+    assert result.state == "NO_CHANGES"
+
+
+def test_current_read_hash_evidence_keeps_changed_same_size_file_for_review() -> None:
+    source_entry = _entry("Readme.txt", "readme.txt", "file", size=7)
+    target_entry = _entry("Readme.txt", "readme.txt", "file", size=7)
+    source = _endpoint(
+        role=PlanEndpointRole.SOURCE,
+        endpoint_id="source-a",
+        entries=(source_entry,),
+        hash_evidence=(
+            _hash_evidence("source-a", source_entry, content_hash="a" * 64),
+        ),
+    )
+    target = _endpoint(
+        role=PlanEndpointRole.TARGET_WRITABLE,
+        endpoint_id="target-a",
+        target_ordinal=1,
+        entries=(target_entry,),
+        hash_evidence=(
+            _hash_evidence("target-a", target_entry, content_hash="b" * 64),
+        ),
+    )
+
+    result = build_initial_backup_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(source, target),
+    )
+
+    assert result.plan is not None
+    assert result.plan.operations[0].reason_code == "REPLACE_WITH_VERSION"
+    assert result.plan.risk_summary["highest"] == PlanRiskLevel.MEDIUM.value
+
+
 def test_initial_backup_plan_rejects_case_collision_in_sealed_input() -> None:
     with pytest.raises(
         InitialBackupPlanningError,
@@ -279,6 +352,7 @@ def _endpoint(
     endpoint_id: str,
     entries: tuple[SnapshotFileEntry, ...],
     target_ordinal: int | None = None,
+    hash_evidence: tuple[CurrentReadHashEvidence, ...] = (),
 ) -> InitialBackupPlanningEndpoint:
     writable = role is PlanEndpointRole.TARGET_WRITABLE
     return InitialBackupPlanningEndpoint(
@@ -292,6 +366,7 @@ def _endpoint(
         capabilities_hash="3" * 64,
         entries=entries,
         role=role,
+        hash_evidence=hash_evidence,
         target_ordinal=target_ordinal,
         required_owner_installation_id="owner-a" if writable else None,
         required_ownership_epoch=1 if writable else None,
@@ -312,4 +387,25 @@ def _entry(
         comparison_key=comparison_key,
         object_type=object_type,
         size_bytes=size,
+    )
+
+
+def _hash_evidence(
+    endpoint_id: str,
+    entry: SnapshotFileEntry,
+    *,
+    content_hash: str,
+) -> CurrentReadHashEvidence:
+    return CurrentReadHashEvidence(
+        snapshot_id=f"{endpoint_id}-snapshot",
+        entry_id=entry.entry_id,
+        endpoint_id=endpoint_id,
+        content_hash=content_hash,
+        size_bytes=entry.size_bytes or 0,
+        algorithm=CURRENT_READ_HASH_ALGORITHM,
+        hash_schema_version=CURRENT_READ_HASH_SCHEMA_VERSION,
+        evidence_kind=HashEvidenceKind.CURRENT_READ_HASH,
+        read_started_fingerprint_hash="c" * 64,
+        read_completed_fingerprint_hash="c" * 64,
+        computed_utc="2026-07-31T10:00:00Z",
     )

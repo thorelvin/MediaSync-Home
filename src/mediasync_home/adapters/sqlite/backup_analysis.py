@@ -35,9 +35,10 @@ class SqliteBackupAnalysisRequestStore:
                     job_id,
                     job_revision_id,
                     state,
-                    requested_utc
+                    requested_utc,
+                    start_when_safe
                 )
-                VALUES (?, ?, ?, ?, 'QUEUED', ?)
+                VALUES (?, ?, ?, ?, 'QUEUED', ?, ?)
                 """,
                 (
                     request.request_id,
@@ -45,6 +46,7 @@ class SqliteBackupAnalysisRequestStore:
                     request.job_id,
                     request.job_revision_id,
                     request.requested_utc,
+                    int(request.start_when_safe),
                 ),
             )
             recorded = self.load_backup_analysis_request(request.request_id)
@@ -61,10 +63,12 @@ class SqliteBackupAnalysisRequestStore:
                 existing.command_idempotency_key,
                 existing.job_id,
                 existing.job_revision_id,
+                existing.start_when_safe,
             ) != (
                 request.command_idempotency_key,
                 request.job_id,
                 request.job_revision_id,
+                request.start_when_safe,
             ):
                 if owns_transaction:
                     _rollback(self._connection)
@@ -155,6 +159,7 @@ class SqliteBackupAnalysisRequestStore:
         reason_code: str,
         operation_count: int,
         planned_bytes: int,
+        started_run_id: str | None,
     ) -> BackupAnalysisRequest:
         if state not in TERMINAL_BACKUP_ANALYSIS_STATES:
             raise ValueError("backup analysis completion state must be terminal")
@@ -175,6 +180,7 @@ class SqliteBackupAnalysisRequestStore:
                     reason_code = ?,
                     operation_count = ?,
                     planned_bytes = ?,
+                    started_run_id = ?,
                     row_version = row_version + 1
                 WHERE request_id = ?
                     AND state = 'RUNNING'
@@ -187,6 +193,7 @@ class SqliteBackupAnalysisRequestStore:
                     reason_code,
                     operation_count,
                     planned_bytes,
+                    started_run_id,
                     request_id,
                 ),
             )
@@ -246,6 +253,8 @@ _REQUEST_COLUMNS = """
     reason_code,
     operation_count,
     planned_bytes,
+    start_when_safe,
+    started_run_id,
     row_version
 """
 
@@ -267,7 +276,9 @@ def _request_from_row(
         reason_code=None if row[10] is None else str(row[10]),
         operation_count=_required_int(row[11]),
         planned_bytes=_required_int(row[12]),
-        row_version=_required_int(row[13]),
+        start_when_safe=bool(_required_int(row[13])),
+        started_run_id=None if row[14] is None else str(row[14]),
+        row_version=_required_int(row[15]),
     )
 
 

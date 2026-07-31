@@ -15,6 +15,10 @@ from mediasync_home.application.initial_backup_planning import (
     endpoint_capabilities_hash,
     initial_backup_plan_runnable,
 )
+from mediasync_home.application.hash_evidence import (
+    CurrentReadHashEvidence,
+    HashEvidenceKind,
+)
 from mediasync_home.application.plans import PlanEndpointRole
 from mediasync_home.application.snapshots import SnapshotFileEntry
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
@@ -366,6 +370,7 @@ class SqliteInitialBackupPlanMaterializer:
             )
         snapshot_id = str(row[10])
         entries = self._load_snapshot_entries(snapshot_id)
+        hash_evidence = self._load_current_read_hash_evidence(snapshot_id)
         if role == "SOURCE":
             if registration_state != "READ_ONLY_READY":
                 raise InitialBackupPlanningError(
@@ -390,6 +395,7 @@ class SqliteInitialBackupPlanMaterializer:
                 capabilities_hash=capabilities_hash,
                 entries=entries,
                 role=PlanEndpointRole.SOURCE,
+                hash_evidence=hash_evidence,
             )
         if role != "TARGET":
             raise InitialBackupPlanningError(
@@ -440,6 +446,7 @@ class SqliteInitialBackupPlanMaterializer:
             capabilities_hash=capabilities_hash,
             entries=entries,
             role=PlanEndpointRole.TARGET_WRITABLE,
+            hash_evidence=hash_evidence,
             target_ordinal=_catalog_int(row[1], minimum=0),
             required_owner_installation_id=str(row[6]),
             required_ownership_epoch=_catalog_int(row[7], minimum=1),
@@ -466,6 +473,47 @@ class SqliteInitialBackupPlanMaterializer:
                 comparison_key=str(row[2]),
                 object_type=str(row[3]),
                 size_bytes=None if row[4] is None else int(row[4]),
+            )
+            for row in rows
+        )
+
+    def _load_current_read_hash_evidence(
+        self,
+        snapshot_id: str,
+    ) -> tuple[CurrentReadHashEvidence, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                snapshot_id,
+                entry_id,
+                endpoint_id,
+                content_hash,
+                size_bytes,
+                algorithm,
+                hash_schema_version,
+                evidence_kind,
+                read_started_fingerprint_hash,
+                read_completed_fingerprint_hash,
+                computed_utc
+            FROM current_read_hash_evidence
+            WHERE snapshot_id = ?
+            ORDER BY entry_id
+            """,
+            (snapshot_id,),
+        ).fetchall()
+        return tuple(
+            CurrentReadHashEvidence(
+                snapshot_id=str(row[0]),
+                entry_id=str(row[1]),
+                endpoint_id=str(row[2]),
+                content_hash=str(row[3]),
+                size_bytes=_catalog_int(row[4], minimum=0),
+                algorithm=str(row[5]),
+                hash_schema_version=_catalog_int(row[6], minimum=1),
+                evidence_kind=HashEvidenceKind(str(row[7])),
+                read_started_fingerprint_hash=str(row[8]),
+                read_completed_fingerprint_hash=str(row[9]),
+                computed_utc=str(row[10]),
             )
             for row in rows
         )

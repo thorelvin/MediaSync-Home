@@ -2238,7 +2238,7 @@ def test_enabled_check_backup_queues_durable_idempotent_request() -> None:
     service.run_store = _InMemoryRunStore()
     ipc_client = _client(service=service)
     ipc_client.connect()
-    command_payload = {"job_id": "job-a"}
+    command_payload = {"job_id": "job-a", "start_when_safe": True}
 
     first = ipc_client.submit_command(
         BackupAnalysisCommandName.CHECK_BACKUP.value,
@@ -2258,6 +2258,7 @@ def test_enabled_check_backup_queues_durable_idempotent_request() -> None:
     assert first.status is IpcStatus.ACCEPTED
     assert first.payload["queued"] is True
     assert first.payload["analysis_request"]["state"] == "QUEUED"
+    assert first.payload["analysis_request"]["start_when_safe"] is True
     assert replay.status is IpcStatus.ACCEPTED
     assert replay.payload["idempotent_replay"] is True
     assert len(requests.requests) == 1

@@ -81,7 +81,10 @@ def test_engine_client_queues_backup_check() -> None:
     assert ipc_client.command_name == "CHECK_BACKUP"
     assert ipc_client.request_id == "request-a"
     assert ipc_client.idempotency_key == "idempotency-a"
-    assert ipc_client.payload == {"job_id": "job-a"}
+    assert ipc_client.payload == {
+        "job_id": "job-a",
+        "start_when_safe": True,
+    }
     assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
 
 

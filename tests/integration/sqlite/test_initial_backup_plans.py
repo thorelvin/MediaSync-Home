@@ -25,6 +25,9 @@ from mediasync_home.adapters.sqlite.endpoint_classifications import (
 from mediasync_home.adapters.sqlite.initial_backup_plans import (
     SqliteInitialBackupPlanMaterializer,
 )
+from mediasync_home.adapters.sqlite.hash_evidence import (
+    SqliteCurrentReadHashEvidenceRefresher,
+)
 from mediasync_home.adapters.sqlite.job_catalog import SqliteStandardBackupJobCatalog
 from mediasync_home.adapters.sqlite.job_snapshots import (
     SqliteJobSnapshotMaterializer,
@@ -265,6 +268,59 @@ def test_initial_plan_materializer_records_immutable_no_changes(
         assert replay.results[0].idempotent_replay is True
         assert plan_ids.calls == 1
         assert connection.execute("SELECT count(*) FROM plans").fetchone() == (0,)
+
+
+def test_current_read_hash_evidence_skips_identical_existing_file(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    (source / "Same.bin").write_bytes(b"identical")
+    (target / "Same.bin").write_bytes(b"identical")
+
+    with sqlite3.connect(database) as connection:
+        _prepare_registered_snapshots(
+            connection,
+            database=database,
+            source=source,
+            target=target,
+        )
+        hash_report = SqliteCurrentReadHashEvidenceRefresher(
+            connection
+        ).refresh_current_read_hash_evidence(
+            analysis_id="analysis-a",
+            observed_utc="2026-07-31T16:02:45Z",
+        )
+        plan_report = SqliteInitialBackupPlanMaterializer(
+            connection,
+            plans=SqlitePlanStore(connection),
+            id_factory=_FixedPlanIds(),
+        ).refresh_initial_backup_plans(
+            observed_utc="2026-07-31T16:03:00Z",
+        )
+
+        assert hash_report.ready is True
+        assert hash_report.candidate_pair_count == 1
+        assert hash_report.hashed_entry_count == 2
+        assert hash_report.identical_pair_count == 1
+        assert plan_report.no_changes_count == 1
+        assert plan_report.results[0].state == "NO_CHANGES"
+        assert connection.execute(
+            "SELECT count(*) FROM current_read_hash_evidence"
+        ).fetchone() == (2,)
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="CURRENT_READ_HASH_EVIDENCE_IMMUTABLE",
+        ):
+            connection.execute(
+                """
+                UPDATE current_read_hash_evidence
+                SET computed_utc = 'changed'
+                """
+            )
 
 
 def test_initial_plan_materializer_persists_operations_for_two_targets(

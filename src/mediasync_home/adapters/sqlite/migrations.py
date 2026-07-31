@@ -213,6 +213,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_backup_analysis_requests",
                 statements=CATALOG_BACKUP_ANALYSIS_REQUESTS,
             ),
+            SqliteMigration(
+                version=36,
+                name="catalog_current_read_hash_evidence",
+                statements=CATALOG_CURRENT_READ_HASH_EVIDENCE,
+            ),
         ),
     )
 
@@ -1408,6 +1413,76 @@ CATALOG_BACKUP_ANALYSIS_REQUESTS = (
     """
     CREATE INDEX idx_backup_analysis_requests_job
         ON backup_analysis_requests (job_id, requested_utc DESC, request_id DESC)
+    """,
+)
+
+CATALOG_CURRENT_READ_HASH_EVIDENCE = (
+    """
+    CREATE TABLE current_read_hash_evidence (
+        snapshot_id TEXT NOT NULL,
+        entry_id TEXT NOT NULL,
+        endpoint_id TEXT NOT NULL,
+        content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+        size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+        algorithm TEXT NOT NULL CHECK (algorithm = 'BLAKE3-256'),
+        hash_schema_version INTEGER NOT NULL CHECK (hash_schema_version = 1),
+        evidence_kind TEXT NOT NULL CHECK (evidence_kind = 'CURRENT_READ_HASH'),
+        read_started_fingerprint_hash TEXT NOT NULL CHECK (
+            length(read_started_fingerprint_hash) = 64
+        ),
+        read_completed_fingerprint_hash TEXT NOT NULL CHECK (
+            length(read_completed_fingerprint_hash) = 64
+        ),
+        computed_utc TEXT NOT NULL,
+        PRIMARY KEY (snapshot_id, entry_id),
+        FOREIGN KEY (snapshot_id, entry_id)
+            REFERENCES file_entries (snapshot_id, id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (snapshot_id, endpoint_id)
+            REFERENCES snapshots (id, endpoint_id)
+            ON DELETE RESTRICT,
+        CHECK (
+            read_started_fingerprint_hash = read_completed_fingerprint_hash
+        )
+    )
+    """,
+    """
+    CREATE INDEX idx_current_read_hash_evidence_content
+        ON current_read_hash_evidence (
+            content_hash,
+            size_bytes,
+            algorithm,
+            hash_schema_version
+        )
+    """,
+    """
+    CREATE TRIGGER trg_current_read_hash_evidence_no_update
+    BEFORE UPDATE ON current_read_hash_evidence
+    BEGIN
+        SELECT RAISE(ABORT, 'CURRENT_READ_HASH_EVIDENCE_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_current_read_hash_evidence_no_delete
+    BEFORE DELETE ON current_read_hash_evidence
+    BEGIN
+        SELECT RAISE(ABORT, 'CURRENT_READ_HASH_EVIDENCE_IMMUTABLE');
+    END
+    """,
+    """
+    ALTER TABLE backup_analysis_requests
+        ADD COLUMN start_when_safe INTEGER NOT NULL DEFAULT 0
+        CHECK (start_when_safe IN (0, 1))
+    """,
+    """
+    ALTER TABLE backup_analysis_requests
+        ADD COLUMN started_run_id TEXT
+        REFERENCES runs (id) ON DELETE RESTRICT
+    """,
+    """
+    CREATE INDEX idx_backup_analysis_requests_started_run
+        ON backup_analysis_requests (started_run_id)
+        WHERE started_run_id IS NOT NULL
     """,
 )
 

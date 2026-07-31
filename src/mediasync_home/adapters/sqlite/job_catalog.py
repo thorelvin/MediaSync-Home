@@ -330,6 +330,8 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                 reason_code,
                 analysis_id,
                 plan_id,
+                start_when_safe,
+                started_run_id,
                 row_version
             FROM backup_analysis_requests
             WHERE job_id = ?
@@ -376,7 +378,15 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                         if analysis_request_row[5] is None
                         else str(analysis_request_row[5])
                     ),
-                    row_version=_required_int(analysis_request_row[6]),
+                    start_when_safe=bool(
+                        _required_int(analysis_request_row[6])
+                    ),
+                    started_run_id=(
+                        None
+                        if analysis_request_row[7] is None
+                        else str(analysis_request_row[7])
+                    ),
+                    row_version=_required_int(analysis_request_row[8]),
                 )
             ),
         )

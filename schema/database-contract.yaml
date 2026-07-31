@@ -56,6 +56,7 @@ invariants:
       - job_revisions
       - standard_backup_job_revision_details
       - writable_endpoint_registrations
+      - current_read_hash_evidence
     immutable_after_reference:
       table: filter_sets
       referenced_by_table: job_revisions
@@ -131,6 +132,17 @@ invariants:
     checksum_bound_from_operation_schema_version: 2
     legacy_single_target_backfill: true
     immutable_after_seal: true
+  - id: HASH-001_CURRENT_READ_HASH_EVIDENCE
+    requirement_id: HASH-001
+    table: current_read_hash_evidence
+    assertion: >
+      Identical-file skipping is driven only by immutable full BLAKE3 reads
+      bound to exact snapshot entries with equal before/after fingerprints.
+    evidence_kind: CURRENT_READ_HASH
+    algorithm: BLAKE3-256
+    hash_schema_version: 1
+    fingerprint_must_be_stable: true
+    immutable: true
   - id: DB-007_PARENT_SCOPE_COMPOSITE_KEYS
     requirement_id: DB-007
     assertion: Security-relevant child rows are bound to their parent scope with composite keys.
@@ -192,6 +204,14 @@ invariants:
         parent_table: endpoint_revisions
         parent_columns: [endpoint_id, id]
       - child_table: file_entries
+        child_columns: [snapshot_id, endpoint_id]
+        parent_table: snapshots
+        parent_columns: [id, endpoint_id]
+      - child_table: current_read_hash_evidence
+        child_columns: [snapshot_id, entry_id]
+        parent_table: file_entries
+        parent_columns: [snapshot_id, id]
+      - child_table: current_read_hash_evidence
         child_columns: [snapshot_id, endpoint_id]
         parent_table: snapshots
         parent_columns: [id, endpoint_id]

@@ -1,5 +1,20 @@
 # Implementeringsstatus
 
+Oppdatering 2026-07-31: Gjentatte backuper skiller nå dokumentert identiske
+filer fra reelle endringer. Catalog schema 36 lagrer append-only
+`CURRENT_READ_HASH`-evidens for eksakte immutable snapshotposter. Den lokale
+leseren reparse- og path-guarder hver fil, beregner full BLAKE3 i avgrensede
+chunks og godtar bare evidensen når størrelse og før-/etterfingerprint er
+uendret. Planleggeren aggregerer slike identiske kilde-/målpar ut av planen;
+en analyse med bare identiske filer blir `NO_CHANGES` og oppretter ingen tom
+run. **Kjør backup** lagrer samtidig brukerens startintensjon. Etter fersk
+analyse køes run automatisk bare når hele planen består av low-risk
+`COPY_NEW`/`CREATE_DIRECTORY` med fraværspreconditions. Erstatning,
+typekonflikt, blokkering eller annen review-plan stopper fortsatt før mutasjon.
+Runtime-testen beviser komplett sekvens: ny fil analyseres, run køes og
+fullføres, neste kontroll hashes på begge sider, returnerer `NO_CHANGES` og
+oppretter ingen ny run.
+
 Oppdatering 2026-07-31: En etablert backup kan nå kontrolleres på nytt uten å
 gjenbruke den forseglede førstegangsplanen. `CHECK_BACKUP` lagrer en durable,
 idempotent køforespørsel i catalog schema 35 og returnerer før filskanning

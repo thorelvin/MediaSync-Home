@@ -106,6 +106,8 @@ class BackupAnalysisRequestSummary:
     reason_code: str | None = None
     analysis_id: str | None = None
     plan_id: str | None = None
+    start_when_safe: bool = False
+    started_run_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -115,6 +117,8 @@ class BackupAnalysisRequestSummary:
             "reason_code": self.reason_code,
             "analysis_id": self.analysis_id,
             "plan_id": self.plan_id,
+            "start_when_safe": self.start_when_safe,
+            "started_run_id": self.started_run_id,
             "row_version": self.row_version,
         }
 
