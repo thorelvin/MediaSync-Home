@@ -181,12 +181,21 @@ class InMemoryRunStore(RunStore):
 
 
 class FixedRunIdFactory(RunIdFactory):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        run_id: str = "run-a",
+        logical_run_group_id: str = "run-group-a",
+    ) -> None:
         self.calls = 0
+        self.run_id = run_id
+        self.logical_run_group_id = logical_run_group_id
 
     def new_run_ids(self) -> RunIds:
         self.calls += 1
-        return RunIds(run_id="run-a", logical_run_group_id="run-group-a")
+        return RunIds(
+            run_id=self.run_id,
+            logical_run_group_id=self.logical_run_group_id,
+        )
 
 
 def test_parse_start_run_command_requires_plan_id_and_checksum() -> None:
@@ -202,6 +211,35 @@ def test_parse_start_run_command_requires_plan_id_and_checksum() -> None:
             idempotency_key="idempotency-a",
             payload={"plan_id": "plan-a", "plan_checksum": "not-a-checksum"},
         )
+
+
+def test_parse_start_run_command_validates_retry_target_scope() -> None:
+    payload = {"plan_id": "plan-a", "plan_checksum": "a" * 64}
+    with pytest.raises(RunStartViolation, match="START_RUN_RETRY_REQUIRES_TARGET_SCOPE"):
+        parse_start_run_command(
+            request_id="request-a",
+            idempotency_key="idempotency-a",
+            payload={**payload, "resumed_from_run_id": "run-source"},
+        )
+    with pytest.raises(RunStartViolation, match="START_RUN_TARGET_SCOPE_DUPLICATE"):
+        parse_start_run_command(
+            request_id="request-a",
+            idempotency_key="idempotency-a",
+            payload={**payload, "target_endpoint_ids": ["target-a", "target-a"]},
+        )
+
+    parsed = parse_start_run_command(
+        request_id="request-a",
+        idempotency_key="idempotency-a",
+        payload={
+            **payload,
+            "target_endpoint_ids": ["target-b"],
+            "resumed_from_run_id": "run-source",
+        },
+    )
+
+    assert parsed.target_endpoint_ids == ("target-b",)
+    assert parsed.resumed_from_run_id == "run-source"
 
 
 def test_pause_request_waits_for_executor_boundary_and_resume_requeues_target() -> None:
@@ -374,6 +412,160 @@ def test_start_run_replays_existing_idempotency_key() -> None:
     assert second.idempotent_replay is True
     assert second.run == first.run
     assert ids.calls == 1
+
+
+def test_retry_run_queues_only_failed_target_with_original_lineage() -> None:
+    source_plan = _multi_target_plan("plan-source")
+    retry_plan = _multi_target_plan("plan-retry")
+    runs = InMemoryRunStore()
+    source = start_run_from_sealed_plan(
+        command=_start_command(source_plan),
+        plans=InMemoryPlanStore(source_plan),
+        runs=runs,
+        id_factory=FixedRunIdFactory("run-source", "run-group-original"),
+    ).run
+    assert source is not None
+    source = replace(
+        source,
+        state=RunState.PARTIAL_FAILURE,
+        targets=(
+            replace(
+                source.targets[0],
+                state=RunTargetState.SUCCEEDED,
+                completed_operations=1,
+                completed_bytes=128,
+            ),
+            replace(
+                source.targets[1],
+                state=RunTargetState.FAILED,
+                completed_operations=1,
+                completed_bytes=64,
+            ),
+        ),
+    )
+    runs.runs[source.run_id] = source
+    command = parse_start_run_command(
+        request_id="request-retry",
+        idempotency_key="idempotency-retry",
+        payload={
+            "plan_id": retry_plan.plan_id,
+            "plan_checksum": retry_plan.plan_checksum,
+            "target_endpoint_ids": ["target-b"],
+            "resumed_from_run_id": source.run_id,
+        },
+    )
+
+    outcome = start_run_from_sealed_plan(
+        command=command,
+        plans=InMemoryPlanStore(retry_plan),
+        runs=runs,
+        id_factory=FixedRunIdFactory("run-retry", "run-group-unused"),
+    )
+
+    assert outcome.created is True
+    assert outcome.run is not None
+    assert outcome.run.resumed_from_run_id == "run-source"
+    assert outcome.run.logical_run_group_id == "run-group-original"
+    assert outcome.run.planned_operations == 1
+    assert outcome.run.planned_bytes == 256
+    assert tuple(target.endpoint_id for target in outcome.run.targets) == ("target-b",)
+    assert outcome.run.summary["scope"] == "TARGET_RETRY"
+    assert outcome.run.summary["target_endpoint_ids"] == ["target-b"]
+
+
+def test_retry_run_rejects_successful_target_and_stale_partial_plan() -> None:
+    plan = _multi_target_plan("plan-source")
+    runs = InMemoryRunStore()
+    source = start_run_from_sealed_plan(
+        command=_start_command(plan),
+        plans=InMemoryPlanStore(plan),
+        runs=runs,
+        id_factory=FixedRunIdFactory("run-source", "run-group-original"),
+    ).run
+    assert source is not None
+    source = replace(
+        source,
+        state=RunState.PARTIAL_FAILURE,
+        targets=(
+            replace(source.targets[0], state=RunTargetState.SUCCEEDED),
+            replace(
+                source.targets[1],
+                state=RunTargetState.FAILED,
+                completed_operations=1,
+            ),
+        ),
+    )
+    runs.runs[source.run_id] = source
+
+    successful_target = start_run_from_sealed_plan(
+        command=replace(
+            _start_command(plan),
+            idempotency_key="retry-successful",
+            target_endpoint_ids=("target-a",),
+            resumed_from_run_id=source.run_id,
+        ),
+        plans=InMemoryPlanStore(plan),
+        runs=runs,
+        id_factory=FixedRunIdFactory("run-retry-a"),
+    )
+    stale_partial = start_run_from_sealed_plan(
+        command=replace(
+            _start_command(plan),
+            idempotency_key="retry-stale",
+            target_endpoint_ids=("target-b",),
+            resumed_from_run_id=source.run_id,
+        ),
+        plans=InMemoryPlanStore(plan),
+        runs=runs,
+        id_factory=FixedRunIdFactory("run-retry-b"),
+    )
+
+    assert successful_target.run is None
+    assert successful_target.readiness.validation_codes == (
+        "RUN_RETRY_TARGET_NOT_FAILED",
+    )
+    assert stale_partial.run is None
+    assert stale_partial.readiness.validation_codes == (
+        "RUN_RETRY_REQUIRES_FRESH_PLAN",
+    )
+
+
+def test_target_scope_does_not_inherit_another_targets_blocked_operation() -> None:
+    base = _multi_target_plan("plan-scoped")
+    plan = seal_plan(
+        plan_id=base.plan_id,
+        analysis_id=base.analysis_id,
+        job_id=base.job_id,
+        job_revision_id=base.job_revision_id,
+        endpoints=base.endpoints,
+        operations=(
+            replace(base.operations[0], risk_level=PlanRiskLevel.BLOCKED),
+            base.operations[1],
+        ),
+    )
+
+    full = start_run_from_sealed_plan(
+        command=_start_command(plan),
+        plans=InMemoryPlanStore(plan),
+        runs=InMemoryRunStore(),
+        id_factory=FixedRunIdFactory("run-full"),
+    )
+    scoped = start_run_from_sealed_plan(
+        command=replace(
+            _start_command(plan),
+            idempotency_key="scoped-target-b",
+            target_endpoint_ids=("target-b",),
+        ),
+        plans=InMemoryPlanStore(plan),
+        runs=InMemoryRunStore(),
+        id_factory=FixedRunIdFactory("run-scoped"),
+    )
+
+    assert full.run is None
+    assert full.readiness.validation_codes == ("PLAN_BLOCKED",)
+    assert scoped.created is True
+    assert scoped.run is not None
+    assert tuple(target.endpoint_id for target in scoped.run.targets) == ("target-b",)
 
 
 def test_start_run_can_use_trigger_occurrence_idempotency_key() -> None:
@@ -572,6 +764,54 @@ def _sealed_plan() -> SealedPlan:
         job_revision_id="job-rev-a",
         endpoints=(_target_endpoint(),),
         operations=(_copy_operation(),),
+    )
+
+
+def _multi_target_plan(plan_id: str) -> SealedPlan:
+    return seal_plan(
+        plan_id=plan_id,
+        analysis_id=f"analysis-{plan_id}",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(
+            _target_endpoint(),
+            PlanEndpoint(
+                endpoint_id="target-b",
+                endpoint_revision_id="target-rev-b",
+                snapshot_id="target-snapshot-b",
+                role=PlanEndpointRole.TARGET_WRITABLE,
+                target_ordinal=1,
+                capabilities_hash="capabilities-b",
+                root_case_context_hash="case-b",
+                endpoint_generation=1,
+                required_owner_installation_id="owner-a",
+                required_ownership_epoch=1,
+                control_schema_version=1,
+                planned_operations=1,
+                planned_bytes=256,
+            ),
+        ),
+        operations=(
+            replace(
+                _copy_operation(),
+                operation_id="op-copy-a",
+                target_endpoint_id="target-a",
+            ),
+            replace(
+                _copy_operation(),
+                operation_id="op-copy-b",
+                sequence_no=20,
+                stable_order_key="021:Pictures/B.jpg",
+                target_endpoint_id="target-b",
+                target_relative_path="Pictures/B.jpg",
+                source_relative_path="Pictures/B.jpg",
+                source_precondition_json=source_precondition_json(
+                    relative_path="Pictures/B.jpg",
+                    size_bytes=256,
+                ),
+                planned_bytes=256,
+            ),
+        ),
     )
 
 

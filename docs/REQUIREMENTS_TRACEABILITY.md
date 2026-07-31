@@ -1,5 +1,27 @@
 # Kravsporbarhet
 
+Oppdatering 2026-07-31 for `UX-004`, `SYNC-002` og målhalvdelen av
+`AC-UX-15`: Terminale Jobs-resultater tilbyr nå en lokalisert velger for
+mislykkede, avbrutte eller blokkerte mål. Handlingen kjører først en fersk
+`CHECK_BACKUP` uten automatisk start og oppretter deretter en checksum-bundet
+`START_RUN` bare for valgt endpoint. Retry-runnen lagrer
+`resumed_from_run_id`, arver opprinnelig `logical_run_group_id` og beregner
+planlagte operasjoner/byte bare fra valgt mål. Application-laget avviser
+samme plan som kilderunnen, ukjente eller vellykkede mål, ikke-terminal kilde
+og jobbmismatch; eksplisitt målscoping ignorerer blokkeringer som bare tilhører
+andre mål. GUI-beviset bytter norsk/engelsk, klikker retry, verifiserer at den
+ferske kontrollen ikke autostarter, og sender bare `target-c` ved 900×560 uten
+horisontal overflow. Elementspesifikt manuelt retry er fortsatt pending.
+Bevis: `src/mediasync_home/application/runs.py`,
+`src/mediasync_home/adapters/sqlite/runs.py`,
+`src/mediasync_home/ipc/server.py`,
+`src/mediasync_home/presentation/engine_client.py`,
+`src/mediasync_home/presentation/main_window.py`,
+`tests/unit/test_run_start.py`, `tests/unit/test_engine_client.py`,
+`tests/unit/test_ipc_handshake.py`,
+`tests/integration/sqlite/test_sqlite_runs.py` og
+`tests/gui/test_pyside_shell.py`.
+
 Oppdatering 2026-07-31 for `SYNC-002`, `UX-002`, `UX-004` og `PERF-001`:
 Jobber viser nå en lokalisert **Endringer**-arbeidsflate over valgt forseglede
 plan. Planoperasjonsspørringen støtter validerte, parameteriserte mål- og

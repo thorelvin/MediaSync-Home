@@ -353,11 +353,17 @@ class EngineClient:
         plan_checksum: str,
         request_id: str,
         idempotency_key: str,
+        target_endpoint_ids: tuple[str, ...] = (),
+        resumed_from_run_id: str | None = None,
     ) -> IpcResponse:
         payload: dict[str, object] = {
             "plan_id": plan_id,
             "plan_checksum": plan_checksum,
         }
+        if target_endpoint_ids:
+            payload["target_endpoint_ids"] = list(target_endpoint_ids)
+        if resumed_from_run_id is not None:
+            payload["resumed_from_run_id"] = resumed_from_run_id
         return self._request_with_handshake_retry(
             lambda: self._ipc_client.submit_command(
                 RunCommandName.START_RUN.value,
@@ -374,10 +380,11 @@ class EngineClient:
         job_id: str,
         request_id: str,
         idempotency_key: str,
+        start_when_safe: bool = True,
     ) -> IpcResponse:
         payload: dict[str, object] = {
             "job_id": job_id,
-            "start_when_safe": True,
+            "start_when_safe": start_when_safe,
         }
         return self._request_with_handshake_retry(
             lambda: self._ipc_client.submit_command(

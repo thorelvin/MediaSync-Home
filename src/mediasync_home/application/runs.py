@@ -23,6 +23,7 @@ WAITABLE_ENDPOINT_LEASE_CODES = frozenset(
     }
 )
 PLAN_CHECKSUM_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+MAX_RUN_TARGET_SCOPE = 32
 
 
 class RunStartViolation(ValueError):
@@ -68,6 +69,26 @@ class RunTargetState(str, Enum):
     RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
 
 
+_TERMINAL_RUN_STATES = frozenset(
+    {
+        RunState.COMPLETED,
+        RunState.COMPLETED_WITH_WARNINGS,
+        RunState.PARTIAL_FAILURE,
+        RunState.FAILED,
+        RunState.CANCELLED,
+        RunState.BLOCKED_BY_SAFETY,
+        RunState.RECOVERY_REQUIRED,
+    }
+)
+_RETRYABLE_RUN_TARGET_STATES = frozenset(
+    {
+        RunTargetState.FAILED,
+        RunTargetState.CANCELLED,
+        RunTargetState.BLOCKED,
+    }
+)
+
+
 class RunTriggerType(str, Enum):
     MANUAL_LOCAL_PREVIEW = "MANUAL_LOCAL_PREVIEW"
 
@@ -80,6 +101,8 @@ class StartRunCommand:
     plan_checksum: str
     run_idempotency_key: str | None = None
     trigger_occurrence_id: str | None = None
+    target_endpoint_ids: tuple[str, ...] = ()
+    resumed_from_run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -389,6 +412,14 @@ def parse_start_run_command(
     idempotency_key: str,
     payload: dict[str, Any],
 ) -> StartRunCommand:
+    allowed_fields = {
+        "plan_id",
+        "plan_checksum",
+        "target_endpoint_ids",
+        "resumed_from_run_id",
+    }
+    if not set(payload).issubset(allowed_fields):
+        raise RunStartViolation("START_RUN_PAYLOAD_INVALID")
     plan_id = payload.get("plan_id")
     if not isinstance(plan_id, str) or not plan_id.strip():
         raise RunStartViolation("START_RUN_REQUIRES_PLAN_ID")
@@ -398,11 +429,17 @@ def parse_start_run_command(
         or PLAN_CHECKSUM_PATTERN.fullmatch(plan_checksum) is None
     ):
         raise RunStartViolation("START_RUN_REQUIRES_PLAN_CHECKSUM")
+    target_endpoint_ids = _parse_target_endpoint_ids(payload)
+    resumed_from_run_id = _parse_resumed_from_run_id(payload)
+    if resumed_from_run_id is not None and not target_endpoint_ids:
+        raise RunStartViolation("START_RUN_RETRY_REQUIRES_TARGET_SCOPE")
     return StartRunCommand(
         request_id=request_id,
         idempotency_key=idempotency_key,
         plan_id=plan_id,
         plan_checksum=plan_checksum,
+        target_endpoint_ids=target_endpoint_ids,
+        resumed_from_run_id=resumed_from_run_id,
     )
 
 
@@ -616,6 +653,25 @@ def start_run_from_sealed_plan(
             readiness=readiness,
         )
 
+    retry_source: StartedRun | None = None
+    if command.resumed_from_run_id is not None:
+        retry_source = runs.load_started_run(command.resumed_from_run_id)
+        retry_error = _retry_source_validation_code(
+            source=retry_source,
+            plan=plan,
+            target_endpoint_ids=command.target_endpoint_ids,
+        )
+        if retry_error is not None:
+            return RunStartOutcome(
+                created=False,
+                idempotent_replay=False,
+                readiness=_not_ready_to_queue(
+                    readiness,
+                    retry_error,
+                    "Run a fresh control and select a failed target before retrying.",
+                ),
+            )
+
     active = _load_active_run_for_job(runs=runs, job_id=plan.job_id)
     if active is not None:
         return RunStartOutcome(
@@ -629,6 +685,7 @@ def start_run_from_sealed_plan(
         command=command,
         plan=plan,
         ids=id_factory.new_run_ids(),
+        retry_source=retry_source,
     )
     runs.save_started_run(run)
     return RunStartOutcome(
@@ -1437,6 +1494,9 @@ def _readiness_for_plan(
     *, command: StartRunCommand, plan: SealedPlan
 ) -> RunStartReadiness:
     validation_codes: list[str] = []
+    target_scope_error = _target_scope_validation_code(command.target_endpoint_ids)
+    if target_scope_error is not None:
+        validation_codes.append(target_scope_error)
     checksum_matches = plan.plan_checksum == command.plan_checksum
     checksum_valid = verify_plan_checksum(plan)
     if not checksum_matches:
@@ -1445,11 +1505,20 @@ def _readiness_for_plan(
         validation_codes.append("PLAN_CHECKSUM_INVALID")
     if not plan.immutable:
         validation_codes.append("PLAN_NOT_IMMUTABLE")
-    if plan.risk_summary.get("highest") == "BLOCKED":
+    target_endpoints = _selected_target_endpoints(plan, command.target_endpoint_ids)
+    known_target_ids = {endpoint.endpoint_id for endpoint in _target_endpoints(plan)}
+    if command.target_endpoint_ids and set(command.target_endpoint_ids) - known_target_ids:
+        validation_codes.append("PLAN_TARGET_SCOPE_UNKNOWN")
+    if _selected_scope_is_blocked(plan, command.target_endpoint_ids):
         validation_codes.append("PLAN_BLOCKED")
-    if plan.operation_count < 1:
+    selected_operation_count = (
+        plan.operation_count
+        if not command.target_endpoint_ids
+        else sum(endpoint.planned_operations for endpoint in target_endpoints)
+    )
+    if selected_operation_count < 1:
         validation_codes.append("PLAN_REQUIRES_OPERATIONS")
-    if not _target_endpoints(plan):
+    if not target_endpoints:
         validation_codes.append("PLAN_REQUIRES_TARGET_ENDPOINT")
 
     if validation_codes:
@@ -1470,7 +1539,10 @@ def _started_run_from_plan(
     command: StartRunCommand,
     plan: SealedPlan,
     ids: RunIds,
+    retry_source: StartedRun | None = None,
 ) -> StartedRun:
+    target_endpoints = _selected_target_endpoints(plan, command.target_endpoint_ids)
+    scoped = bool(command.target_endpoint_ids)
     return StartedRun(
         run_id=ids.run_id,
         job_id=plan.job_id,
@@ -1479,21 +1551,44 @@ def _started_run_from_plan(
         command_request_id=command.request_id,
         idempotency_key=_effective_run_idempotency_key(command),
         command_receipt_id=command.idempotency_key,
-        logical_run_group_id=ids.logical_run_group_id,
+        logical_run_group_id=(
+            retry_source.logical_run_group_id
+            if retry_source is not None
+            else ids.logical_run_group_id
+        ),
         trigger_type=RunTriggerType.MANUAL_LOCAL_PREVIEW,
         state=RunState.QUEUED,
         app_version=APP_VERSION,
         plan_checksum=plan.plan_checksum,
-        planned_operations=plan.operation_count,
-        planned_bytes=plan.planned_bytes,
+        planned_operations=(
+            sum(endpoint.planned_operations for endpoint in target_endpoints)
+            if scoped
+            else plan.operation_count
+        ),
+        planned_bytes=(
+            sum(endpoint.planned_bytes for endpoint in target_endpoints)
+            if scoped
+            else plan.planned_bytes
+        ),
         trigger_occurrence_id=command.trigger_occurrence_id,
+        resumed_from_run_id=command.resumed_from_run_id,
         targets=tuple(
             _started_run_target(ids.run_id, endpoint)
-            for endpoint in _target_endpoints(plan)
+            for endpoint in target_endpoints
         ),
         summary={
             "executor_pending": True,
-            "scope": "0B_RUN_START_SKELETON",
+            "scope": "TARGET_RETRY" if retry_source is not None else "0B_RUN_START_SKELETON",
+            **(
+                {"target_endpoint_ids": list(command.target_endpoint_ids)}
+                if scoped
+                else {}
+            ),
+            **(
+                {"resumed_from_run_id": command.resumed_from_run_id}
+                if command.resumed_from_run_id is not None
+                else {}
+            ),
             **(
                 {"trigger_occurrence_id": command.trigger_occurrence_id}
                 if command.trigger_occurrence_id is not None
@@ -1517,6 +1612,130 @@ def _target_endpoints(plan: SealedPlan) -> tuple[PlanEndpoint, ...]:
             ),
         )
     )
+
+
+def _selected_target_endpoints(
+    plan: SealedPlan,
+    target_endpoint_ids: tuple[str, ...],
+) -> tuple[PlanEndpoint, ...]:
+    endpoints = _target_endpoints(plan)
+    if not target_endpoint_ids:
+        return endpoints
+    selected = set(target_endpoint_ids)
+    return tuple(endpoint for endpoint in endpoints if endpoint.endpoint_id in selected)
+
+
+def _selected_scope_is_blocked(
+    plan: SealedPlan,
+    target_endpoint_ids: tuple[str, ...],
+) -> bool:
+    if not target_endpoint_ids:
+        return plan.risk_summary.get("highest") == "BLOCKED"
+    selected = set(target_endpoint_ids)
+    return any(
+        operation.risk_level.value == "BLOCKED"
+        and (
+            operation.target_endpoint_id is None
+            or operation.target_endpoint_id in selected
+        )
+        for operation in plan.operations
+    )
+
+
+def _retry_source_validation_code(
+    *,
+    source: StartedRun | None,
+    plan: SealedPlan,
+    target_endpoint_ids: tuple[str, ...],
+) -> str | None:
+    if source is None:
+        return "RUN_RETRY_SOURCE_NOT_FOUND"
+    if not target_endpoint_ids:
+        return "RUN_RETRY_REQUIRES_TARGET_SCOPE"
+    if source.state not in _TERMINAL_RUN_STATES:
+        return "RUN_RETRY_SOURCE_NOT_TERMINAL"
+    if source.job_id != plan.job_id:
+        return "RUN_RETRY_SOURCE_JOB_MISMATCH"
+    source_targets = {target.endpoint_id: target for target in source.targets}
+    for endpoint_id in target_endpoint_ids:
+        target = source_targets.get(endpoint_id)
+        if target is None:
+            return "RUN_RETRY_TARGET_NOT_IN_SOURCE"
+        if target.state not in _RETRYABLE_RUN_TARGET_STATES:
+            return "RUN_RETRY_TARGET_NOT_FAILED"
+        if source.plan_id == plan.plan_id:
+            return "RUN_RETRY_REQUIRES_FRESH_PLAN"
+    return None
+
+
+def _not_ready_to_queue(
+    readiness: RunStartReadiness,
+    validation_code: str,
+    next_action: str,
+) -> RunStartReadiness:
+    return RunStartReadiness(
+        plan_id=readiness.plan_id,
+        plan_found=readiness.plan_found,
+        plan_checksum_matches=readiness.plan_checksum_matches,
+        plan_checksum_valid=readiness.plan_checksum_valid,
+        plan_runnable=False,
+        validation_codes=(validation_code,),
+        next_action=next_action,
+    )
+
+
+def _parse_target_endpoint_ids(payload: dict[str, Any]) -> tuple[str, ...]:
+    if "target_endpoint_ids" not in payload:
+        return ()
+    value = payload.get("target_endpoint_ids")
+    if not isinstance(value, list) or not 1 <= len(value) <= MAX_RUN_TARGET_SCOPE:
+        raise RunStartViolation("START_RUN_TARGET_SCOPE_INVALID")
+    normalized: list[str] = []
+    for item in value:
+        if (
+            not isinstance(item, str)
+            or not item.strip()
+            or len(item) > 128
+            or item != item.strip()
+        ):
+            raise RunStartViolation("START_RUN_TARGET_SCOPE_INVALID")
+        normalized.append(item)
+    if len(set(normalized)) != len(normalized):
+        raise RunStartViolation("START_RUN_TARGET_SCOPE_DUPLICATE")
+    return tuple(normalized)
+
+
+def _target_scope_validation_code(
+    target_endpoint_ids: tuple[str, ...],
+) -> str | None:
+    if not target_endpoint_ids:
+        return None
+    if not 1 <= len(target_endpoint_ids) <= MAX_RUN_TARGET_SCOPE:
+        return "START_RUN_TARGET_SCOPE_INVALID"
+    if len(set(target_endpoint_ids)) != len(target_endpoint_ids):
+        return "START_RUN_TARGET_SCOPE_DUPLICATE"
+    if any(
+        not endpoint_id.strip()
+        or len(endpoint_id) > 128
+        or endpoint_id != endpoint_id.strip()
+        for endpoint_id in target_endpoint_ids
+    ):
+        return "START_RUN_TARGET_SCOPE_INVALID"
+    return None
+
+
+def _parse_resumed_from_run_id(payload: dict[str, Any]) -> str | None:
+    if "resumed_from_run_id" not in payload:
+        return None
+    value = payload.get("resumed_from_run_id")
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > 128
+        or value != value.strip()
+    ):
+        raise RunStartViolation("START_RUN_RETRY_SOURCE_INVALID")
+    return value
 
 
 def _target_by_id(run: StartedRun, run_target_id: str) -> StartedRunTarget | None:

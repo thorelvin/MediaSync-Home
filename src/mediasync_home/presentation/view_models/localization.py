@@ -252,6 +252,20 @@ class ShellText:
         return "Backup result" if self.language_tooltip_prefix == "Language" else "Backupresultat"
 
     @property
+    def retry_target(self) -> str:
+        return "Retry target" if self.language_tooltip_prefix == "Language" else "Prøv målet på nytt"
+
+    @property
+    def retry_target_tooltip(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Check again, then retry only the selected failed target"
+        return "Kontroller på nytt, og prøv bare det valgte mislykkede målet"
+
+    @property
+    def failed_target(self) -> str:
+        return "Failed target" if self.language_tooltip_prefix == "Language" else "Mislykket mål"
+
+    @property
     def last_successful_backup(self) -> str:
         if self.language_tooltip_prefix == "Language":
             return "Last successful"

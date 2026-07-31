@@ -259,6 +259,8 @@ class BackupStartProvider(Protocol):
         plan_checksum: str,
         request_id: str,
         idempotency_key: str,
+        target_endpoint_ids: tuple[str, ...] = (),
+        resumed_from_run_id: str | None = None,
     ) -> IpcResponse: ...
 
 
@@ -269,6 +271,7 @@ class BackupCheckProvider(Protocol):
         job_id: str,
         request_id: str,
         idempotency_key: str,
+        start_when_safe: bool = True,
     ) -> IpcResponse: ...
 
 
@@ -341,6 +344,7 @@ class MediaSyncWindow(QMainWindow):
         self._start_idempotency_key: str | None = None
         self._analysis_request_id: str | None = None
         self._analysis_idempotency_key: str | None = None
+        self._retry_after_analysis: tuple[str, str] | None = None
         self._latest_run_job_id: str | None = None
         self._latest_run_plan_id: str | None = None
         self._latest_run_state: str | None = None
@@ -478,6 +482,8 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_pause_button: QPushButton | None = None
         self._jobs_resume_button: QPushButton | None = None
         self._jobs_stop_button: QPushButton | None = None
+        self._jobs_retry_target_combo: QComboBox | None = None
+        self._jobs_retry_target_button: QPushButton | None = None
         self._changes_plan_id: str | None = None
         self._changes_page_state = empty_plan_operation_preview_state()
         self._changes_page_limit = 25
@@ -794,6 +800,7 @@ class MediaSyncWindow(QMainWindow):
             self._start_idempotency_key = None
             self._analysis_request_id = None
             self._analysis_idempotency_key = None
+            self._retry_after_analysis = None
             self._analysis_timer.stop()
         self._selected_job_id = job_id
         state = self._refresh_backup_job_detail(job_id)
@@ -1776,6 +1783,10 @@ class MediaSyncWindow(QMainWindow):
                 self._jobs_resume_button.setVisible(False)
             if self._jobs_stop_button is not None:
                 self._jobs_stop_button.setVisible(False)
+            if self._jobs_retry_target_combo is not None:
+                self._jobs_retry_target_combo.setVisible(False)
+            if self._jobs_retry_target_button is not None:
+                self._jobs_retry_target_button.setVisible(False)
             return
         if state.active:
             for start_button in (
@@ -1990,6 +2001,57 @@ class MediaSyncWindow(QMainWindow):
                 and self._engine_client is not None
                 and hasattr(self._engine_client, "stop_backup_after_active_file")
             )
+        self._apply_target_retry_controls(state)
+
+    def _apply_target_retry_controls(self, state: RunProgressViewState) -> None:
+        combo = self._jobs_retry_target_combo
+        button = self._jobs_retry_target_button
+        if combo is None or button is None:
+            return
+        retryable_targets = tuple(
+            target
+            for target in state.targets
+            if target.state in {"FAILED", "CANCELLED", "BLOCKED"}
+        )
+        visible = state.terminal and bool(retryable_targets)
+        selected_endpoint_id = combo.currentData(Qt.ItemDataRole.UserRole)
+        endpoint_ids = tuple(target.endpoint_id for target in retryable_targets)
+        current_ids = tuple(
+            str(combo.itemData(index, Qt.ItemDataRole.UserRole))
+            for index in range(combo.count())
+        )
+        labels = tuple(
+            f"{target.endpoint_id} · {self._target_state_label(target.state)}"
+            for target in retryable_targets
+        )
+        current_labels = tuple(combo.itemText(index) for index in range(combo.count()))
+        if current_ids != endpoint_ids or current_labels != labels:
+            combo.blockSignals(True)
+            combo.clear()
+            for endpoint_id, label in zip(endpoint_ids, labels, strict=True):
+                combo.addItem(label, endpoint_id)
+            if selected_endpoint_id in endpoint_ids:
+                combo.setCurrentIndex(endpoint_ids.index(str(selected_endpoint_id)))
+            combo.blockSignals(False)
+        texts = self._texts()
+        combo.setAccessibleName(texts.failed_target)
+        combo.setToolTip(texts.retry_target_tooltip)
+        combo.setVisible(visible)
+        button.setText(
+            texts.checking_backup
+            if self._retry_after_analysis is not None
+            else texts.retry_target
+        )
+        button.setToolTip(texts.retry_target_tooltip)
+        button.setVisible(visible)
+        button.setEnabled(
+            visible
+            and self._analysis_request_id is None
+            and self._retry_after_analysis is None
+            and self._engine_client is not None
+            and hasattr(self._engine_client, "check_backup")
+            and hasattr(self._engine_client, "start_backup")
+        )
 
     def _terminal_run_summary(self, state: str | None) -> str:
         english = self._selected_language_code is LanguageCode.ENGLISH
@@ -3020,7 +3082,7 @@ class MediaSyncWindow(QMainWindow):
             return
         self._start_selected_backup()
 
-    def _check_selected_backup(self) -> None:
+    def _check_selected_backup(self, *, start_when_safe: bool = True) -> None:
         state = self._job_detail_state
         if (
             self._engine_client is None
@@ -3036,6 +3098,7 @@ class MediaSyncWindow(QMainWindow):
             job_id=state.job_id,
             request_id=request_id,
             idempotency_key=idempotency_key,
+            start_when_safe=start_when_safe,
         )
         if response.status is IpcStatus.REJECTED:
             reason = (
@@ -3104,6 +3167,7 @@ class MediaSyncWindow(QMainWindow):
         self._analysis_idempotency_key = None
         terminal_state = state.analysis_request_state or "FAILED"
         started_run_id = state.analysis_request_started_run_id
+        pending_retry = self._retry_after_analysis
         if (
             terminal_state == "SUCCEEDED"
             and started_run_id is not None
@@ -3126,6 +3190,8 @@ class MediaSyncWindow(QMainWindow):
                 or self._texts().backup_check_failed
             )
             status_kind = "warning"
+        if terminal_state != "SUCCEEDED":
+            self._retry_after_analysis = None
         self.apply_engine_status(
             replace(
                 self._engine_status_state,
@@ -3136,8 +3202,20 @@ class MediaSyncWindow(QMainWindow):
         self._refresh_backup_overview()
         self._refresh_activity_overview()
         self._refresh_history_timeline()
+        if pending_retry is not None and terminal_state == "SUCCEEDED":
+            source_run_id, endpoint_id = pending_retry
+            self._retry_after_analysis = None
+            self._start_selected_backup(
+                target_endpoint_ids=(endpoint_id,),
+                resumed_from_run_id=source_run_id,
+            )
 
-    def _start_selected_backup(self) -> None:
+    def _start_selected_backup(
+        self,
+        *,
+        target_endpoint_ids: tuple[str, ...] = (),
+        resumed_from_run_id: str | None = None,
+    ) -> None:
         state = self._job_detail_state
         if (
             self._engine_client is None
@@ -3156,6 +3234,8 @@ class MediaSyncWindow(QMainWindow):
             plan_checksum=state.plan_checksum,
             request_id=self._start_request_id,
             idempotency_key=self._start_idempotency_key,
+            target_endpoint_ids=target_endpoint_ids,
+            resumed_from_run_id=resumed_from_run_id,
         )
         if response.status is IpcStatus.REJECTED:
             readiness = response.payload.get("readiness")
@@ -3196,6 +3276,29 @@ class MediaSyncWindow(QMainWindow):
         if isinstance(run_id, str) and run_id:
             self._set_active_run(run_id)
             self._poll_active_run_progress()
+
+    def _retry_selected_target(self) -> None:
+        combo = self._jobs_retry_target_combo
+        source_run_id = self._run_progress_state.run_id
+        endpoint_id = (
+            combo.currentData(Qt.ItemDataRole.UserRole)
+            if combo is not None
+            else None
+        )
+        if (
+            source_run_id is None
+            or not isinstance(endpoint_id, str)
+            or not endpoint_id
+            or self._analysis_request_id is not None
+        ):
+            return
+        self._start_request_id = None
+        self._start_idempotency_key = None
+        self._retry_after_analysis = (source_run_id, endpoint_id)
+        self._check_selected_backup(start_when_safe=False)
+        if self._analysis_request_id is None:
+            self._retry_after_analysis = None
+        self._apply_run_progress_state(self._run_progress_state)
 
     def _apply_job_status_state(self, state: BackupJobStatusViewState) -> None:
         if self._activity_status_title is not None:
@@ -3686,6 +3789,20 @@ class MediaSyncWindow(QMainWindow):
             2,
             alignment=Qt.AlignmentFlag.AlignRight,
         )
+
+        retry_target_combo = QComboBox()
+        retry_target_combo.setObjectName("jobsRetryTargetCombo")
+        retry_target_combo.setVisible(False)
+        self._jobs_retry_target_combo = retry_target_combo
+        layout.addWidget(retry_target_combo, 16, 0, 1, 2)
+
+        retry_target_button = QPushButton(texts.retry_target)
+        retry_target_button.setObjectName("jobsRetryTargetButton")
+        retry_target_button.setToolTip(texts.retry_target_tooltip)
+        retry_target_button.setVisible(False)
+        retry_target_button.clicked.connect(self._retry_selected_target)
+        self._jobs_retry_target_button = retry_target_button
+        layout.addWidget(retry_target_button, 16, 2)
 
         start_backup = QPushButton(texts.start_backup)
         start_backup.setObjectName("jobsStartBackupButton")

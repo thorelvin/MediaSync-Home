@@ -2389,6 +2389,8 @@ def test_enabled_start_run_persists_queued_run_and_succeeds_receipt() -> None:
     assert response.payload["idempotent_replay"] is False
     assert response.payload["run"] == {
         "run_id": "run-a",
+        "logical_run_group_id": "run-group-a",
+        "resumed_from_run_id": None,
         "job_id": "job-a",
         "job_revision_id": "job-rev-a",
         "plan_id": "plan-a",
@@ -2396,6 +2398,7 @@ def test_enabled_start_run_persists_queued_run_and_succeeds_receipt() -> None:
         "plan_checksum": plan.plan_checksum,
         "planned_operations": 1,
         "planned_bytes": 128,
+        "target_endpoint_ids": ["target-a"],
     }
     assert response.payload["receipt"]["state"] == CommandReceiptState.SUCCEEDED.value
     assert response.payload["receipt"]["result_entity_type"] == "run"
@@ -2405,6 +2408,57 @@ def test_enabled_start_run_persists_queued_run_and_succeeds_receipt() -> None:
     assert run is not None
     assert run.state is RunState.QUEUED
     assert id_factory.calls == 1
+
+
+def test_enabled_start_run_carries_failed_target_retry_scope_and_lineage() -> None:
+    plan = _sealed_plan()
+    receipts = _InMemoryCommandReceiptStore()
+    runs = _InMemoryRunStore()
+    source = replace(
+        _started_run("run-source"),
+        job_revision_id=plan.job_revision_id,
+        plan_id="plan-source",
+        plan_checksum=plan.plan_checksum,
+        logical_run_group_id="run-group-original",
+        state=RunState.PARTIAL_FAILURE,
+        targets=(
+            replace(
+                _started_run("run-source").targets[0],
+                state=RunTargetState.FAILED,
+            ),
+        ),
+    )
+    runs.save_started_run(source)
+    service = _service(mutations_enabled=True)
+    service.plan_store = _InMemoryPlanStore(plan)
+    service.run_store = runs
+    service.run_id_factory = _FixedRunIdFactory()
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    payload = {
+        "plan_id": plan.plan_id,
+        "plan_checksum": plan.plan_checksum,
+        "target_endpoint_ids": ["target-a"],
+        "resumed_from_run_id": "run-source",
+    }
+
+    response = ipc_client.submit_command(
+        RunCommandName.START_RUN.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=payload,
+        payload_hash=payload_hash(payload),
+    )
+
+    assert response.status is IpcStatus.ACCEPTED
+    assert response.payload["run"]["target_endpoint_ids"] == ["target-a"]
+    assert response.payload["run"]["resumed_from_run_id"] == "run-source"
+    assert response.payload["run"]["logical_run_group_id"] == "run-group-original"
+    retry = runs.load_started_run("run-a")
+    assert retry is not None
+    assert retry.resumed_from_run_id == "run-source"
+    assert tuple(target.endpoint_id for target in retry.targets) == ("target-a",)
 
 
 def test_enabled_pause_and_resume_commands_are_durable_and_idempotent() -> None:

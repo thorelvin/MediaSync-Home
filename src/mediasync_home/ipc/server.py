@@ -2088,6 +2088,8 @@ def _start_run_response_payload(
     if run is not None:
         result["run"] = {
             "run_id": run.run_id,
+            "logical_run_group_id": run.logical_run_group_id,
+            "resumed_from_run_id": run.resumed_from_run_id,
             "job_id": run.job_id,
             "job_revision_id": run.job_revision_id,
             "plan_id": run.plan_id,
@@ -2095,6 +2097,7 @@ def _start_run_response_payload(
             "plan_checksum": run.plan_checksum,
             "planned_operations": run.planned_operations,
             "planned_bytes": run.planned_bytes,
+            "target_endpoint_ids": [target.endpoint_id for target in run.targets],
         }
     return result
 

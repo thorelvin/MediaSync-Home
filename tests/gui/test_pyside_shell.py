@@ -1852,6 +1852,60 @@ def test_jobs_page_localizes_terminal_partial_failure_summary(qapp) -> None:
         window.deleteLater()
 
 
+def test_jobs_page_rechecks_then_retries_only_selected_failed_target(qapp) -> None:
+    provider = _FakeTargetRetryDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window.refresh_engine_status()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+        combo = window.findChild(QComboBox, "jobsRetryTargetCombo")
+        button = window.findChild(QPushButton, "jobsRetryTargetButton")
+        jobs_scroll = window.findChild(QScrollArea, "jobsScrollArea")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert combo is not None and combo.isVisible()
+        assert combo.count() == 1
+        assert combo.currentData(Qt.ItemDataRole.UserRole) == "target-c"
+        assert "Feilet" in combo.currentText()
+        assert button is not None and button.isVisible() and button.isEnabled()
+        assert button.text() == "Prøv målet på nytt"
+        assert jobs_scroll is not None
+        assert jobs_scroll.horizontalScrollBar().maximum() == 0
+        assert language is not None and language.menu() is not None
+
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+
+        assert button.text() == "Retry target"
+        assert "Failed" in combo.currentText()
+        assert jobs_scroll.horizontalScrollBar().maximum() == 0
+
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert provider.check_start_policies == [False]
+        assert button.isEnabled() is False
+        assert button.text() == "Checking changes..."
+
+        window._poll_backup_analysis()
+        qapp.processEvents()
+
+        assert provider.started_plan == ("plan-refreshed", "b" * 64)
+        assert provider.started_scope == (("target-c",), "run-a")
+        assert jobs_scroll.horizontalScrollBar().maximum() == 0
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_jobs_page_counts_warning_target_as_completed(qapp) -> None:
     provider = _FakeTerminalRunDashboardEngineClient(
         run_state="COMPLETED_WITH_WARNINGS",
@@ -2637,6 +2691,7 @@ class _FakeBackupStartDashboardEngineClient(_FakeDashboardEngineClient):
     def __init__(self) -> None:
         super().__init__()
         self.started_plan: tuple[str, str] | None = None
+        self.started_scope: tuple[tuple[str, ...], str | None] | None = None
 
     def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
         response = super().get_backup_job_detail(job_id=job_id)
@@ -2657,11 +2712,14 @@ class _FakeBackupStartDashboardEngineClient(_FakeDashboardEngineClient):
         plan_checksum: str,
         request_id: str,
         idempotency_key: str,
+        target_endpoint_ids: tuple[str, ...] = (),
+        resumed_from_run_id: str | None = None,
     ) -> IpcResponse:
         assert request_id
         assert idempotency_key
         self.calls.append("start_backup")
         self.started_plan = (plan_id, plan_checksum)
+        self.started_scope = (target_endpoint_ids, resumed_from_run_id)
         return IpcResponse.accepted({"created": True, "run": {"run_id": "run-a"}})
 
 
@@ -2982,6 +3040,81 @@ class _FakeTerminalRunDashboardEngineClient(_FakeBackupStartDashboardEngineClien
                 }
             }
         )
+
+
+class _FakeTargetRetryDashboardEngineClient(_FakeTerminalRunDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__(
+            run_state="PARTIAL_FAILURE",
+            completed_operations=2,
+            completed_bytes=2048,
+            warning_count=1,
+            error_count=1,
+        )
+        self.analysis_requested = False
+        self.check_start_policies: list[bool] = []
+
+    def check_backup(
+        self,
+        *,
+        job_id: str,
+        request_id: str,
+        idempotency_key: str,
+        start_when_safe: bool = True,
+    ) -> IpcResponse:
+        assert job_id == "job-a"
+        assert request_id
+        assert idempotency_key
+        self.analysis_requested = True
+        self.check_start_policies.append(start_when_safe)
+        return IpcResponse.accepted(
+            {
+                "analysis_request": {
+                    "request_id": "analysis-retry",
+                    "state": "QUEUED",
+                }
+            }
+        )
+
+    def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        response = super().get_backup_job_detail(job_id=job_id)
+        if not self.analysis_requested:
+            return response
+        payload = dict(response.payload)
+        detail = dict(payload["backup_job_detail"])
+        job = dict(detail["job"])
+        initial_plan = dict(job["initial_plan"])
+        initial_plan.update(
+            {
+                "analysis_id": "analysis-refreshed",
+                "plan_id": "plan-refreshed",
+                "plan_checksum": "b" * 64,
+                "operation_count": 1,
+                "planned_bytes": 1024,
+                "plan_runnable": True,
+            }
+        )
+        job["initial_plan"] = initial_plan
+        job["latest_analysis_request"] = {
+            "request_id": "analysis-retry",
+            "job_id": "job-a",
+            "job_revision_id": "job-rev-a",
+            "state": "SUCCEEDED",
+            "requested_utc": "2026-07-31T12:00:00.000Z",
+            "started_utc": "2026-07-31T12:00:01.000Z",
+            "completed_utc": "2026-07-31T12:00:02.000Z",
+            "analysis_id": "analysis-refreshed",
+            "plan_id": "plan-refreshed",
+            "reason_code": "INITIAL_BACKUP_PLAN_READY_FOR_REVIEW",
+            "operation_count": 1,
+            "planned_bytes": 1024,
+            "start_when_safe": False,
+            "started_run_id": None,
+            "row_version": 2,
+        }
+        detail["job"] = job
+        payload["backup_job_detail"] = detail
+        return IpcResponse.accepted(payload)
 
 
 class _FakeMultiTargetFreshnessDashboardEngineClient(_FakeDashboardEngineClient):

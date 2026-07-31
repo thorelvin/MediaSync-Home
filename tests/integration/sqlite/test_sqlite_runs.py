@@ -90,12 +90,21 @@ from mediasync_home.ipc.server import EngineHostIpcService
 
 
 class FixedRunIdFactory(RunIdFactory):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        run_id: str = "run-a",
+        logical_run_group_id: str = "run-group-a",
+    ) -> None:
         self.calls = 0
+        self.run_id = run_id
+        self.logical_run_group_id = logical_run_group_id
 
     def new_run_ids(self) -> RunIds:
         self.calls += 1
-        return RunIds(run_id="run-a", logical_run_group_id="run-group-a")
+        return RunIds(
+            run_id=self.run_id,
+            logical_run_group_id=self.logical_run_group_id,
+        )
 
 
 class FixedLeaseAuthority(EndpointLeaseAuthority):
@@ -196,6 +205,71 @@ def test_sqlite_run_store_persists_started_run_from_sealed_plan(tmp_path: Path) 
         assert loaded.targets[0].planned_bytes == 128
         assert _row_count(connection, "runs") == 1
         assert _row_count(connection, "run_targets") == 1
+
+
+def test_sqlite_run_store_persists_target_retry_lineage(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        _insert_receipt_with_id(
+            connection,
+            idempotency_key="idempotency-retry",
+            request_id="request-retry",
+        )
+        plans = SqlitePlanStore(connection)
+        runs = SqliteRunStore(connection)
+        source_plan = _sealed_plan(plan_id="plan-source")
+        plan = _sealed_plan()
+        plans.save_sealed_plan(source_plan)
+        plans.save_sealed_plan(plan)
+        source = start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={
+                    "plan_id": source_plan.plan_id,
+                    "plan_checksum": source_plan.plan_checksum,
+                },
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory("run-source", "run-group-original"),
+        ).run
+        assert source is not None
+        connection.execute(
+            "UPDATE runs SET state = 'PARTIAL_FAILURE' WHERE id = 'run-source'"
+        )
+        connection.execute(
+            "UPDATE run_targets SET state = 'FAILED' WHERE run_id = 'run-source'"
+        )
+        connection.commit()
+
+        outcome = start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-retry",
+                idempotency_key="idempotency-retry",
+                payload={
+                    "plan_id": plan.plan_id,
+                    "plan_checksum": plan.plan_checksum,
+                    "target_endpoint_ids": ["target-a"],
+                    "resumed_from_run_id": "run-source",
+                },
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory("run-retry", "run-group-unused"),
+        )
+
+        loaded = runs.load_started_run("run-retry")
+        assert outcome.created is True
+        assert loaded == outcome.run
+        assert loaded is not None
+        assert loaded.resumed_from_run_id == "run-source"
+        assert loaded.logical_run_group_id == "run-group-original"
+        assert loaded.summary["scope"] == "TARGET_RETRY"
+        assert tuple(target.endpoint_id for target in loaded.targets) == ("target-a",)
 
 
 def test_sqlite_graceful_stop_request_binds_and_terminalizes_run(
@@ -1701,9 +1775,9 @@ def _start_sqlite_executing_run(connection: sqlite3.Connection) -> SqliteRunStor
     return runs
 
 
-def _sealed_plan() -> SealedPlan:
+def _sealed_plan(*, plan_id: str = "plan-a") -> SealedPlan:
     return seal_plan(
-        plan_id="plan-a",
+        plan_id=plan_id,
         analysis_id="analysis-a",
         job_id="job-a",
         job_revision_id="job-rev-a",

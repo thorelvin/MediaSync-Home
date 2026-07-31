@@ -67,6 +67,30 @@ def test_engine_client_submits_checksum_bound_start_run() -> None:
     assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
 
 
+def test_engine_client_submits_target_scoped_retry_lineage() -> None:
+    ipc_client = _RecordingIpcClient()
+    client = EngineClient(ipc_client)  # type: ignore[arg-type]
+
+    response = client.start_backup(
+        plan_id="plan-refreshed",
+        plan_checksum="b" * 64,
+        request_id="request-retry",
+        idempotency_key="idempotency-retry",
+        target_endpoint_ids=("target-b",),
+        resumed_from_run_id="run-source",
+    )
+
+    assert response.reason is None
+    assert ipc_client.command_name == RunCommandName.START_RUN.value
+    assert ipc_client.payload == {
+        "plan_id": "plan-refreshed",
+        "plan_checksum": "b" * 64,
+        "target_endpoint_ids": ["target-b"],
+        "resumed_from_run_id": "run-source",
+    }
+    assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
+
+
 def test_engine_client_queues_backup_check() -> None:
     ipc_client = _RecordingIpcClient()
     client = EngineClient(ipc_client)  # type: ignore[arg-type]
@@ -86,6 +110,18 @@ def test_engine_client_queues_backup_check() -> None:
         "start_when_safe": True,
     }
     assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
+
+    client.check_backup(
+        job_id="job-a",
+        request_id="request-b",
+        idempotency_key="idempotency-b",
+        start_when_safe=False,
+    )
+
+    assert ipc_client.payload == {
+        "job_id": "job-a",
+        "start_when_safe": False,
+    }
 
 
 def test_engine_client_submits_pause_and_resume_run_controls() -> None:

@@ -1,5 +1,17 @@
 # Implementeringsstatus
 
+Oppdatering 2026-07-31: Et terminalt resultat i **Jobber** kan nå prøve ett
+mislykket, avbrutt eller blokkert mål på nytt uten å kjøre allerede vellykkede
+mål. Brukeren velger målet i en lokalisert resultatkontroll; GUI-et bestiller
+først en ny kontroll med automatisk start avslått og sender deretter
+`START_RUN` med bare valgt endpoint og opprinnelig run som lineage. Backend
+krever en ny forseglet plan, avviser vellykkede/ukjente mål og ikke-terminale
+kilder, beregner run-tall bare for valgt mål og gjenbruker opprinnelig
+`logical_run_group_id` med varig `resumed_from_run_id`. Et blokkert funn på et
+annet eksplisitt bundet mål blokkerer ikke det valgte trygge målet. Norsk,
+engelsk, reell klikkflyt og 900×560 uten horisontal overflow er dekket.
+Elementspesifikt manuelt retry gjenstår.
+
 Oppdatering 2026-07-31: **Jobber** har nå en egen, lokalisert
 **Endringer**-arbeidsflate for den valgte jobbens gjeldende forseglede plan.
 Den viser immutable beslutningstall og oppmerksomhetsbanner, filtrerer
