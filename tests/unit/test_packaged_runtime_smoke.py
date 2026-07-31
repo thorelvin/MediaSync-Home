@@ -67,6 +67,7 @@ def test_packaged_runtime_smoke_requires_scheduler_reconciliation_counts() -> No
         stdout_json_lines=(
             {
                 "event": "ENGINE_HOST_PIPE_STARTING",
+                "run_executor_staging_backend": "robocopy",
                 "task_scheduler_reconciliation": {
                     "resources_applied": 1,
                     "resources_blocked": 0,

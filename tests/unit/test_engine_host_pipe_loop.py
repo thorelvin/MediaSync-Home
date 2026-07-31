@@ -195,6 +195,7 @@ def test_engine_host_parser_accepts_explicit_local_writable_mode() -> None:
 
     assert args.enable_local_mutations is True
     assert args.state_root == Path("C:/MediaSyncState")
+    assert args.run_executor_staging_backend == "robocopy"
 
 
 def test_engine_host_rejects_local_writable_mode_without_state_root() -> None:

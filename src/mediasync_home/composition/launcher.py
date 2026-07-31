@@ -206,7 +206,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--run-executor-staging-backend",
         choices=("local-file", "robocopy"),
-        default="local-file",
+        default="robocopy",
         help="staging transfer backend for the persistent Engine Host",
     )
     parser.add_argument(
@@ -248,7 +248,7 @@ def build_local_preview_desktop_launch(
     environment: dict[str, str] | None = None,
     run_executor_cycle_interval_ms: int = 5000,
     run_executor_cycle_max_interval_ms: int = 60_000,
-    run_executor_staging_backend: str = "local-file",
+    run_executor_staging_backend: str = "robocopy",
     reconcile_task_scheduler_resources: bool = False,
     task_scheduler_executable_path: Path | None = None,
     task_scheduler_reconciliation_interval_ms: int = 300_000,
@@ -353,7 +353,7 @@ def build_local_preview_host_run(
     task_scheduler_executable_path: Path | None = None,
     run_executor_cycle_interval_ms: int | None = None,
     run_executor_cycle_max_interval_ms: int | None = None,
-    run_executor_staging_backend: str = "local-file",
+    run_executor_staging_backend: str = "robocopy",
     task_scheduler_reconciliation_interval_ms: int | None = None,
     task_scheduler_reconciliation_max_interval_ms: int | None = None,
 ) -> LocalPreviewHostRun:
@@ -395,13 +395,12 @@ def build_local_preview_host_run(
                         str(run_executor_cycle_max_interval_ms),
                     )
                 )
-        if run_executor_staging_backend != "local-file":
-            engine_args.extend(
-                (
-                    "--run-executor-staging-backend",
-                    run_executor_staging_backend,
-                )
+        engine_args.extend(
+            (
+                "--run-executor-staging-backend",
+                run_executor_staging_backend,
             )
+        )
     if reconcile_task_scheduler_resources:
         if state_root is None:
             raise ValueError("TASK_SCHEDULER_RECONCILIATION_REQUIRES_STATE_ROOT")

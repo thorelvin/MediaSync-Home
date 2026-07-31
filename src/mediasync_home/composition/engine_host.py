@@ -1135,7 +1135,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--run-executor-staging-backend",
         choices=("local-file", "robocopy"),
-        default="local-file",
+        default="robocopy",
         help="staging transfer backend used by the run executor",
     )
     parser.add_argument(
@@ -1496,7 +1496,7 @@ def build_engine_host_runtime(
     reconciler_instance_id: str = "local-dev",
     inactive_outbox_owner_instance_ids: tuple[str, ...] = (),
     inactive_external_resource_owner_instance_ids: tuple[str, ...] = (),
-    run_executor_staging_backend: str = "local-file",
+    run_executor_staging_backend: str = "robocopy",
     state_capacity_policy: StateCapacityPolicy | None = None,
     state_capacity_probe: StateCapacityProbe | None = None,
     clock: ClockPort | None = None,

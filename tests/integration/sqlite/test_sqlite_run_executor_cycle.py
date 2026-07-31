@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 from pathlib import Path
+
+import pytest
 
 from tests.support.sqlite_catalog import insert_default_filter_set_version
 from tests.support.source_preconditions import source_precondition_for_file
 
 from mediasync_home.adapters.final_commit import LocalResolvingFinalCommitAdapter
+from mediasync_home.adapters.robocopy import (
+    RobocopyStagingTransferAdapter,
+    RobocopyTransferProfile,
+)
 from mediasync_home.adapters.staging import LocalFileStagingTransferAdapter
 from mediasync_home.adapters.sqlite.catalog_handoffs import SqliteFinalFileCatalogHandoffStore
 from mediasync_home.adapters.sqlite.connection_policy import (
@@ -141,8 +148,22 @@ class EndpointLossStagingAdapter(LocalFileStagingTransferAdapter):
         )
 
 
+@pytest.mark.parametrize(
+    "staging_backend",
+    (
+        "local-file",
+        pytest.param(
+            "robocopy",
+            marks=pytest.mark.skipif(
+                os.name != "nt",
+                reason="full Robocopy executor evidence requires Windows",
+            ),
+        ),
+    ),
+)
 def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
     tmp_path: Path,
+    staging_backend: str,
 ) -> None:
     payload = b"x" * 128
     content_hash = hashlib.sha256(payload).hexdigest()
@@ -176,9 +197,19 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
             staging_root=staging_root,
             permit_validator=lease,
         )
-        staging = LocalFileStagingTransferAdapter(
-            root_resolver=SqliteEndpointRootResolver(catalog_connection),
-            staging_root=staging_root,
+        root_resolver = SqliteEndpointRootResolver(catalog_connection)
+        staging = (
+            RobocopyStagingTransferAdapter(
+                root_resolver=root_resolver,
+                staging_root=staging_root,
+                robocopy_work_root=tmp_path / "robocopy-work",
+                profile=RobocopyTransferProfile(timeout_seconds=15.0),
+            )
+            if staging_backend == "robocopy"
+            else LocalFileStagingTransferAdapter(
+                root_resolver=root_resolver,
+                staging_root=staging_root,
+            )
         )
         plan = _sealed_plan(source_file=source_root / "Pictures" / "A.jpg")
         plans.save_sealed_plan(plan)
@@ -272,7 +303,11 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
             (
                 "SUCCEEDED",
                 128,
-                "TRANSFERRED_TO_STAGING",
+                (
+                    "ROBOCOPY_EXIT_1_COPIED_TRANSFERRED_TO_STAGING"
+                    if staging_backend == "robocopy"
+                    else "TRANSFERRED_TO_STAGING"
+                ),
                 "STAGING_HASH_MATCHES_POST_TRANSFER_SOURCE_HASH",
                 "FINAL_COMMIT_ADAPTER_COMPLETED",
             ),

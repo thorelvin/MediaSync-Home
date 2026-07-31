@@ -40,7 +40,6 @@ def test_local_preview_host_run_uses_long_running_published_descriptor(tmp_path:
         user_scope_hash="b" * 64,
         state_root=state_root,
     )
-
     host_run = build_local_preview_host_run(host_descriptor=descriptor)
 
     assert host_run.pipe_name == descriptor.pipe_name
@@ -58,6 +57,25 @@ def test_local_preview_host_run_uses_long_running_published_descriptor(tmp_path:
         str(state_root.resolve()),
         "--enable-local-mutations",
         "--run-executor-cycle-after-request",
+        "--run-executor-staging-backend",
+        "robocopy",
+    )
+
+
+def test_local_preview_host_run_forwards_explicit_local_file_override(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+
+    host_run = build_local_preview_host_run(
+        pipe_name="pipe-a",
+        state_root=state_root,
+        run_executor_staging_backend="local-file",
+    )
+
+    assert host_run.engine_host_args[-2:] == (
+        "--run-executor-staging-backend",
+        "local-file",
     )
 
 
@@ -95,7 +113,7 @@ def test_desktop_launch_builds_source_and_packaged_host_argv(tmp_path: Path) -> 
         "--run-executor-cycle-max-interval-ms",
         "60000",
         "--run-executor-staging-backend",
-        "local-file",
+        "robocopy",
     )
     assert source.engine_host.command_line_vector() == (
         str(Path(sys.executable).resolve()),

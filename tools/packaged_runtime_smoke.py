@@ -666,7 +666,8 @@ def _engine_host_reconciled_task(result: CommandResult | None) -> bool:
     if not isinstance(reconciliation, dict):
         return False
     return (
-        reconciliation.get("resources_staged") == 1
+        starting.get("run_executor_staging_backend") == "robocopy"
+        and reconciliation.get("resources_staged") == 1
         and reconciliation.get("resources_reconciled") == 1
         and reconciliation.get("resources_completed") == 1
         and reconciliation.get("resources_blocked") == 0

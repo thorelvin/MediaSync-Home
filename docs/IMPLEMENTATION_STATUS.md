@@ -1,5 +1,18 @@
 # Implementeringsstatus
 
+Oppdatering 2026-07-31: Den vedvarende desktop-Engine Hosten bruker nå
+supervisert Robocopy som standard stagingbackend. Produktinngangen,
+desktop-launchplanen, den publiserte same-user hosten, direkte Engine Host-
+komposisjon og runtimebyggeren velger alle `robocopy`; `local-file` finnes bare
+som en eksplisitt utviklings-/testoverride og forwardes uten å falle tilbake til
+produksjonsdefaulten. En Windows-integrasjon driver en ekte planlagt fil gjennom
+lease, recoveryjournal, Job Object-contained Robocopy, manifestbundet inbox,
+staginghash, final commit, cataloghandoff, operasjonsaudit og fullført run. Den
+eksisterende live-testen beviser fortsatt fatal missing-source-håndtering og tom
+handle-arv. Pakkesmoken krever nå at den pakkede Engine Hosten annonserer
+`run_executor_staging_backend=robocopy`, i tillegg til host/GUI- og Task
+Scheduler-rundturen.
+
 Oppdatering 2026-07-31: Catalog schema 40 materialiserer nå durable
 `run_attempts`, immutable `operation_attempts` og immutable
 `operation_outcomes` fra den hashkjedede recoveryjournalen. Hvert klassifisert
@@ -292,7 +305,7 @@ Forrige 0B-slice: Robocopy batchmanifest er nå en faktisk adaptergrense. `Roboc
 
 Forrige 0B-slice: Lokal ReparseGuard-grense er nå samlet i `adapters/reparse_guard.py`. Staging, Robocopy-arvet staging, final recovery-verification og final commit bruker samme guard til å avvise reparse endpointrøtter og eksisterende path-kjeder før filsystemlesing eller mutasjon, samtidig som lazy kontrollobjekt-suffixer fortsatt kan opprettes deterministisk. `SafePath` reserverer nå `.mediasync` som brukerrelativt kontrollnavn. Handle-/file-ID-basert final-path proof og persisted endpoint identity binding er senere etablert; bredere live reparse-/fault-injection-evidence gjenstår fortsatt.
 
-Forrige 0B-slice: Robocopy transfer-wiring fikk en produksjonsformet, opt-in enkeltfil-stagingadapter. `RobocopyStagingTransferAdapter` bygger typed Robocopy-argv fra source-parent, staginginbox, eksakt filnavn og trygg profil, validerer forbudte switcher både før og etter Windows command-line parsing, resolver `Robocopy.exe` via Windows systemkatalog/final-path-sjekk, og starter transferen gjennom `Win32JobObjectTransferSupervisor` slik at child må være contained før resume. Engine Host og launcher kan velge `--run-executor-staging-backend robocopy`; default lokal preview er fortsatt `local-file`. Batchmanifestgrensen, live temp-only adapter/supervisor-smoke, handlebasert ReparseGuard identity-evidence og persisted endpoint identity binding er senere etablert; bredere Robocopy fault-injection og live reparse-/fault-injection-evidence er fortsatt pending.
+Forrige 0B-slice: Robocopy transfer-wiring fikk en produksjonsformet, opprinnelig opt-in enkeltfil-stagingadapter. `RobocopyStagingTransferAdapter` bygger typed Robocopy-argv fra source-parent, staginginbox, eksakt filnavn og trygg profil, validerer forbudte switcher både før og etter Windows command-line parsing, resolver `Robocopy.exe` via Windows systemkatalog/final-path-sjekk, og starter transferen gjennom `Win32JobObjectTransferSupervisor` slik at child må være contained før resume. Engine Host og launcher kan velge `--run-executor-staging-backend`; Robocopy er nå produksjonsdefault og `local-file` krever eksplisitt override. Batchmanifestgrensen, live temp-only adapter/supervisor-smoke, handlebasert ReparseGuard identity-evidence og persisted endpoint identity binding er senere etablert; bredere Robocopy fault-injection og live reparse-/fault-injection-evidence er fortsatt pending.
 
 Forrige 0B-slice: Win32 transferchild containment er nå løftet fra policy-skjelett til produksjonsformet adapterflate. `build_transfer_child_launch_plan()` tillater bare skjult, unelevated, no-shell, tom handleliste og minimal environment, mens `Win32JobObjectTransferSupervisor` oppretter child suspended, lager kill-on-close Job Object, assigner før resume, terminerer suspended child ved containment-feil og beholder process/job-handles til attempt-livssyklusen kan avsluttes. Robocopy command/profile-/manifestwiring, live temp-only containment-smoke og live kill-on-close/orphan-prosessbevis er senere etablert; bredere fault-injection-evidence er fortsatt pending.
 
