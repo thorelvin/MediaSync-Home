@@ -379,6 +379,7 @@ def test_target_selection_reflows_without_horizontal_clipping(
         create_backup = window.findChild(QPushButton, "createBackupButton")
         add_target = window.findChild(QToolButton, "addTargetButton")
         setup_back = window.findChild(QToolButton, "setupBackButton")
+        source_path = window.findChild(QLabel, "setupSourceValue")
         target_paths = window.findChildren(QLabel, "setupTargetPathRow")
         target_controls = window.findChild(QWidget, "setupTargetControls")
         setup_panel = window.findChild(QFrame, "standardBackupPanel")
@@ -389,6 +390,7 @@ def test_target_selection_reflows_without_horizontal_clipping(
         assert create_backup is not None
         assert add_target is not None
         assert setup_back is not None
+        assert source_path is not None
         assert len(target_paths) == 3
         assert target_controls is not None
         assert setup_panel is not None
@@ -407,6 +409,12 @@ def test_target_selection_reflows_without_horizontal_clipping(
         assert target_paths[0].text().endswith(
             "CompleteComputerBackupTargetFolderWithoutBreaksOne"
         )
+        assert source_path.text().endswith(
+            "ImportantDocumentsAndFamilyPicturesCollectionWithoutBreaks"
+        )
+        assert source_path.toolTip() == source_path.text()
+        assert "\N{HORIZONTAL ELLIPSIS}" in str(source_path.property("displayText"))
+        assert source_path.wordWrap() is False
         assert all(target.isVisible() for target in target_paths)
         assert all(target.toolTip() == target.text() for target in target_paths)
         assert all(

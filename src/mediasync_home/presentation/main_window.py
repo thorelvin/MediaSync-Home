@@ -3190,11 +3190,13 @@ class MediaSyncWindow(QMainWindow):
         self._setup_stepper_layout = stepper_layout
         layout.addWidget(stepper, 2, 0, 1, 3)
 
-        self._setup_source_label, self._setup_source_value = _add_labeled_text_value(
-            layout,
-            3,
-            texts.source,
-            self._display(state.source_label),
+        self._setup_source_label, self._setup_source_value = (
+            _add_labeled_eliding_path_value(
+                layout,
+                3,
+                texts.source,
+                self._display(state.source_label),
+            )
         )
         self._setup_source_value.setObjectName("setupSourceValue")
         self._setup_target_label, self._setup_target_value = _add_labeled_text_value(
@@ -4079,6 +4081,22 @@ def _add_labeled_text_value(
 ) -> tuple[QLabel, QLabel]:
     value = QLabel(value_text)
     label = _add_key_value(layout, row, label_text, value)
+    return label, value
+
+
+def _add_labeled_eliding_path_value(
+    layout: QGridLayout,
+    row: int,
+    label_text: str,
+    value_text: str,
+) -> tuple[QLabel, QLabel]:
+    label = QLabel(label_text)
+    label.setObjectName("mutedLabel")
+    value = _ElidingPathLabel()
+    value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    value.setText(value_text)
+    layout.addWidget(label, row, 0)
+    layout.addWidget(value, row, 1, 1, 2)
     return label, value
 
 
