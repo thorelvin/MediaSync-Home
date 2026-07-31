@@ -223,6 +223,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_source_file_preconditions",
                 statements=CATALOG_SOURCE_FILE_PRECONDITIONS,
             ),
+            SqliteMigration(
+                version=38,
+                name="catalog_run_target_endpoint_waits",
+                statements=CATALOG_RUN_TARGET_ENDPOINT_WAITS,
+            ),
         ),
     )
 
@@ -1560,6 +1565,41 @@ CATALOG_SOURCE_FILE_PRECONDITIONS = (
         )
     BEGIN
         SELECT RAISE(ABORT, 'COPY_PLAN_OPERATION_REQUIRES_SOURCE_PRECONDITION');
+    END
+    """,
+)
+
+CATALOG_RUN_TARGET_ENDPOINT_WAITS = (
+    """
+    CREATE TABLE run_target_endpoint_wait_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        run_target_id TEXT NOT NULL,
+        attempt_no INTEGER NOT NULL CHECK (attempt_no >= 1),
+        reason_code TEXT NOT NULL CHECK (length(trim(reason_code)) > 0),
+        observed_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        UNIQUE (run_id, run_target_id, attempt_no),
+        FOREIGN KEY (run_id, run_target_id)
+            REFERENCES run_targets (run_id, id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_run_target_endpoint_wait_events_observed
+        ON run_target_endpoint_wait_events (observed_utc, id)
+    """,
+    """
+    CREATE TRIGGER trg_run_target_endpoint_wait_events_no_update
+    BEFORE UPDATE ON run_target_endpoint_wait_events
+    BEGIN
+        SELECT RAISE(ABORT, 'RUN_TARGET_ENDPOINT_WAIT_EVENT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_run_target_endpoint_wait_events_no_delete
+    BEFORE DELETE ON run_target_endpoint_wait_events
+    BEGIN
+        SELECT RAISE(ABORT, 'RUN_TARGET_ENDPOINT_WAIT_EVENT_IMMUTABLE');
     END
     """,
 )

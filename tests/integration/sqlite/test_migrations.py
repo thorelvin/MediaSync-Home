@@ -38,7 +38,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 37
+        assert current_schema_version(connection, plan.store) == 38
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -76,10 +76,11 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "run_stop_requests",
             "backup_analysis_requests",
             "current_read_hash_evidence",
+            "run_target_endpoint_wait_events",
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 37
+        assert _row_count(connection, "schema_migrations") == 38
         assert _column_names(connection, "endpoint_revisions") >= {"generation"}
         assert _column_names(connection, "snapshots") >= {"endpoint_generation"}
         assert _column_names(connection, "plan_endpoints") >= {"endpoint_generation"}
@@ -968,7 +969,7 @@ def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> N
                 name,
                 migration_checksum
             )
-                    VALUES ('catalog', 38, 'future_migration', ?)
+                    VALUES ('catalog', 39, 'future_migration', ?)
             """,
             ("f" * 64,),
         )
@@ -1081,8 +1082,8 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
         preflight = inspect_sqlite_migration_state(connection, plan)
 
         assert preflight.initialized
-        assert preflight.current_version == 37
-        assert preflight.target_version == 37
+        assert preflight.current_version == 38
+        assert preflight.target_version == 38
         assert preflight.checksum_backfill_required
         assert "migration_checksum" not in _column_names(
             connection,

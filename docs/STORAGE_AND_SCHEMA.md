@@ -872,6 +872,25 @@ for samme terminale input.
 
 `required_*` kommer fra planen. `last_*` er diagnostisk read model; autorisasjon kommer fra levende endpointlock, validert målmarkør og matching recoverylease. Et ownership-epokebytte gjør run-target stale og krever ny plan.
 
+#### `run_target_endpoint_wait_events`
+
+- `id INTEGER PRIMARY KEY AUTOINCREMENT`
+- `run_id TEXT NOT NULL`
+- `run_target_id TEXT NOT NULL`
+- `attempt_no INTEGER NOT NULL`
+- `reason_code TEXT NOT NULL`
+- `observed_utc TEXT NOT NULL`
+- unik `(run_id, run_target_id, attempt_no)`
+- sammensatt FK `(run_id, run_target_id) REFERENCES run_targets(run_id, id)`
+
+Catalog schema 38 gjør radene immutable med update-/delete-triggere. En
+klassifisert utilgjengelig målrot eller opptatt endpointlock appender eventen i
+samme transaksjon som `run_targets.state` flyttes til
+`WAITING_FOR_ENDPOINT`; stale leasefelt nullstilles. En senere bounded
+maintenance-pass kan flytte ett ventende mål tilbake til `PENDING` for ny
+preflight. Feil i kontrollmarkør, owner, epoch eller endpointidentitet bruker
+ikke denne retryflyten.
+
 #### `run_attempts`
 
 - `id TEXT PRIMARY KEY`

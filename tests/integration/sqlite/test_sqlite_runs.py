@@ -14,13 +14,18 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     apply_sqlite_connection_policy,
     catalog_critical_writer_policy,
 )
-from mediasync_home.adapters.sqlite.migrations import apply_sqlite_migrations, catalog_migration_plan
+from mediasync_home.adapters.sqlite.migrations import (
+    apply_sqlite_migrations,
+    catalog_migration_plan,
+)
 from mediasync_home.adapters.sqlite.outbox import SqliteOutboxStore
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
 from mediasync_home.adapters.sqlite.runs import SqliteRunStore, SqliteRunStoreError
 from mediasync_home.adapters.sqlite.schedules import SqliteScheduleStore
 from mediasync_home.adapters.sqlite.transactions import SqliteImmediateTransactionRunner
-from mediasync_home.adapters.sqlite.trigger_occurrences import SqliteTriggerOccurrenceStore
+from mediasync_home.adapters.sqlite.trigger_occurrences import (
+    SqliteTriggerOccurrenceStore,
+)
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.command_receipts import CommandReceipt
 from mediasync_home.application.plans import (
@@ -71,7 +76,10 @@ from mediasync_home.application.trigger_occurrences import (
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.domain.capabilities import MutationPermit, _issue_mutation_permit
 from mediasync_home.ipc.client import InProcessIpcClient
-from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
+from mediasync_home.ipc.client_identity import (
+    ClientAuthorizationPolicy,
+    VerifiedClientIdentity,
+)
 from mediasync_home.ipc.protocol import IpcStatus
 from mediasync_home.ipc.server import EngineHostIpcService
 
@@ -90,13 +98,30 @@ class FixedLeaseAuthority(EndpointLeaseAuthority):
         self.lease = lease
         self.requests: list[EndpointLeaseRequest] = []
 
-    def acquire_endpoint_lease(self, request: EndpointLeaseRequest) -> EndpointLeaseAttempt:
+    def acquire_endpoint_lease(
+        self, request: EndpointLeaseRequest
+    ) -> EndpointLeaseAttempt:
         self.requests.append(request)
         return EndpointLeaseAttempt(
             acquired=True,
             lease=self.lease,
             validation_codes=(),
             next_action="Lease acquired.",
+        )
+
+
+class UnavailableLeaseAuthority(EndpointLeaseAuthority):
+    def __init__(self, reason_code: str = "ENDPOINT_ROOT_UNAVAILABLE") -> None:
+        self.reason_code = reason_code
+
+    def acquire_endpoint_lease(
+        self, request: EndpointLeaseRequest
+    ) -> EndpointLeaseAttempt:
+        return EndpointLeaseAttempt(
+            acquired=False,
+            lease=None,
+            validation_codes=(self.reason_code,),
+            next_action="Reconnect the target.",
         )
 
 
@@ -168,7 +193,9 @@ def test_sqlite_run_store_persists_started_run_from_sealed_plan(tmp_path: Path) 
         assert _row_count(connection, "run_targets") == 1
 
 
-def test_sqlite_graceful_stop_request_binds_and_terminalizes_run(tmp_path: Path) -> None:
+def test_sqlite_graceful_stop_request_binds_and_terminalizes_run(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
         _prepare_catalog(connection, database)
@@ -308,10 +335,7 @@ def test_sqlite_graceful_stop_requeues_only_its_paused_boundary_target(
         assert bound is not None
         assert activated is not None
         assert activated.state is RunState.QUEUED
-        targets = {
-            target.run_target_id: target.state
-            for target in activated.targets
-        }
+        targets = {target.run_target_id: target.state for target in activated.targets}
         assert targets == {
             "run-a-target-0000": RunTargetState.PAUSED,
             "run-a-target-0001": RunTargetState.PENDING,
@@ -387,8 +411,12 @@ def test_sqlite_run_store_replays_run_idempotency_key(tmp_path: Path) -> None:
             payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
         )
 
-        first = start_run_from_sealed_plan(command=command, plans=plans, runs=runs, id_factory=ids)
-        second = start_run_from_sealed_plan(command=command, plans=plans, runs=runs, id_factory=ids)
+        first = start_run_from_sealed_plan(
+            command=command, plans=plans, runs=runs, id_factory=ids
+        )
+        second = start_run_from_sealed_plan(
+            command=command, plans=plans, runs=runs, id_factory=ids
+        )
 
         assert first.created is True
         assert second.created is False
@@ -437,7 +465,79 @@ def test_sqlite_run_store_begins_run_target_preflight(tmp_path: Path) -> None:
         assert repeated.validation_codes == ("RUN_HAS_NO_PENDING_TARGETS",)
 
 
-def test_sqlite_run_target_preflight_requires_lease_key_without_mutating(tmp_path: Path) -> None:
+def test_sqlite_run_store_journals_endpoint_waits_and_requeues_one_attempt_per_pass(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        plans = SqlitePlanStore(connection)
+        runs = SqliteRunStore(connection)
+        plan = _sealed_plan()
+        plans.save_sealed_plan(plan)
+        start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+
+        first = execute_one_run_target_preflight_step(
+            runs=runs,
+            leases=UnavailableLeaseAuthority(),
+        )
+        first_snapshot = runs.load_run_progress_snapshot("run-a")
+
+        assert first.validation_codes == ()
+        assert first.target is not None
+        assert first.target.state is RunTargetState.WAITING_FOR_ENDPOINT
+        assert first_snapshot is not None
+        assert first_snapshot.targets[0].state is RunTargetState.WAITING_FOR_ENDPOINT
+        assert connection.execute(
+            """
+            SELECT attempt_no, reason_code
+            FROM run_target_endpoint_wait_events
+            ORDER BY id
+            """
+        ).fetchall() == [(1, "ENDPOINT_ROOT_UNAVAILABLE")]
+
+        requeued = runs.requeue_next_waiting_run_target()
+        second = execute_one_run_target_preflight_step(
+            runs=runs,
+            leases=UnavailableLeaseAuthority("ENDPOINT_LEASE_UNAVAILABLE"),
+        )
+
+        assert requeued is not None
+        assert requeued.state is RunTargetState.PENDING
+        assert second.target is not None
+        assert second.target.state is RunTargetState.WAITING_FOR_ENDPOINT
+        assert connection.execute(
+            """
+            SELECT attempt_no, reason_code
+            FROM run_target_endpoint_wait_events
+            ORDER BY id
+            """
+        ).fetchall() == [
+            (1, "ENDPOINT_ROOT_UNAVAILABLE"),
+            (2, "ENDPOINT_LEASE_UNAVAILABLE"),
+        ]
+        with pytest.raises(
+            sqlite3.IntegrityError, match="RUN_TARGET_ENDPOINT_WAIT_EVENT_IMMUTABLE"
+        ):
+            connection.execute(
+                "UPDATE run_target_endpoint_wait_events SET reason_code = 'changed' WHERE id = 1"
+            )
+
+
+def test_sqlite_run_target_preflight_requires_lease_key_without_mutating(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
         _prepare_catalog(connection, database)
@@ -653,7 +753,9 @@ def test_sqlite_run_store_records_revalidating_target_lease_reacquired(
             runs=runs,
             id_factory=FixedRunIdFactory(),
         )
-        execute_one_run_target_preflight_step(runs=runs, leases=FixedLeaseAuthority(lease))
+        execute_one_run_target_preflight_step(
+            runs=runs, leases=FixedLeaseAuthority(lease)
+        )
 
         updated = runs.record_run_target_lease_reacquired(
             run_id="run-a",
@@ -703,7 +805,9 @@ def test_sqlite_run_executor_execution_start_step_reacquires_missing_retained_le
             runs=runs,
             id_factory=FixedRunIdFactory(),
         )
-        execute_one_run_target_preflight_step(runs=runs, leases=FixedLeaseAuthority(old_lease))
+        execute_one_run_target_preflight_step(
+            runs=runs, leases=FixedLeaseAuthority(old_lease)
+        )
 
         outcome = execute_one_run_target_execution_start_step(
             runs=runs,
@@ -721,10 +825,13 @@ def test_sqlite_run_executor_execution_start_step_reacquires_missing_retained_le
         assert loaded.targets[0].state is RunTargetState.EXECUTING
         assert loaded.targets[0].last_lease_id == "lease-b"
         assert loaded.targets[0].last_fencing_token == 43
-        assert registry.load_retained_run_target_lease(
-            run_id="run-a",
-            run_target_id="run-a-target-0000",
-        ) is new_lease
+        assert (
+            registry.load_retained_run_target_lease(
+                run_id="run-a",
+                run_target_id="run-a-target-0000",
+            )
+            is new_lease
+        )
         assert leases.requests == [
             EndpointLeaseRequest(
                 run_id="run-a",
@@ -799,10 +906,13 @@ def test_sqlite_run_executor_reacquires_executing_target_lease_after_registry_lo
         assert loaded.targets[0].state is RunTargetState.EXECUTING
         assert loaded.targets[0].last_lease_id == "lease-b"
         assert loaded.targets[0].last_fencing_token == 43
-        assert restart_registry.load_retained_run_target_lease(
-            run_id="run-a",
-            run_target_id="run-a-target-0000",
-        ) is new_lease
+        assert (
+            restart_registry.load_retained_run_target_lease(
+                run_id="run-a",
+                run_target_id="run-a-target-0000",
+            )
+            is new_lease
+        )
         assert leases.requests == [
             EndpointLeaseRequest(
                 run_id="run-a",
@@ -1014,7 +1124,9 @@ def test_sqlite_run_store_lists_recent_run_activity_summaries(tmp_path: Path) ->
             id_factory=FixedRunIdFactory(),
         )
         assert first.run is not None
-        _insert_receipt_with_id(connection, idempotency_key="idempotency-b", request_id="request-b")
+        _insert_receipt_with_id(
+            connection, idempotency_key="idempotency-b", request_id="request-b"
+        )
         second = replace(
             first.run,
             run_id="run-b",
@@ -1047,7 +1159,9 @@ def test_sqlite_run_store_lists_recent_run_activity_summaries(tmp_path: Path) ->
             """
         )
 
-        page = runs.list_recent_run_activity_summaries(limit=1, offset=0, job_id="job-a")
+        page = runs.list_recent_run_activity_summaries(
+            limit=1, offset=0, job_id="job-a"
+        )
 
         assert [run.run_id for run in page] == ["run-b"]
         assert page[0].started_utc == "2026-07-20T11:00:00.000Z"
@@ -1156,7 +1270,9 @@ def test_sqlite_run_store_requires_command_receipt_binding(tmp_path: Path) -> No
             )
 
 
-def test_sqlite_enabled_start_run_ipc_persists_run_and_success_receipt(tmp_path: Path) -> None:
+def test_sqlite_enabled_start_run_ipc_persists_run_and_success_receipt(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
         _prepare_catalog(connection, database)
@@ -1211,7 +1327,9 @@ def test_sqlite_enabled_start_run_ipc_persists_run_and_success_receipt(tmp_path:
         )
 
         loaded_run = run_store.load_started_run("run-a")
-        loaded_receipt = receipt_store.load_command_receipt("66666666-6666-4666-8666-666666666666")
+        loaded_receipt = receipt_store.load_command_receipt(
+            "66666666-6666-4666-8666-666666666666"
+        )
         loaded_outbox = outbox_store.load_outbox_message(
             "command-effect:66666666-6666-4666-8666-666666666666"
         )
@@ -1314,11 +1432,16 @@ def test_sqlite_enabled_trigger_occurrence_ipc_records_occurrence_and_queues_run
         assert loaded_receipt.result_entity_type == "run"
         assert loaded_receipt.result_entity_id == "run-a"
         assert loaded_run is not None
-        assert loaded_run.trigger_occurrence_id == response.payload["occurrence"]["occurrence_id"]
+        assert (
+            loaded_run.trigger_occurrence_id
+            == response.payload["occurrence"]["occurrence_id"]
+        )
         loaded_occurrence = occurrence_store.load_trigger_occurrence(
             loaded_run.trigger_occurrence_id
         )
-        loaded_outbox = outbox_store.load_outbox_message(f"command-effect:{delivery_id}")
+        loaded_outbox = outbox_store.load_outbox_message(
+            f"command-effect:{delivery_id}"
+        )
         assert loaded_occurrence is not None
         assert loaded_occurrence.state is TriggerOccurrenceState.RUN_ENQUEUED
         assert loaded_occurrence.run_id == "run-a"
@@ -1338,8 +1461,12 @@ def _prepare_catalog(connection: sqlite3.Connection, database: Path) -> None:
 
 
 def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
-    connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')")
-    connection.execute("INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')")
+    connection.execute(
+        "INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')"
+    )
+    connection.execute(
+        "INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')"
+    )
     insert_default_filter_set_version(
         connection,
         job_id="job-a",
@@ -1351,7 +1478,9 @@ def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
             VALUES ('job-a', 'job-rev-a', 'filter-a')
         """
     )
-    connection.execute("INSERT INTO job_heads (job_id, active_revision_id) VALUES ('job-a', 'job-rev-a')")
+    connection.execute(
+        "INSERT INTO job_heads (job_id, active_revision_id) VALUES ('job-a', 'job-rev-a')"
+    )
     connection.execute(
         """
         INSERT INTO analyses (id, job_id, job_revision_id)
@@ -1575,7 +1704,9 @@ class _MemoryRunStore:
             return self.run
         return None
 
-    def load_started_run_by_idempotency_key(self, idempotency_key: str) -> StartedRun | None:
+    def load_started_run_by_idempotency_key(
+        self, idempotency_key: str
+    ) -> StartedRun | None:
         if self.run is not None and self.run.idempotency_key == idempotency_key:
             return self.run
         return None
@@ -1587,7 +1718,9 @@ def _row_count(connection: sqlite3.Connection, table: str) -> int:
     return int(row[0])
 
 
-def _run_target_started_utc(connection: sqlite3.Connection, run_target_id: str) -> str | None:
+def _run_target_started_utc(
+    connection: sqlite3.Connection, run_target_id: str
+) -> str | None:
     row = connection.execute(
         "SELECT started_utc FROM run_targets WHERE id = ?",
         (run_target_id,),
@@ -1596,7 +1729,9 @@ def _run_target_started_utc(connection: sqlite3.Connection, run_target_id: str) 
     return None if row[0] is None else str(row[0])
 
 
-def _run_target_finished_utc(connection: sqlite3.Connection, run_target_id: str) -> str | None:
+def _run_target_finished_utc(
+    connection: sqlite3.Connection, run_target_id: str
+) -> str | None:
     row = connection.execute(
         "SELECT finished_utc FROM run_targets WHERE id = ?",
         (run_target_id,),

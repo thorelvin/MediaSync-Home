@@ -148,6 +148,136 @@ def test_bounded_executor_cycle_progresses_queued_target_through_staging() -> No
     assert operation.expected_staging_fingerprint_json == _fingerprint_json()
 
 
+def test_bounded_executor_cycle_waits_for_unavailable_target_then_retries_next_pass() -> (
+    None
+):
+    plan = _sealed_plan()
+    runs = _InMemoryRunStore(_run(state=RunState.QUEUED, plan=plan))
+    lease = _FakeLiveLease()
+    leases = _SequencedLeaseAuthority(
+        (
+            EndpointLeaseAttempt(
+                acquired=False,
+                lease=None,
+                validation_codes=("ENDPOINT_ROOT_UNAVAILABLE",),
+                next_action="Reconnect the target.",
+            ),
+            EndpointLeaseAttempt(
+                acquired=True,
+                lease=lease,
+                validation_codes=(),
+                next_action="Lease acquired.",
+            ),
+        )
+    )
+    registry = HeldRunTargetLeaseRegistry()
+
+    waiting = execute_bounded_run_executor_cycle(
+        runs=runs,
+        leases=leases,
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=_FakeRecoveryOperationStore(()),
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        process_instance_id="host-a",
+        max_steps=1,
+    )
+    waited_run = runs.load_started_run("run-a")
+
+    assert waiting.last_step is not None
+    assert (
+        waiting.last_step.action is RunExecutorCycleAction.TARGET_WAITING_FOR_ENDPOINT
+    )
+    assert waited_run is not None
+    assert waited_run.targets[0].state is RunTargetState.WAITING_FOR_ENDPOINT
+    assert registry.retained_count == 0
+
+    retried = execute_bounded_run_executor_cycle(
+        runs=runs,
+        leases=leases,
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=_FakeRecoveryOperationStore(()),
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        process_instance_id="host-a",
+        max_steps=1,
+    )
+    retried_run = runs.load_started_run("run-a")
+
+    assert retried.last_step is not None
+    assert retried.last_step.action is RunExecutorCycleAction.PREFLIGHT_LEASE_ACQUIRED
+    assert retried_run is not None
+    assert retried_run.targets[0].state is RunTargetState.REVALIDATING
+    assert registry.retained_count == 1
+
+
+def test_unavailable_target_does_not_block_next_target_preflight() -> None:
+    plan = _sealed_plan()
+    first = _target(state=RunTargetState.PENDING)
+    second = replace(
+        first,
+        run_target_id="run-a-target-0001",
+        endpoint_id="target-b",
+        endpoint_revision_id="target-rev-b",
+        lease_resource_key="endpoint:target-b",
+    )
+    run = replace(
+        _run(state=RunState.QUEUED, plan=plan),
+        planned_operations=2,
+        planned_bytes=256,
+        targets=(first, second),
+    )
+    lease = _FakeLiveLease("lease-b")
+    leases = _SequencedLeaseAuthority(
+        (
+            EndpointLeaseAttempt(
+                acquired=False,
+                lease=None,
+                validation_codes=("ENDPOINT_ROOT_UNAVAILABLE",),
+                next_action="Reconnect the target.",
+            ),
+            EndpointLeaseAttempt(
+                acquired=True,
+                lease=lease,
+                validation_codes=(),
+                next_action="Lease acquired.",
+            ),
+        )
+    )
+    runs = _InMemoryRunStore(run)
+    registry = HeldRunTargetLeaseRegistry()
+
+    outcome = execute_bounded_run_executor_cycle(
+        runs=runs,
+        leases=leases,
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=_FakeRecoveryOperationStore(()),
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        process_instance_id="host-a",
+        max_steps=2,
+    )
+    loaded = runs.load_started_run("run-a")
+
+    assert outcome.last_step is not None
+    assert outcome.last_step.action is RunExecutorCycleAction.PREFLIGHT_LEASE_ACQUIRED
+    assert loaded is not None
+    assert [target.state for target in loaded.targets] == [
+        RunTargetState.WAITING_FOR_ENDPOINT,
+        RunTargetState.REVALIDATING,
+    ]
+    assert (
+        registry.load_retained_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-a-target-0001",
+        )
+        is lease
+    )
+
+
 def test_bounded_executor_cycle_retries_transient_file_failure_then_advances() -> None:
     plan = _sealed_plan()
     runs = _InMemoryRunStore(_run(state=RunState.QUEUED, plan=plan))
@@ -710,6 +840,7 @@ class _InMemoryRunStore(RunExecutorCycleRunStore):
         if self.run is None or self.run.state not in {
             RunState.QUEUED,
             RunState.PREFLIGHT,
+            RunState.EXECUTING,
         }:
             return None
         if not any(
@@ -717,6 +848,33 @@ class _InMemoryRunStore(RunExecutorCycleRunStore):
         ):
             return None
         return self.run
+
+    def requeue_next_waiting_run_target(self) -> StartedRunTarget | None:
+        if self.run is None or self.run.state not in {
+            RunState.QUEUED,
+            RunState.PREFLIGHT,
+            RunState.EXECUTING,
+        }:
+            return None
+        waiting = next(
+            (
+                target
+                for target in self.run.targets
+                if target.state is RunTargetState.WAITING_FOR_ENDPOINT
+            ),
+            None,
+        )
+        if waiting is None:
+            return None
+        pending = replace(waiting, state=RunTargetState.PENDING)
+        self.run = replace(
+            self.run,
+            targets=tuple(
+                pending if target.run_target_id == waiting.run_target_id else target
+                for target in self.run.targets
+            ),
+        )
+        return pending
 
     def load_next_pausing_run(self) -> StartedRun | None:
         if self.run is None or self.run.state is not RunState.PAUSING:
@@ -743,6 +901,7 @@ class _InMemoryRunStore(RunExecutorCycleRunStore):
                     RunTargetState.ACQUIRING_LEASE,
                     RunTargetState.REVALIDATING,
                     RunTargetState.EXECUTING,
+                    RunTargetState.WAITING_FOR_ENDPOINT,
                 }
                 else target
                 for target in run.targets
@@ -803,7 +962,11 @@ class _InMemoryRunStore(RunExecutorCycleRunStore):
         run_target_id: str,
     ) -> StartedRunTarget | None:
         run = self.load_started_run(run_id)
-        if run is None or run.state not in {RunState.QUEUED, RunState.PREFLIGHT}:
+        if run is None or run.state not in {
+            RunState.QUEUED,
+            RunState.PREFLIGHT,
+            RunState.EXECUTING,
+        }:
             return None
         updated_targets: list[StartedRunTarget] = []
         claimed: StartedRunTarget | None = None
@@ -819,7 +982,13 @@ class _InMemoryRunStore(RunExecutorCycleRunStore):
         if claimed is None:
             return None
         self.run = replace(
-            run, state=RunState.PREFLIGHT, targets=tuple(updated_targets)
+            run,
+            state=(
+                RunState.EXECUTING
+                if run.state is RunState.EXECUTING
+                else RunState.PREFLIGHT
+            ),
+            targets=tuple(updated_targets),
         )
         return claimed
 
@@ -857,6 +1026,36 @@ class _InMemoryRunStore(RunExecutorCycleRunStore):
             return None
         self.run = replace(run, targets=tuple(updated_targets))
         return recorded
+
+    def record_run_target_waiting_for_endpoint(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        expected_state: RunTargetState,
+        reason_code: str,
+    ) -> StartedRunTarget | None:
+        run = self.load_started_run(run_id)
+        if run is None or not reason_code.strip():
+            return None
+        waiting: StartedRunTarget | None = None
+        updated_targets: list[StartedRunTarget] = []
+        for target in run.targets:
+            if target.run_target_id == run_target_id and target.state is expected_state:
+                waiting = replace(
+                    target,
+                    state=RunTargetState.WAITING_FOR_ENDPOINT,
+                    last_lease_id=None,
+                    last_ownership_epoch=None,
+                    last_fencing_token=None,
+                )
+                updated_targets.append(waiting)
+            else:
+                updated_targets.append(target)
+        if waiting is None:
+            return None
+        self.run = replace(run, targets=tuple(updated_targets))
+        return waiting
 
     def record_run_target_lease_reacquired(
         self,
@@ -912,7 +1111,7 @@ class _InMemoryRunStore(RunExecutorCycleRunStore):
         fencing_token: int,
     ) -> StartedRunTarget | None:
         run = self.load_started_run(run_id)
-        if run is None or run.state is not RunState.PREFLIGHT:
+        if run is None or run.state not in {RunState.PREFLIGHT, RunState.EXECUTING}:
             return None
         updated_targets: list[StartedRunTarget] = []
         started: StartedRunTarget | None = None
@@ -1435,6 +1634,18 @@ class _FakeLeaseAuthority(EndpointLeaseAuthority):
             validation_codes=(),
             next_action="Lease acquired.",
         )
+
+
+class _SequencedLeaseAuthority(EndpointLeaseAuthority):
+    def __init__(self, attempts: tuple[EndpointLeaseAttempt, ...]) -> None:
+        self._attempts = list(attempts)
+
+    def acquire_endpoint_lease(
+        self, request: EndpointLeaseRequest
+    ) -> EndpointLeaseAttempt:
+        if not self._attempts:
+            raise AssertionError("unexpected lease request")
+        return self._attempts.pop(0)
 
 
 class _FakeLiveLease:

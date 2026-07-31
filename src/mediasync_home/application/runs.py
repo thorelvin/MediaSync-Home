@@ -16,6 +16,12 @@ from mediasync_home.domain.capabilities import MutationPermit
 
 
 APP_VERSION = "0B-dev"
+WAITABLE_ENDPOINT_LEASE_CODES = frozenset(
+    {
+        "ENDPOINT_LEASE_UNAVAILABLE",
+        "ENDPOINT_ROOT_UNAVAILABLE",
+    }
+)
 PLAN_CHECKSUM_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -301,6 +307,15 @@ class RunStore(Protocol):
         owner_installation_id: str,
         ownership_epoch: int,
         fencing_token: int,
+    ) -> StartedRunTarget | None: ...
+
+    def record_run_target_waiting_for_endpoint(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        expected_state: RunTargetState,
+        reason_code: str,
     ) -> StartedRunTarget | None: ...
 
     def record_run_target_execution_started(
@@ -639,14 +654,14 @@ def begin_next_run_target_preflight(
             validation_codes=("RUN_NOT_FOUND",),
             next_action="Create a queued run before target preflight.",
         )
-    if run.state not in {RunState.QUEUED, RunState.PREFLIGHT}:
+    if run.state not in {RunState.QUEUED, RunState.PREFLIGHT, RunState.EXECUTING}:
         return RunTargetPreflightOutcome(
             claimed=False,
             run_id=run_id,
             run_target_id=None,
             target=None,
             validation_codes=("RUN_NOT_READY_FOR_TARGET_PREFLIGHT",),
-            next_action="Only queued or preflight runs can acquire target work.",
+            next_action="Only queued, preflight, or executing runs can acquire target work.",
         )
 
     target = runs.load_next_pending_run_target(run_id)
@@ -765,6 +780,33 @@ def acquire_run_target_lease(
         )
     )
     if not attempt.acquired:
+        wait_reason = endpoint_wait_reason(attempt)
+        if wait_reason is not None:
+            waiting = runs.record_run_target_waiting_for_endpoint(
+                run_id=run_id,
+                run_target_id=run_target_id,
+                expected_state=RunTargetState.ACQUIRING_LEASE,
+                reason_code=wait_reason,
+            )
+            if waiting is None:
+                return RunTargetLeaseOutcome(
+                    acquired=False,
+                    run_id=run_id,
+                    run_target_id=run_target_id,
+                    target=None,
+                    lease=None,
+                    validation_codes=("RUN_TARGET_ENDPOINT_WAIT_RECORD_CONFLICT",),
+                    next_action="Reload run state before recording endpoint wait.",
+                )
+            return RunTargetLeaseOutcome(
+                acquired=False,
+                run_id=run_id,
+                run_target_id=run_target_id,
+                target=waiting,
+                lease=None,
+                validation_codes=(),
+                next_action="Target is waiting safely and will be retried on a later maintenance pass.",
+            )
         return RunTargetLeaseOutcome(
             acquired=False,
             run_id=run_id,
@@ -815,6 +857,13 @@ def acquire_run_target_lease(
         validation_codes=(),
         next_action="Target has a live endpoint lease and is ready for revalidation.",
     )
+
+
+def endpoint_wait_reason(attempt: EndpointLeaseAttempt) -> str | None:
+    if len(attempt.validation_codes) != 1:
+        return None
+    reason_code = attempt.validation_codes[0]
+    return reason_code if reason_code in WAITABLE_ENDPOINT_LEASE_CODES else None
 
 
 def start_run_target_execution(

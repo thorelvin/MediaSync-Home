@@ -88,7 +88,7 @@ def test_acquire_run_target_lease_requires_acquiring_target_state() -> None:
     assert leases.requests == ()
 
 
-def test_acquire_run_target_lease_reports_unavailable_without_mutating_target() -> None:
+def test_acquire_run_target_lease_records_waiting_target_when_unavailable() -> None:
     runs = _InMemoryRunStore(_preflight_run())
     leases = _FakeLeaseAuthority(
         EndpointLeaseAttempt(
@@ -108,9 +108,9 @@ def test_acquire_run_target_lease_reports_unavailable_without_mutating_target() 
 
     loaded = runs.load_started_run("run-a")
     assert outcome.acquired is False
-    assert outcome.validation_codes == ("ENDPOINT_LEASE_UNAVAILABLE",)
+    assert outcome.validation_codes == ()
     assert loaded is not None
-    assert loaded.targets[0].state is RunTargetState.ACQUIRING_LEASE
+    assert loaded.targets[0].state is RunTargetState.WAITING_FOR_ENDPOINT
     assert loaded.targets[0].last_lease_id is None
 
 
@@ -157,7 +157,9 @@ def test_acquire_run_target_lease_rejects_success_without_live_handle() -> None:
 
 
 class _InMemoryRunStore(RunStore):
-    def __init__(self, run: StartedRun | None, *, record_conflict: bool = False) -> None:
+    def __init__(
+        self, run: StartedRun | None, *, record_conflict: bool = False
+    ) -> None:
         self.run = run
         self.record_conflict = record_conflict
 
@@ -169,7 +171,9 @@ class _InMemoryRunStore(RunStore):
             return self.run
         return None
 
-    def load_started_run_by_idempotency_key(self, idempotency_key: str) -> StartedRun | None:
+    def load_started_run_by_idempotency_key(
+        self, idempotency_key: str
+    ) -> StartedRun | None:
         if self.run is not None and self.run.idempotency_key == idempotency_key:
             return self.run
         return None
@@ -178,7 +182,14 @@ class _InMemoryRunStore(RunStore):
         run = self.load_started_run(run_id)
         if run is None:
             return None
-        return next((target for target in run.targets if target.state is RunTargetState.PENDING), None)
+        return next(
+            (
+                target
+                for target in run.targets
+                if target.state is RunTargetState.PENDING
+            ),
+            None,
+        )
 
     def begin_run_target_preflight(
         self,
@@ -206,8 +217,14 @@ class _InMemoryRunStore(RunStore):
         updated_targets: list[StartedRunTarget] = []
         recorded: StartedRunTarget | None = None
         for target in run.targets:
-            if target.run_target_id == run_target_id and target.state is RunTargetState.ACQUIRING_LEASE:
-                if target.required_owner_installation_id not in (None, owner_installation_id):
+            if (
+                target.run_target_id == run_target_id
+                and target.state is RunTargetState.ACQUIRING_LEASE
+            ):
+                if target.required_owner_installation_id not in (
+                    None,
+                    owner_installation_id,
+                ):
                     return None
                 if target.required_ownership_epoch not in (None, ownership_epoch):
                     return None
@@ -226,6 +243,44 @@ class _InMemoryRunStore(RunStore):
         self.run = replace(run, targets=tuple(updated_targets))
         return recorded
 
+    def record_run_target_waiting_for_endpoint(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        expected_state: RunTargetState,
+        reason_code: str,
+    ) -> StartedRunTarget | None:
+        run = self.load_started_run(run_id)
+        if run is None or not reason_code.strip():
+            return None
+        target = next(
+            (
+                target
+                for target in run.targets
+                if target.run_target_id == run_target_id
+                and target.state is expected_state
+            ),
+            None,
+        )
+        if target is None:
+            return None
+        waiting = replace(
+            target,
+            state=RunTargetState.WAITING_FOR_ENDPOINT,
+            last_lease_id=None,
+            last_ownership_epoch=None,
+            last_fencing_token=None,
+        )
+        self.run = replace(
+            run,
+            targets=tuple(
+                waiting if item.run_target_id == run_target_id else item
+                for item in run.targets
+            ),
+        )
+        return waiting
+
 
 class _FakeLeaseAuthority(EndpointLeaseAuthority):
     def __init__(self, attempt: EndpointLeaseAttempt) -> None:
@@ -236,7 +291,9 @@ class _FakeLeaseAuthority(EndpointLeaseAuthority):
     def requests(self) -> tuple[EndpointLeaseRequest, ...]:
         return tuple(self._requests)
 
-    def acquire_endpoint_lease(self, request: EndpointLeaseRequest) -> EndpointLeaseAttempt:
+    def acquire_endpoint_lease(
+        self, request: EndpointLeaseRequest
+    ) -> EndpointLeaseAttempt:
         self._requests.append(request)
         return self._attempt
 

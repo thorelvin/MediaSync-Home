@@ -29,14 +29,16 @@ def test_begin_next_run_target_preflight_claims_pending_target() -> None:
 
 
 def test_begin_next_run_target_preflight_requires_existing_run() -> None:
-    outcome = begin_next_run_target_preflight(run_id="missing-run", runs=_InMemoryRunStore(None))
+    outcome = begin_next_run_target_preflight(
+        run_id="missing-run", runs=_InMemoryRunStore(None)
+    )
 
     assert outcome.claimed is False
     assert outcome.validation_codes == ("RUN_NOT_FOUND",)
 
 
 def test_begin_next_run_target_preflight_requires_ready_run_state() -> None:
-    runs = _InMemoryRunStore(replace(_queued_run(), state=RunState.EXECUTING))
+    runs = _InMemoryRunStore(replace(_queued_run(), state=RunState.COMPLETED))
 
     outcome = begin_next_run_target_preflight(run_id="run-a", runs=runs)
 
@@ -50,7 +52,9 @@ def test_begin_next_run_target_preflight_requires_pending_target() -> None:
         targets=(replace(_target(), state=RunTargetState.ACQUIRING_LEASE),),
     )
 
-    outcome = begin_next_run_target_preflight(run_id="run-a", runs=_InMemoryRunStore(run))
+    outcome = begin_next_run_target_preflight(
+        run_id="run-a", runs=_InMemoryRunStore(run)
+    )
 
     assert outcome.claimed is False
     assert outcome.validation_codes == ("RUN_HAS_NO_PENDING_TARGETS",)
@@ -59,7 +63,9 @@ def test_begin_next_run_target_preflight_requires_pending_target() -> None:
 def test_begin_next_run_target_preflight_requires_lease_resource_key() -> None:
     run = replace(_queued_run(), targets=(replace(_target(), lease_resource_key=None),))
 
-    outcome = begin_next_run_target_preflight(run_id="run-a", runs=_InMemoryRunStore(run))
+    outcome = begin_next_run_target_preflight(
+        run_id="run-a", runs=_InMemoryRunStore(run)
+    )
 
     assert outcome.claimed is False
     assert outcome.run_target_id == "run-a-target-0000"
@@ -88,7 +94,9 @@ class _InMemoryRunStore(RunStore):
             return self.run
         return None
 
-    def load_started_run_by_idempotency_key(self, idempotency_key: str) -> StartedRun | None:
+    def load_started_run_by_idempotency_key(
+        self, idempotency_key: str
+    ) -> StartedRun | None:
         if self.run is not None and self.run.idempotency_key == idempotency_key:
             return self.run
         return None
@@ -97,7 +105,14 @@ class _InMemoryRunStore(RunStore):
         run = self.load_started_run(run_id)
         if run is None:
             return None
-        return next((target for target in run.targets if target.state is RunTargetState.PENDING), None)
+        return next(
+            (
+                target
+                for target in run.targets
+                if target.state is RunTargetState.PENDING
+            ),
+            None,
+        )
 
     def begin_run_target_preflight(
         self,
@@ -113,14 +128,19 @@ class _InMemoryRunStore(RunStore):
         updated_targets: list[StartedRunTarget] = []
         claimed: StartedRunTarget | None = None
         for target in run.targets:
-            if target.run_target_id == run_target_id and target.state is RunTargetState.PENDING:
+            if (
+                target.run_target_id == run_target_id
+                and target.state is RunTargetState.PENDING
+            ):
                 claimed = replace(target, state=RunTargetState.ACQUIRING_LEASE)
                 updated_targets.append(claimed)
             else:
                 updated_targets.append(target)
         if claimed is None:
             return None
-        self.run = replace(run, state=RunState.PREFLIGHT, targets=tuple(updated_targets))
+        self.run = replace(
+            run, state=RunState.PREFLIGHT, targets=tuple(updated_targets)
+        )
         return claimed
 
     def record_run_target_lease_acquired(
@@ -139,7 +159,10 @@ class _InMemoryRunStore(RunStore):
         updated_targets: list[StartedRunTarget] = []
         recorded: StartedRunTarget | None = None
         for target in run.targets:
-            if target.run_target_id == run_target_id and target.state is RunTargetState.ACQUIRING_LEASE:
+            if (
+                target.run_target_id == run_target_id
+                and target.state is RunTargetState.ACQUIRING_LEASE
+            ):
                 recorded = replace(
                     target,
                     state=RunTargetState.REVALIDATING,

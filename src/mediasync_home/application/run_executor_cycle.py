@@ -89,6 +89,7 @@ class RunExecutorCycleAction(str, Enum):
     TARGET_COMPLETED = "TARGET_COMPLETED"
     TARGET_CANCELLED = "TARGET_CANCELLED"
     TARGET_RECOVERY_REQUIRED = "TARGET_RECOVERY_REQUIRED"
+    TARGET_WAITING_FOR_ENDPOINT = "TARGET_WAITING_FOR_ENDPOINT"
     EXECUTING_LEASE_REACQUIRED = "EXECUTING_LEASE_REACQUIRED"
     OPERATION_LEASE_REBOUND = "OPERATION_LEASE_REBOUND"
     COMMIT_INTENT_REFRESHED = "COMMIT_INTENT_REFRESHED"
@@ -171,6 +172,7 @@ def execute_bounded_run_executor_cycle(
     if max_steps > MAX_RUN_EXECUTOR_PUMP_STEPS:
         raise RunExecutorViolation("RUN_EXECUTOR_CYCLE_STEP_LIMIT_TOO_LARGE")
 
+    runs.requeue_next_waiting_run_target()
     last_step: RunExecutorCycleOutcome | None = None
     for step_index in range(1, max_steps + 1):
         last_step = execute_one_run_executor_cycle(
@@ -338,6 +340,13 @@ def execute_one_run_executor_cycle(
                 run_target_id=reacquired.run_target_id,
                 next_action=reacquired.next_action,
             )
+        if _target_is_waiting_for_endpoint(reacquired.target):
+            return _advanced(
+                action=RunExecutorCycleAction.TARGET_WAITING_FOR_ENDPOINT,
+                run_id=reacquired.run_id,
+                run_target_id=reacquired.run_target_id,
+                next_action=reacquired.next_action,
+            )
         return _blocked(
             run_id=reacquired.run_id,
             run_target_id=reacquired.run_target_id,
@@ -359,6 +368,13 @@ def execute_one_run_executor_cycle(
                 run_id=execution.run_id,
                 run_target_id=execution.run_target_id,
                 validation_codes=(),
+                next_action=execution.next_action,
+            )
+        if _target_is_waiting_for_endpoint(execution.target):
+            return _advanced(
+                action=RunExecutorCycleAction.TARGET_WAITING_FOR_ENDPOINT,
+                run_id=execution.run_id,
+                run_target_id=execution.run_target_id,
                 next_action=execution.next_action,
             )
         return _blocked(
@@ -384,6 +400,15 @@ def execute_one_run_executor_cycle(
             validation_codes=(),
             next_action=preflight.last_step.next_action,
         )
+    if preflight.last_step is not None and _target_is_waiting_for_endpoint(
+        preflight.last_step.target
+    ):
+        return _advanced(
+            action=RunExecutorCycleAction.TARGET_WAITING_FOR_ENDPOINT,
+            run_id=preflight.last_step.run_id,
+            run_target_id=preflight.last_step.run_target_id,
+            next_action=preflight.last_step.next_action,
+        )
     if preflight.stopped_reason is RunExecutorPumpStopReason.IDLE:
         return RunExecutorCycleOutcome(
             action=RunExecutorCycleAction.IDLE,
@@ -402,6 +427,10 @@ def execute_one_run_executor_cycle(
         validation_codes=preflight.validation_codes,
         next_action=preflight.next_action,
     )
+
+
+def _target_is_waiting_for_endpoint(target: StartedRunTarget | None) -> bool:
+    return target is not None and target.state is RunTargetState.WAITING_FOR_ENDPOINT
 
 
 @dataclass(frozen=True)

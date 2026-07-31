@@ -21,7 +21,9 @@ from mediasync_home.application.runs import EndpointLeaseRequest
 from mediasync_home.domain.capabilities import MutationPermit
 
 
-def test_local_endpoint_lease_authority_opens_lock_and_allocates_fencing_token(tmp_path: Path) -> None:
+def test_local_endpoint_lease_authority_opens_lock_and_allocates_fencing_token(
+    tmp_path: Path,
+) -> None:
     root = _endpoint_root(tmp_path)
     handle = _FakeHandle(root / ".mediasync" / "locks" / "mutation.lock")
     opener = _FakeOpener(handle)
@@ -114,7 +116,9 @@ def test_local_resolving_endpoint_lease_authority_validates_resolved_identity(
     assert attempt.lease is not None
     assert attempt.lease.endpoint_generation == 7
     assert attempt.lease.issue_mutation_permit().endpoint_generation == 7
-    assert resolver.descriptor_requests == [("endpoint:target-a", "target-a", "target-rev-a")]
+    assert resolver.descriptor_requests == [
+        ("endpoint:target-a", "target-a", "target-rev-a")
+    ]
     assert resolver.path_requests == []
     assert opener.paths == [root / ".mediasync" / "locks" / "mutation.lock"]
     assert token_store.requests == [("endpoint:target-a", 1)]
@@ -154,7 +158,9 @@ def test_local_resolving_endpoint_lease_authority_returns_resolver_rejection(
     assert opener.paths == []
 
 
-def test_local_endpoint_lease_authority_registers_durable_resource_lease(tmp_path: Path) -> None:
+def test_local_endpoint_lease_authority_registers_durable_resource_lease(
+    tmp_path: Path,
+) -> None:
     root = _endpoint_root(tmp_path)
     handle = _FakeHandle(root / ".mediasync" / "locks" / "mutation.lock")
     resource_store = _FakeResourceLeaseStore(42)
@@ -178,7 +184,7 @@ def test_local_endpoint_lease_authority_registers_durable_resource_lease(tmp_pat
         "run_id": "run-a",
         "run_target_id": "run-a-target-0000",
         "endpoint_id": "target-a",
-            "endpoint_generation": 1,
+        "endpoint_generation": 1,
         "lease_mode": "EXCLUSIVE",
         "os_lock_kind": "LOCAL_OS_HANDLE",
     }
@@ -299,7 +305,9 @@ def test_local_endpoint_lease_rejects_new_permit_after_release(tmp_path: Path) -
     authority = LocalEndpointLeaseAuthority(
         target_roots={"endpoint:target-a": root},
         token_store=_FakeTokenStore(42),
-        lock_opener=_FakeOpener(_FakeHandle(root / ".mediasync" / "locks" / "mutation.lock")),
+        lock_opener=_FakeOpener(
+            _FakeHandle(root / ".mediasync" / "locks" / "mutation.lock")
+        ),
     )
 
     attempt = authority.acquire_endpoint_lease(_request())
@@ -311,7 +319,9 @@ def test_local_endpoint_lease_rejects_new_permit_after_release(tmp_path: Path) -
     assert exc_info.value.validation_code == "MUTATION_PERMIT_LEASE_RELEASED"
 
 
-def test_local_endpoint_lease_rejects_new_permit_after_lock_loss(tmp_path: Path) -> None:
+def test_local_endpoint_lease_rejects_new_permit_after_lock_loss(
+    tmp_path: Path,
+) -> None:
     root = _endpoint_root(tmp_path)
     handle = _FakeHandle(root / ".mediasync" / "locks" / "mutation.lock")
     authority = LocalEndpointLeaseAuthority(
@@ -360,7 +370,9 @@ def test_local_endpoint_lease_rejects_permit_from_other_lease(tmp_path: Path) ->
     assert exc_info.value.validation_code == "MUTATION_PERMIT_LEASE_MISMATCH"
 
 
-def test_local_endpoint_lease_authority_reports_unknown_resource_without_opening(tmp_path: Path) -> None:
+def test_local_endpoint_lease_authority_reports_unknown_resource_without_opening(
+    tmp_path: Path,
+) -> None:
     opener = _FakeOpener(_FakeHandle(tmp_path / "unused.lock"))
     authority = LocalEndpointLeaseAuthority(
         target_roots={},
@@ -375,8 +387,11 @@ def test_local_endpoint_lease_authority_reports_unknown_resource_without_opening
     assert opener.paths == []
 
 
-def test_local_endpoint_lease_authority_requires_existing_control_area(tmp_path: Path) -> None:
+def test_local_endpoint_lease_authority_requires_existing_control_area(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "target"
+    root.mkdir()
     opener = _FakeOpener(_FakeHandle(root / ".mediasync" / "locks" / "mutation.lock"))
     authority = LocalEndpointLeaseAuthority(
         target_roots={"endpoint:target-a": root},
@@ -391,7 +406,27 @@ def test_local_endpoint_lease_authority_requires_existing_control_area(tmp_path:
     assert opener.paths == []
 
 
-def test_local_endpoint_lease_authority_releases_lock_when_owner_mismatches(tmp_path: Path) -> None:
+def test_local_endpoint_lease_authority_reports_unavailable_root_before_control_checks(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "disconnected-target"
+    opener = _FakeOpener(_FakeHandle(root / ".mediasync" / "locks" / "mutation.lock"))
+    authority = LocalEndpointLeaseAuthority(
+        target_roots={"endpoint:target-a": root},
+        token_store=_FakeTokenStore(1),
+        lock_opener=opener,
+    )
+
+    attempt = authority.acquire_endpoint_lease(_request())
+
+    assert attempt.acquired is False
+    assert attempt.validation_codes == ("ENDPOINT_ROOT_UNAVAILABLE",)
+    assert opener.paths == []
+
+
+def test_local_endpoint_lease_authority_releases_lock_when_owner_mismatches(
+    tmp_path: Path,
+) -> None:
     root = _endpoint_root(tmp_path, owner_installation_id="owner-b")
     handle = _FakeHandle(root / ".mediasync" / "locks" / "mutation.lock")
     token_store = _FakeTokenStore(42)
@@ -463,7 +498,9 @@ def test_local_endpoint_lease_authority_reports_busy_lock_without_token_allocati
     assert token_store.requests == []
 
 
-def test_local_endpoint_lease_authority_requires_token_or_resource_store(tmp_path: Path) -> None:
+def test_local_endpoint_lease_authority_requires_token_or_resource_store(
+    tmp_path: Path,
+) -> None:
     with pytest.raises(ValueError, match="requires a token or resource lease store"):
         LocalEndpointLeaseAuthority(
             target_roots={"endpoint:target-a": tmp_path},
@@ -471,7 +508,9 @@ def test_local_endpoint_lease_authority_requires_token_or_resource_store(tmp_pat
         )
 
 
-def test_win32_endpoint_lock_opener_reports_non_windows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_win32_endpoint_lock_opener_reports_non_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(endpoint_leases.os, "name", "posix")
 
     with pytest.raises(EndpointLeaseUnavailable) as exc_info:
@@ -587,7 +626,9 @@ class _FakeRootDescriptorResolver:
         endpoint_id: str,
         endpoint_revision_id: str,
     ) -> EndpointRootDescriptor | None:
-        self.descriptor_requests.append((resource_key, endpoint_id, endpoint_revision_id))
+        self.descriptor_requests.append(
+            (resource_key, endpoint_id, endpoint_revision_id)
+        )
         return self._descriptors.get(resource_key)
 
     def resolve_endpoint_root(
@@ -623,13 +664,17 @@ class _FakeTokenStore:
         self._token = token
         self.requests: list[tuple[str, int]] = []
 
-    def allocate_next_fencing_token(self, *, resource_key: str, ownership_epoch: int) -> int:
+    def allocate_next_fencing_token(
+        self, *, resource_key: str, ownership_epoch: int
+    ) -> int:
         self.requests.append((resource_key, ownership_epoch))
         return self._token
 
 
 class _FailingTokenStore:
-    def allocate_next_fencing_token(self, *, resource_key: str, ownership_epoch: int) -> int:
+    def allocate_next_fencing_token(
+        self, *, resource_key: str, ownership_epoch: int
+    ) -> int:
         raise FencingTokenAllocationError(
             "ENDPOINT_FENCING_TOKEN_UNAVAILABLE",
             "Retry after recovery storage is writable.",
@@ -637,7 +682,9 @@ class _FailingTokenStore:
 
 
 class _FakeResourceLeaseStore:
-    def __init__(self, token: int, stale_active_lease_ids: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self, token: int, stale_active_lease_ids: tuple[str, ...] = ()
+    ) -> None:
         self._token = token
         self._stale_active_lease_ids = list(stale_active_lease_ids)
         self.registrations: list[dict[str, object]] = []

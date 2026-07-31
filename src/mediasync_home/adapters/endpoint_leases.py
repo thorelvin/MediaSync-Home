@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import stat
 from collections.abc import Callable
 from ctypes import wintypes
 from dataclasses import dataclass, field
@@ -51,7 +52,9 @@ class MutationPermitIssueError(EndpointLeaseAdapterError):
 
 
 class FencingTokenStore(Protocol):
-    def allocate_next_fencing_token(self, *, resource_key: str, ownership_epoch: int) -> int: ...
+    def allocate_next_fencing_token(
+        self, *, resource_key: str, ownership_epoch: int
+    ) -> int: ...
 
 
 class ResourceLeaseStore(Protocol):
@@ -216,8 +219,12 @@ class LocalEndpointLeaseAuthority(EndpointLeaseAuthority):
         target_identities: Mapping[str, EndpointRootDescriptor] | None = None,
     ) -> None:
         if token_store is None and resource_lease_store is None:
-            raise ValueError("LocalEndpointLeaseAuthority requires a token or resource lease store")
-        self._target_roots = {resource_key: Path(root) for resource_key, root in target_roots.items()}
+            raise ValueError(
+                "LocalEndpointLeaseAuthority requires a token or resource lease store"
+            )
+        self._target_roots = {
+            resource_key: Path(root) for resource_key, root in target_roots.items()
+        }
         self._target_identities = {
             resource_key: EndpointRootDescriptor(
                 root=Path(descriptor.root),
@@ -238,12 +245,27 @@ class LocalEndpointLeaseAuthority(EndpointLeaseAuthority):
         self._resource_lease_store = resource_lease_store
         self._lock_opener = lock_opener or Win32EndpointLockOpener()
 
-    def acquire_endpoint_lease(self, request: EndpointLeaseRequest) -> EndpointLeaseAttempt:
+    def acquire_endpoint_lease(
+        self, request: EndpointLeaseRequest
+    ) -> EndpointLeaseAttempt:
         root = self._target_roots.get(request.resource_key)
         if root is None:
             return _failed(
                 "ENDPOINT_LEASE_RESOURCE_UNKNOWN",
                 "Register the target endpoint root before acquiring its mutation lock.",
+            )
+
+        try:
+            root_status = root.stat()
+        except OSError:
+            return _failed(
+                "ENDPOINT_ROOT_UNAVAILABLE",
+                "Reconnect the target; MediaSync will retry it without changing target data.",
+            )
+        if not stat.S_ISDIR(root_status.st_mode):
+            return _failed(
+                "ENDPOINT_ROOT_NOT_DIRECTORY",
+                "Review the registered endpoint because its root is no longer a directory.",
             )
 
         control_dir = root / ".mediasync"
@@ -276,7 +298,9 @@ class LocalEndpointLeaseAuthority(EndpointLeaseAuthority):
             owner_installation_id, ownership_epoch = _validate_marker(marker, request)
             identity = self._target_identities.get(request.resource_key)
             _validate_marker_identity(marker, identity)
-            endpoint_generation = 1 if identity is None else identity.endpoint_generation
+            endpoint_generation = (
+                1 if identity is None else identity.endpoint_generation
+            )
             if endpoint_generation < 1:
                 raise EndpointLeaseUnavailable(
                     "ENDPOINT_GENERATION_INVALID",
@@ -380,7 +404,9 @@ class LocalResolvingEndpointLeaseAuthority(EndpointLeaseAuthority):
         self._resource_lease_store = resource_lease_store
         self._lock_opener = lock_opener
 
-    def acquire_endpoint_lease(self, request: EndpointLeaseRequest) -> EndpointLeaseAttempt:
+    def acquire_endpoint_lease(
+        self, request: EndpointLeaseRequest
+    ) -> EndpointLeaseAttempt:
         try:
             descriptor = self._resolve_endpoint_root_descriptor(request)
         except EndpointLeaseUnavailable as exc:
@@ -402,7 +428,9 @@ class LocalResolvingEndpointLeaseAuthority(EndpointLeaseAuthority):
         self,
         request: EndpointLeaseRequest,
     ) -> EndpointRootDescriptor | None:
-        descriptor_resolver = getattr(self._root_resolver, "resolve_endpoint_root_descriptor", None)
+        descriptor_resolver = getattr(
+            self._root_resolver, "resolve_endpoint_root_descriptor", None
+        )
         if callable(descriptor_resolver):
             resolver = cast(
                 EndpointRootDescriptorResolver,
@@ -510,7 +538,9 @@ def _win32_file_handle_is_alive(handle_value: int) -> bool:
 class Win32EndpointLockHandle:
     path: Path
     handle_value: int
-    _probe_file_handle: Callable[[int], bool] = field(default=_win32_file_handle_is_alive, repr=False)
+    _probe_file_handle: Callable[[int], bool] = field(
+        default=_win32_file_handle_is_alive, repr=False
+    )
     _closed: bool = field(default=False, init=False, repr=False)
     _lost: bool = field(default=False, init=False, repr=False)
 
@@ -608,7 +638,10 @@ def _validate_marker(
             "ENDPOINT_OWNER_MISMATCH",
             "Stop mutation and refresh ownership before writing to this endpoint.",
         )
-    if request.required_ownership_epoch is not None and ownership_epoch != request.required_ownership_epoch:
+    if (
+        request.required_ownership_epoch is not None
+        and ownership_epoch != request.required_ownership_epoch
+    ):
         raise EndpointLeaseUnavailable(
             "ENDPOINT_OWNERSHIP_EPOCH_MISMATCH",
             "Refresh the sealed plan because endpoint ownership changed.",
@@ -650,7 +683,10 @@ def _validate_marker_identity(
         "ENDPOINT_REVISION_OWNER_MISMATCH",
         "Stop mutation and refresh endpoint ownership because the endpoint revision owner is stale.",
     )
-    if expected.ownership_epoch is not None and marker.get("ownership_epoch") != expected.ownership_epoch:
+    if (
+        expected.ownership_epoch is not None
+        and marker.get("ownership_epoch") != expected.ownership_epoch
+    ):
         raise EndpointLeaseUnavailable(
             "ENDPOINT_REVISION_OWNERSHIP_EPOCH_MISMATCH",
             "Refresh the sealed plan because the endpoint revision ownership epoch is stale.",

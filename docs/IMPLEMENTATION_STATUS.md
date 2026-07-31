@@ -1,5 +1,18 @@
 # Implementeringsstatus
 
+Oppdatering 2026-07-31: Utilgjengelige og opptatte mål går nå i en varig,
+ikke-destruktiv ventetilstand i stedet for å blokkere hele kjøringen. Catalog
+schema 38 lagrer immutable `run_target_endpoint_wait_events` med mål,
+forsøksnummer, årsak og tidspunkt. Manglende målrot og en opptatt
+`mutation.lock` flytter bare det aktuelle målet til `WAITING_FOR_ENDPOINT` og
+nullstiller stale leasebevis; marker-, owner- og identitetsfeil forblir harde
+sikkerhetsblokker. Executor promoterer høyst ett ventende mål ved starten av en
+senere maintenance-pass, slik at reconnect kan prøves uten tight loop, og andre
+mål kan fortsette gjennom preflight i mellomtiden. Jobs viser allerede den
+varige måltilstanden som **Venter på mål**. Eksponentiell tidsstyrt backoff,
+volume-arrival hints og klassifisering av nettverksbrudd under aktiv transfer
+gjenstår.
+
 Oppdatering 2026-07-31: Feil på enkeltfiler har nå en varig, avgrenset
 retryflyt. Recovery schema 9 lagrer `staging_failure_count`, og hvert transient
 stagingforsøk appendes som en hashkjedet recovery-event med forsøksnummer,

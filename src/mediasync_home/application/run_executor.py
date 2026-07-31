@@ -17,6 +17,7 @@ from mediasync_home.application.runs import (
     StartedRunTarget,
     acquire_run_target_lease,
     begin_next_run_target_preflight,
+    endpoint_wait_reason,
     start_run_target_execution,
 )
 from mediasync_home.domain.capabilities import MutationPermit
@@ -37,6 +38,8 @@ class RunExecutorPumpStopReason(str, Enum):
 
 class RunExecutorQueueStore(RunStore, Protocol):
     def load_next_runnable_run(self) -> StartedRun | None: ...
+
+    def requeue_next_waiting_run_target(self) -> StartedRunTarget | None: ...
 
     def load_next_pausing_run(self) -> StartedRun | None: ...
 
@@ -221,7 +224,11 @@ def execute_bounded_run_executor_preflight_pump(
     for step_index in range(1, max_steps + 1):
         last_step = execute_one_run_target_preflight_step(runs=runs, leases=leases)
         if last_step.lease_acquired:
-            if last_step.run_id is None or last_step.run_target_id is None or last_step.lease is None:
+            if (
+                last_step.run_id is None
+                or last_step.run_target_id is None
+                or last_step.lease is None
+            ):
                 raise RunExecutorViolation("RUN_EXECUTOR_ACQUIRED_LEASE_INCOMPLETE")
             lease_registry.retain_run_target_lease(
                 run_id=last_step.run_id,
@@ -468,7 +475,10 @@ def _load_target(
     run = runs.load_started_run(run_id)
     if run is None:
         return None
-    return next((target for target in run.targets if target.run_target_id == run_target_id), None)
+    return next(
+        (target for target in run.targets if target.run_target_id == run_target_id),
+        None,
+    )
 
 
 def _reacquire_revalidating_target_lease(
@@ -552,6 +562,32 @@ def _reacquire_run_target_lease(
         )
     )
     if not attempt.acquired:
+        wait_reason = endpoint_wait_reason(attempt)
+        if wait_reason is not None:
+            waiting = runs.record_run_target_waiting_for_endpoint(
+                run_id=run_id,
+                run_target_id=run_target_id,
+                expected_state=expected_target_state,
+                reason_code=wait_reason,
+            )
+            if waiting is None:
+                return _execution_start_failed(
+                    run_id=run_id,
+                    run_target_id=run_target_id,
+                    target=None,
+                    validation_code="RUN_TARGET_ENDPOINT_WAIT_RECORD_CONFLICT",
+                    next_action="Reload run state before recording endpoint wait.",
+                )
+            return RunExecutorExecutionStartStepOutcome(
+                idle=False,
+                execution_started=False,
+                run_id=run_id,
+                run_target_id=run_target_id,
+                target=waiting,
+                mutation_permit=None,
+                validation_codes=(),
+                next_action="Target is waiting safely and will be retried on a later maintenance pass.",
+            )
         return _execution_start_failed(
             run_id=run_id,
             run_target_id=run_target_id,

@@ -61,7 +61,9 @@ def test_execute_one_run_target_preflight_step_claims_and_acquires_lease() -> No
     )
 
 
-def test_execute_one_run_target_preflight_step_reports_idle_when_no_run_is_ready() -> None:
+def test_execute_one_run_target_preflight_step_reports_idle_when_no_run_is_ready() -> (
+    None
+):
     outcome = execute_one_run_target_preflight_step(
         runs=_InMemoryRunStore(None),
         leases=_FakeLeaseAuthority(EndpointLeaseAttempt(False, None, (), "unused")),
@@ -107,7 +109,9 @@ def test_execute_one_run_target_preflight_step_reports_claim_conflict() -> None:
     assert leases.requests == ()
 
 
-def test_execute_one_run_target_preflight_step_reports_lease_unavailable_after_claim() -> None:
+def test_execute_one_run_target_preflight_step_waits_when_lease_is_unavailable() -> (
+    None
+):
     runs = _InMemoryRunStore(_queued_run())
     leases = _FakeLeaseAuthority(
         EndpointLeaseAttempt(
@@ -124,12 +128,12 @@ def test_execute_one_run_target_preflight_step_reports_lease_unavailable_after_c
     assert outcome.idle is False
     assert outcome.claimed is True
     assert outcome.lease_acquired is False
-    assert outcome.validation_codes == ("ENDPOINT_LEASE_UNAVAILABLE",)
+    assert outcome.validation_codes == ()
     assert outcome.target is not None
-    assert outcome.target.state is RunTargetState.ACQUIRING_LEASE
+    assert outcome.target.state is RunTargetState.WAITING_FOR_ENDPOINT
     assert loaded is not None
     assert loaded.state is RunState.PREFLIGHT
-    assert loaded.targets[0].state is RunTargetState.ACQUIRING_LEASE
+    assert loaded.targets[0].state is RunTargetState.WAITING_FOR_ENDPOINT
 
 
 def test_bounded_run_executor_pump_retains_acquired_leases_until_idle() -> None:
@@ -162,14 +166,20 @@ def test_bounded_run_executor_pump_retains_acquired_leases_until_idle() -> None:
     assert outcome.leases_retained == 2
     assert outcome.stopped_reason is RunExecutorPumpStopReason.IDLE
     assert registry.retained_count == 2
-    assert registry.load_retained_run_target_lease(
-        run_id="run-a",
-        run_target_id="run-a-target-0000",
-    ) is first_lease
-    assert registry.load_retained_run_target_lease(
-        run_id="run-a",
-        run_target_id="run-a-target-0001",
-    ) is second_lease
+    assert (
+        registry.load_retained_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+        )
+        is first_lease
+    )
+    assert (
+        registry.load_retained_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-a-target-0001",
+        )
+        is second_lease
+    )
     assert first_lease.released is False
     assert second_lease.released is False
     loaded = runs.load_started_run("run-a")
@@ -185,8 +195,8 @@ def test_bounded_run_executor_pump_stops_on_blocked_step() -> None:
         EndpointLeaseAttempt(
             acquired=False,
             lease=None,
-            validation_codes=("ENDPOINT_LEASE_UNAVAILABLE",),
-            next_action="Wait for the current endpoint writer to release the lock.",
+            validation_codes=("ENDPOINT_CONTROL_AREA_MISSING",),
+            next_action="Review the endpoint before continuing.",
         )
     )
     registry = HeldRunTargetLeaseRegistry()
@@ -201,7 +211,7 @@ def test_bounded_run_executor_pump_stops_on_blocked_step() -> None:
     assert outcome.steps_attempted == 1
     assert outcome.leases_retained == 0
     assert outcome.stopped_reason is RunExecutorPumpStopReason.BLOCKED
-    assert outcome.validation_codes == ("ENDPOINT_LEASE_UNAVAILABLE",)
+    assert outcome.validation_codes == ("ENDPOINT_CONTROL_AREA_MISSING",)
     assert registry.retained_count == 0
 
 
@@ -218,7 +228,9 @@ def test_bounded_run_executor_pump_stops_at_step_limit_with_retained_lease() -> 
                 )
             )
         ),
-        leases=_SequencedLeaseAuthority((EndpointLeaseAttempt(True, lease, (), "acquired"),)),
+        leases=_SequencedLeaseAuthority(
+            (EndpointLeaseAttempt(True, lease, (), "acquired"),)
+        ),
         lease_registry=registry,
         max_steps=1,
     )
@@ -231,14 +243,18 @@ def test_bounded_run_executor_pump_stops_at_step_limit_with_retained_lease() -> 
 
 
 def test_bounded_run_executor_pump_requires_bounded_step_limit() -> None:
-    with pytest.raises(RunExecutorViolation, match="RUN_EXECUTOR_PUMP_REQUIRES_POSITIVE_STEP_LIMIT"):
+    with pytest.raises(
+        RunExecutorViolation, match="RUN_EXECUTOR_PUMP_REQUIRES_POSITIVE_STEP_LIMIT"
+    ):
         execute_bounded_run_executor_preflight_pump(
             runs=_InMemoryRunStore(None),
             leases=_FakeLeaseAuthority(EndpointLeaseAttempt(False, None, (), "unused")),
             lease_registry=HeldRunTargetLeaseRegistry(),
             max_steps=0,
         )
-    with pytest.raises(RunExecutorViolation, match="RUN_EXECUTOR_PUMP_STEP_LIMIT_TOO_LARGE"):
+    with pytest.raises(
+        RunExecutorViolation, match="RUN_EXECUTOR_PUMP_STEP_LIMIT_TOO_LARGE"
+    ):
         execute_bounded_run_executor_preflight_pump(
             runs=_InMemoryRunStore(None),
             leases=_FakeLeaseAuthority(EndpointLeaseAttempt(False, None, (), "unused")),
@@ -276,7 +292,9 @@ def test_execute_one_run_target_execution_start_step_issues_permit() -> None:
     assert lease.released is False
 
 
-def test_execute_one_run_target_execution_start_step_reports_idle_without_revalidating_target() -> None:
+def test_execute_one_run_target_execution_start_step_reports_idle_without_revalidating_target() -> (
+    None
+):
     outcome = execute_one_run_target_execution_start_step(
         runs=_InMemoryRunStore(_queued_run()),
         lease_registry=HeldRunTargetLeaseRegistry(),
@@ -305,7 +323,9 @@ def test_execute_one_run_target_execution_start_step_requires_retained_lease() -
     assert loaded.state is RunState.PREFLIGHT
 
 
-def test_execute_one_run_target_execution_start_step_reacquires_missing_retained_lease() -> None:
+def test_execute_one_run_target_execution_start_step_reacquires_missing_retained_lease() -> (
+    None
+):
     lease = _FakeLiveLease("lease-b", fencing_token=43)
     leases = _FakeLeaseAuthority(EndpointLeaseAttempt(True, lease, (), "reacquired"))
     registry = HeldRunTargetLeaseRegistry()
@@ -327,10 +347,13 @@ def test_execute_one_run_target_execution_start_step_reacquires_missing_retained
     assert loaded.targets[0].state is RunTargetState.EXECUTING
     assert loaded.targets[0].last_lease_id == "lease-b"
     assert loaded.targets[0].last_fencing_token == 43
-    assert registry.load_retained_run_target_lease(
-        run_id="run-a",
-        run_target_id="run-a-target-0000",
-    ) is lease
+    assert (
+        registry.load_retained_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+        )
+        is lease
+    )
     assert leases.requests == (
         EndpointLeaseRequest(
             run_id="run-a",
@@ -344,7 +367,9 @@ def test_execute_one_run_target_execution_start_step_reacquires_missing_retained
     )
 
 
-def test_execute_one_run_target_execution_start_step_blocks_when_reacquire_unavailable() -> None:
+def test_execute_one_run_target_execution_start_step_waits_when_reacquire_unavailable() -> (
+    None
+):
     leases = _FakeLeaseAuthority(
         EndpointLeaseAttempt(
             acquired=False,
@@ -364,16 +389,20 @@ def test_execute_one_run_target_execution_start_step_blocks_when_reacquire_unava
 
     loaded = runs.load_started_run("run-a")
     assert outcome.execution_started is False
-    assert outcome.validation_codes == ("ENDPOINT_LEASE_UNAVAILABLE",)
-    assert outcome.next_action == "Wait for the current endpoint writer to release the lock."
+    assert outcome.validation_codes == ()
+    assert outcome.next_action == (
+        "Target is waiting safely and will be retried on a later maintenance pass."
+    )
     assert registry.retained_count == 0
     assert loaded is not None
     assert loaded.state is RunState.PREFLIGHT
-    assert loaded.targets[0].state is RunTargetState.REVALIDATING
-    assert loaded.targets[0].last_lease_id == "lease-a"
+    assert loaded.targets[0].state is RunTargetState.WAITING_FOR_ENDPOINT
+    assert loaded.targets[0].last_lease_id is None
 
 
-def test_execute_one_run_target_execution_start_step_releases_stale_retained_lease() -> None:
+def test_execute_one_run_target_execution_start_step_releases_stale_retained_lease() -> (
+    None
+):
     stale_lease = _FakeLiveLease("stale-lease")
     registry = HeldRunTargetLeaseRegistry()
     registry.retain_run_target_lease(
@@ -393,7 +422,9 @@ def test_execute_one_run_target_execution_start_step_releases_stale_retained_lea
     assert registry.retained_count == 0
 
 
-def test_execute_one_executing_run_target_lease_reacquire_step_retains_new_lease() -> None:
+def test_execute_one_executing_run_target_lease_reacquire_step_retains_new_lease() -> (
+    None
+):
     lease = _FakeLiveLease("lease-b", fencing_token=43)
     leases = _FakeLeaseAuthority(EndpointLeaseAttempt(True, lease, (), "reacquired"))
     registry = HeldRunTargetLeaseRegistry()
@@ -415,13 +446,18 @@ def test_execute_one_executing_run_target_lease_reacquire_step_retains_new_lease
     assert loaded.targets[0].state is RunTargetState.EXECUTING
     assert loaded.targets[0].last_lease_id == "lease-b"
     assert loaded.targets[0].last_fencing_token == 43
-    assert registry.load_retained_run_target_lease(
-        run_id="run-a",
-        run_target_id="run-a-target-0000",
-    ) is lease
+    assert (
+        registry.load_retained_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+        )
+        is lease
+    )
 
 
-def test_execute_one_executing_run_target_lease_reacquire_step_reports_idle_without_executing_target() -> None:
+def test_execute_one_executing_run_target_lease_reacquire_step_reports_idle_without_executing_target() -> (
+    None
+):
     outcome = execute_one_executing_run_target_lease_reacquire_step(
         runs=_InMemoryRunStore(_preflighted_run()),
         leases=_FakeLeaseAuthority(EndpointLeaseAttempt(False, None, (), "unused")),
@@ -438,8 +474,12 @@ def test_lease_registry_releases_replaced_and_shutdown_leases() -> None:
     second = _FakeLiveLease("lease-b")
     registry = HeldRunTargetLeaseRegistry()
 
-    registry.retain_run_target_lease(run_id="run-a", run_target_id="target-a", lease=first)
-    registry.retain_run_target_lease(run_id="run-a", run_target_id="target-a", lease=second)
+    registry.retain_run_target_lease(
+        run_id="run-a", run_target_id="target-a", lease=first
+    )
+    registry.retain_run_target_lease(
+        run_id="run-a", run_target_id="target-a", lease=second
+    )
 
     assert first.released is True
     assert second.released is False
@@ -452,7 +492,9 @@ def test_lease_registry_releases_replaced_and_shutdown_leases() -> None:
 
 
 class _InMemoryRunStore(RunExecutorQueueStore):
-    def __init__(self, run: StartedRun | None, *, preflight_conflict: bool = False) -> None:
+    def __init__(
+        self, run: StartedRun | None, *, preflight_conflict: bool = False
+    ) -> None:
         self.run = run
         self.preflight_conflict = preflight_conflict
 
@@ -464,17 +506,52 @@ class _InMemoryRunStore(RunExecutorQueueStore):
             return self.run
         return None
 
-    def load_started_run_by_idempotency_key(self, idempotency_key: str) -> StartedRun | None:
+    def load_started_run_by_idempotency_key(
+        self, idempotency_key: str
+    ) -> StartedRun | None:
         if self.run is not None and self.run.idempotency_key == idempotency_key:
             return self.run
         return None
 
     def load_next_runnable_run(self) -> StartedRun | None:
-        if self.run is None or self.run.state not in {RunState.QUEUED, RunState.PREFLIGHT}:
+        if self.run is None or self.run.state not in {
+            RunState.QUEUED,
+            RunState.PREFLIGHT,
+            RunState.EXECUTING,
+        }:
             return None
-        if not any(target.state is RunTargetState.PENDING for target in self.run.targets):
+        if not any(
+            target.state is RunTargetState.PENDING for target in self.run.targets
+        ):
             return None
         return self.run
+
+    def requeue_next_waiting_run_target(self) -> StartedRunTarget | None:
+        if self.run is None or self.run.state not in {
+            RunState.QUEUED,
+            RunState.PREFLIGHT,
+            RunState.EXECUTING,
+        }:
+            return None
+        waiting = next(
+            (
+                target
+                for target in self.run.targets
+                if target.state is RunTargetState.WAITING_FOR_ENDPOINT
+            ),
+            None,
+        )
+        if waiting is None:
+            return None
+        pending = replace(waiting, state=RunTargetState.PENDING)
+        self.run = replace(
+            self.run,
+            targets=tuple(
+                pending if target.run_target_id == waiting.run_target_id else target
+                for target in self.run.targets
+            ),
+        )
+        return pending
 
     def load_next_pausing_run(self) -> StartedRun | None:
         if self.run is None or self.run.state is not RunState.PAUSING:
@@ -509,10 +586,17 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         return self.run
 
     def load_next_revalidating_run_target_key(self) -> tuple[str, str] | None:
-        if self.run is None or self.run.state not in {RunState.PREFLIGHT, RunState.EXECUTING}:
+        if self.run is None or self.run.state not in {
+            RunState.PREFLIGHT,
+            RunState.EXECUTING,
+        }:
             return None
         target = next(
-            (target for target in self.run.targets if target.state is RunTargetState.REVALIDATING),
+            (
+                target
+                for target in self.run.targets
+                if target.state is RunTargetState.REVALIDATING
+            ),
             None,
         )
         if target is None:
@@ -523,7 +607,11 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         if self.run is None or self.run.state is not RunState.EXECUTING:
             return None
         target = next(
-            (target for target in self.run.targets if target.state is RunTargetState.EXECUTING),
+            (
+                target
+                for target in self.run.targets
+                if target.state is RunTargetState.EXECUTING
+            ),
             None,
         )
         if target is None:
@@ -534,7 +622,14 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         run = self.load_started_run(run_id)
         if run is None:
             return None
-        return next((target for target in run.targets if target.state is RunTargetState.PENDING), None)
+        return next(
+            (
+                target
+                for target in run.targets
+                if target.state is RunTargetState.PENDING
+            ),
+            None,
+        )
 
     def begin_run_target_preflight(
         self,
@@ -545,19 +640,34 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         if self.preflight_conflict:
             return None
         run = self.load_started_run(run_id)
-        if run is None or run.state not in {RunState.QUEUED, RunState.PREFLIGHT}:
+        if run is None or run.state not in {
+            RunState.QUEUED,
+            RunState.PREFLIGHT,
+            RunState.EXECUTING,
+        }:
             return None
         updated_targets: list[StartedRunTarget] = []
         claimed: StartedRunTarget | None = None
         for target in run.targets:
-            if target.run_target_id == run_target_id and target.state is RunTargetState.PENDING:
+            if (
+                target.run_target_id == run_target_id
+                and target.state is RunTargetState.PENDING
+            ):
                 claimed = replace(target, state=RunTargetState.ACQUIRING_LEASE)
                 updated_targets.append(claimed)
             else:
                 updated_targets.append(target)
         if claimed is None:
             return None
-        self.run = replace(run, state=RunState.PREFLIGHT, targets=tuple(updated_targets))
+        self.run = replace(
+            run,
+            state=(
+                RunState.EXECUTING
+                if run.state is RunState.EXECUTING
+                else RunState.PREFLIGHT
+            ),
+            targets=tuple(updated_targets),
+        )
         return claimed
 
     def record_run_target_lease_acquired(
@@ -576,7 +686,10 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         updated_targets: list[StartedRunTarget] = []
         recorded: StartedRunTarget | None = None
         for target in run.targets:
-            if target.run_target_id == run_target_id and target.state is RunTargetState.ACQUIRING_LEASE:
+            if (
+                target.run_target_id == run_target_id
+                and target.state is RunTargetState.ACQUIRING_LEASE
+            ):
                 recorded = replace(
                     target,
                     state=RunTargetState.REVALIDATING,
@@ -591,6 +704,36 @@ class _InMemoryRunStore(RunExecutorQueueStore):
             return None
         self.run = replace(run, targets=tuple(updated_targets))
         return recorded
+
+    def record_run_target_waiting_for_endpoint(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        expected_state: RunTargetState,
+        reason_code: str,
+    ) -> StartedRunTarget | None:
+        run = self.load_started_run(run_id)
+        if run is None or not reason_code.strip():
+            return None
+        waiting: StartedRunTarget | None = None
+        updated_targets: list[StartedRunTarget] = []
+        for target in run.targets:
+            if target.run_target_id == run_target_id and target.state is expected_state:
+                waiting = replace(
+                    target,
+                    state=RunTargetState.WAITING_FOR_ENDPOINT,
+                    last_lease_id=None,
+                    last_ownership_epoch=None,
+                    last_fencing_token=None,
+                )
+                updated_targets.append(waiting)
+            else:
+                updated_targets.append(target)
+        if waiting is None:
+            return None
+        self.run = replace(run, targets=tuple(updated_targets))
+        return waiting
 
     def record_run_target_lease_reacquired(
         self,
@@ -621,7 +764,10 @@ class _InMemoryRunStore(RunExecutorQueueStore):
                     or target.last_fencing_token != expected_fencing_token
                 ):
                     return None
-                if target.required_owner_installation_id not in (None, owner_installation_id):
+                if target.required_owner_installation_id not in (
+                    None,
+                    owner_installation_id,
+                ):
                     return None
                 if target.required_ownership_epoch not in (None, ownership_epoch):
                     return None
@@ -650,19 +796,25 @@ class _InMemoryRunStore(RunExecutorQueueStore):
         fencing_token: int,
     ) -> StartedRunTarget | None:
         run = self.load_started_run(run_id)
-        if run is None or run.state is not RunState.PREFLIGHT:
+        if run is None or run.state not in {RunState.PREFLIGHT, RunState.EXECUTING}:
             return None
         updated_targets: list[StartedRunTarget] = []
         started: StartedRunTarget | None = None
         for target in run.targets:
-            if target.run_target_id == run_target_id and target.state is RunTargetState.REVALIDATING:
+            if (
+                target.run_target_id == run_target_id
+                and target.state is RunTargetState.REVALIDATING
+            ):
                 if (
                     target.last_lease_id != lease_id
                     or target.last_ownership_epoch != ownership_epoch
                     or target.last_fencing_token != fencing_token
                 ):
                     return None
-                if target.required_owner_installation_id not in (None, owner_installation_id):
+                if target.required_owner_installation_id not in (
+                    None,
+                    owner_installation_id,
+                ):
                     return None
                 if target.required_ownership_epoch not in (None, ownership_epoch):
                     return None
@@ -672,7 +824,9 @@ class _InMemoryRunStore(RunExecutorQueueStore):
                 updated_targets.append(target)
         if started is None:
             return None
-        self.run = replace(run, state=RunState.EXECUTING, targets=tuple(updated_targets))
+        self.run = replace(
+            run, state=RunState.EXECUTING, targets=tuple(updated_targets)
+        )
         return started
 
 
@@ -681,7 +835,9 @@ class _FakeLeaseAuthority(EndpointLeaseAuthority):
         self._attempt = attempt
         self.requests: tuple[EndpointLeaseRequest, ...] = ()
 
-    def acquire_endpoint_lease(self, request: EndpointLeaseRequest) -> EndpointLeaseAttempt:
+    def acquire_endpoint_lease(
+        self, request: EndpointLeaseRequest
+    ) -> EndpointLeaseAttempt:
         self.requests = (*self.requests, request)
         return self._attempt
 
@@ -691,7 +847,9 @@ class _SequencedLeaseAuthority(EndpointLeaseAuthority):
         self._attempts = list(attempts)
         self.requests: tuple[EndpointLeaseRequest, ...] = ()
 
-    def acquire_endpoint_lease(self, request: EndpointLeaseRequest) -> EndpointLeaseAttempt:
+    def acquire_endpoint_lease(
+        self, request: EndpointLeaseRequest
+    ) -> EndpointLeaseAttempt:
         self.requests = (*self.requests, request)
         if not self._attempts:
             raise AssertionError("unexpected lease request")
@@ -787,7 +945,9 @@ def _target(
     return StartedRunTarget(
         run_target_id=run_target_id,
         endpoint_id=endpoint_id,
-        endpoint_revision_id="target-rev-a" if endpoint_id == "target-a" else f"{endpoint_id}-rev-a",
+        endpoint_revision_id="target-rev-a"
+        if endpoint_id == "target-a"
+        else f"{endpoint_id}-rev-a",
         state=RunTargetState.PENDING,
         required_owner_installation_id="owner-a",
         required_ownership_epoch=1,

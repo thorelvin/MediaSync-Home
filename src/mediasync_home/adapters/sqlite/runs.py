@@ -310,7 +310,12 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                     last_fencing_token = NULL,
                     row_version = row_version + 1
                 WHERE run_id = ?
-                    AND state IN ('ACQUIRING_LEASE', 'REVALIDATING', 'EXECUTING')
+                    AND state IN (
+                        'ACQUIRING_LEASE',
+                        'REVALIDATING',
+                        'EXECUTING',
+                        'WAITING_FOR_ENDPOINT'
+                    )
                     AND EXISTS (
                         SELECT 1
                         FROM runs
@@ -781,7 +786,7 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                 planned_operations,
                 planned_bytes
             FROM runs
-            WHERE state IN ('QUEUED', 'PREFLIGHT')
+            WHERE state IN ('QUEUED', 'PREFLIGHT', 'EXECUTING')
                 AND EXISTS (
                     SELECT 1
                     FROM run_targets
@@ -1035,7 +1040,7 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                         SELECT 1
                         FROM runs
                         WHERE runs.id = run_targets.run_id
-                            AND runs.state IN ('QUEUED', 'PREFLIGHT')
+                            AND runs.state IN ('QUEUED', 'PREFLIGHT', 'EXECUTING')
                     )
                 """,
                 (run_id, run_target_id),
@@ -1048,10 +1053,13 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                 """
                 UPDATE runs
                 SET
-                    state = 'PREFLIGHT',
+                    state = CASE
+                        WHEN state = 'EXECUTING' THEN 'EXECUTING'
+                        ELSE 'PREFLIGHT'
+                    END,
                     row_version = row_version + 1
                 WHERE id = ?
-                    AND state IN ('QUEUED', 'PREFLIGHT')
+                    AND state IN ('QUEUED', 'PREFLIGHT', 'EXECUTING')
                 """,
                 (run_id,),
             )
@@ -1071,6 +1079,163 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
             if isinstance(exc, SqliteRunStoreError):
                 raise
             raise SqliteRunStoreError("RUN_TARGET_PREFLIGHT_FAILED") from exc
+
+    def record_run_target_waiting_for_endpoint(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        expected_state: RunTargetState,
+        reason_code: str,
+    ) -> StartedRunTarget | None:
+        normalized_reason = reason_code.strip()
+        if (
+            expected_state
+            not in {
+                RunTargetState.ACQUIRING_LEASE,
+                RunTargetState.REVALIDATING,
+                RunTargetState.EXECUTING,
+            }
+            or not normalized_reason
+        ):
+            return None
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            cursor = self._connection.execute(
+                """
+                UPDATE run_targets
+                SET
+                    state = 'WAITING_FOR_ENDPOINT',
+                    last_lease_id = NULL,
+                    last_ownership_epoch = NULL,
+                    last_fencing_token = NULL,
+                    result_json = ?,
+                    row_version = row_version + 1
+                WHERE run_id = ?
+                    AND id = ?
+                    AND state = ?
+                    AND EXISTS (
+                        SELECT 1
+                        FROM runs
+                        WHERE runs.id = run_targets.run_id
+                            AND runs.state IN ('PREFLIGHT', 'EXECUTING')
+                    )
+                """,
+                (
+                    _json_dump(
+                        {
+                            "last_endpoint_error_code": normalized_reason,
+                            "status": "WAITING_FOR_ENDPOINT",
+                        }
+                    ),
+                    run_id,
+                    run_target_id,
+                    expected_state.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            attempt_row = self._connection.execute(
+                """
+                SELECT coalesce(max(attempt_no), 0) + 1
+                FROM run_target_endpoint_wait_events
+                WHERE run_id = ?
+                    AND run_target_id = ?
+                """,
+                (run_id, run_target_id),
+            ).fetchone()
+            if attempt_row is None:
+                raise SqliteRunStoreError(
+                    "RUN_TARGET_ENDPOINT_WAIT_ATTEMPT_LOAD_FAILED"
+                )
+            self._connection.execute(
+                """
+                INSERT INTO run_target_endpoint_wait_events (
+                    run_id,
+                    run_target_id,
+                    attempt_no,
+                    reason_code
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (run_id, run_target_id, int(attempt_row[0]), normalized_reason),
+            )
+            target = self._load_target(run_id=run_id, run_target_id=run_target_id)
+            if target is None:
+                raise SqliteRunStoreError("RUN_TARGET_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return target
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_TARGET_ENDPOINT_WAIT_RECORD_FAILED") from exc
+
+    def requeue_next_waiting_run_target(self) -> StartedRunTarget | None:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            row = self._connection.execute(
+                """
+                SELECT run_targets.run_id, run_targets.id
+                FROM run_targets
+                INNER JOIN runs ON runs.id = run_targets.run_id
+                WHERE run_targets.state = 'WAITING_FOR_ENDPOINT'
+                    AND runs.state IN ('QUEUED', 'PREFLIGHT', 'EXECUTING')
+                ORDER BY
+                    (
+                        SELECT max(events.id)
+                        FROM run_target_endpoint_wait_events AS events
+                        WHERE events.run_id = run_targets.run_id
+                            AND events.run_target_id = run_targets.id
+                    ),
+                    run_targets.run_id,
+                    run_targets.id
+                LIMIT 1
+                """,
+                (),
+            ).fetchone()
+            if row is None:
+                if not outer_transaction:
+                    self._connection.execute("COMMIT")
+                return None
+            run_id, run_target_id = str(row[0]), str(row[1])
+            cursor = self._connection.execute(
+                """
+                UPDATE run_targets
+                SET
+                    state = 'PENDING',
+                    result_json = NULL,
+                    row_version = row_version + 1
+                WHERE run_id = ?
+                    AND id = ?
+                    AND state = 'WAITING_FOR_ENDPOINT'
+                """,
+                (run_id, run_target_id),
+            )
+            if cursor.rowcount != 1:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            target = self._load_target(run_id=run_id, run_target_id=run_target_id)
+            if target is None:
+                raise SqliteRunStoreError("RUN_TARGET_LOAD_FAILED")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return target
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_TARGET_ENDPOINT_REQUEUE_FAILED") from exc
 
     def record_run_target_lease_acquired(
         self,
@@ -1172,7 +1337,10 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                         FROM runs
                         WHERE runs.id = run_targets.run_id
                             AND (
-                                (run_targets.state = 'REVALIDATING' AND runs.state = 'PREFLIGHT')
+                                (
+                                    run_targets.state = 'REVALIDATING'
+                                    AND runs.state IN ('PREFLIGHT', 'EXECUTING')
+                                )
                                 OR (run_targets.state = 'EXECUTING' AND runs.state = 'EXECUTING')
                             )
                     )
@@ -1239,7 +1407,7 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                         SELECT 1
                         FROM runs
                         WHERE runs.id = run_targets.run_id
-                            AND runs.state = 'PREFLIGHT'
+                            AND runs.state IN ('PREFLIGHT', 'EXECUTING')
                     )
                 """,
                 (
