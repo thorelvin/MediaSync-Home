@@ -1797,6 +1797,9 @@ class MediaSyncWindow(QMainWindow):
                 f"{_format_bytes(state.planned_bytes)} {self._texts().transferred.lower()}",
             ]
             if state.terminal:
+                target_summary = self._terminal_target_summary(state)
+                if target_summary is not None:
+                    details.append(target_summary)
                 details.extend(
                     (
                         self._terminal_run_summary(state.state),
@@ -2007,6 +2010,19 @@ class MediaSyncWindow(QMainWindow):
         if self._selected_language_code is LanguageCode.ENGLISH:
             return f"{state.warning_count} warnings / {state.error_count} errors"
         return f"{state.warning_count} varsler / {state.error_count} feil"
+
+    def _terminal_target_summary(self, state: RunProgressViewState) -> str | None:
+        if state.target_count == 0:
+            return None
+        if self._selected_language_code is LanguageCode.ENGLISH:
+            noun = "target" if state.target_count == 1 else "targets"
+            return (
+                f"{state.completed_target_count} of {state.target_count} "
+                f"{noun} completed"
+            )
+        return (
+            f"{state.completed_target_count} av {state.target_count} mål fullført"
+        )
 
     def _pause_active_backup(self) -> None:
         self._submit_run_control("pause")

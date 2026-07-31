@@ -1,5 +1,15 @@
 # Kravsporbarhet
 
+Oppdatering 2026-07-31 for `UX-004`: Det terminale resultatkortet viser nå et
+stabilt, lokalisert **N av M mål fullført** basert på det autoritative
+run-snapshotet. Mål med suksess eller suksess med varsler teller som fullført;
+andre terminaltilstander gjør ikke det. Aktive runs og eldre snapshots uten
+målrader beholder tidligere visning. Bevis:
+`src/mediasync_home/presentation/view_models/run_progress.py`,
+`src/mediasync_home/presentation/main_window.py`,
+`tests/unit/test_run_progress_view_model.py` og
+`tests/gui/test_pyside_shell.py`.
+
 Oppdatering 2026-07-31 for `SAF-001`, `SAF-002`, `REC-003` og `UX-003`:
 desktop-launcher, persistent same-user host, direkte Engine Host-komposisjon og
 runtimebygger velger nå den Job Object-superviserte Robocopy-adapteren som

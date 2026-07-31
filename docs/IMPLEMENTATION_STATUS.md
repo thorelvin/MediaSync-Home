@@ -1,5 +1,14 @@
 # Implementeringsstatus
 
+Oppdatering 2026-07-31: Terminale resultater i **Jobber** viser nå et stabilt,
+lokalisert sammendrag av hvor mange mål som ble fullført, for eksempel
+**2 av 3 mål fullført**. `SUCCEEDED` og `SUCCEEDED_WITH_WARNINGS` teller som
+fullførte mål; feil, avbrudd, sikkerhetsblokkering og recoverybehov gjør ikke
+det. Aktive kjøringer påvirkes ikke, og eldre terminale snapshots uten mål
+beholder det eksisterende resultatet uten en misvisende nulltelling. GUI-
+regresjonene dekker omstart, suksess, varsel, delvis feil, norsk, engelsk og
+legacy-snapshot.
+
 Oppdatering 2026-07-31: Den vedvarende desktop-Engine Hosten bruker nå
 supervisert Robocopy som standard stagingbackend. Produktinngangen,
 desktop-launchplanen, den publiserte same-user hosten, direkte Engine Host-

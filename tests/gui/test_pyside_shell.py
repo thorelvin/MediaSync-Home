@@ -1679,6 +1679,7 @@ def test_jobs_page_restores_terminal_result_after_gui_restart(qapp) -> None:
             assert detail is not None
             assert "3 / 3 operasjoner" in detail.text()
             assert "3.0 KiB / 3.0 KiB overført" in detail.text()
+            assert "1 av 1 mål fullført" in detail.text()
             assert "Backupen er fullført og verifisert." in detail.text()
             assert "0 varsler / 0 feil" in detail.text()
             assert "Beregner gjenstående tid" not in detail.text()
@@ -1713,6 +1714,7 @@ def test_jobs_page_localizes_terminal_partial_failure_summary(qapp) -> None:
     )
 
     try:
+        window.resize(900, 560)
         window.show()
         window.refresh_engine_status()
         window._select_navigation_row(1)
@@ -1721,15 +1723,71 @@ def test_jobs_page_localizes_terminal_partial_failure_summary(qapp) -> None:
         title = window._jobs_run_progress_title
         result_state = window.findChild(QLabel, "jobsRunProgressState")
         detail = window.findChild(QLabel, "jobsRunProgressDetail")
+        jobs_scroll = window.findChild(QScrollArea, "jobsScrollArea")
 
         assert title is not None and title.text() == "Backup result"
         assert result_state is not None
         assert result_state.text() == "Partially completed"
         assert detail is not None
         assert "2 / 3 operations" in detail.text()
+        assert "2 of 3 targets completed" in detail.text()
         assert "Some files were not backed up. Review History and run again." in detail.text()
         assert "1 warnings / 1 errors" in detail.text()
         assert "Calculating remaining time" not in detail.text()
+        assert jobs_scroll is not None
+        assert jobs_scroll.horizontalScrollBar().maximum() == 0
+        assert detail.height() >= detail.heightForWidth(detail.width())
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_jobs_page_counts_warning_target_as_completed(qapp) -> None:
+    provider = _FakeTerminalRunDashboardEngineClient(
+        run_state="COMPLETED_WITH_WARNINGS",
+        warning_count=1,
+    )
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.show()
+        window.refresh_engine_status()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+        detail = window.findChild(QLabel, "jobsRunProgressDetail")
+
+        assert detail is not None
+        assert "1 av 1 mål fullført" in detail.text()
+        assert "Backupen er fullført med varsler." in detail.text()
+        assert "1 varsler / 0 feil" in detail.text()
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_jobs_page_omits_target_count_for_legacy_terminal_snapshot(qapp) -> None:
+    provider = _FakeTerminalRunDashboardEngineClient(target_states=())
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.show()
+        window.refresh_engine_status()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+        detail = window.findChild(QLabel, "jobsRunProgressDetail")
+
+        assert detail is not None
+        assert "mål fullført" not in detail.text()
+        assert "target completed" not in detail.text()
+        assert "targets completed" not in detail.text()
     finally:
         window.close()
         window.deleteLater()
@@ -2503,6 +2561,7 @@ class _FakeTerminalRunDashboardEngineClient(_FakeBackupStartDashboardEngineClien
         completed_bytes: int = 3072,
         warning_count: int = 0,
         error_count: int = 0,
+        target_states: tuple[str, ...] | None = None,
     ) -> None:
         super().__init__()
         self.run_state = run_state
@@ -2510,7 +2569,64 @@ class _FakeTerminalRunDashboardEngineClient(_FakeBackupStartDashboardEngineClien
         self.completed_bytes = completed_bytes
         self.warning_count = warning_count
         self.error_count = error_count
+        self.target_states = target_states if target_states is not None else {
+            "COMPLETED": ("SUCCEEDED",),
+            "COMPLETED_WITH_WARNINGS": ("SUCCEEDED_WITH_WARNINGS",),
+            "PARTIAL_FAILURE": (
+                "SUCCEEDED",
+                "SUCCEEDED_WITH_WARNINGS",
+                "FAILED",
+            ),
+            "FAILED": ("FAILED",),
+            "CANCELLED": ("CANCELLED",),
+            "BLOCKED_BY_SAFETY": ("BLOCKED",),
+            "RECOVERY_REQUIRED": ("RECOVERY_REQUIRED",),
+        }.get(run_state, ("FAILED",))
         self.progress_after_sequences: list[int | None] = []
+
+    def _target_payloads(self) -> list[dict[str, object]]:
+        target_count = len(self.target_states)
+        payloads: list[dict[str, object]] = []
+        for index, target_state in enumerate(self.target_states):
+            succeeded = target_state in {"SUCCEEDED", "SUCCEEDED_WITH_WARNINGS"}
+            planned_operations = 3 if target_count == 1 else 1
+            planned_bytes = 3072 if target_count == 1 else 1024
+            completed_operations = (
+                self.completed_operations
+                if target_count == 1
+                else planned_operations if succeeded else 0
+            )
+            completed_bytes = (
+                self.completed_bytes
+                if target_count == 1
+                else planned_bytes if succeeded else 0
+            )
+            payloads.append(
+                {
+                    "run_target_id": f"run-a-target-{index:04d}",
+                    "endpoint_id": f"target-{chr(ord('a') + index)}",
+                    "endpoint_revision_id": f"target-rev-{index}",
+                    "state": target_state,
+                    "planned_operations": planned_operations,
+                    "completed_operations": completed_operations,
+                    "planned_bytes": planned_bytes,
+                    "completed_bytes": completed_bytes,
+                    "warning_count": (
+                        1 if target_state == "SUCCEEDED_WITH_WARNINGS" else 0
+                    ),
+                    "error_count": (
+                        1
+                        if target_state in {"FAILED", "BLOCKED", "RECOVERY_REQUIRED"}
+                        else 0
+                    ),
+                    "last_success_utc": (
+                        "2026-07-20T12:01:00.000Z"
+                        if succeeded
+                        else "2026-07-19T12:05:00.000Z"
+                    ),
+                }
+            )
+        return payloads
 
     def get_activity_overview(
         self,
@@ -2541,30 +2657,7 @@ class _FakeTerminalRunDashboardEngineClient(_FakeBackupStartDashboardEngineClien
                             "planned_bytes": 3072,
                             "warning_count": self.warning_count,
                             "error_count": self.error_count,
-                            "targets": [
-                                {
-                                    "run_target_id": "run-a-target-0000",
-                                    "endpoint_id": "target-a",
-                                    "endpoint_revision_id": "target-rev-a",
-                                    "state": (
-                                        "SUCCEEDED"
-                                        if self.run_state == "COMPLETED"
-                                        else "FAILED"
-                                    ),
-                                    "planned_operations": 3,
-                                    "completed_operations": self.completed_operations,
-                                    "planned_bytes": 3072,
-                                    "completed_bytes": self.completed_bytes,
-                                    "warning_count": self.warning_count,
-                                    "error_count": self.error_count,
-                                    "last_success_utc": (
-                                        "2026-07-20T12:01:00.000Z"
-                                        if self.run_state
-                                        in {"COMPLETED", "COMPLETED_WITH_WARNINGS"}
-                                        else "2026-07-19T12:05:00.000Z"
-                                    ),
-                                }
-                            ],
+                            "targets": self._target_payloads(),
                         }
                     ],
                 }
@@ -2610,22 +2703,7 @@ class _FakeTerminalRunDashboardEngineClient(_FakeBackupStartDashboardEngineClien
                             "bytes_per_second": None,
                             "eta_seconds": None,
                             "stop_requested": False,
-                            "targets": [
-                                {
-                                    "endpoint_id": "target-a",
-                                    "state": (
-                                        "SUCCEEDED"
-                                        if self.run_state == "COMPLETED"
-                                        else "FAILED"
-                                    ),
-                                    "planned_operations": 3,
-                                    "completed_operations": self.completed_operations,
-                                    "planned_bytes": 3072,
-                                    "completed_bytes": self.completed_bytes,
-                                    "warning_count": self.warning_count,
-                                    "error_count": self.error_count,
-                                }
-                            ],
+                            "targets": self._target_payloads(),
                         }
                     ),
                 }

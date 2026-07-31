@@ -56,6 +56,17 @@ class RunProgressViewState:
     def active(self) -> bool:
         return self.run_found and not self.terminal
 
+    @property
+    def target_count(self) -> int:
+        return len(self.targets)
+
+    @property
+    def completed_target_count(self) -> int:
+        return sum(
+            target.state in {"SUCCEEDED", "SUCCEEDED_WITH_WARNINGS"}
+            for target in self.targets
+        )
+
 
 def empty_run_progress_state() -> RunProgressViewState:
     return RunProgressViewState(

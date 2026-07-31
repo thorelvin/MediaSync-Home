@@ -50,7 +50,27 @@ def test_run_progress_view_model_parses_snapshot_and_retains_unchanged_state() -
                             ),
                             "endpoint_wait_reason_code": "NETWORK_INTERRUPTED",
                             "endpoint_wait_started_utc": "2026-07-31T00:00:00.000Z",
-                        }
+                        },
+                        {
+                            "endpoint_id": "target-b",
+                            "state": "SUCCEEDED",
+                            "planned_operations": 1,
+                            "completed_operations": 1,
+                            "planned_bytes": 50,
+                            "completed_bytes": 50,
+                            "warning_count": 0,
+                            "error_count": 0,
+                        },
+                        {
+                            "endpoint_id": "target-c",
+                            "state": "SUCCEEDED_WITH_WARNINGS",
+                            "planned_operations": 1,
+                            "completed_operations": 1,
+                            "planned_bytes": 50,
+                            "completed_bytes": 50,
+                            "warning_count": 1,
+                            "error_count": 0,
+                        },
                     ],
                 },
             }
@@ -87,6 +107,8 @@ def test_run_progress_view_model_parses_snapshot_and_retains_unchanged_state() -
     assert (
         state.targets[0].endpoint_wait_reason_code == "NETWORK_INTERRUPTED"
     )
+    assert state.target_count == 3
+    assert state.completed_target_count == 2
     assert unchanged == state
 
 
@@ -109,3 +131,5 @@ def test_run_progress_view_model_fails_closed_for_missing_run() -> None:
     assert state.run_id == "missing"
     assert state.run_found is False
     assert state.active is False
+    assert state.target_count == 0
+    assert state.completed_target_count == 0
