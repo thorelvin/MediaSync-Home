@@ -57,6 +57,8 @@ invariants:
       - standard_backup_job_revision_details
       - writable_endpoint_registrations
       - current_read_hash_evidence
+      - operation_attempts
+      - operation_outcomes
     immutable_after_reference:
       table: filter_sets
       referenced_by_table: job_revisions
@@ -261,5 +263,33 @@ invariants:
         parent_columns: [plan_id, id]
       - child_table: operation_dependencies
         child_columns: [plan_id, after_operation_id]
+        parent_table: planned_operations
+        parent_columns: [plan_id, id]
+      - child_table: operation_outcomes
+        child_columns: [run_id, plan_id]
+        parent_table: runs
+        parent_columns: [id, plan_id]
+      - child_table: operation_outcomes
+        child_columns: [run_id, run_target_id]
+        parent_table: run_targets
+        parent_columns: [run_id, id]
+      - child_table: operation_outcomes
+        child_columns: [plan_id, operation_id]
+        parent_table: planned_operations
+        parent_columns: [plan_id, id]
+      - child_table: operation_attempts
+        child_columns: [run_attempt_id, run_id]
+        parent_table: run_attempts
+        parent_columns: [id, run_id]
+      - child_table: operation_attempts
+        child_columns: [run_id, plan_id]
+        parent_table: runs
+        parent_columns: [id, plan_id]
+      - child_table: operation_attempts
+        child_columns: [run_id, run_target_id]
+        parent_table: run_targets
+        parent_columns: [run_id, id]
+      - child_table: operation_attempts
+        child_columns: [plan_id, operation_id]
         parent_table: planned_operations
         parent_columns: [plan_id, id]

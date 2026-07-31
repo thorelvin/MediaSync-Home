@@ -22,12 +22,14 @@ from mediasync_home.adapters.sqlite.migrations import (
     catalog_migration_plan,
     recovery_migration_plan,
 )
+from mediasync_home.adapters.sqlite.operation_audit import SqliteOperationAuditStore
 from mediasync_home.adapters.sqlite.endpoint_roots import SqliteEndpointRootResolver
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
 from mediasync_home.adapters.sqlite.recovery_intents import SqliteRecoveryIntentSegmentStore
 from mediasync_home.adapters.sqlite.recovery_operations import SqliteRecoveryOperationStore
 from mediasync_home.adapters.sqlite.runs import SqliteRunStore
 from mediasync_home.application.command_receipts import CommandReceipt
+from mediasync_home.application.operation_audit_read_models import query_operation_audit
 from mediasync_home.application.directory_artifacts import DIRECTORY_MARKER_NAME
 from mediasync_home.application.plans import (
     PlanEndpoint,
@@ -166,6 +168,7 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
         recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
         intent_segments = SqliteRecoveryIntentSegmentStore(recovery_connection)
         catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
+        operation_audits = SqliteOperationAuditStore(catalog_connection)
         lease = FixedLiveLease()
         registry = HeldRunTargetLeaseRegistry()
         final_commit = LocalResolvingFinalCommitAdapter(
@@ -200,18 +203,19 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
             run_executor_recovery_operation_store=recovery_operations,
             run_executor_recovery_intent_segment_store=intent_segments,
             run_executor_catalog_handoff_store=catalog_handoffs,
+            run_executor_operation_audit_store=operation_audits,
             run_executor_staging_transfer_port=staging,
             run_executor_final_commit_port=final_commit,
             run_executor_old_target_preservation_port=final_commit,
             run_executor_process_instance_id="host-a",
         )
-        outcome = runtime.run_executor_cycle(max_steps=15)
+        outcome = runtime.run_executor_cycle(max_steps=18)
 
         loaded_run = runs.load_started_run("run-a")
         operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
         handoff = catalog_handoffs.load_final_file_handoff("final-file:run-a:op-a")
         assert outcome.stopped_reason is RunExecutorPumpStopReason.IDLE
-        assert outcome.steps_attempted == 15
+        assert outcome.steps_attempted == 18
         assert outcome.last_step is not None
         assert outcome.last_step.action is RunExecutorCycleAction.IDLE
         assert registry.retained_count == 0
@@ -228,10 +232,61 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
         assert operation.catalog_handoff_id == "final-file:run-a:op-a"
         assert operation.expected_source_fingerprint_json is not None
         assert operation.expected_staging_fingerprint_json is not None
+        verified_event_payload = json.loads(
+            str(
+                recovery_connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM recovery_events
+                    WHERE run_id = 'run-a'
+                        AND operation_id = 'op-a'
+                        AND to_phase = 'STAGING_VERIFIED'
+                    """
+                ).fetchone()[0]
+            )
+        )
+        assert verified_event_payload["operation_audit"]["lease_id"] == "lease-a"
+        assert verified_event_payload["operation_audit"]["fencing_token"] == 1
         assert (target_root / "Pictures" / "A.jpg").read_bytes() == payload
         assert (staging_root / "op-a.payload").read_bytes() == payload
         assert handoff is not None
         assert handoff.content_hash == content_hash
+        assert catalog_connection.execute(
+            "SELECT attempt_number, process_instance_id FROM run_attempts"
+        ).fetchall() == [(1, "host-a")]
+        assert catalog_connection.execute(
+            """
+            SELECT attempt_number, state, bytes_transferred
+            FROM operation_attempts
+            WHERE run_id = 'run-a' AND operation_id = 'op-a'
+            """
+        ).fetchall() == [(1, "SUCCEEDED", 128)]
+        assert catalog_connection.execute(
+            """
+            SELECT final_state, bytes_transferred, transfer_state,
+                   assurance_level, durability_level
+            FROM operation_outcomes
+            WHERE run_id = 'run-a' AND operation_id = 'op-a'
+            """
+        ).fetchall() == [
+            (
+                "SUCCEEDED",
+                128,
+                "TRANSFERRED_TO_STAGING",
+                "STAGING_HASH_MATCHES_POST_TRANSFER_SOURCE_HASH",
+                "FINAL_COMMIT_ADAPTER_COMPLETED",
+            ),
+        ]
+        audit_detail = query_operation_audit(
+            operation_audit_store=operation_audits,
+            run_id="run-a",
+            operation_id="op-a",
+        )
+        assert audit_detail.found is True
+        assert audit_detail.target_relative_path == "Pictures/A.jpg"
+        assert audit_detail.attempts[0].process_instance_id == "host-a"
+        assert audit_detail.outcome is not None
+        assert audit_detail.outcome.final_state == "SUCCEEDED"
     finally:
         catalog_connection.close()
         recovery_connection.close()

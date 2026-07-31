@@ -8,6 +8,10 @@ from typing import Any, Mapping
 
 from mediasync_home.adapters.system_clock import SystemClock
 from mediasync_home.application.clocks import ClockPort
+from mediasync_home.application.operation_audit import (
+    RecoveryOperationAuditEvent,
+    RunProcessAuditEvidence,
+)
 from mediasync_home.application.recovery_operations import (
     PRE_COMMIT_LEASE_REBIND_PHASES,
     TERMINAL_PHASES,
@@ -865,6 +869,104 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         ).fetchall()
         return tuple(_operation_from_row(row) for row in rows)
 
+    def list_operations_for_run_target(
+        self,
+        *,
+        run_id: str,
+        run_target_id: str,
+        limit: int,
+    ) -> tuple[RecoveryOperation, ...]:
+        _validate_positive_limit(limit)
+        rows = self._connection.execute(
+            f"""
+            SELECT
+                {RECOVERY_OPERATION_COLUMNS}
+            FROM recovery_operations
+            WHERE run_id = ?
+                AND run_target_id = ?
+            ORDER BY plan_sequence_no, operation_id
+            LIMIT ?
+            """,
+            (run_id, run_target_id, limit),
+        ).fetchall()
+        return tuple(_operation_from_row(row) for row in rows)
+
+    def list_operation_audit_events(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        limit: int,
+    ) -> tuple[RecoveryOperationAuditEvent, ...]:
+        _validate_positive_limit(limit)
+        rows = self._connection.execute(
+            """
+            SELECT
+                run_id,
+                run_sequence,
+                operation_id,
+                from_phase,
+                to_phase,
+                event_utc,
+                process_instance_id,
+                payload_json,
+                event_hash
+            FROM recovery_events
+            WHERE run_id = ?
+                AND operation_id = ?
+            ORDER BY run_sequence
+            LIMIT ?
+            """,
+            (run_id, operation_id, limit),
+        ).fetchall()
+        return tuple(_operation_audit_event_from_row(row) for row in rows)
+
+    def list_run_process_audit_evidence(
+        self,
+        *,
+        run_id: str,
+        limit: int,
+    ) -> tuple[RunProcessAuditEvidence, ...]:
+        _validate_positive_limit(limit)
+        rows = self._connection.execute(
+            """
+            WITH process_bounds AS (
+                SELECT
+                    process_instance_id,
+                    min(run_sequence) AS first_run_sequence,
+                    max(run_sequence) AS last_run_sequence
+                FROM recovery_events
+                WHERE run_id = ?
+                GROUP BY process_instance_id
+                ORDER BY first_run_sequence, process_instance_id
+                LIMIT ?
+            )
+            SELECT
+                bounds.process_instance_id,
+                bounds.first_run_sequence,
+                first_event.event_utc,
+                last_event.event_utc
+            FROM process_bounds AS bounds
+            JOIN recovery_events AS first_event
+                ON first_event.run_id = ?
+                AND first_event.run_sequence = bounds.first_run_sequence
+            JOIN recovery_events AS last_event
+                ON last_event.run_id = ?
+                AND last_event.run_sequence = bounds.last_run_sequence
+            ORDER BY bounds.first_run_sequence, bounds.process_instance_id
+            """,
+            (run_id, limit, run_id, run_id),
+        ).fetchall()
+        return tuple(
+            RunProcessAuditEvidence(
+                process_instance_id=str(row[0]),
+                first_run_sequence=int(row[1]),
+                first_event_utc=str(row[2]),
+                last_event_utc=str(row[3]),
+            )
+            for row in rows
+        )
+
     def list_started_operations_for_run(
         self,
         *,
@@ -1114,7 +1216,17 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         else:
             run_sequence = int(row[0]) + 1
             previous_event_hash = str(row[1])
-        payload_json = _canonical_json({} if payload is None else payload)
+        operation = self.load_operation(run_id=run_id, operation_id=operation_id)
+        event_payload = {} if payload is None else dict(payload)
+        if operation is not None and (
+            event_payload.get("event_kind") == "STAGING_ATTEMPT_FAILED"
+            or (
+                from_phase is RecoveryOperationPhase.STAGING_DURABLE
+                and to_phase is RecoveryOperationPhase.STAGING_VERIFIED
+            )
+        ):
+            event_payload["operation_audit"] = _operation_audit_payload(operation)
+        payload_json = _canonical_json(event_payload)
         event_hash = _event_hash(
             run_id=run_id,
             run_sequence=run_sequence,
@@ -1370,6 +1482,58 @@ def _apply_operation_metadata(
         if metadata.last_error_code is not None
         else operation.last_error_code,
     )
+
+
+def _operation_audit_event_from_row(
+    row: sqlite3.Row | tuple[Any, ...],
+) -> RecoveryOperationAuditEvent:
+    try:
+        payload = json.loads(str(row[7]))
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise SqliteRecoveryOperationStoreError(
+            "RECOVERY_OPERATION_AUDIT_PAYLOAD_INVALID"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise SqliteRecoveryOperationStoreError(
+            "RECOVERY_OPERATION_AUDIT_PAYLOAD_INVALID"
+        )
+    return RecoveryOperationAuditEvent(
+        run_id=str(row[0]),
+        run_sequence=int(row[1]),
+        operation_id=str(row[2]),
+        from_phase=(
+            None if row[3] is None else RecoveryOperationPhase(str(row[3]))
+        ),
+        to_phase=RecoveryOperationPhase(str(row[4])),
+        event_utc=str(row[5]),
+        process_instance_id=str(row[6]),
+        payload=payload,
+        event_hash=str(row[8]),
+    )
+
+
+def _operation_audit_payload(operation: RecoveryOperation) -> Mapping[str, object]:
+    return {
+        "assurance_level": operation.assurance_level,
+        "durability_level": (
+            operation.final_durability_state or operation.staging_durability_state
+        ),
+        "fencing_token": operation.fencing_token,
+        "lease_id": operation.lease_id,
+        "ownership_epoch": operation.ownership_epoch,
+        "planned_bytes": operation.planned_bytes,
+        "source_guard_evidence_hash": operation.source_guard_evidence_hash,
+        "source_guard_kind": operation.source_guard_kind,
+        "staging_object_id": operation.staging_object_id,
+        "transfer_state": operation.transfer_state,
+    }
+
+
+def _validate_positive_limit(limit: int) -> None:
+    if limit < 1:
+        raise SqliteRecoveryOperationStoreError(
+            "RECOVERY_OPERATION_REQUIRES_POSITIVE_LIMIT"
+        )
 
 
 def _validate_process_instance_id(process_instance_id: str) -> None:

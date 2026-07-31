@@ -38,7 +38,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 39
+        assert current_schema_version(connection, plan.store) == 40
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -77,10 +77,13 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "backup_analysis_requests",
             "current_read_hash_evidence",
             "run_target_endpoint_wait_events",
+            "run_attempts",
+            "operation_attempts",
+            "operation_outcomes",
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 39
+        assert _row_count(connection, "schema_migrations") == 40
         assert _column_names(connection, "run_target_endpoint_wait_events") >= {
             "backoff_ms",
             "retry_not_before_utc",
@@ -141,6 +144,10 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "trg_run_target_endpoint_wait_events_retry_timing_required",
             "trg_run_target_endpoint_wait_events_no_update",
             "trg_run_target_endpoint_wait_events_no_delete",
+            "trg_operation_attempts_no_update",
+            "trg_operation_attempts_no_delete",
+            "trg_operation_outcomes_no_update",
+            "trg_operation_outcomes_no_delete",
         } <= _trigger_names(connection)
         assert _foreign_key(
             connection,
@@ -182,6 +189,55 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "operation_dependencies",
             "planned_operations",
             ("plan_id", "before_operation_id"),
+            ("plan_id", "id"),
+        )
+        assert _foreign_key(
+            connection,
+            "operation_attempts",
+            "run_attempts",
+            ("run_attempt_id", "run_id"),
+            ("id", "run_id"),
+        )
+        assert _foreign_key(
+            connection,
+            "operation_attempts",
+            "runs",
+            ("run_id", "plan_id"),
+            ("id", "plan_id"),
+        )
+        assert _foreign_key(
+            connection,
+            "operation_attempts",
+            "run_targets",
+            ("run_id", "run_target_id"),
+            ("run_id", "id"),
+        )
+        assert _foreign_key(
+            connection,
+            "operation_attempts",
+            "planned_operations",
+            ("plan_id", "operation_id"),
+            ("plan_id", "id"),
+        )
+        assert _foreign_key(
+            connection,
+            "operation_outcomes",
+            "runs",
+            ("run_id", "plan_id"),
+            ("id", "plan_id"),
+        )
+        assert _foreign_key(
+            connection,
+            "operation_outcomes",
+            "run_targets",
+            ("run_id", "run_target_id"),
+            ("run_id", "id"),
+        )
+        assert _foreign_key(
+            connection,
+            "operation_outcomes",
+            "planned_operations",
+            ("plan_id", "operation_id"),
             ("plan_id", "id"),
         )
         assert _foreign_key(
@@ -980,7 +1036,7 @@ def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> N
                 name,
                 migration_checksum
             )
-                    VALUES ('catalog', 40, 'future_migration', ?)
+                    VALUES ('catalog', 41, 'future_migration', ?)
             """,
             ("f" * 64,),
         )
@@ -1093,8 +1149,8 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
         preflight = inspect_sqlite_migration_state(connection, plan)
 
         assert preflight.initialized
-        assert preflight.current_version == 39
-        assert preflight.target_version == 39
+        assert preflight.current_version == 40
+        assert preflight.target_version == 40
         assert preflight.checksum_backfill_required
         assert "migration_checksum" not in _column_names(
             connection,

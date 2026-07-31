@@ -77,6 +77,11 @@ from mediasync_home.application.initial_backup_planning import (
     InitialBackupPlanRefreshReport,
 )
 from mediasync_home.application.outbox import OutboxStore, command_effect_outbox_message
+from mediasync_home.application.operation_audit_read_models import (
+    OperationAuditQueryError,
+    OperationAuditReadModelStore,
+    query_operation_audit,
+)
 from mediasync_home.application.plan_read_models import (
     PlanEndpointsQueryError,
     PlanOperationsQueryError,
@@ -245,6 +250,7 @@ class EngineHostIpcService:
         Callable[[], InitialBackupPlanRefreshReport] | None
     ) = None
     history_timeline_read_store: HistoryTimelineReadModelStore | None = None
+    operation_audit_read_store: OperationAuditReadModelStore | None = None
     run_activity_read_store: RunActivityReadModelStore | None = None
     run_progress_snapshot_store: RunProgressSnapshotStore | None = None
     plan_operation_read_store: PlanOperationReadModelStore | None = None
@@ -437,6 +443,28 @@ class EngineHostIpcService:
         except (ProgressSnapshotQueryError, IpcProtocolError, TypeError, ValueError):
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         return response
+
+    def query_operation_audit(
+        self,
+        client_instance_id: str,
+        *,
+        run_id: str,
+        operation_id: str,
+        limit: int | None = None,
+    ) -> IpcResponse:
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
+        try:
+            detail = query_operation_audit(
+                operation_audit_store=self.operation_audit_read_store,
+                run_id=run_id,
+                operation_id=operation_id,
+                limit=limit,
+            )
+        except (OperationAuditQueryError, TypeError, ValueError):
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        return IpcResponse.accepted({"operation_audit": detail.to_dict()})
 
     def query_plan_operations(
         self,

@@ -1,5 +1,17 @@
 # Implementeringsstatus
 
+Oppdatering 2026-07-31: Catalog schema 40 materialiserer nå durable
+`run_attempts`, immutable `operation_attempts` og immutable
+`operation_outcomes` fra den hashkjedede recoveryjournalen. Hvert klassifisert
+filforsøk beholder prosess-, lease-, epoch-, fencing-, source-guard-, transfer-,
+assurance- og durabilitybevis slik de var ved eventen. Executor avstemmer
+journalen idempotent før intent/terminalisering, og startup-resume gjør samme
+avstemming før et catalog-recorded mål kan fullføres. Et krasj mellom recovery-
+event og catalog-write repareres derfor i neste bounded pass. Parent-scope-FK-er
+binder radene til samme run, plan, mål og planoperasjon. Bounded
+`QUERY_OPERATION_AUDIT` eksponerer målsti, forsøk og sluttresultat uten at GUI
+leser SQLite direkte. Full interaktiv fil-drilldown i Historikk gjenstår.
+
 Oppdatering 2026-07-31: Utilgjengelige og opptatte mål går nå i en varig,
 ikke-destruktiv ventetilstand i stedet for å blokkere hele kjøringen. Catalog
 schema 39 lagrer immutable `run_target_endpoint_wait_events` med mål,
@@ -30,8 +42,8 @@ operasjoner på samme mål går forbi den ventende operasjonen. Et ellers ferdig
 mål avsluttes som `SUCCEEDED_WITH_WARNINGS`, og run blir
 `COMPLETED_WITH_WARNINGS`. Progress schema 4 og Jobs viser neste filforsøk,
 lokal retrytid, feilkode og backoff i en tekstflate som reflowes. Nettverksbrudd
-bruker fortsatt den separate tidsstyrte retryflyten for hele målet. Persistente
-catalog-`operation_attempts` gjenstår.
+bruker fortsatt den separate tidsstyrte retryflyten for hele målet. Forsøkene
+materialiseres nå i catalog schema 40 før terminalisering.
 
 Oppdatering 2026-07-31: Kildebytes er nå bundet til analysen som opprettet
 planen. Snapshot schema 2 og catalog schema 37 lagrer et stabilt

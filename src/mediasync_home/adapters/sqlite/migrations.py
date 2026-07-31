@@ -233,6 +233,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_run_target_endpoint_retry_timing",
                 statements=CATALOG_RUN_TARGET_ENDPOINT_RETRY_TIMING,
             ),
+            SqliteMigration(
+                version=40,
+                name="catalog_run_operation_audit",
+                statements=CATALOG_RUN_OPERATION_AUDIT,
+            ),
         ),
     )
 
@@ -1654,6 +1659,147 @@ CATALOG_RUN_TARGET_ENDPOINT_RETRY_TIMING = (
     BEFORE UPDATE ON run_target_endpoint_wait_events
     BEGIN
         SELECT RAISE(ABORT, 'RUN_TARGET_ENDPOINT_WAIT_EVENT_IMMUTABLE');
+    END
+    """,
+)
+
+CATALOG_RUN_OPERATION_AUDIT = (
+    """
+    CREATE TABLE run_attempts (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+        process_instance_id TEXT NOT NULL CHECK (
+            length(trim(process_instance_id)) > 0
+        ),
+        started_utc TEXT NOT NULL,
+        finished_utc TEXT,
+        termination_reason TEXT,
+        UNIQUE (run_id, attempt_number),
+        UNIQUE (run_id, process_instance_id),
+        UNIQUE (id, run_id),
+        FOREIGN KEY (run_id) REFERENCES runs (id) ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_run_attempts_run_started
+        ON run_attempts (run_id, started_utc, attempt_number)
+    """,
+    """
+    CREATE TABLE operation_outcomes (
+        run_id TEXT NOT NULL,
+        plan_id TEXT NOT NULL,
+        run_target_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        final_state TEXT NOT NULL CHECK (
+            final_state IN ('SUCCEEDED', 'SKIPPED', 'CANCELLED', 'RECOVERY_REQUIRED')
+        ),
+        bytes_transferred INTEGER NOT NULL DEFAULT 0 CHECK (bytes_transferred >= 0),
+        transfer_state TEXT NOT NULL,
+        assurance_level TEXT NOT NULL,
+        hash_evidence_kind TEXT,
+        durability_level TEXT NOT NULL,
+        verification_json TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        completed_utc TEXT NOT NULL,
+        PRIMARY KEY (run_id, operation_id),
+        FOREIGN KEY (run_id, plan_id)
+            REFERENCES runs (id, plan_id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (run_id, run_target_id)
+            REFERENCES run_targets (run_id, id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (plan_id, operation_id)
+            REFERENCES planned_operations (plan_id, id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_operation_outcomes_run_target_completed
+        ON operation_outcomes (run_id, run_target_id, completed_utc, operation_id)
+    """,
+    """
+    CREATE TABLE operation_attempts (
+        id TEXT PRIMARY KEY,
+        run_attempt_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        plan_id TEXT NOT NULL,
+        run_target_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+        state TEXT NOT NULL CHECK (state IN ('FAILED', 'SUCCEEDED')),
+        batch_id TEXT,
+        lease_id TEXT,
+        ownership_epoch INTEGER CHECK (
+            ownership_epoch IS NULL OR ownership_epoch >= 1
+        ),
+        fencing_token INTEGER CHECK (fencing_token IS NULL OR fencing_token >= 1),
+        source_guard_kind TEXT,
+        source_guard_evidence_hash TEXT CHECK (
+            source_guard_evidence_hash IS NULL
+            OR length(source_guard_evidence_hash) = 64
+        ),
+        transfer_state TEXT,
+        assurance_level TEXT,
+        durability_level TEXT,
+        started_utc TEXT,
+        finished_utc TEXT NOT NULL,
+        bytes_transferred INTEGER NOT NULL DEFAULT 0 CHECK (bytes_transferred >= 0),
+        duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
+        robocopy_exit_code INTEGER,
+        verification_json TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        UNIQUE (run_id, operation_id, attempt_number),
+        FOREIGN KEY (run_attempt_id, run_id)
+            REFERENCES run_attempts (id, run_id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (run_id, plan_id)
+            REFERENCES runs (id, plan_id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (run_id, run_target_id)
+            REFERENCES run_targets (run_id, id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (plan_id, operation_id)
+            REFERENCES planned_operations (plan_id, id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_operation_attempts_operation
+        ON operation_attempts (run_id, operation_id, attempt_number)
+    """,
+    """
+    CREATE INDEX idx_operation_attempts_run_target_finished
+        ON operation_attempts (run_id, run_target_id, finished_utc, operation_id)
+    """,
+    """
+    CREATE TRIGGER trg_operation_outcomes_no_update
+    BEFORE UPDATE ON operation_outcomes
+    BEGIN
+        SELECT RAISE(ABORT, 'OPERATION_OUTCOME_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_operation_outcomes_no_delete
+    BEFORE DELETE ON operation_outcomes
+    BEGIN
+        SELECT RAISE(ABORT, 'OPERATION_OUTCOME_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_operation_attempts_no_update
+    BEFORE UPDATE ON operation_attempts
+    BEGIN
+        SELECT RAISE(ABORT, 'OPERATION_ATTEMPT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_operation_attempts_no_delete
+    BEFORE DELETE ON operation_attempts
+    BEGIN
+        SELECT RAISE(ABORT, 'OPERATION_ATTEMPT_IMMUTABLE');
     END
     """,
 )

@@ -5,6 +5,11 @@ from enum import Enum
 from typing import Protocol
 
 from mediasync_home.application.catalog_handoff import FinalFileCatalogHandoffStore
+from mediasync_home.application.operation_audit import (
+    OperationAuditCatalogStore,
+    OperationAuditRecoveryStore,
+    reconcile_next_run_target_operation_audit,
+)
 from mediasync_home.application.plans import PlanStore
 from mediasync_home.application.ports import (
     FinalCommitPort,
@@ -94,6 +99,7 @@ class RunExecutorCycleAction(str, Enum):
     OPERATION_LEASE_REBOUND = "OPERATION_LEASE_REBOUND"
     COMMIT_INTENT_REFRESHED = "COMMIT_INTENT_REFRESHED"
     STAGING_ADVANCED = "STAGING_ADVANCED"
+    OPERATION_AUDIT_RECORDED = "OPERATION_AUDIT_RECORDED"
     STAGING_RETRY_WAITING = "STAGING_RETRY_WAITING"
     WAITING_FOR_STAGING = "WAITING_FOR_STAGING"
     IDLE = "IDLE"
@@ -123,6 +129,7 @@ class RunExecutorCyclePumpOutcome:
 class RunExecutorCycleRecoveryOperationStore(
     RunStopRecoveryOperationStore,
     RunTargetStagingOperationStore,
+    OperationAuditRecoveryStore,
     Protocol,
 ):
     def list_operations_for_run_target_in_phase(
@@ -167,6 +174,7 @@ def execute_bounded_run_executor_cycle(
     old_target_preservation_port: OldTargetPreservationPort | None = None,
     recovery_object_cleanup_port: RecoveryObjectCleanupPort | None = None,
     staging_transfer_port: RunTargetStagingPort | None = None,
+    operation_audits: OperationAuditCatalogStore | None = None,
 ) -> RunExecutorCyclePumpOutcome:
     if max_steps < 1:
         raise RunExecutorViolation("RUN_EXECUTOR_CYCLE_REQUIRES_POSITIVE_STEP_LIMIT")
@@ -189,6 +197,7 @@ def execute_bounded_run_executor_cycle(
             old_target_preservation_port=old_target_preservation_port,
             recovery_object_cleanup_port=recovery_object_cleanup_port,
             staging_transfer_port=staging_transfer_port,
+            operation_audits=operation_audits,
         )
         if last_step.idle:
             return RunExecutorCyclePumpOutcome(
@@ -230,6 +239,7 @@ def execute_one_run_executor_cycle(
     old_target_preservation_port: OldTargetPreservationPort | None = None,
     recovery_object_cleanup_port: RecoveryObjectCleanupPort | None = None,
     staging_transfer_port: RunTargetStagingPort | None = None,
+    operation_audits: OperationAuditCatalogStore | None = None,
 ) -> RunExecutorCycleOutcome:
     stopping = (
         prepare_next_requested_run_stop(
@@ -326,6 +336,7 @@ def execute_one_run_executor_cycle(
             old_target_preservation_port=old_target_preservation_port,
             recovery_object_cleanup_port=recovery_object_cleanup_port,
             staging_transfer_port=staging_transfer_port,
+            operation_audits=operation_audits,
             retained=retained,
         )
         if retained_outcome.action is RunExecutorCycleAction.STAGING_RETRY_WAITING:
@@ -461,16 +472,41 @@ def _advance_retained_target(
     old_target_preservation_port: OldTargetPreservationPort | None,
     recovery_object_cleanup_port: RecoveryObjectCleanupPort | None,
     staging_transfer_port: RunTargetStagingPort | None,
+    operation_audits: OperationAuditCatalogStore | None,
     retained: _RetainedTarget,
 ) -> RunExecutorCycleOutcome:
     permit = retained.permit
     target = retained.target
+
+    audit_outcome = None
+    if operation_audits is not None:
+        audit_outcome = reconcile_next_run_target_operation_audit(
+            run_id=permit.run_id,
+            run_target_id=permit.run_target_id,
+            recovery_operations=recovery_operations,
+            operation_audits=operation_audits,
+            max_operations=target.planned_operations + 1,
+        )
+        if audit_outcome.changed:
+            return _advanced(
+                action=RunExecutorCycleAction.OPERATION_AUDIT_RECORDED,
+                run_id=audit_outcome.run_id,
+                run_target_id=audit_outcome.run_target_id,
+                next_action=audit_outcome.next_action,
+            )
 
     if _terminal_recovery_ready(
         recovery_operations=recovery_operations,
         permit=permit,
         target=target,
     ):
+        if audit_outcome is not None and not audit_outcome.terminal_outcomes_complete:
+            return _blocked(
+                run_id=permit.run_id,
+                run_target_id=permit.run_target_id,
+                validation_codes=("RUN_TARGET_OPERATION_AUDIT_INCOMPLETE",),
+                next_action="Reconcile terminal operation outcomes before completing the target.",
+            )
         completion_outcome = complete_run_target_after_terminal_recovery(
             permit=permit,
             runs=runs,
@@ -767,6 +803,8 @@ def _advance_retained_target(
         permit=permit,
         target=target,
     ):
+        if audit_outcome is not None and not audit_outcome.terminal_outcomes_complete:
+            return _operation_audit_incomplete(permit)
         completion_outcome = complete_run_target_after_terminal_recovery(
             permit=permit,
             runs=runs,
@@ -798,6 +836,8 @@ def _advance_retained_target(
         )
         >= target.planned_operations
     ):
+        if audit_outcome is not None and not audit_outcome.terminal_outcomes_complete:
+            return _operation_audit_incomplete(permit)
         completion_outcome = complete_run_target_after_catalog_handoffs(
             permit=permit,
             runs=runs,
@@ -1057,6 +1097,15 @@ def _terminal_completion_action(
     if target is not None and target.state is RunTargetState.CANCELLED:
         return RunExecutorCycleAction.TARGET_CANCELLED
     return RunExecutorCycleAction.TARGET_COMPLETED
+
+
+def _operation_audit_incomplete(permit: MutationPermit) -> RunExecutorCycleOutcome:
+    return _blocked(
+        run_id=permit.run_id,
+        run_target_id=permit.run_target_id,
+        validation_codes=("RUN_TARGET_OPERATION_AUDIT_INCOMPLETE",),
+        next_action="Reconcile terminal operation outcomes before completing the target.",
+    )
 
 
 def _has_early_operation(

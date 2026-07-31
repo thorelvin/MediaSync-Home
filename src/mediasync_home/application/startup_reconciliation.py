@@ -22,6 +22,7 @@ from mediasync_home.application.outbox import (
     OutboxStartupReconciliationRequest,
     OutboxStartupReconciliationStore,
 )
+from mediasync_home.application.operation_audit import OperationAuditCatalogStore
 from mediasync_home.application.recovery_reconciliation import (
     MAX_RECOVERY_OPERATION_STARTUP_RECONCILIATION_LIMIT,
     RecoveryOperationStartupReconciliationReport,
@@ -80,6 +81,7 @@ def reconcile_engine_host_after_startup(
     recovery_resume_catalog_handoffs: FinalFileCatalogHandoffStore | None = None,
     recovery_resume_final_verifier: FinalArtifactVerificationPort | None = None,
     runs: RunStore | None = None,
+    operation_audits: OperationAuditCatalogStore | None = None,
 ) -> EngineHostStartupReconciliationReport:
     validate_engine_host_startup_reconciliation_request(request)
 
@@ -146,6 +148,7 @@ def reconcile_engine_host_after_startup(
                 resume_request,
                 runs=runs,
                 recovery_operations=recovery_resume_operations,
+                operation_audits=operation_audits,
             )
         else:
             recovery_resume_report = resume_recovery_operations_after_startup(
@@ -154,6 +157,7 @@ def reconcile_engine_host_after_startup(
                 recovery_operations=recovery_resume_operations,
                 catalog_handoffs=recovery_resume_catalog_handoffs,
                 final_verifier=recovery_resume_final_verifier,
+                operation_audits=operation_audits,
             )
 
     return EngineHostStartupReconciliationReport(

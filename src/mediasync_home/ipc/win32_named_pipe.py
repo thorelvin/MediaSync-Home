@@ -767,6 +767,13 @@ class Win32NamedPipeServer:
                 run_id=str(request["run_id"]),
                 after_sequence_no=_optional_query_int(request.get("after_sequence_no")),
             )
+        if message_type == "QUERY_OPERATION_AUDIT":
+            return self.service.query_operation_audit(
+                str(request["client_instance_id"]),
+                run_id=str(request["run_id"]),
+                operation_id=str(request["operation_id"]),
+                limit=_optional_query_int(request.get("limit")),
+            )
         if message_type == "QUERY_PLAN_OPERATIONS":
             return self.service.query_plan_operations(
                 str(request["client_instance_id"]),
@@ -933,6 +940,23 @@ class Win32NamedPipeClient:
         }
         if after_sequence_no is not None:
             request["after_sequence_no"] = after_sequence_no
+        return self._roundtrip(request)
+
+    def query_operation_audit(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        limit: int | None = None,
+    ) -> IpcResponse:
+        request: dict[str, Any] = {
+            "message_type": "QUERY_OPERATION_AUDIT",
+            "client_instance_id": self.client_instance_id,
+            "run_id": run_id,
+            "operation_id": operation_id,
+        }
+        if limit is not None:
+            request["limit"] = limit
         return self._roundtrip(request)
 
     def query_plan_operations(

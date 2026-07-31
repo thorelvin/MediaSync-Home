@@ -121,6 +121,22 @@ class InProcessIpcClient:
             )
         )
 
+    def query_operation_audit(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        limit: int | None = None,
+    ) -> IpcResponse:
+        return self._correlated_response(
+            self.service.query_operation_audit(
+                self.client_instance_id,
+                run_id=run_id,
+                operation_id=operation_id,
+                limit=limit,
+            )
+        )
+
     def query_plan_operations(
         self,
         *,

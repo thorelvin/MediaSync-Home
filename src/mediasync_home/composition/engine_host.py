@@ -90,6 +90,7 @@ from mediasync_home.adapters.sqlite.migrations import (
     recovery_migration_plan,
 )
 from mediasync_home.adapters.sqlite.outbox import SqliteOutboxStore
+from mediasync_home.adapters.sqlite.operation_audit import SqliteOperationAuditStore
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
 from mediasync_home.adapters.sqlite.recovery_intents import (
     SqliteRecoveryIntentSegmentStore,
@@ -186,6 +187,7 @@ from mediasync_home.application.run_completion import (
 )
 from mediasync_home.application.catalog_handoff import FinalFileCatalogHandoffStore
 from mediasync_home.application.plans import PlanStore
+from mediasync_home.application.operation_audit import OperationAuditCatalogStore
 from mediasync_home.application.ports import (
     FinalCommitPort,
     OldTargetPreservationPort,
@@ -409,6 +411,7 @@ class EngineHostRuntime:
     ) = None
     run_executor_recovery_intent_segment_store: RecoveryIntentSegmentStore | None = None
     run_executor_catalog_handoff_store: FinalFileCatalogHandoffStore | None = None
+    run_executor_operation_audit_store: OperationAuditCatalogStore | None = None
     run_executor_staging_transfer_port: RunTargetStagingPort | None = None
     run_executor_final_commit_port: FinalCommitPort | None = None
     run_executor_old_target_preservation_port: OldTargetPreservationPort | None = None
@@ -769,6 +772,7 @@ class EngineHostRuntime:
                 staging_transfer_port=(
                     staging_transfer_port or self.run_executor_staging_transfer_port
                 ),
+                operation_audits=self.run_executor_operation_audit_store,
             )
         except Exception as exc:
             if (
@@ -1655,6 +1659,7 @@ def build_engine_host_runtime(
         trigger_occurrences = SqliteTriggerOccurrenceStore(catalog_connection)
         external_resource_state = SqliteExternalResourceStateStore(catalog_connection)
         catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
+        operation_audits = SqliteOperationAuditStore(catalog_connection)
         resource_leases = SqliteResourceLeaseStore(recovery_connection)
         recovery_operations = SqliteRecoveryOperationStore(
             recovery_connection,
@@ -1701,6 +1706,7 @@ def build_engine_host_runtime(
             recovery_resume_catalog_handoffs=catalog_handoffs,
             recovery_resume_final_verifier=final_artifact_verifier,
             runs=runs,
+            operation_audits=operation_audits,
         )
 
         def refresh_job_snapshots_for_service() -> SnapshotMaterializationRefreshReport:
@@ -1751,6 +1757,7 @@ def build_engine_host_runtime(
             run_control_store=runs,
             run_id_factory=UuidRunIdFactory(),
             history_timeline_read_store=history,
+            operation_audit_read_store=operation_audits,
             run_activity_read_store=runs,
             run_progress_snapshot_store=run_progress,
             schedule_store=schedules,
@@ -1798,6 +1805,7 @@ def build_engine_host_runtime(
         run_executor_recovery_operation_store=recovery_operations,
         run_executor_recovery_intent_segment_store=recovery_intent_segments,
         run_executor_catalog_handoff_store=catalog_handoffs,
+        run_executor_operation_audit_store=operation_audits,
         run_executor_staging_transfer_port=run_executor_staging_transfer_port,
         run_executor_final_commit_port=run_executor_final_commit_port,
         run_executor_old_target_preservation_port=run_executor_final_commit_port,

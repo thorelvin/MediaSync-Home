@@ -4,6 +4,8 @@ import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from tests.support.sqlite_catalog import insert_default_filter_set_version
 from tests.support.source_preconditions import source_precondition_json
 
@@ -19,10 +21,18 @@ from mediasync_home.adapters.sqlite.migrations import (
     catalog_migration_plan,
     recovery_migration_plan,
 )
+from mediasync_home.adapters.sqlite.operation_audit import SqliteOperationAuditStore
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
 from mediasync_home.adapters.sqlite.recovery_operations import SqliteRecoveryOperationStore
 from mediasync_home.adapters.sqlite.runs import SqliteRunStore
 from mediasync_home.application.command_receipts import CommandReceipt
+from mediasync_home.application.operation_audit import (
+    OperationAttemptAudit,
+    OperationAttemptState,
+    OperationOutcomeAudit,
+    OperationOutcomeState,
+    reconcile_next_run_target_operation_audit,
+)
 from mediasync_home.application.plans import (
     PlanEndpoint,
     PlanEndpointRole,
@@ -179,6 +189,72 @@ def test_sqlite_run_operation_planning_records_only_bound_target_operations(
                 operation_id="op-copy-b",
             ) is None
             assert _row_count(recovery_connection, "recovery_events") == 1
+
+            operation_audits = SqliteOperationAuditStore(catalog_connection)
+            audit_outcome = reconcile_next_run_target_operation_audit(
+                run_id="run-a",
+                run_target_id="run-a-target-0000",
+                recovery_operations=recovery_operations,
+                operation_audits=operation_audits,
+                max_operations=2,
+            )
+            assert audit_outcome.changed is True
+            assert _row_count(catalog_connection, "run_attempts") == 1
+            run_attempt_id = str(
+                catalog_connection.execute(
+                    "SELECT id FROM run_attempts WHERE run_id = 'run-a'"
+                ).fetchone()[0]
+            )
+            write = operation_audits.reconcile_operation_audit(
+                run_attempts=(),
+                operation_attempts=(
+                    OperationAttemptAudit(
+                        id="attempt-a",
+                        run_attempt_id=run_attempt_id,
+                        run_id="run-a",
+                        run_target_id="run-a-target-0000",
+                        operation_id="op-copy",
+                        attempt_number=1,
+                        state=OperationAttemptState.SUCCEEDED,
+                        process_instance_id="host-a",
+                        finished_utc="2026-07-31T10:00:00.000Z",
+                        batch_id="staging-a",
+                        lease_id="lease-a",
+                        ownership_epoch=1,
+                        fencing_token=1,
+                        source_guard_kind="FILE_ID",
+                        source_guard_evidence_hash="b" * 64,
+                        transfer_state="TRANSFERRED",
+                        assurance_level="FULL_HASH",
+                        durability_level="DURABLE",
+                        bytes_transferred=128,
+                        verification_json='{"verified":true}',
+                        error_code=None,
+                    ),
+                ),
+                operation_outcome=OperationOutcomeAudit(
+                    run_id="run-a",
+                    run_target_id="run-a-target-0000",
+                    operation_id="op-copy",
+                    final_state=OperationOutcomeState.SUCCEEDED,
+                    bytes_transferred=128,
+                    transfer_state="TRANSFERRED",
+                    assurance_level="FULL_HASH",
+                    hash_evidence_kind="CURRENT_READ_HASH",
+                    durability_level="DURABLE",
+                    verification_json='{"verified":true}',
+                    error_code=None,
+                    completed_utc="2026-07-31T10:00:01.000Z",
+                ),
+            )
+            assert write.operation_attempts_inserted == 1
+            assert write.operation_outcome_inserted is True
+            assert _row_count(catalog_connection, "operation_attempts") == 1
+            assert _row_count(catalog_connection, "operation_outcomes") == 1
+            with pytest.raises(sqlite3.IntegrityError, match="OPERATION_ATTEMPT_IMMUTABLE"):
+                catalog_connection.execute(
+                    "UPDATE operation_attempts SET state = 'FAILED' WHERE id = 'attempt-a'"
+                )
         finally:
             recovery_connection.close()
 

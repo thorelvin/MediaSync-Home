@@ -57,6 +57,15 @@ class StatusIpcClient(Protocol):
     ) -> IpcResponse:
         pass
 
+    def query_operation_audit(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        limit: int | None = None,
+    ) -> IpcResponse:
+        pass
+
     def query_plan_operations(
         self,
         *,
@@ -198,6 +207,21 @@ class EngineClient:
             lambda: self._ipc_client.query_run_progress(
                 run_id=run_id,
                 after_sequence_no=after_sequence_no,
+            )
+        )
+
+    def get_operation_audit(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        limit: int | None = None,
+    ) -> IpcResponse:
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_operation_audit(
+                run_id=run_id,
+                operation_id=operation_id,
+                limit=limit,
             )
         )
 

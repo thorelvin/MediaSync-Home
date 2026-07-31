@@ -22,6 +22,7 @@ from mediasync_home.adapters.sqlite.migrations import apply_sqlite_migrations, c
 from mediasync_home.adapters.sqlite.migrations import recovery_migration_plan
 from mediasync_home.adapters.sqlite.endpoint_roots import SqliteEndpointRootResolver
 from mediasync_home.adapters.sqlite.outbox import SqliteOutboxStore
+from mediasync_home.adapters.sqlite.operation_audit import SqliteOperationAuditStore
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
 from mediasync_home.adapters.sqlite.recovery_intents import SqliteRecoveryIntentSegmentStore
 from mediasync_home.adapters.sqlite.recovery_operations import SqliteRecoveryOperationStore
@@ -162,6 +163,7 @@ def test_sqlite_engine_host_startup_reconciliation_resumes_catalog_recorded_targ
             plans = SqlitePlanStore(catalog_connection)
             runs = SqliteRunStore(catalog_connection)
             recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
+            operation_audits = SqliteOperationAuditStore(catalog_connection)
             _register_resource_lease(recovery_connection)
             SqliteRecoveryIntentSegmentStore(recovery_connection).publish_intent_segment(
                 _segment()
@@ -194,6 +196,7 @@ def test_sqlite_engine_host_startup_reconciliation_resumes_catalog_recorded_targ
                 recovery_operations=recovery_operations,
                 recovery_resume_operations=recovery_operations,
                 runs=runs,
+                operation_audits=operation_audits,
             )
 
             loaded = runs.load_started_run("run-a")
@@ -213,6 +216,12 @@ def test_sqlite_engine_host_startup_reconciliation_resumes_catalog_recorded_targ
             assert loaded.targets[0].state is RunTargetState.SUCCEEDED
             assert loaded.targets[0].completed_operations == 1
             assert loaded.targets[0].completed_bytes == 128
+            assert catalog_connection.execute(
+                "SELECT attempt_number, state FROM operation_attempts"
+            ).fetchall() == [(1, "SUCCEEDED")]
+            assert catalog_connection.execute(
+                "SELECT final_state FROM operation_outcomes"
+            ).fetchall() == [("SUCCEEDED",)]
         finally:
             recovery_connection.close()
 

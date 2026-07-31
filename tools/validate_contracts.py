@@ -152,6 +152,38 @@ REQUIRED_DATABASE_PARENT_SCOPE_FKS = {
         "planned_operations",
         ("plan_id", "id"),
     ),
+    ("operation_outcomes", ("run_id", "plan_id"), "runs", ("id", "plan_id")),
+    (
+        "operation_outcomes",
+        ("run_id", "run_target_id"),
+        "run_targets",
+        ("run_id", "id"),
+    ),
+    (
+        "operation_outcomes",
+        ("plan_id", "operation_id"),
+        "planned_operations",
+        ("plan_id", "id"),
+    ),
+    (
+        "operation_attempts",
+        ("run_attempt_id", "run_id"),
+        "run_attempts",
+        ("id", "run_id"),
+    ),
+    ("operation_attempts", ("run_id", "plan_id"), "runs", ("id", "plan_id")),
+    (
+        "operation_attempts",
+        ("run_id", "run_target_id"),
+        "run_targets",
+        ("run_id", "id"),
+    ),
+    (
+        "operation_attempts",
+        ("plan_id", "operation_id"),
+        "planned_operations",
+        ("plan_id", "id"),
+    ),
 }
 
 
@@ -506,6 +538,8 @@ def _validate_immutable_revision_invariant(invariant: dict[str, Any]) -> None:
         "standard_backup_job_revision_details",
         "writable_endpoint_registrations",
         "current_read_hash_evidence",
+        "operation_attempts",
+        "operation_outcomes",
     }
     if immutable_tables != expected_immutable_tables:
         fail("ARC-005 always immutable tables drifted")

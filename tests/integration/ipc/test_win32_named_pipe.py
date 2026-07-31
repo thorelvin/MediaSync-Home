@@ -179,6 +179,25 @@ def test_named_pipe_run_progress_query_succeeds_after_handshake() -> None:
     assert progress.payload["run_progress"]["requested_after_sequence_no"] == 4
 
 
+def test_named_pipe_operation_audit_query_succeeds_after_handshake() -> None:
+    server, client = _server_and_client()
+
+    handshake = _roundtrip(server, client.connect)
+    detail = _roundtrip(
+        server,
+        lambda: client.query_operation_audit(
+            run_id="run-a",
+            operation_id="op-a",
+            limit=5,
+        ),
+    )
+
+    assert handshake.status is IpcStatus.ACCEPTED
+    assert detail.status is IpcStatus.ACCEPTED
+    assert detail.payload["operation_audit"]["read_model_available"] is False
+    assert detail.payload["operation_audit"]["found"] is False
+
+
 def test_named_pipe_plan_operations_query_succeeds_after_handshake() -> None:
     server, client = _server_and_client()
 

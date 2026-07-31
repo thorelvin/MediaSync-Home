@@ -61,6 +61,14 @@ class GuiIpcClient(Protocol):
         after_sequence_no: int | None = None,
     ) -> IpcResponse: ...
 
+    def query_operation_audit(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        limit: int | None = None,
+    ) -> IpcResponse: ...
+
     def query_plan_operations(
         self,
         *,

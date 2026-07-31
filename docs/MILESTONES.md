@@ -303,7 +303,8 @@ pre-migration-30 pending-jobbreparasjon og SMB-bevis gjenstår.
 - Implementer transfer, stagingflush/verifisering og no-overwrite commit for **nye filer bare**.
 - Implementer endpoint owner/epoch/lease/token, `MutationPermit`, `SourceReadGuard` eller forseglet post-transfer-hashfallback, source-/target-/parent-/case-revalidation og bounded immutable intentsegmenter gjennom hele commitflyten; segmentene kjedes med checksum, bruker bare relative stier/persistente ID-er og publiseres varig før første mutasjon.
 - Implementer catalog ↔ recovery handoff for run start/outcome og recoveryfasene, pause/stopp og idempotent attemptrestart.
-- Implementer operation attempts, outcomes og audit.
+- Implementer operation attempts, outcomes og audit. 0B-grunnlaget er levert i
+  catalog schema 40 med recovery-avstemming og bounded IPC-read model.
 - Mål mot direkte Robocopy.
 
 #### Kvalitetsport

@@ -988,7 +988,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.recovery_connection is not None
         assert runtime.installation_state is not None
         assert runtime.installation_state.product_channel == "local-preview"
-        assert runtime.installation_state.catalog_schema_version == 39
+        assert runtime.installation_state.catalog_schema_version == 40
         assert runtime.installation_state.recovery_schema_version == 10
         assert runtime.installation_state.ipc_protocol_major == 1
         assert runtime.snapshot_materialization_refresh is not None
@@ -1029,7 +1029,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         )
         assert (
             current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG)
-            == 39
+            == 40
         )
         assert (
             current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY)
@@ -1069,6 +1069,11 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         backup_job_detail = ipc_client.query_backup_job_detail(job_id="job-a")
         activity = ipc_client.query_activity_overview(limit=5)
         history = ipc_client.query_history_timeline(limit=5)
+        operation_audit = ipc_client.query_operation_audit(
+            run_id="run-a",
+            operation_id="op-a",
+            limit=5,
+        )
         plan_operations = ipc_client.query_plan_operations(plan_id="plan-a", limit=5)
         plan_endpoints = ipc_client.query_plan_endpoints(plan_id="plan-a", limit=5)
         snapshot_entries = ipc_client.query_snapshot_entries(
@@ -1081,6 +1086,10 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         snapshot_issues = ipc_client.query_snapshot_issues(
             snapshot_id="snapshot-a", limit=5
         )
+
+        assert operation_audit.status is IpcStatus.ACCEPTED
+        assert operation_audit.payload["operation_audit"]["read_model_available"] is True
+        assert operation_audit.payload["operation_audit"]["found"] is False
 
         response = ipc_client.submit_command(
             "UNKNOWN_MUTATION",

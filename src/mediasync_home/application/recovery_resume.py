@@ -11,6 +11,11 @@ from mediasync_home.application.catalog_handoff import (
     FinalFileCatalogHandoffStore,
     record_catalog_handoff_after_final_verification,
 )
+from mediasync_home.application.operation_audit import (
+    OperationAuditCatalogStore,
+    OperationAuditRecoveryStore,
+    reconcile_next_run_target_operation_audit,
+)
 from mediasync_home.application.ports import FinalArtifactVerificationEvidence
 from mediasync_home.application.recovery_operations import RecoveryOperation, RecoveryOperationPhase
 from mediasync_home.application.recovery_operations import RecoveryOperationMetadata, RecoveryOperationStore
@@ -78,7 +83,7 @@ class RecoveryResumeStartupReport:
         )
 
 
-class RecoveryResumeOperationStore(Protocol):
+class RecoveryResumeOperationStore(OperationAuditRecoveryStore, Protocol):
     def list_operations_in_phase(
         self,
         *,
@@ -118,6 +123,7 @@ def resume_recovery_operations_after_startup(
     recovery_operations: RecoveryResumeCatalogHandoffOperationStore,
     catalog_handoffs: FinalFileCatalogHandoffStore,
     final_verifier: FinalArtifactVerificationPort | None = None,
+    operation_audits: OperationAuditCatalogStore | None = None,
 ) -> RecoveryResumeStartupReport:
     validate_recovery_resume_startup_request(request)
 
@@ -182,6 +188,7 @@ def resume_recovery_operations_after_startup(
             ),
             runs=runs,
             recovery_operations=recovery_operations,
+            operation_audits=operation_audits,
         )
         scanned += catalog_recorded_report.scanned
         findings.extend(catalog_recorded_report.findings)
@@ -198,6 +205,7 @@ def resume_catalog_recorded_run_targets_after_startup(
     *,
     runs: RunStore,
     recovery_operations: RecoveryResumeOperationStore,
+    operation_audits: OperationAuditCatalogStore | None = None,
 ) -> RecoveryResumeStartupReport:
     validate_recovery_resume_startup_request(request)
 
@@ -217,6 +225,7 @@ def resume_catalog_recorded_run_targets_after_startup(
                 operation=operation,
                 runs=runs,
                 recovery_operations=recovery_operations,
+                operation_audits=operation_audits,
             )
         )
 
@@ -241,6 +250,7 @@ def _resume_catalog_recorded_target(
     operation: RecoveryOperation,
     runs: RunStore,
     recovery_operations: RecoveryResumeOperationStore,
+    operation_audits: OperationAuditCatalogStore | None,
 ) -> RecoveryResumeFinding:
     run = runs.load_started_run(operation.run_id)
     if run is None:
@@ -318,6 +328,31 @@ def _resume_catalog_recorded_target(
             validation_codes=("RECOVERY_RESUME_OPERATION_TARGET_BINDING_MISMATCH",),
             next_action="Reconcile lease and ownership evidence before completing the run target.",
         )
+
+    if operation_audits is not None:
+        audit_outcome = None
+        for _ in range(target.planned_operations + 1):
+            audit_outcome = reconcile_next_run_target_operation_audit(
+                run_id=operation.run_id,
+                run_target_id=operation.run_target_id,
+                recovery_operations=recovery_operations,
+                operation_audits=operation_audits,
+                max_operations=target.planned_operations + 1,
+            )
+            if not audit_outcome.changed:
+                break
+        if audit_outcome is None or audit_outcome.changed:
+            return _blocked(
+                operation=operation,
+                validation_code="RECOVERY_RESUME_OPERATION_AUDIT_LIMIT_REACHED",
+                next_action="Continue bounded operation-audit reconciliation before completion.",
+            )
+        if not audit_outcome.terminal_outcomes_complete:
+            return _blocked(
+                operation=operation,
+                validation_code="RECOVERY_RESUME_OPERATION_AUDIT_INCOMPLETE",
+                next_action="Reconcile terminal operation outcomes before completion.",
+            )
 
     completed_bytes = sum(_operation_byte_count(item) for item in cataloged_operations)
     outcome = complete_run_target_success(
