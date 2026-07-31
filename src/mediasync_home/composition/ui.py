@@ -19,6 +19,9 @@ if TYPE_CHECKING:
     from mediasync_home.presentation.view_models.engine_status import EngineStatusProvider
 
 
+MAX_QT_SHELL_IPC_TIMEOUT_MS = 1000
+
+
 class GuiIpcClient(Protocol):
     def connect(self) -> IpcResponse: ...
 
@@ -421,7 +424,13 @@ def _run_qt_shell(args: argparse.Namespace) -> int:
             Win32NamedPipeClient(
                 pipe_name=pipe_name,
                 role=ProcessRole.GUI,
-                timeout_ms=int(args.timeout_seconds * 1000),
+                timeout_ms=max(
+                    1,
+                    min(
+                        int(args.timeout_seconds * 1000),
+                        MAX_QT_SHELL_IPC_TIMEOUT_MS,
+                    ),
+                ),
             )
         )
 

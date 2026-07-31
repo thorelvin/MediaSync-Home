@@ -578,7 +578,7 @@ def test_qt_shell_wires_host_locator_publication_to_engine_client(
     client = FakeWin32NamedPipeClient.instances[0]
     assert client.pipe_name == "pipe-from-host-locator"
     assert client.role is ProcessRole.GUI
-    assert client.timeout_ms == 1500
+    assert client.timeout_ms == 1000
 
 
 def test_parse_payload_json_requires_object() -> None:

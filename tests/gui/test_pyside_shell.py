@@ -368,7 +368,11 @@ def test_target_selection_reflows_without_horizontal_clipping(
             "C:/Users/Example/Documents/"
             "ImportantDocumentsAndFamilyPicturesCollectionWithoutBreaks",
             "E:/MediaSync Home Backups/Primary External Drive/"
-            "CompleteComputerBackupTargetFolderWithoutBreaks",
+            "CompleteComputerBackupTargetFolderWithoutBreaksOne",
+            "F:/MediaSync Home Backups/Secondary External Drive/"
+            "CompleteComputerBackupTargetFolderWithoutBreaksTwo",
+            "G:/MediaSync Home Backups/Offsite External Drive/"
+            "CompleteComputerBackupTargetFolderWithoutBreaksThree",
         ]
         window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
         create_backup = window.findChild(QPushButton, "createBackupButton")
@@ -386,13 +390,20 @@ def test_target_selection_reflows_without_horizontal_clipping(
         assert activity_scroll is not None
         QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
         qapp.processEvents()
-        QTest.mouseClick(add_target, Qt.MouseButton.LeftButton)
-        qapp.processEvents()
+        for _ in range(3):
+            QTest.mouseClick(add_target, Qt.MouseButton.LeftButton)
+            qapp.processEvents()
 
         assert target_paths[0].text().endswith(
-            "CompleteComputerBackupTargetFolderWithoutBreaks"
+            "CompleteComputerBackupTargetFolderWithoutBreaksOne"
         )
-        assert target_paths[0].isVisible() is True
+        assert all(target.isVisible() for target in target_paths)
+        assert all(target.toolTip() == target.text() for target in target_paths)
+        assert all(
+            "\N{HORIZONTAL ELLIPSIS}" in str(target.property("displayText"))
+            for target in target_paths
+        )
+        assert all(target.wordWrap() is False for target in target_paths)
         assert window._dashboard_detail_layout is not None
         assert window._dashboard_detail_layout.direction() is QBoxLayout.Direction.TopToBottom
         assert window._setup_stepper_layout is not None
@@ -426,6 +437,11 @@ def test_target_selection_reflows_without_horizontal_clipping(
             assert label.sizePolicy().horizontalPolicy() is QSizePolicy.Policy.Ignored
             assert label.width() > 0
             assert label.height() >= label.heightForWidth(label.width())
+        action_position = create_backup.mapTo(
+            dashboard_scroll.viewport(), create_backup.rect().topLeft()
+        )
+        assert action_position.y() >= 0
+        assert action_position.y() + create_backup.height() <= dashboard_scroll.viewport().height()
     finally:
         window.close()
         window.deleteLater()
@@ -444,6 +460,27 @@ def test_directory_picker_is_parented_and_uses_visible_qt_dialog(qapp) -> None:
         assert dialog.acceptMode() is QFileDialog.AcceptMode.AcceptOpen
         assert dialog.testOption(QFileDialog.Option.DontUseNativeDialog) is True
         assert dialog.testOption(QFileDialog.Option.ShowDirsOnly) is True
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_directory_picker_returns_packaged_qt_acceptance_value(qapp) -> None:
+    window = build_main_window(initial_state=_ready_state(), theme_mode=ThemeMode.LIGHT)
+
+    class AcceptedDirectoryDialog:
+        def exec(self) -> int:
+            return 1
+
+        def selectedFiles(self) -> list[str]:
+            return ["C:/Users/Ada/Pictures"]
+
+    try:
+        window._build_directory_picker = (  # type: ignore[method-assign]
+            lambda title: AcceptedDirectoryDialog()
+        )
+
+        assert window._choose_directory("Choose source folder") == "C:/Users/Ada/Pictures"
     finally:
         window.close()
         window.deleteLater()
@@ -731,6 +768,42 @@ def test_main_window_refreshes_through_engine_client(qapp) -> None:
         assert provider.calls == ["connect", "get_status"]
         assert chip is not None
         assert chip.text() == "Tilkoblet: Klar"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_main_window_refresh_recovers_after_engine_timeout(qapp) -> None:
+    provider = _FakeEngineClient()
+
+    def fail_connect() -> IpcResponse:
+        provider.calls.append("connect")
+        raise TimeoutError("host did not answer")
+
+    provider.connect = fail_connect  # type: ignore[method-assign]
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.show()
+        qapp.processEvents()
+        refresh = window.findChild(QPushButton, "refreshEngineButton")
+        chip = window.findChild(QLabel, "engineStatusChip")
+        detail = window.findChild(QLabel, "engineDetailLabel")
+
+        assert refresh is not None
+        assert chip is not None
+        assert detail is not None
+        QTest.mouseClick(refresh, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert provider.calls == ["connect"]
+        assert refresh.isEnabled() is True
+        assert chip.text() == "Frakoblet: Venter"
+        assert detail.text() == "Motorstatus er utilgjengelig."
     finally:
         window.close()
         window.deleteLater()

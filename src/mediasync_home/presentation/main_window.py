@@ -533,6 +533,18 @@ class MediaSyncWindow(QMainWindow):
         return localize_display_value(self._selected_language_code, value)
 
     def refresh_engine_status(self) -> None:
+        self._refresh_button.setEnabled(False)
+        try:
+            self._refresh_engine_status_now()
+        except (OSError, TimeoutError):
+            self._connected = False
+            self.apply_engine_status(
+                EngineStatusViewState.disconnected("Engine status is unavailable.")
+            )
+        finally:
+            self._refresh_button.setEnabled(True)
+
+    def _refresh_engine_status_now(self) -> None:
         if self._engine_client is None and self._engine_client_factory is not None:
             try:
                 self._engine_client = self._engine_client_factory()
@@ -1792,7 +1804,7 @@ class MediaSyncWindow(QMainWindow):
 
     def _choose_directory(self, title: str) -> str | None:
         dialog = self._build_directory_picker(title)
-        if dialog.exec() is not QDialog.DialogCode.Accepted:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         selected = dialog.selectedFiles()
         return selected[0] if selected else None
@@ -1814,6 +1826,16 @@ class MediaSyncWindow(QMainWindow):
             current_step=step,
         )
         self._apply_backup_setup_state(self._setup_state)
+        QTimer.singleShot(0, self._ensure_setup_action_visible)
+
+    def _ensure_setup_action_visible(self) -> None:
+        if self._dashboard_scroll_area is None or self._setup_primary_button is None:
+            return
+        self._dashboard_scroll_area.ensureWidgetVisible(
+            self._setup_primary_button,
+            0,
+            12,
+        )
 
     def _apply_local_preview_job_detail(self) -> None:
         if self._setup_draft.source_path_label is None:
@@ -3095,9 +3117,8 @@ class MediaSyncWindow(QMainWindow):
             target_row_layout = QHBoxLayout(target_row)
             target_row_layout.setContentsMargins(0, 0, 0, 0)
             target_row_layout.setSpacing(8)
-            target_path = QLabel()
+            target_path = _ElidingPathLabel()
             target_path.setObjectName("setupTargetPathRow")
-            _configure_responsive_label(target_path, selectable=True)
             remove_target = QToolButton()
             remove_target.setObjectName("removeTargetButton")
             remove_target.setIcon(self._icons.icon("remove-target"))
@@ -3983,6 +4004,42 @@ def _configure_responsive_label(label: QLabel, *, selectable: bool = False) -> N
     label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
     if selectable:
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+
+class _ElidingPathLabel(QLabel):
+    def __init__(self) -> None:
+        super().__init__()
+        self._full_text = ""
+        self.setMinimumWidth(0)
+        self.setWordWrap(False)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+
+    def setText(self, text: str) -> None:
+        self._full_text = text
+        self.setToolTip(text)
+        self.setAccessibleName(text)
+        self.setProperty("fullText", text)
+        self._sync_display_text()
+
+    def text(self) -> str:
+        return self._full_text
+
+    def clear(self) -> None:
+        self.setText("")
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._sync_display_text()
+
+    def _sync_display_text(self) -> None:
+        available_width = max(0, self.contentsRect().width())
+        display_text = self.fontMetrics().elidedText(
+            self._full_text,
+            Qt.TextElideMode.ElideMiddle,
+            available_width,
+        )
+        self.setProperty("displayText", display_text)
+        super().setText(display_text)
 
 
 def _format_bytes(value: int) -> str:
