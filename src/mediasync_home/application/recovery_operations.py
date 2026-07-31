@@ -26,6 +26,11 @@ class RecoveryTargetPreconditionKind(str, Enum):
     NONE = "NONE"
 
 
+class RecoveryOperationKind(str, Enum):
+    COPY_NEW = "COPY_NEW"
+    CREATE_DIRECTORY = "CREATE_DIRECTORY"
+
+
 @dataclass(frozen=True)
 class RecoveryOperation:
     run_id: str
@@ -42,6 +47,8 @@ class RecoveryOperation:
     phase: RecoveryOperationPhase
     final_relative_path: str
     target_precondition_kind: RecoveryTargetPreconditionKind
+    operation_kind: RecoveryOperationKind = RecoveryOperationKind.COPY_NEW
+    plan_sequence_no: int = 0
     source_endpoint_id: str | None = None
     source_endpoint_revision_id: str | None = None
     source_relative_path: str | None = None
@@ -236,6 +243,8 @@ def planned_recovery_operation(
     fencing_token: int,
     final_relative_path: str,
     target_precondition_kind: RecoveryTargetPreconditionKind,
+    operation_kind: RecoveryOperationKind = RecoveryOperationKind.COPY_NEW,
+    plan_sequence_no: int = 0,
     source_endpoint_id: str | None = None,
     source_endpoint_revision_id: str | None = None,
     source_relative_path: str | None = None,
@@ -255,6 +264,8 @@ def planned_recovery_operation(
         phase=RecoveryOperationPhase.PLANNED,
         final_relative_path=final_relative_path,
         target_precondition_kind=target_precondition_kind,
+        operation_kind=operation_kind,
+        plan_sequence_no=plan_sequence_no,
         source_endpoint_id=source_endpoint_id,
         source_endpoint_revision_id=source_endpoint_revision_id,
         source_relative_path=source_relative_path,
@@ -281,6 +292,8 @@ def validate_recovery_operation(operation: RecoveryOperation) -> None:
         or operation.fencing_token < 1
     ):
         raise RecoveryOperationViolation("RECOVERY_OPERATION_REQUIRES_POSITIVE_NUMBERS")
+    if operation.plan_sequence_no < 0:
+        raise RecoveryOperationViolation("RECOVERY_OPERATION_REQUIRES_NONNEGATIVE_PLAN_SEQUENCE")
     if not _valid_relative_path(operation.final_relative_path):
         raise RecoveryOperationViolation("RECOVERY_OPERATION_REQUIRES_RELATIVE_FINAL_PATH")
     if operation.source_relative_path is not None and not _valid_relative_path(

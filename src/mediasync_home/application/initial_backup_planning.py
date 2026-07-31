@@ -235,10 +235,6 @@ def build_initial_backup_plan(
         execution_policy="MANUAL_REVIEW_REQUIRED",
     )
     blocked = plan.risk_summary.get("highest") == PlanRiskLevel.BLOCKED.value
-    directory_execution_pending = any(
-        operation.operation_type is PlanOperationType.CREATE_DIRECTORY
-        for operation in plan.operations
-    )
     return InitialBackupPlanBuild(
         plan=plan,
         state="SEALED",
@@ -250,11 +246,7 @@ def build_initial_backup_plan(
         next_action=(
             "Resolve blocked path or type conflicts and refresh the analysis."
             if blocked
-            else (
-                "Review the sealed changes. Directory execution support is required before start."
-                if directory_execution_pending
-                else "Review the sealed change plan before starting the backup."
-            )
+            else "Review the sealed change plan before starting the backup."
         ),
     )
 
@@ -271,12 +263,7 @@ def endpoint_capabilities_hash(payload: dict[str, object]) -> str:
 
 
 def initial_backup_plan_runnable(plan: SealedPlan) -> bool:
-    if plan.risk_summary.get("highest") == PlanRiskLevel.BLOCKED.value:
-        return False
-    return all(
-        operation.operation_type is not PlanOperationType.CREATE_DIRECTORY
-        for operation in plan.operations
-    )
+    return plan.risk_summary.get("highest") != PlanRiskLevel.BLOCKED.value
 
 
 def _single_endpoint(

@@ -27,6 +27,7 @@ from mediasync_home.adapters.sqlite.recovery_intents import SqliteRecoveryIntent
 from mediasync_home.adapters.sqlite.recovery_operations import SqliteRecoveryOperationStore
 from mediasync_home.adapters.sqlite.runs import SqliteRunStore
 from mediasync_home.application.command_receipts import CommandReceipt
+from mediasync_home.application.directory_artifacts import DIRECTORY_MARKER_NAME
 from mediasync_home.application.plans import (
     PlanEndpoint,
     PlanEndpointRole,
@@ -214,6 +215,117 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
         assert (staging_root / "op-a.payload").read_bytes() == payload
         assert handoff is not None
         assert handoff.content_hash == content_hash
+    finally:
+        catalog_connection.close()
+        recovery_connection.close()
+
+
+def test_sqlite_run_executor_cycle_creates_parent_before_copying_nested_file(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    staging_root = tmp_path / "staging"
+    (source_root / "Pictures").mkdir(parents=True)
+    (source_root / "Pictures" / "A.jpg").write_bytes(b"image")
+    target_root.mkdir()
+    _write_endpoint_marker(target_root)
+
+    catalog_connection = _prepared_catalog_connection(tmp_path)
+    recovery_connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _insert_plan_parent_rows(
+            catalog_connection,
+            source_root=source_root,
+            target_root=target_root,
+        )
+        _insert_receipt(catalog_connection)
+        plans = SqlitePlanStore(catalog_connection)
+        runs = SqliteRunStore(catalog_connection)
+        recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
+        intent_segments = SqliteRecoveryIntentSegmentStore(recovery_connection)
+        catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
+        lease = FixedLiveLease()
+        registry = HeldRunTargetLeaseRegistry()
+        final_commit = LocalResolvingFinalCommitAdapter(
+            root_resolver=SqliteEndpointRootResolver(catalog_connection),
+            staging_root=staging_root,
+            permit_validator=lease,
+        )
+        staging = LocalFileStagingTransferAdapter(
+            root_resolver=SqliteEndpointRootResolver(catalog_connection),
+            staging_root=staging_root,
+        )
+        plan = _sealed_directory_plan()
+        plans.save_sealed_plan(plan)
+        outcome = start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        assert outcome.created is True
+        duplicate = start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-b",
+                idempotency_key="idempotency-b",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        assert duplicate.created is False
+        assert duplicate.idempotent_replay is True
+        assert duplicate.run is not None
+        assert duplicate.run.run_id == "run-a"
+        _register_resource_lease(recovery_connection)
+
+        executor = execute_bounded_run_executor_cycle(
+            runs=runs,
+            leases=FixedLeaseAuthority(lease),
+            lease_registry=registry,
+            plans=plans,
+            recovery_operations=recovery_operations,
+            intent_segments=intent_segments,
+            catalog_handoffs=catalog_handoffs,
+            final_commit_port=final_commit,
+            old_target_preservation_port=final_commit,
+            recovery_object_cleanup_port=final_commit,
+            staging_transfer_port=staging,
+            process_instance_id="host-a",
+            max_steps=50,
+        )
+
+        loaded_run = runs.load_started_run("run-a")
+        operation = recovery_operations.load_operation(
+            run_id="run-a",
+            operation_id="op-directory",
+        )
+        handoff = catalog_handoffs.load_final_file_handoff(
+            "final-directory:run-a:op-directory"
+        )
+        file_handoff = catalog_handoffs.load_final_file_handoff(
+            "final-file:run-a:op-file"
+        )
+        assert executor.stopped_reason is RunExecutorPumpStopReason.IDLE
+        assert loaded_run is not None
+        assert loaded_run.state is RunState.COMPLETED
+        assert operation is not None
+        assert operation.phase is RecoveryOperationPhase.CLEANED
+        assert operation.operation_kind.value == "CREATE_DIRECTORY"
+        assert operation.plan_sequence_no == 10
+        assert (target_root / "Pictures").is_dir()
+        assert not (target_root / "Pictures" / DIRECTORY_MARKER_NAME).exists()
+        assert (target_root / "Pictures" / "A.jpg").read_bytes() == b"image"
+        assert handoff is not None
+        assert handoff.effect_kind == "CREATE_DIRECTORY"
+        assert file_handoff is not None
+        assert file_handoff.effect_kind == "COPY_NEW_FINAL_FILE"
     finally:
         catalog_connection.close()
         recovery_connection.close()
@@ -658,6 +770,45 @@ def _sealed_plan(
     )
 
 
+def _sealed_directory_plan() -> SealedPlan:
+    return seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(
+            _source_endpoint(),
+            _target_endpoint(planned_bytes=5, planned_operations=2),
+        ),
+        operations=(
+            PlanOperation(
+                operation_id="op-directory",
+                operation_type=PlanOperationType.CREATE_DIRECTORY,
+                sequence_no=10,
+                execution_phase=10,
+                stable_order_key="010:Pictures",
+                target_precondition_kind=TargetPreconditionKind.ABSENT,
+                target_relative_path="Pictures",
+                planned_bytes=0,
+                reason_code="CREATE_MISSING_DIRECTORY",
+                risk_level=PlanRiskLevel.LOW,
+            ),
+            PlanOperation(
+                operation_id="op-file",
+                operation_type=PlanOperationType.COPY_NEW,
+                sequence_no=20,
+                execution_phase=20,
+                stable_order_key="020:Pictures/A.jpg",
+                target_precondition_kind=TargetPreconditionKind.ABSENT,
+                target_relative_path="Pictures/A.jpg",
+                planned_bytes=5,
+                reason_code="COPY_NEW",
+                risk_level=PlanRiskLevel.LOW,
+            ),
+        ),
+    )
+
+
 def _source_endpoint() -> PlanEndpoint:
     return PlanEndpoint(
         endpoint_id="source-a",
@@ -674,7 +825,11 @@ def _source_endpoint() -> PlanEndpoint:
     )
 
 
-def _target_endpoint(*, planned_bytes: int = 128) -> PlanEndpoint:
+def _target_endpoint(
+    *,
+    planned_bytes: int = 128,
+    planned_operations: int = 1,
+) -> PlanEndpoint:
     return PlanEndpoint(
         endpoint_id="target-a",
         endpoint_revision_id="target-rev-a",
@@ -687,7 +842,7 @@ def _target_endpoint(*, planned_bytes: int = 128) -> PlanEndpoint:
         required_owner_installation_id="owner-a",
         required_ownership_epoch=1,
         control_schema_version=1,
-        planned_operations=1,
+        planned_operations=planned_operations,
         planned_bytes=planned_bytes,
     )
 

@@ -193,6 +193,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_initial_backup_plan_materializations",
                 statements=CATALOG_INITIAL_BACKUP_PLAN_MATERIALIZATIONS,
             ),
+            SqliteMigration(
+                version=32,
+                name="catalog_directory_effect_handoffs",
+                statements=CATALOG_DIRECTORY_EFFECT_HANDOFFS,
+            ),
         ),
     )
 
@@ -225,6 +230,11 @@ def recovery_migration_plan() -> SqliteMigrationPlan:
                 version=5,
                 name="recovery_operation_journal",
                 statements=RECOVERY_OPERATION_JOURNAL,
+            ),
+            SqliteMigration(
+                version=6,
+                name="recovery_operation_kind_and_plan_sequence",
+                statements=RECOVERY_OPERATION_KIND_AND_PLAN_SEQUENCE,
             ),
         ),
     )
@@ -2291,6 +2301,69 @@ CATALOG_FINAL_FILE_HANDOFF_SKELETON = (
     """,
 )
 
+CATALOG_DIRECTORY_EFFECT_HANDOFFS = (
+    """
+    ALTER TABLE final_file_catalog_handoffs
+        RENAME TO final_file_catalog_handoffs_v31
+    """,
+    """
+    CREATE TABLE final_file_catalog_handoffs (
+        handoff_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        run_target_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        target_endpoint_id TEXT NOT NULL,
+        target_endpoint_revision_id TEXT NOT NULL,
+        final_relative_path TEXT NOT NULL,
+        content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+        lease_id TEXT NOT NULL,
+        fencing_token INTEGER NOT NULL CHECK (fencing_token >= 1),
+        effect_kind TEXT NOT NULL CHECK (
+            effect_kind IN ('COPY_NEW_FINAL_FILE', 'CREATE_DIRECTORY')
+        ),
+        recorded_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        UNIQUE (run_id, operation_id)
+    )
+    """,
+    """
+    INSERT INTO final_file_catalog_handoffs (
+        handoff_id,
+        run_id,
+        run_target_id,
+        operation_id,
+        target_endpoint_id,
+        target_endpoint_revision_id,
+        final_relative_path,
+        content_hash,
+        lease_id,
+        fencing_token,
+        effect_kind,
+        recorded_utc
+    )
+    SELECT
+        handoff_id,
+        run_id,
+        run_target_id,
+        operation_id,
+        target_endpoint_id,
+        target_endpoint_revision_id,
+        final_relative_path,
+        content_hash,
+        lease_id,
+        fencing_token,
+        effect_kind,
+        recorded_utc
+    FROM final_file_catalog_handoffs_v31
+    """,
+    """
+    DROP TABLE final_file_catalog_handoffs_v31
+    """,
+    """
+    CREATE INDEX idx_final_file_catalog_handoffs_run_target
+        ON final_file_catalog_handoffs (run_id, run_target_id)
+    """,
+)
+
 CATALOG_SNAPSHOT_ENTRY_MATERIALIZATION = (
     """
     ALTER TABLE snapshots
@@ -2995,5 +3068,22 @@ RECOVERY_OPERATION_JOURNAL = (
             REFERENCES recovery_operations (run_id, operation_id)
             ON DELETE RESTRICT
     )
+    """,
+)
+
+RECOVERY_OPERATION_KIND_AND_PLAN_SEQUENCE = (
+    """
+    ALTER TABLE recovery_operations
+    ADD COLUMN operation_kind TEXT NOT NULL DEFAULT 'COPY_NEW'
+        CHECK (operation_kind IN ('COPY_NEW', 'CREATE_DIRECTORY'))
+    """,
+    """
+    ALTER TABLE recovery_operations
+    ADD COLUMN plan_sequence_no INTEGER NOT NULL DEFAULT 0
+        CHECK (plan_sequence_no >= 0)
+    """,
+    """
+    CREATE INDEX idx_recovery_operations_run_target_sequence
+        ON recovery_operations (run_id, run_target_id, plan_sequence_no, operation_id)
     """,
 )

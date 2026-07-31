@@ -679,6 +679,34 @@ def test_current_job_plan_remains_visible_without_any_run(qapp) -> None:
         window.deleteLater()
 
 
+def test_start_backup_button_submits_sealed_plan_once(qapp) -> None:
+    provider = _FakeBackupStartDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.show()
+        window.refresh_engine_status()
+        qapp.processEvents()
+        button = window.findChild(QPushButton, "startBackupButton")
+        assert button is not None
+        assert button.isVisible()
+        assert button.isEnabled()
+
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert provider.started_plan == ("plan-a", "a" * 64)
+        assert button.isEnabled() is False
+        assert button.text() == "Backup er lagt i kø"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def _ready_state() -> EngineStatusViewState:
     return engine_status_from_response(
         IpcResponse.accepted({"host_status": startup_status(ProcessRole.ENGINE_HOST).to_dict()})
@@ -859,6 +887,7 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                 }
             }
         )
+
 
     def get_activity_overview(
         self,
@@ -1116,6 +1145,38 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                 }
             }
         )
+
+
+class _FakeBackupStartDashboardEngineClient(_FakeDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started_plan: tuple[str, str] | None = None
+
+    def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        response = super().get_backup_job_detail(job_id=job_id)
+        payload = dict(response.payload)
+        detail = dict(payload["backup_job_detail"])
+        job = dict(detail["job"])
+        initial_plan = dict(job["initial_plan"])
+        initial_plan["plan_runnable"] = True
+        job["initial_plan"] = initial_plan
+        detail["job"] = job
+        payload["backup_job_detail"] = detail
+        return IpcResponse.accepted(payload)
+
+    def start_backup(
+        self,
+        *,
+        plan_id: str,
+        plan_checksum: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        assert request_id
+        assert idempotency_key
+        self.calls.append("start_backup")
+        self.started_plan = (plan_id, plan_checksum)
+        return IpcResponse.accepted({"created": True, "run": {"run_id": "run-a"}})
 
 
 class _FakePlanOnlyDashboardEngineClient(_FakeDashboardEngineClient):

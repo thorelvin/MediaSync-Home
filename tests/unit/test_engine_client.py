@@ -5,6 +5,7 @@ from typing import Any
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.job_creation import JobCreationCommandName
 from mediasync_home.application.job_drafts import DraftTarget, StandardBackupJobDraft
+from mediasync_home.application.runs import RunCommandName
 from mediasync_home.ipc.protocol import IpcReason, IpcResponse
 from mediasync_home.presentation.engine_client import EngineClient
 
@@ -44,6 +45,26 @@ def test_engine_client_reconnects_once_when_host_loses_handshake_state() -> None
     assert response.payload == {"ready": True}
     assert ipc_client.status_calls == 2
     assert ipc_client.connect_calls == 1
+
+
+def test_engine_client_submits_checksum_bound_start_run() -> None:
+    ipc_client = _RecordingIpcClient()
+    client = EngineClient(ipc_client)  # type: ignore[arg-type]
+
+    response = client.start_backup(
+        plan_id="plan-a",
+        plan_checksum="a" * 64,
+        request_id="request-a",
+        idempotency_key="idempotency-a",
+    )
+
+    assert response.reason is None
+    assert ipc_client.command_name == RunCommandName.START_RUN.value
+    assert ipc_client.payload == {
+        "plan_id": "plan-a",
+        "plan_checksum": "a" * 64,
+    }
+    assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
 
 
 def test_engine_client_returns_failed_reconnect_without_replaying_request() -> None:

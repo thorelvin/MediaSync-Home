@@ -421,15 +421,24 @@ def _job_detail_from_row(row: sqlite3.Row | tuple[object, ...]) -> StandardBacku
 def _initial_plan_summary_from_row(
     row: sqlite3.Row | tuple[object, ...],
 ) -> InitialBackupPlanSummary:
+    state = str(row[0])
+    plan_id = _optional_str(row[3])
+    plan_checksum = _optional_str(row[4])
+    operation_count = _required_non_negative_int(row[5])
     return InitialBackupPlanSummary(
-        state=str(row[0]),
+        state=state,
         reason_code=str(row[1]),
         analysis_id=_optional_str(row[2]),
-        plan_id=_optional_str(row[3]),
-        plan_checksum=_optional_str(row[4]),
-        operation_count=_required_non_negative_int(row[5]),
+        plan_id=plan_id,
+        plan_checksum=plan_checksum,
+        operation_count=operation_count,
         planned_bytes=_required_non_negative_int(row[6]),
-        plan_runnable=bool(_required_non_negative_int(row[7])),
+        plan_runnable=(
+            state == "SEALED"
+            and plan_id is not None
+            and plan_checksum is not None
+            and operation_count > 0
+        ),
         next_action=str(row[8]),
     )
 

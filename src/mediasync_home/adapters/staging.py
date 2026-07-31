@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,7 +16,14 @@ from mediasync_home.adapters.reparse_guard import (
 )
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationKind,
     RecoveryTargetPreconditionKind,
+)
+from mediasync_home.application.directory_artifacts import (
+    DIRECTORY_MARKER_NAME,
+    directory_artifact_fingerprint,
+    directory_artifact_matches,
+    directory_marker_bytes,
 )
 from mediasync_home.application.run_staging import (
     SourceStabilityEvidence,
@@ -53,6 +61,11 @@ class LocalFileStagingTransferAdapter:
         self._reparse_guard = reparse_guard or LocalReparseGuard()
 
     def validate_source_file(self, operation: RecoveryOperation) -> SourceValidationEvidence:
+        if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
+            return SourceValidationEvidence(
+                fingerprint_json=_canonical_json(_directory_fingerprint(operation)),
+                hash_evidence_kind="SHA256_DIRECTORY_RECOVERY_MARKER",
+            )
         source_path = self._source_path(operation)
         if not source_path.is_file() or source_path.is_symlink():
             raise LocalFileStagingError(
@@ -208,6 +221,8 @@ class LocalFileStagingTransferAdapter:
         return StagingAllocation(staging_object_id=object_id)
 
     def transfer_to_staging(self, operation: RecoveryOperation) -> StagingTransferEvidence:
+        if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
+            return self._transfer_directory_to_staging(operation)
         expected = _expected_fingerprint(operation.expected_source_fingerprint_json)
         payload_path = self._staging_payload_path(operation)
         if payload_path.exists():
@@ -235,6 +250,19 @@ class LocalFileStagingTransferAdapter:
 
     def ensure_staging_durable(self, operation: RecoveryOperation) -> StagingDurabilityEvidence:
         payload_path = self._staging_payload_path(operation)
+        if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
+            if not _directory_payload_matches(payload_path, operation):
+                raise LocalFileStagingError(
+                    "LOCAL_STAGING_DIRECTORY_PAYLOAD_MISSING",
+                    "Retry directory staging before durability verification.",
+                )
+            marker_path = payload_path / DIRECTORY_MARKER_NAME
+            with marker_path.open("ab") as handle:
+                handle.flush()
+                os.fsync(handle.fileno())
+            return StagingDurabilityEvidence(
+                durability_state="DIRECTORY_MARKER_FILE_FSYNC_COMPLETED"
+            )
         if not payload_path.is_file() or payload_path.is_symlink():
             raise LocalFileStagingError(
                 "LOCAL_STAGING_PAYLOAD_MISSING",
@@ -246,6 +274,8 @@ class LocalFileStagingTransferAdapter:
         return StagingDurabilityEvidence(durability_state="FILE_FSYNC_COMPLETED")
 
     def verify_staging_artifact(self, operation: RecoveryOperation) -> StagingVerificationEvidence:
+        if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
+            return self._verify_staging_directory(operation)
         expected = _expected_fingerprint(operation.expected_source_fingerprint_json)
         payload_path = self._staging_payload_path(operation)
         staging_fingerprint = _fingerprint_file(payload_path)
@@ -265,6 +295,63 @@ class LocalFileStagingTransferAdapter:
             fingerprint_json=fingerprint_json,
             final_fingerprint_json=fingerprint_json,
             assurance_level="STAGING_HASH_MATCHES_POST_TRANSFER_SOURCE_HASH",
+        )
+
+    def _transfer_directory_to_staging(
+        self,
+        operation: RecoveryOperation,
+    ) -> StagingTransferEvidence:
+        expected = _expected_fingerprint(operation.expected_source_fingerprint_json)
+        if expected != _directory_fingerprint(operation):
+            raise LocalFileStagingError(
+                "LOCAL_STAGING_DIRECTORY_FINGERPRINT_MISMATCH",
+                "Reload the planned directory operation before staging it.",
+            )
+        payload_path = self._staging_payload_path(operation)
+        if payload_path.exists() or payload_path.is_symlink():
+            if _directory_payload_matches(payload_path, operation):
+                return StagingTransferEvidence(transfer_state="TRANSFERRED_EXISTING_MATCH")
+            raise LocalFileStagingError(
+                "LOCAL_STAGING_EXISTING_DIRECTORY_PAYLOAD_MISMATCH",
+                "Discard the stale directory staging payload and retry.",
+            )
+
+        temp_path = payload_path.with_name(f".{payload_path.name}.{uuid4().hex}.tmp")
+        try:
+            temp_path.mkdir()
+            marker_path = temp_path / DIRECTORY_MARKER_NAME
+            marker_path.write_bytes(
+                directory_marker_bytes(
+                    run_id=operation.run_id,
+                    run_target_id=operation.run_target_id,
+                    operation_id=operation.operation_id,
+                    final_relative_path=operation.final_relative_path,
+                )
+            )
+            with marker_path.open("ab") as handle:
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, payload_path)
+        finally:
+            if temp_path.exists():
+                shutil.rmtree(temp_path)
+        return StagingTransferEvidence(transfer_state="DIRECTORY_TRANSFERRED_TO_STAGING")
+
+    def _verify_staging_directory(
+        self,
+        operation: RecoveryOperation,
+    ) -> StagingVerificationEvidence:
+        payload_path = self._staging_payload_path(operation)
+        if not _directory_payload_matches(payload_path, operation):
+            raise LocalFileStagingError(
+                "LOCAL_STAGING_DIRECTORY_MARKER_MISMATCH",
+                "Restage the directory marker before publishing commit intent.",
+            )
+        fingerprint_json = _canonical_json(_directory_fingerprint(operation))
+        return StagingVerificationEvidence(
+            fingerprint_json=fingerprint_json,
+            final_fingerprint_json=fingerprint_json,
+            assurance_level="STAGING_DIRECTORY_MARKER_VERIFIED",
         )
 
     def _source_path(self, operation: RecoveryOperation) -> Path:
@@ -521,3 +608,22 @@ def _fingerprint_file(path: Path) -> dict[str, object]:
 
 def _canonical_json(payload: dict[str, object]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _directory_fingerprint(operation: RecoveryOperation) -> dict[str, object]:
+    return directory_artifact_fingerprint(
+        run_id=operation.run_id,
+        run_target_id=operation.run_target_id,
+        operation_id=operation.operation_id,
+        final_relative_path=operation.final_relative_path,
+    )
+
+
+def _directory_payload_matches(path: Path, operation: RecoveryOperation) -> bool:
+    return directory_artifact_matches(
+        path,
+        run_id=operation.run_id,
+        run_target_id=operation.run_target_id,
+        operation_id=operation.operation_id,
+        final_relative_path=operation.final_relative_path,
+    )

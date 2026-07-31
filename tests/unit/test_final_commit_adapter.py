@@ -23,8 +23,14 @@ from mediasync_home.adapters.final_commit import (
 )
 from mediasync_home.adapters.reparse_guard import ReparseGuardError
 from mediasync_home.application.ports import RelativePath, VerifiedStagingArtifact
+from mediasync_home.application.directory_artifacts import (
+    DIRECTORY_MARKER_NAME,
+    directory_artifact_fingerprint,
+    directory_marker_bytes,
+)
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationKind,
     RecoveryOperationPhase,
     RecoveryTargetPreconditionKind,
     planned_recovery_operation,
@@ -397,6 +403,47 @@ def test_local_resolving_final_commit_inserts_without_lab_marker(tmp_path: Path)
     assert receipt.operation_id == "operation-a"
     assert receipt.final_relative_path == artifact.relative_path
     assert (fixture.target_root / "Photos" / "image.jpg").read_bytes() == b"image"
+
+
+def test_local_resolving_directory_commit_recognizes_retry_after_rename(
+    tmp_path: Path,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    adapter = LocalResolvingFinalCommitAdapter(
+        root_resolver=_RootResolver(target_root=fixture.target_root),
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    relative_path = "Created"
+    marker = directory_marker_bytes(
+        run_id=permit.run_id,
+        run_target_id=permit.run_target_id,
+        operation_id="operation-a",
+        final_relative_path=relative_path,
+    )
+    staged = fixture.staging_root / "operation-a.payload"
+    staged.mkdir()
+    (staged / DIRECTORY_MARKER_NAME).write_bytes(marker)
+    fingerprint = directory_artifact_fingerprint(
+        run_id=permit.run_id,
+        run_target_id=permit.run_target_id,
+        operation_id="operation-a",
+        final_relative_path=relative_path,
+    )
+    artifact = VerifiedStagingArtifact(
+        object_id="operation-a",
+        relative_path=RelativePath(relative_path),
+        content_hash=str(fingerprint["content_hash"]),
+        operation_kind=RecoveryOperationKind.CREATE_DIRECTORY,
+    )
+
+    first = adapter.commit_verified_artifact(permit, artifact)
+    replay = adapter.commit_verified_artifact(permit, artifact)
+
+    assert first == replay
+    assert not staged.exists()
+    assert (fixture.target_root / relative_path / DIRECTORY_MARKER_NAME).read_bytes() == marker
 
 
 def test_local_resolving_final_commit_preserves_then_replaces(tmp_path: Path) -> None:

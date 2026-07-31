@@ -14,6 +14,7 @@ from mediasync_home.application.plans import (
 )
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationKind,
     RecoveryOperationStore,
     RecoveryTargetPreconditionKind,
     planned_recovery_operation,
@@ -216,6 +217,8 @@ def _planned_recovery_operation(
         target_precondition_kind=RecoveryTargetPreconditionKind(
             operation.target_precondition_kind.value
         ),
+        operation_kind=RecoveryOperationKind(operation.operation_type.value),
+        plan_sequence_no=operation.sequence_no,
         source_endpoint_id=source_endpoint_id,
         source_endpoint_revision_id=source_endpoint_revision_id,
         source_relative_path=source_relative_path,

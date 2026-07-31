@@ -837,13 +837,14 @@ uten horisontal scrolling eller clipping. Alle dynamiske source-, target-, statu
 planetiketter reserverer høyden som den aktuelle bredden faktisk krever, også etter
 at et langt mål er valgt og jobbdeltaljen utvides.
 
-Etter registrering materialiserer Engine Host nå en immutable første plan fra de
+Etter registrering materialiserer Engine Host en immutable første plan fra de
 eksakte forseglede source-/target-snapshottene. Den aktive jobbdeltaljen viser
 planstatus, operasjonsantall, bytes og en bounded operasjonspreview selv når ingen
-run finnes. Dette starter aldri kopiering automatisk. Lokale planer som trenger
-katalogoppretting vises som **Kun forhåndsvisning** og kan ikke startes før den
-journalførte katalogoperasjonen er implementert. Første eksplisitte
-**Start backup**-kommando er neste slice.
+run finnes. Dette starter aldri kopiering automatisk. En runnable forseglet plan
+viser en eksplisitt **Start backup**-knapp. Knappen sender den eksakte plan-ID-en og
+checksummen med stabil idempotensnøkkel, og deaktiveres når kjøringen er lagt i kø.
+`CREATE_DIRECTORY` utføres journalført før avhengige filer og bruker en verifiserbar
+recovery-markør frem til catalog-handoff er registrert.
 
 Etter første vellykkede manuelle backup kan programmet vise én diskret anbefaling: `Vil du kjøre denne backupen automatisk?` med handlingen **Sett opp automatikk**. Den skal ikke avbryte fullføringsoppsummeringen.
 

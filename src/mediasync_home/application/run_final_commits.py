@@ -358,6 +358,7 @@ def _verified_artifact(operation: RecoveryOperation) -> VerifiedStagingArtifact 
         object_id=operation.staging_object_id,
         relative_path=RelativePath(operation.final_relative_path),
         content_hash=content_hash,
+        operation_kind=operation.operation_kind,
     )
 
 

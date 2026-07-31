@@ -160,7 +160,7 @@ def test_initial_plan_materializer_seals_exact_registered_snapshots_and_replays(
         assert first.results[0].plan_id == "plan-1"
         assert first.results[0].operation_count == 3
         assert first.results[0].planned_bytes == 15
-        assert first.results[0].plan_runnable is False
+        assert first.results[0].plan_runnable is True
         assert replay.sealed_plan_count == 0
         assert replay.reused_plan_count == 1
         assert replay.results[0].idempotent_replay is True
@@ -189,7 +189,7 @@ def test_initial_plan_materializer_seals_exact_registered_snapshots_and_replays(
             "plan-1",
             3,
             15,
-            0,
+                1,
             1,
         )
         detail = SqliteStandardBackupJobCatalog(
@@ -199,7 +199,7 @@ def test_initial_plan_materializer_seals_exact_registered_snapshots_and_replays(
         assert detail.initial_plan is not None
         assert detail.initial_plan.plan_id == "plan-1"
         assert detail.initial_plan.plan_checksum == plan.plan_checksum
-        assert detail.initial_plan.plan_runnable is False
+        assert detail.initial_plan.plan_runnable is True
         with pytest.raises(
             sqlite3.IntegrityError,
             match="INITIAL_BACKUP_PLAN_MATERIALIZATION_IMMUTABLE",

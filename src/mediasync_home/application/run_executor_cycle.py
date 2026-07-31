@@ -514,11 +514,21 @@ def _advance_retained_target(
         phase=RecoveryOperationPhase.STAGING_VERIFIED,
         limit=target.planned_operations + 1,
     ):
+        latest_segment = intent_segments.load_latest_intent_segment_for_run_target(
+            run_id=permit.run_id,
+            run_target_id=permit.run_target_id,
+        )
         intent_outcome = publish_run_target_recovery_intent_segment(
             permit=permit,
             recovery_operations=recovery_operations,
             intent_segments=intent_segments,
             process_instance_id=process_instance_id,
+            segment_sequence=(
+                0 if latest_segment is None else latest_segment.segment_sequence + 1
+            ),
+            previous_segment_hash=(
+                None if latest_segment is None else latest_segment.segment_hash
+            ),
         )
         if intent_outcome.published:
             return _advanced(

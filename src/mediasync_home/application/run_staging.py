@@ -192,6 +192,7 @@ def _next_staging_operation(
     permit: MutationPermit,
     recovery_operations: RunTargetStagingOperationStore,
 ) -> RecoveryOperation | None:
+    candidates: list[RecoveryOperation] = []
     for phase in STAGING_EXECUTION_PHASES:
         operations = recovery_operations.list_operations_for_run_target_in_phase(
             run_id=permit.run_id,
@@ -200,8 +201,13 @@ def _next_staging_operation(
             limit=1,
         )
         if operations:
-            return operations[0]
-    return None
+            candidates.append(operations[0])
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda operation: (operation.plan_sequence_no, operation.operation_id),
+    )
 
 
 def _execute_phase(

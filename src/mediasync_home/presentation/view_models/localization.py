@@ -41,6 +41,20 @@ class ShellText:
     target_freshness: str
     next_action: str
 
+    @property
+    def start_backup(self) -> str:
+        return "Start backup"
+
+    @property
+    def start_backup_tooltip(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Start the sealed backup plan"
+        return "Start den forseglede backupplanen"
+
+    @property
+    def backup_queued(self) -> str:
+        return "Backup queued" if self.language_tooltip_prefix == "Language" else "Backup er lagt i kø"
+
 
 NB_TEXT = ShellText(
     local_preview="Lokal forhåndsvisning",

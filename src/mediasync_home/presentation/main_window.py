@@ -184,6 +184,17 @@ class BackupJobCreationProvider(Protocol):
     ) -> IpcResponse: ...
 
 
+class BackupStartProvider(Protocol):
+    def start_backup(
+        self,
+        *,
+        plan_id: str,
+        plan_checksum: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse: ...
+
+
 class MediaSyncWindow(QMainWindow):
     def __init__(
         self,
@@ -202,6 +213,9 @@ class MediaSyncWindow(QMainWindow):
         self._setup_draft_id: str | None = None
         self._setup_request_id: str | None = None
         self._setup_idempotency_key: str | None = None
+        self._start_request_id: str | None = None
+        self._start_idempotency_key: str | None = None
+        self._queued_backup_job_ids: set[str] = set()
         self._setup_state = build_standard_backup_setup_state(self._setup_draft)
         self._job_status_state = empty_backup_job_status_state()
         self._job_detail_state = empty_backup_job_detail_state()
@@ -246,6 +260,7 @@ class MediaSyncWindow(QMainWindow):
         self._job_detail_targets_value: QLabel | None = None
         self._job_detail_defaults_value: QLabel | None = None
         self._job_detail_plan_value: QLabel | None = None
+        self._start_backup_button: QPushButton | None = None
         self._job_detail_target_rows: list[QLabel] = []
         self._engine_title_label: QLabel | None = None
         self._engine_scope_label: QLabel | None = None
@@ -761,7 +776,78 @@ class MediaSyncWindow(QMainWindow):
             else:
                 row.setText("")
                 row.setVisible(False)
+        if self._start_backup_button is not None:
+            has_plan = (
+                state.found
+                and state.plan_state == "SEALED"
+                and state.plan_id is not None
+                and state.plan_checksum is not None
+            )
+            queued = state.job_id in self._queued_backup_job_ids
+            self._start_backup_button.setVisible(has_plan)
+            self._start_backup_button.setEnabled(
+                has_plan
+                and state.plan_runnable
+                and not queued
+                and self._engine_client is not None
+                and hasattr(self._engine_client, "start_backup")
+            )
+            self._start_backup_button.setText(
+                self._texts().backup_queued if queued else self._texts().start_backup
+            )
+            self._start_backup_button.setToolTip(self._texts().start_backup_tooltip)
         self._refresh_dashboard_geometry()
+
+    def _start_selected_backup(self) -> None:
+        state = self._job_detail_state
+        if (
+            self._engine_client is None
+            or not hasattr(self._engine_client, "start_backup")
+            or state.job_id is None
+            or state.plan_id is None
+            or state.plan_checksum is None
+            or not state.plan_runnable
+        ):
+            return
+        self._start_request_id = self._start_request_id or str(uuid4())
+        self._start_idempotency_key = self._start_idempotency_key or str(uuid4())
+        provider = cast(BackupStartProvider, self._engine_client)
+        response = provider.start_backup(
+            plan_id=state.plan_id,
+            plan_checksum=state.plan_checksum,
+            request_id=self._start_request_id,
+            idempotency_key=self._start_idempotency_key,
+        )
+        if response.status is IpcStatus.REJECTED:
+            readiness = response.payload.get("readiness")
+            codes = readiness.get("validation_codes") if isinstance(readiness, dict) else None
+            reason = (
+                str(codes[0])
+                if isinstance(codes, list) and codes
+                else response.reason.value
+                if response.reason is not None
+                else "UNKNOWN"
+            )
+            self.apply_engine_status(
+                replace(
+                    self._engine_status_state,
+                    detail=f"Backup start failed: {reason}",
+                    status_kind="warning",
+                )
+            )
+            return
+        self._queued_backup_job_ids.add(state.job_id)
+        self._start_request_id = None
+        self._start_idempotency_key = None
+        self.apply_engine_status(
+            replace(
+                self._engine_status_state,
+                detail=self._texts().backup_queued,
+                status_kind="ready",
+            )
+        )
+        self._apply_backup_job_detail_state(state)
+        self._refresh_activity_overview()
 
     def _apply_job_status_state(self, state: BackupJobStatusViewState) -> None:
         if self._activity_status_title is not None:
@@ -1136,6 +1222,14 @@ class MediaSyncWindow(QMainWindow):
             row.setVisible(index < len(target_lines))
             self._job_detail_target_rows.append(row)
             layout.addWidget(row, 6 + index, 1, 1, 2)
+
+        start_backup = QPushButton(texts.start_backup)
+        start_backup.setObjectName("startBackupButton")
+        start_backup.setToolTip(texts.start_backup_tooltip)
+        start_backup.setVisible(False)
+        start_backup.clicked.connect(self._start_selected_backup)
+        self._start_backup_button = start_backup
+        layout.addWidget(start_backup, 9, 2)
 
         layout.setColumnStretch(1, 1)
         return panel

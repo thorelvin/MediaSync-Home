@@ -8,7 +8,6 @@ from typing import Any, Mapping, Protocol
 from mediasync_home.application.plans import (
     PlanEndpoint,
     PlanEndpointRole,
-    PlanOperationType,
     PlanStore,
     SealedPlan,
     verify_plan_checksum,
@@ -244,6 +243,8 @@ class RunStore(Protocol):
 
     def load_started_run_by_idempotency_key(self, idempotency_key: str) -> StartedRun | None: ...
 
+    def load_active_run_for_job(self, job_id: str) -> StartedRun | None: ...
+
     def load_next_pending_run_target(self, run_id: str) -> StartedRunTarget | None: ...
 
     def begin_run_target_preflight(
@@ -366,6 +367,15 @@ def start_run_from_sealed_plan(
             created=False,
             idempotent_replay=False,
             readiness=readiness,
+        )
+
+    active = _load_active_run_for_job(runs=runs, job_id=plan.job_id)
+    if active is not None:
+        return RunStartOutcome(
+            created=False,
+            idempotent_replay=True,
+            readiness=readiness,
+            run=active,
         )
 
     run = _started_run_from_plan(
@@ -1031,11 +1041,6 @@ def _readiness_for_plan(*, command: StartRunCommand, plan: SealedPlan) -> RunSta
         validation_codes.append("PLAN_NOT_IMMUTABLE")
     if plan.risk_summary.get("highest") == "BLOCKED":
         validation_codes.append("PLAN_BLOCKED")
-    if any(
-        operation.operation_type is PlanOperationType.CREATE_DIRECTORY
-        for operation in plan.operations
-    ):
-        validation_codes.append("PLAN_CREATE_DIRECTORY_EXECUTION_UNAVAILABLE")
     if plan.operation_count < 1:
         validation_codes.append("PLAN_REQUIRES_OPERATIONS")
     if not _target_endpoints(plan):
@@ -1182,3 +1187,11 @@ def _ready_to_queue(plan_id: str) -> RunStartReadiness:
 
 def _effective_run_idempotency_key(command: StartRunCommand) -> str:
     return command.run_idempotency_key or command.idempotency_key
+
+
+def _load_active_run_for_job(*, runs: RunStore, job_id: str) -> StartedRun | None:
+    loader = getattr(runs, "load_active_run_for_job", None)
+    if not callable(loader):
+        return None
+    loaded = loader(job_id)
+    return loaded if isinstance(loaded, StartedRun) else None

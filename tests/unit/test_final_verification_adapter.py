@@ -14,9 +14,15 @@ from mediasync_home.adapters.final_verification import (
 from mediasync_home.adapters.reparse_guard import LocalReparseGuard, ReparseInspection
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationKind,
     RecoveryOperationPhase,
     RecoveryTargetPreconditionKind,
     planned_recovery_operation,
+)
+from mediasync_home.application.directory_artifacts import (
+    DIRECTORY_MARKER_NAME,
+    directory_artifact_fingerprint,
+    directory_marker_bytes,
 )
 
 
@@ -75,6 +81,44 @@ def test_local_final_artifact_verifier_rejects_reparse_parent(tmp_path: Path) ->
         verifier.verify_final_artifact(_operation(payload=b"image"))
 
     assert exc_info.value.validation_code == "FINAL_ARTIFACT_VERIFY_REPARSE_UNSUPPORTED"
+
+
+def test_local_final_artifact_verifier_accepts_owned_directory_marker(tmp_path: Path) -> None:
+    root = tmp_path / "target"
+    final_path = root / "Pictures"
+    final_path.mkdir(parents=True)
+    operation = replace(
+        _operation(payload=b""),
+        operation_kind=RecoveryOperationKind.CREATE_DIRECTORY,
+        final_relative_path="Pictures",
+    )
+    (final_path / DIRECTORY_MARKER_NAME).write_bytes(
+        directory_marker_bytes(
+            run_id=operation.run_id,
+            run_target_id=operation.run_target_id,
+            operation_id=operation.operation_id,
+            final_relative_path=operation.final_relative_path,
+        )
+    )
+    operation = replace(
+        operation,
+        expected_final_fingerprint_json=json.dumps(
+            directory_artifact_fingerprint(
+                run_id=operation.run_id,
+                run_target_id=operation.run_target_id,
+                operation_id=operation.operation_id,
+                final_relative_path=operation.final_relative_path,
+            ),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+
+    evidence = LocalFinalArtifactVerificationAdapter(
+        root_resolver=_RootResolver(root)
+    ).verify_final_artifact(operation)
+
+    assert json.loads(evidence.fingerprint_json)["byte_count"] == 0
 
 
 class _RootResolver:

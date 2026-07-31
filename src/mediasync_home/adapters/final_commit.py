@@ -19,8 +19,14 @@ from mediasync_home.application.ports import (
     RelativePath,
     VerifiedStagingArtifact,
 )
+from mediasync_home.application.directory_artifacts import (
+    DIRECTORY_MARKER_NAME,
+    directory_artifact_fingerprint,
+    directory_artifact_matches,
+)
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationKind,
     RecoveryOperationPhase,
     RecoveryTargetPreconditionKind,
 )
@@ -631,6 +637,12 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
             endpoint_id=operation.target_endpoint_id,
             endpoint_revision_id=operation.target_endpoint_revision_id,
         )
+        if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
+            return self._cleanup_created_directory_marker(
+                permit=permit,
+                operation=operation,
+                target_root=target_root,
+            )
         return self._replace_adapter(target_root).cleanup_recovery_objects(permit, operation)
 
     def commit_verified_artifact(
@@ -644,6 +656,13 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
             endpoint_id=permit.endpoint_id,
             endpoint_revision_id=permit.endpoint_revision_id,
         )
+        if artifact.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
+            return self._commit_new_directory(
+                permit=permit,
+                artifact=artifact,
+                target_root=target_root,
+                staging_root=self._staging_root_for(target_root),
+            )
         if _version_manifest_exists(target_root=target_root, object_id=artifact.object_id):
             return self._replace_adapter(target_root).commit_verified_artifact(permit, artifact)
         return self._commit_new_file(
@@ -687,6 +706,121 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
         return CommitReceipt(
             operation_id=artifact.object_id,
             final_relative_path=artifact.relative_path,
+        )
+
+    def _commit_new_directory(
+        self,
+        *,
+        permit: MutationPermit,
+        artifact: VerifiedStagingArtifact,
+        target_root: Path,
+        staging_root: Path,
+    ) -> CommitReceipt:
+        _require_endpoint_marker(
+            target_root,
+            permit,
+            validation_code="LOCAL_DIRECTORY_COMMIT_ENDPOINT_MARKER_MISMATCH",
+            missing_code="LOCAL_DIRECTORY_COMMIT_ENDPOINT_MARKER_MISSING",
+        )
+        expected = directory_artifact_fingerprint(
+            run_id=permit.run_id,
+            run_target_id=permit.run_target_id,
+            operation_id=artifact.object_id,
+            final_relative_path=artifact.relative_path.value,
+        )
+        if expected["content_hash"] != artifact.content_hash:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_COMMIT_ARTIFACT_HASH_MISMATCH",
+                "Reload the verified directory artifact before final commit.",
+            )
+        final_path = _local_final_path(target_root, artifact.relative_path.value)
+        if final_path.exists() or final_path.is_symlink():
+            if directory_artifact_matches(
+                final_path,
+                run_id=permit.run_id,
+                run_target_id=permit.run_target_id,
+                operation_id=artifact.object_id,
+                final_relative_path=artifact.relative_path.value,
+            ):
+                return CommitReceipt(
+                    operation_id=artifact.object_id,
+                    final_relative_path=artifact.relative_path,
+                )
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_COMMIT_TARGET_EXISTS",
+                "Refresh analysis because the planned directory path is no longer absent.",
+            )
+        staging_payload = _local_staging_directory_payload_path(staging_root, artifact)
+        if not directory_artifact_matches(
+            staging_payload,
+            run_id=permit.run_id,
+            run_target_id=permit.run_target_id,
+            operation_id=artifact.object_id,
+            final_relative_path=artifact.relative_path.value,
+        ):
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_COMMIT_STAGING_MARKER_MISMATCH",
+                "Restage and verify the directory marker before final commit.",
+            )
+        try:
+            os.rename(staging_payload, final_path)
+        except FileExistsError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_COMMIT_TARGET_REAPPEARED",
+                "Reload recovery state because the final directory appeared during commit.",
+            ) from exc
+        except OSError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_COMMIT_RENAME_FAILED",
+                "Enter recovery and inspect the staged and final directory marker state.",
+            ) from exc
+        return CommitReceipt(
+            operation_id=artifact.object_id,
+            final_relative_path=artifact.relative_path,
+        )
+
+    def _cleanup_created_directory_marker(
+        self,
+        *,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+        target_root: Path,
+    ) -> RecoveryObjectCleanupReceipt:
+        self._permit_validator.assert_mutation_permit_current(permit)
+        _require_endpoint_marker(
+            target_root,
+            permit,
+            validation_code="LOCAL_DIRECTORY_CLEANUP_ENDPOINT_MARKER_MISMATCH",
+            missing_code="LOCAL_DIRECTORY_CLEANUP_ENDPOINT_MARKER_MISSING",
+        )
+        if operation.phase is not RecoveryOperationPhase.CATALOG_RECORDED:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_CLEANUP_REQUIRES_CATALOG_RECORDED",
+                "Remove the directory recovery marker only after catalog handoff.",
+            )
+        final_path = _local_final_path(target_root, operation.final_relative_path)
+        if not directory_artifact_matches(
+            final_path,
+            run_id=operation.run_id,
+            run_target_id=operation.run_target_id,
+            operation_id=operation.operation_id,
+            final_relative_path=operation.final_relative_path,
+        ):
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_CLEANUP_MARKER_MISMATCH",
+                "Enter recovery because the created directory marker no longer matches.",
+            )
+        try:
+            (final_path / DIRECTORY_MARKER_NAME).unlink()
+        except OSError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_CLEANUP_MARKER_REMOVE_FAILED",
+                "Retry cleanup after confirming the created directory is writable.",
+            ) from exc
+        return RecoveryObjectCleanupReceipt(
+            operation_id=operation.operation_id,
+            final_relative_path=RelativePath(operation.final_relative_path),
+            cleaned_object_ids=(operation.operation_id,),
         )
 
     def _replace_adapter(self, target_root: Path) -> LocalVersionedReplaceFinalCommitAdapter:
@@ -877,6 +1011,31 @@ def _local_staging_payload_path(staging_root: Path, artifact: VerifiedStagingArt
         raise FinalCommitAdapterError(
             "LOCAL_FINAL_COMMIT_STAGING_PAYLOAD_MISSING",
             "Restage and verify the artifact before final commit.",
+        )
+    return payload
+
+
+def _local_staging_directory_payload_path(
+    staging_root: Path,
+    artifact: VerifiedStagingArtifact,
+) -> Path:
+    if OBJECT_ID_PATTERN.fullmatch(artifact.object_id) is None:
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_COMMIT_REQUIRES_SAFE_OBJECT_ID",
+            "Restage the directory with an opaque object id before final commit.",
+        )
+    root = _resolve_existing_root(
+        staging_root,
+        missing_code="LOCAL_DIRECTORY_COMMIT_STAGING_ROOT_MISSING",
+        missing_next_action="Create the staging root before directory commit.",
+        reparse_code="LOCAL_DIRECTORY_COMMIT_STAGING_ROOT_REPARSE_UNSUPPORTED",
+        reparse_next_action="Revalidate the staging root before directory commit.",
+    )
+    payload = root / f"{artifact.object_id}.payload"
+    if payload.is_symlink() or not payload.is_dir():
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_COMMIT_STAGING_PAYLOAD_MISSING",
+            "Restage and verify the directory before final commit.",
         )
     return payload
 

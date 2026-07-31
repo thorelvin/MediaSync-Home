@@ -135,7 +135,7 @@ class SqliteFinalFileCatalogHandoffStore(FinalFileCatalogHandoffStore):
         if offset < 0:
             raise ValueError("offset must not be negative")
 
-        filters: list[str] = []
+        filters: list[str] = ["effect_kind = 'COPY_NEW_FINAL_FILE'"]
         parameters: list[object] = []
         if run_id is not None:
             filters.append("run_id = ?")
@@ -143,7 +143,7 @@ class SqliteFinalFileCatalogHandoffStore(FinalFileCatalogHandoffStore):
         if target_endpoint_id is not None:
             filters.append("target_endpoint_id = ?")
             parameters.append(target_endpoint_id)
-        where_clause = "" if not filters else f"WHERE {' AND '.join(filters)}"
+        where_clause = f"WHERE {' AND '.join(filters)}"
         rows = self._connection.execute(
             f"""
             SELECT

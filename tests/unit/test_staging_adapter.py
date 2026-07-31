@@ -14,9 +14,11 @@ from mediasync_home.adapters.staging import (
 from mediasync_home.adapters.reparse_guard import LocalReparseGuard, ReparseInspection
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationKind,
     RecoveryTargetPreconditionKind,
     planned_recovery_operation,
 )
+from mediasync_home.application.directory_artifacts import DIRECTORY_MARKER_NAME
 from mediasync_home.domain.capabilities import MutationPermit, _issue_mutation_permit
 
 
@@ -124,6 +126,37 @@ def test_local_staging_rejects_non_empty_directory_target_precondition(
         )
 
     assert exc_info.value.validation_code == "LOCAL_STAGING_TARGET_DIRECTORY_NOT_EMPTY"
+
+
+def test_local_staging_materializes_verified_directory_marker(tmp_path: Path) -> None:
+    target_root = tmp_path / "target"
+    staging_root = tmp_path / "staging"
+    target_root.mkdir()
+    adapter = LocalFileStagingTransferAdapter(
+        root_resolver=_RootResolver(target_root=target_root),
+        staging_root=staging_root,
+    )
+    operation = replace(
+        _operation(RecoveryTargetPreconditionKind.ABSENT),
+        operation_kind=RecoveryOperationKind.CREATE_DIRECTORY,
+        final_relative_path="Pictures",
+    )
+
+    source = adapter.validate_source_file(operation)
+    operation = replace(operation, expected_source_fingerprint_json=source.fingerprint_json)
+    stability = adapter.bind_source_stability(operation)
+    assert stability.guard_evidence_hash == json.loads(source.fingerprint_json)["content_hash"]
+    adapter.validate_target_precondition(_permit(), operation)
+    allocation = adapter.allocate_staging_object(operation)
+    operation = replace(operation, staging_object_id=allocation.staging_object_id)
+    adapter.transfer_to_staging(operation)
+    adapter.ensure_staging_durable(operation)
+    verification = adapter.verify_staging_artifact(operation)
+
+    payload = staging_root / "op-a.payload"
+    assert payload.is_dir()
+    assert tuple(path.name for path in payload.iterdir()) == (DIRECTORY_MARKER_NAME,)
+    assert verification.fingerprint_json == source.fingerprint_json
 
 
 class _RootResolver:

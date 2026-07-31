@@ -220,7 +220,8 @@ QMenu#languageSelectorMenu::item:selected {{
     background: {tokens.selection};
 }}
 
-QPushButton#createBackupButton {{
+QPushButton#createBackupButton,
+QPushButton#startBackupButton {{
     min-height: 32px;
     border-radius: {tokens.radius_sm}px;
     border: {tokens.border_hairline}px solid {tokens.accent};
@@ -229,20 +230,24 @@ QPushButton#createBackupButton {{
     padding: 0 {tokens.space_4}px;
 }}
 
-QPushButton#createBackupButton:hover {{
+QPushButton#createBackupButton:hover,
+QPushButton#startBackupButton:hover {{
     border: {tokens.border_focus}px solid {tokens.focus};
 }}
 
-QPushButton#createBackupButton:pressed {{
+QPushButton#createBackupButton:pressed,
+QPushButton#startBackupButton:pressed {{
     border-color: {tokens.focus};
     background: {tokens.focus};
 }}
 
-QPushButton#createBackupButton:focus {{
+QPushButton#createBackupButton:focus,
+QPushButton#startBackupButton:focus {{
     border: {tokens.border_focus}px solid {tokens.focus};
 }}
 
-QPushButton#createBackupButton:disabled {{
+QPushButton#createBackupButton:disabled,
+QPushButton#startBackupButton:disabled {{
     border-color: {tokens.border};
     background: {tokens.surface_alt};
     color: {tokens.text_muted};

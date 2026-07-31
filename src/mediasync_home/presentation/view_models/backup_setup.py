@@ -144,6 +144,7 @@ class BackupJobDetailViewState:
     plan_id: str | None = None
     plan_checksum: str | None = None
     plan_state: str | None = None
+    plan_runnable: bool = False
 
 
 @dataclass(frozen=True)
@@ -559,6 +560,7 @@ def _job_detail_from_payload(payload: dict[object, object], *, job_id: str | Non
         plan_id=_optional_text(plan_payload.get("plan_id")),
         plan_checksum=_optional_text(plan_payload.get("plan_checksum")),
         plan_state=_optional_text(plan_payload.get("state")),
+        plan_runnable=plan_payload.get("plan_runnable") is True,
     )
 
 

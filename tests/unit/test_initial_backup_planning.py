@@ -85,7 +85,7 @@ def test_initial_backup_plan_orders_directories_and_conservative_file_changes() 
     assert writable_target.planned_operations == 3
     assert writable_target.planned_bytes == 135
     assert result.plan.risk_summary["highest"] == PlanRiskLevel.MEDIUM.value
-    assert initial_backup_plan_runnable(result.plan) is False
+    assert initial_backup_plan_runnable(result.plan) is True
 
 
 def test_initial_backup_plan_blocks_nonempty_directory_file_conflict() -> None:

@@ -361,7 +361,7 @@ def test_start_run_blocks_plan_with_blocked_risk() -> None:
     assert outcome.readiness.validation_codes == ("PLAN_BLOCKED",)
 
 
-def test_start_run_blocks_directory_operations_until_executor_support_exists() -> None:
+def test_start_run_accepts_journaled_directory_operations() -> None:
     plan = seal_plan(
         plan_id="plan-a",
         analysis_id="analysis-a",
@@ -390,10 +390,9 @@ def test_start_run_blocks_directory_operations_until_executor_support_exists() -
         id_factory=FixedRunIdFactory(),
     )
 
-    assert outcome.created is False
-    assert outcome.readiness.validation_codes == (
-        "PLAN_CREATE_DIRECTORY_EXECUTION_UNAVAILABLE",
-    )
+    assert outcome.created is True
+    assert outcome.run is not None
+    assert outcome.readiness.validation_codes == ()
 
 
 def _sealed_plan() -> SealedPlan:

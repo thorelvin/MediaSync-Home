@@ -6,6 +6,7 @@ from typing import Protocol
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.job_creation import JobCreationCommandName
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
+from mediasync_home.application.runs import RunCommandName
 from mediasync_home.ipc.protocol import IpcReason, IpcResponse
 
 
@@ -284,6 +285,28 @@ class EngineClient:
                 idempotency_key=idempotency_key,
                 payload=payload,
                 payload_hash=payload_hash,
+            )
+        )
+
+    def start_backup(
+        self,
+        *,
+        plan_id: str,
+        plan_checksum: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        payload: dict[str, object] = {
+            "plan_id": plan_id,
+            "plan_checksum": plan_checksum,
+        }
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.submit_command(
+                RunCommandName.START_RUN.value,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                payload_hash=canonical_command_payload_hash(payload),
             )
         )
 

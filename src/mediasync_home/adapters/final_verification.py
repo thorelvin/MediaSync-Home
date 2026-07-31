@@ -12,7 +12,8 @@ from mediasync_home.adapters.reparse_guard import (
     ReparseGuardError,
 )
 from mediasync_home.application.ports import FinalArtifactVerificationEvidence
-from mediasync_home.application.recovery_operations import RecoveryOperation
+from mediasync_home.application.directory_artifacts import directory_artifact_fingerprint, directory_artifact_matches
+from mediasync_home.application.recovery_operations import RecoveryOperation, RecoveryOperationKind
 from mediasync_home.application.safe_paths import SafePathViolation, parse_endpoint_relative_path
 
 
@@ -42,6 +43,32 @@ class LocalFinalArtifactVerificationAdapter:
     ) -> FinalArtifactVerificationEvidence:
         expected = _expected_fingerprint(operation)
         final_path = self._final_path(operation)
+        if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
+            if not directory_artifact_matches(
+                final_path,
+                run_id=operation.run_id,
+                run_target_id=operation.run_target_id,
+                operation_id=operation.operation_id,
+                final_relative_path=operation.final_relative_path,
+            ):
+                raise FinalArtifactVerificationError(
+                    "FINAL_ARTIFACT_VERIFY_DIRECTORY_MARKER_MISMATCH",
+                    "Reacquire the endpoint lease and inspect the created directory state.",
+                )
+            actual_directory = directory_artifact_fingerprint(
+                run_id=operation.run_id,
+                run_target_id=operation.run_target_id,
+                operation_id=operation.operation_id,
+                final_relative_path=operation.final_relative_path,
+            )
+            if actual_directory != expected:
+                raise FinalArtifactVerificationError(
+                    "FINAL_ARTIFACT_VERIFY_DIRECTORY_FINGERPRINT_MISMATCH",
+                    "Reload recovery evidence before cataloging the created directory.",
+                )
+            return FinalArtifactVerificationEvidence(
+                fingerprint_json=_canonical_json(actual_directory)
+            )
         if not final_path.is_file() or final_path.is_symlink():
             raise FinalArtifactVerificationError(
                 "FINAL_ARTIFACT_VERIFY_FILE_MISSING",

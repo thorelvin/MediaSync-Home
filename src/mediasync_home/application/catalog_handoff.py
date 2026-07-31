@@ -7,6 +7,7 @@ from typing import Mapping, Protocol
 
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationKind,
     RecoveryOperationPhase,
     RecoveryOperationStore,
 )
@@ -245,7 +246,7 @@ def validate_final_file_catalog_handoff(handoff: FinalFileCatalogHandoff) -> Non
             "CATALOG_HANDOFF_REQUIRES_IDENTIFIERS",
             "Record final-file catalog handoff with all immutable identifiers.",
         )
-    if handoff.effect_kind != "COPY_NEW_FINAL_FILE":
+    if handoff.effect_kind not in {"COPY_NEW_FINAL_FILE", "CREATE_DIRECTORY"}:
         raise CatalogHandoffError(
             "CATALOG_HANDOFF_EFFECT_UNSUPPORTED",
             "Use a dedicated catalog handoff type for this operation effect.",
@@ -301,13 +302,25 @@ def _handoff_from_operation(
         content_hash=content_hash,
         lease_id=operation.lease_id,
         fencing_token=operation.fencing_token,
+        effect_kind=_effect_kind(operation),
     )
     validate_final_file_catalog_handoff(handoff)
     return handoff
 
 
 def _handoff_id(operation: RecoveryOperation) -> str:
-    return f"final-file:{operation.run_id}:{operation.operation_id}"
+    role = (
+        "final-directory"
+        if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY
+        else "final-file"
+    )
+    return f"{role}:{operation.run_id}:{operation.operation_id}"
+
+
+def _effect_kind(operation: RecoveryOperation) -> str:
+    if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
+        return "CREATE_DIRECTORY"
+    return "COPY_NEW_FINAL_FILE"
 
 
 def _handoff_payload(handoff: FinalFileCatalogHandoff) -> Mapping[str, object]:

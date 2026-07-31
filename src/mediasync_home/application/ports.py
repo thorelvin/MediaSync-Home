@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 from mediasync_home.domain.capabilities import MutationPermit
+from mediasync_home.application.recovery_operations import RecoveryOperationKind
 
 if TYPE_CHECKING:
     from mediasync_home.application.recovery_operations import RecoveryOperation
@@ -19,6 +20,7 @@ class VerifiedStagingArtifact:
     object_id: str
     relative_path: RelativePath
     content_hash: str
+    operation_kind: RecoveryOperationKind = RecoveryOperationKind.COPY_NEW
 
 
 @dataclass(frozen=True)

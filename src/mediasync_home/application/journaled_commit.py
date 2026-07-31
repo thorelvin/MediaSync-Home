@@ -218,6 +218,11 @@ def _validate_operation_binding(
             "RECOVERY_COMMIT_STAGING_OBJECT_MISMATCH",
             "Restage or reload the operation before final commit.",
         )
+    if operation.operation_kind is not artifact.operation_kind:
+        raise JournaledFinalCommitError(
+            "RECOVERY_COMMIT_OPERATION_KIND_MISMATCH",
+            "Reload the verified staging artifact before final commit.",
+        )
     if _relative_path(operation.final_relative_path) != _relative_path(artifact.relative_path.value):
         raise JournaledFinalCommitError(
             "RECOVERY_COMMIT_FINAL_PATH_MISMATCH",
