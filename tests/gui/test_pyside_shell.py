@@ -76,6 +76,9 @@ def test_main_window_displays_engine_status(qapp) -> None:
         create_backup = window.findChild(QPushButton, "createBackupButton")
         add_target = window.findChild(QToolButton, "addTargetButton")
         setup_back = window.findChild(QToolButton, "setupBackButton")
+        jobs_page = window.findChild(QWidget, "jobsPage")
+        jobs_list = window.findChild(QListWidget, "jobsList")
+        jobs_empty = window.findChild(QLabel, "jobsEmptyLabel")
         detail_panel = window.findChild(QWidget, "backupJobDetailPanel")
         detail_title = window.findChild(QLabel, "jobDetailTitle")
         plan_preview_title = window.findChild(QLabel, "planPreviewTitle")
@@ -129,6 +132,11 @@ def test_main_window_displays_engine_status(qapp) -> None:
         assert add_target.isHidden() is True
         assert setup_back is not None
         assert setup_back.isHidden() is True
+        assert jobs_page is not None
+        assert jobs_list is not None
+        assert jobs_list.count() == 0
+        assert jobs_empty is not None
+        assert jobs_empty.text() == "Jobblisten er ikke tilgjengelig."
         assert detail_panel is not None
         assert detail_title is not None
         assert detail_title.text() == "Ingen lagret backupjobb"
@@ -156,6 +164,8 @@ def test_language_selector_updates_selected_flag(qapp) -> None:
         create_backup = window.findChild(QPushButton, "createBackupButton")
         add_target = window.findChild(QToolButton, "addTargetButton")
         setup_back = window.findChild(QToolButton, "setupBackButton")
+        jobs_empty = window.findChild(QLabel, "jobsEmptyLabel")
+        jobs_list = window.findChild(QListWidget, "jobsList")
         detail_title = window.findChild(QLabel, "jobDetailTitle")
         plan_preview_title = window.findChild(QLabel, "planPreviewTitle")
         plan_endpoint_title = window.findChild(QLabel, "planEndpointTitle")
@@ -199,6 +209,10 @@ def test_language_selector_updates_selected_flag(qapp) -> None:
         assert add_target.toolTip() == "Add target folder"
         assert setup_back is not None
         assert setup_back.toolTip() == "Back"
+        assert jobs_empty is not None
+        assert jobs_empty.text() == "The job list is not available."
+        assert jobs_list is not None
+        assert jobs_list.accessibleName() == "Saved backup jobs"
         assert detail_title is not None
         assert detail_title.text() == "No saved backup job"
         assert plan_preview_title is not None
@@ -221,6 +235,8 @@ def test_navigation_rail_switches_workspace_pages(qapp) -> None:
         nav = window.findChild(QListWidget, "navigationRail")
         heading = window.findChild(QLabel, "workspaceHeading")
         stack = window.findChild(QStackedWidget, "workspaceStack")
+        jobs_list = window.findChild(QListWidget, "jobsList")
+        jobs_empty = window.findChild(QLabel, "jobsEmptyLabel")
 
         assert nav is not None
         assert heading is not None
@@ -236,6 +252,9 @@ def test_navigation_rail_switches_workspace_pages(qapp) -> None:
 
         assert stack.currentIndex() == 1
         assert heading.text() == "Jobber"
+        assert jobs_list is not None
+        assert jobs_empty is not None
+        assert jobs_empty.text() == "Jobblisten er ikke tilgjengelig."
 
         QTest.mouseClick(
             nav.viewport(),
@@ -621,6 +640,12 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         target = window.findChild(QLabel, "setupTargetValue")
         create_backup = window.findChild(QPushButton, "createBackupButton")
         setup_back = window.findChild(QToolButton, "setupBackButton")
+        jobs_list = window.findChild(QListWidget, "jobsList")
+        jobs_empty = window.findChild(QLabel, "jobsEmptyLabel")
+        jobs_detail_title = window.findChild(QLabel, "jobsDetailTitle")
+        jobs_detail_source = window.findChild(QLabel, "jobsDetailSourceValue")
+        jobs_detail_targets = window.findChild(QLabel, "jobsDetailTargetsValue")
+        jobs_start = window.findChild(QPushButton, "jobsStartBackupButton")
         activity_title = window.findChild(QLabel, "activityStatusTitle")
         activity_rows = window.findChildren(QLabel, "activityDimensionLabel")
         job_detail_title = window.findChild(QLabel, "jobDetailTitle")
@@ -660,6 +685,24 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert create_backup.isEnabled() is True
         assert setup_back is not None
         assert setup_back.isHidden() is True
+        assert jobs_list is not None
+        assert jobs_list.count() == 1
+        assert jobs_list.currentItem() is not None
+        assert jobs_list.currentItem().data(Qt.ItemDataRole.UserRole) == "job-a"
+        assert jobs_list.currentItem().text() == (
+            "Pictures\n1 mål / 1 uavhengig enhet"
+        )
+        assert jobs_empty is not None
+        assert jobs_empty.isHidden() is True
+        assert jobs_detail_title is not None
+        assert jobs_detail_title.text() == "Pictures"
+        assert jobs_detail_source is not None
+        assert jobs_detail_source.text() == "C:/Users/Ada/Pictures"
+        assert jobs_detail_targets is not None
+        assert jobs_detail_targets.text() == "1 mål / 1 uavhengig enhet"
+        assert jobs_start is not None
+        assert jobs_start.isHidden() is False
+        assert jobs_start.isEnabled() is False
         assert job_detail_title is not None
         assert job_detail_title.text() == "Pictures"
         assert job_detail_source is not None
@@ -702,6 +745,10 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         language.menu().actions()[1].trigger()
 
         assert target.text() == "1 target: USB 1"
+        assert jobs_list.currentItem().text() == (
+            "Pictures\n1 target / 1 independent device"
+        )
+        assert jobs_detail_targets.text() == "1 target / 1 independent device"
         assert job_detail_targets.text() == "1 target / 1 independent device"
         assert job_detail_defaults.text() == "Update backup - All user files - Standard verification"
         assert job_detail_revision.text() == "Revision: job-rev-a - Filter: filter-a"
@@ -727,6 +774,10 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         language.menu().actions()[0].trigger()
 
         assert target.text() == "1 mål: USB 1"
+        assert jobs_list.currentItem().text() == (
+            "Pictures\n1 mål / 1 uavhengig enhet"
+        )
+        assert jobs_detail_targets.text() == "1 mål / 1 uavhengig enhet"
         assert job_detail_targets.text() == "1 mål / 1 uavhengig enhet"
         assert job_detail_defaults.text() == "Oppdater backup - Alle brukerfiler - Standard kontroll"
         assert job_detail_revision.text() == "Revisjon: job-rev-a - Filter: filter-a"
@@ -746,6 +797,125 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert activity_title.text() == "Siste kjøring: run-a"
         assert activity_rows[0].text() == "Aktivitet: Kontrollerer"
         assert activity_rows[1].text() == "Oppmerksomhet: Venter"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_jobs_workspace_selects_job_and_starts_its_exact_plan(qapp) -> None:
+    provider = _FakeMultiJobDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window.refresh_engine_status()
+        qapp.processEvents()
+        nav = window.findChild(QListWidget, "navigationRail")
+        jobs_list = window.findChild(QListWidget, "jobsList")
+        jobs_detail_title = window.findChild(QLabel, "jobsDetailTitle")
+        jobs_detail_source = window.findChild(QLabel, "jobsDetailSourceValue")
+        jobs_start = window.findChild(QPushButton, "jobsStartBackupButton")
+        dashboard_detail_title = window.findChild(QLabel, "jobDetailTitle")
+        jobs_scroll = window.findChild(QScrollArea, "jobsScrollArea")
+
+        assert nav is not None
+        assert jobs_list is not None
+        assert jobs_list.count() == 2
+        assert jobs_detail_title is not None
+        assert jobs_detail_source is not None
+        assert jobs_start is not None
+        assert dashboard_detail_title is not None
+        assert jobs_scroll is not None
+
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(1)).center(),
+        )
+        qapp.processEvents()
+        QTest.mouseClick(
+            jobs_list.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=jobs_list.visualItemRect(jobs_list.item(1)).center(),
+        )
+        qapp.processEvents()
+
+        assert jobs_list.currentItem() is not None
+        assert jobs_list.currentItem().data(Qt.ItemDataRole.UserRole) == "job-b"
+        assert provider.requested_job_ids[-1] == "job-b"
+        assert jobs_detail_title.text() == "Documents"
+        assert jobs_detail_source.text() == "C:/Users/Ada/Documents"
+        assert dashboard_detail_title.text() == "Documents"
+        assert jobs_start.isVisible() is True
+        assert jobs_start.isEnabled() is True
+        assert jobs_scroll.horizontalScrollBar().maximum() == 0
+        jobs_page = jobs_scroll.widget()
+        assert jobs_page is not None
+        for label in jobs_page.findChildren(QLabel):
+            if label.property("responsiveText") and not label.isHidden():
+                assert label.height() >= label.heightForWidth(label.width())
+
+        QTest.mouseClick(jobs_start, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert provider.started_plan == ("plan-b", "b" * 64)
+        assert jobs_start.text() == "Backup er lagt i kø"
+        assert jobs_start.isEnabled() is False
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_jobs_workspace_pages_without_losing_bounded_query_state(qapp) -> None:
+    provider = _FakePagedJobsEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.show()
+        window.refresh_engine_status()
+        qapp.processEvents()
+        nav = window.findChild(QListWidget, "navigationRail")
+        jobs_list = window.findChild(QListWidget, "jobsList")
+        previous = window.findChild(QToolButton, "jobsPreviousButton")
+        next_button = window.findChild(QToolButton, "jobsNextButton")
+
+        assert nav is not None
+        assert jobs_list is not None
+        assert previous is not None
+        assert next_button is not None
+        assert jobs_list.item(0).data(Qt.ItemDataRole.UserRole) == "job-a"
+        assert previous.isEnabled() is False
+        assert next_button.isEnabled() is True
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(1)).center(),
+        )
+        qapp.processEvents()
+
+        QTest.mouseClick(next_button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert provider.requested_offsets[-1] == 25
+        assert jobs_list.count() == 1
+        assert jobs_list.item(0).data(Qt.ItemDataRole.UserRole) == "job-z"
+        assert previous.isEnabled() is True
+        assert next_button.isEnabled() is False
+
+        QTest.mouseClick(previous, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert provider.requested_offsets[-1] == 0
+        assert jobs_list.item(0).data(Qt.ItemDataRole.UserRole) == "job-a"
     finally:
         window.close()
         window.deleteLater()
@@ -1287,6 +1457,158 @@ class _FakeBackupStartDashboardEngineClient(_FakeDashboardEngineClient):
         self.calls.append("start_backup")
         self.started_plan = (plan_id, plan_checksum)
         return IpcResponse.accepted({"created": True, "run": {"run_id": "run-a"}})
+
+
+class _FakeMultiJobDashboardEngineClient(_FakeBackupStartDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.requested_job_ids: list[str] = []
+
+    def get_backup_overview(
+        self,
+        *,
+        draft_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        response = super().get_backup_overview(
+            draft_id=draft_id,
+            limit=limit,
+            offset=offset,
+        )
+        payload = dict(response.payload)
+        overview = dict(payload["backup_overview"])
+        overview["limit"] = 25
+        overview["offset"] = 0
+        overview["jobs"] = [
+            *overview["jobs"],
+            {
+                "job_id": "job-b",
+                "job_revision_id": "job-rev-b",
+                "filter_set_id": "filter-b",
+                "title": "Documents",
+                "source_name": "Documents",
+                "source_path_label": "C:/Users/Ada/Documents",
+                "configured_target_count": 1,
+                "independent_device_count": 1,
+                "targets": [
+                    {
+                        "name": "Archive Drive",
+                        "path_label": "F:/DocumentsBackup",
+                        "independent_device_id": "disk-b",
+                    }
+                ],
+            },
+        ]
+        payload["backup_overview"] = overview
+        return IpcResponse.accepted(payload)
+
+    def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        self.requested_job_ids.append(job_id)
+        response = super().get_backup_job_detail(job_id=job_id)
+        if job_id != "job-b":
+            return response
+        payload = dict(response.payload)
+        detail = dict(payload["backup_job_detail"])
+        detail["job_id"] = "job-b"
+        job = dict(detail["job"])
+        job.update(
+            {
+                "job_id": "job-b",
+                "job_revision_id": "job-rev-b",
+                "filter_set_id": "filter-b",
+                "title": "Documents",
+                "source_name": "Documents",
+                "source_path_label": "C:/Users/Ada/Documents",
+                "targets": [
+                    {
+                        "name": "Archive Drive",
+                        "path_label": "F:/DocumentsBackup",
+                        "independent_device_id": "disk-b",
+                        "registration_state": "WRITABLE_READY",
+                    }
+                ],
+                "initial_plan": {
+                    "state": "SEALED",
+                    "reason_code": "INITIAL_BACKUP_PLAN_READY_FOR_REVIEW",
+                    "analysis_id": "analysis-b",
+                    "plan_id": "plan-b",
+                    "plan_checksum": "b" * 64,
+                    "operation_count": 1,
+                    "planned_bytes": 1024,
+                    "plan_runnable": True,
+                    "next_action": "Review the plan.",
+                },
+            }
+        )
+        detail["job"] = job
+        payload["backup_job_detail"] = detail
+        return IpcResponse.accepted(payload)
+
+
+class _FakePagedJobsEngineClient(_FakeDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.requested_offsets: list[int] = []
+
+    def get_backup_overview(
+        self,
+        *,
+        draft_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        del draft_id
+        assert limit == 25
+        page_offset = 0 if offset is None else offset
+        self.calls.append("get_backup_overview")
+        self.requested_offsets.append(page_offset)
+        job_id = "job-a" if page_offset == 0 else "job-z"
+        title = "Pictures" if page_offset == 0 else "Archive"
+        return IpcResponse.accepted(
+            {
+                "backup_overview": {
+                    "read_model_available": True,
+                    "limit": 25,
+                    "offset": page_offset,
+                    "has_more": page_offset == 0,
+                    "draft": None,
+                    "jobs": [
+                        {
+                            "job_id": job_id,
+                            "title": title,
+                            "source_name": title,
+                            "source_path_label": f"C:/Users/Ada/{title}",
+                            "configured_target_count": 1,
+                            "independent_device_count": 1,
+                            "targets": [
+                                {
+                                    "name": "USB 1",
+                                    "path_label": "E:/Backup",
+                                    "independent_device_id": "disk-a",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        )
+
+    def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        response = super().get_backup_job_detail(job_id=job_id)
+        if job_id == "job-a":
+            return response
+        payload = dict(response.payload)
+        detail = dict(payload["backup_job_detail"])
+        detail["job_id"] = job_id
+        job = dict(detail["job"])
+        job["job_id"] = job_id
+        job["title"] = "Archive"
+        job["source_name"] = "Archive"
+        job["source_path_label"] = "C:/Users/Ada/Archive"
+        detail["job"] = job
+        payload["backup_job_detail"] = detail
+        return IpcResponse.accepted(payload)
 
 
 class _FakePlanOnlyDashboardEngineClient(_FakeDashboardEngineClient):

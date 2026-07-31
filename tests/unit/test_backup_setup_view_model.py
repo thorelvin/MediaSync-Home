@@ -176,6 +176,52 @@ def test_backup_overview_view_model_renders_draft_and_first_job_summary() -> Non
     assert state.job_status.configured_target_count == 1
     assert state.job_status.target_statuses[0].freshness_label == "Ukjent"
     assert state.selected_job_id == "job-a"
+    assert len(state.jobs) == 1
+    assert state.jobs[0].job_id == "job-a"
+    assert state.jobs[0].title == "Pictures"
+    assert state.jobs[0].source_label == "C:/Users/Ada/Pictures"
+    assert state.jobs[0].target_summary_label == "1 mål / 1 uavhengig enhet"
+    assert state.limit == 10
+    assert state.offset == 0
+
+
+def test_backup_overview_view_model_preserves_bounded_job_page_metadata() -> None:
+    response = IpcResponse.accepted(
+        {
+            "backup_overview": {
+                "read_model_available": True,
+                "limit": 2,
+                "offset": 2,
+                "has_more": True,
+                "draft": None,
+                "jobs": [
+                    {
+                        "job_id": "job-c",
+                        "title": "Documents",
+                        "source_path_label": "C:/Users/Ada/Documents",
+                        "configured_target_count": 2,
+                        "independent_device_count": 1,
+                        "targets": [],
+                    },
+                    {
+                        "title": "Missing identifier",
+                        "source_path_label": "C:/ignored",
+                        "targets": [],
+                    },
+                ],
+            }
+        }
+    )
+
+    state = backup_overview_from_response(response)
+
+    assert state.read_model_available is True
+    assert state.limit == 2
+    assert state.offset == 2
+    assert state.has_more_jobs is True
+    assert [job.job_id for job in state.jobs] == ["job-c"]
+    assert state.jobs[0].target_summary_label == "2 mål / 1 uavhengig enhet"
+    assert state.selected_job_id == "job-c"
 
 
 def test_backup_job_detail_view_model_renders_exact_job_revision() -> None:

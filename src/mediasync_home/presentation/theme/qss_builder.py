@@ -86,6 +86,24 @@ QListWidget#navigationRail::item:selected {{
     color: {tokens.text};
 }}
 
+QListWidget#jobsList {{
+    background: {tokens.surface};
+    border: {tokens.border_hairline}px solid {tokens.border};
+    border-radius: {tokens.radius_sm}px;
+    outline: 0;
+}}
+
+QListWidget#jobsList::item {{
+    min-height: 50px;
+    padding: {tokens.space_2}px {tokens.space_3}px;
+    border-bottom: {tokens.border_hairline}px solid {tokens.border};
+}}
+
+QListWidget#jobsList::item:selected {{
+    background: {tokens.selection};
+    color: {tokens.text};
+}}
+
 QFrame#workspace,
 QWidget#workspace {{
     background: {tokens.window_background};
@@ -94,6 +112,7 @@ QWidget#workspace {{
 QFrame#engineStatusPanel,
 QFrame#standardBackupPanel,
 QFrame#backupJobDetailPanel,
+QFrame#jobsDetailPanel,
 QFrame#componentGallery {{
     background: {tokens.panel};
     border: {tokens.border_hairline}px solid {tokens.border};
@@ -157,13 +176,15 @@ QFrame#activityBar {{
 }}
 
 QScrollArea#dashboardScrollArea,
+QScrollArea#jobsScrollArea,
 QScrollArea#activityScrollArea,
 QWidget#activityContent {{
     background: transparent;
     border: none;
 }}
 
-QScrollArea#dashboardScrollArea > QWidget > QWidget {{
+QScrollArea#dashboardScrollArea > QWidget > QWidget,
+QScrollArea#jobsScrollArea > QWidget > QWidget {{
     background: {tokens.window_background};
 }}
 
@@ -208,7 +229,9 @@ QToolButton#languageSelectorButton:focus {{
 
 QToolButton#addTargetButton,
 QToolButton#removeTargetButton,
-QToolButton#setupBackButton {{
+QToolButton#setupBackButton,
+QToolButton#jobsPreviousButton,
+QToolButton#jobsNextButton {{
     min-width: 32px;
     max-width: 32px;
     min-height: 32px;
@@ -221,19 +244,25 @@ QToolButton#setupBackButton {{
 
 QToolButton#addTargetButton:hover,
 QToolButton#removeTargetButton:hover,
-QToolButton#setupBackButton:hover {{
+QToolButton#setupBackButton:hover,
+QToolButton#jobsPreviousButton:hover,
+QToolButton#jobsNextButton:hover {{
     border-color: {tokens.accent};
 }}
 
 QToolButton#addTargetButton:focus,
 QToolButton#removeTargetButton:focus,
-QToolButton#setupBackButton:focus {{
+QToolButton#setupBackButton:focus,
+QToolButton#jobsPreviousButton:focus,
+QToolButton#jobsNextButton:focus {{
     border: {tokens.border_focus}px solid {tokens.focus};
 }}
 
 QToolButton#addTargetButton:disabled,
 QToolButton#removeTargetButton:disabled,
-QToolButton#setupBackButton:disabled {{
+QToolButton#setupBackButton:disabled,
+QToolButton#jobsPreviousButton:disabled,
+QToolButton#jobsNextButton:disabled {{
     background: {tokens.surface};
     border-color: {tokens.border};
 }}
@@ -253,7 +282,8 @@ QMenu#languageSelectorMenu::item:selected {{
 }}
 
 QPushButton#createBackupButton,
-QPushButton#startBackupButton {{
+QPushButton#startBackupButton,
+QPushButton#jobsStartBackupButton {{
     min-height: 32px;
     border-radius: {tokens.radius_sm}px;
     border: {tokens.border_hairline}px solid {tokens.accent};
@@ -263,23 +293,27 @@ QPushButton#startBackupButton {{
 }}
 
 QPushButton#createBackupButton:hover,
-QPushButton#startBackupButton:hover {{
+QPushButton#startBackupButton:hover,
+QPushButton#jobsStartBackupButton:hover {{
     border: {tokens.border_focus}px solid {tokens.focus};
 }}
 
 QPushButton#createBackupButton:pressed,
-QPushButton#startBackupButton:pressed {{
+QPushButton#startBackupButton:pressed,
+QPushButton#jobsStartBackupButton:pressed {{
     border-color: {tokens.focus};
     background: {tokens.focus};
 }}
 
 QPushButton#createBackupButton:focus,
-QPushButton#startBackupButton:focus {{
+QPushButton#startBackupButton:focus,
+QPushButton#jobsStartBackupButton:focus {{
     border: {tokens.border_focus}px solid {tokens.focus};
 }}
 
 QPushButton#createBackupButton:disabled,
-QPushButton#startBackupButton:disabled {{
+QPushButton#startBackupButton:disabled,
+QPushButton#jobsStartBackupButton:disabled {{
     border-color: {tokens.border};
     background: {tokens.surface_alt};
     color: {tokens.text_muted};

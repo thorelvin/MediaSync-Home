@@ -148,11 +148,22 @@ class BackupJobDetailViewState:
 
 
 @dataclass(frozen=True)
+class BackupJobListItemViewState:
+    job_id: str
+    title: str
+    source_label: str
+    target_summary_label: str
+
+
+@dataclass(frozen=True)
 class BackupOverviewViewState:
     setup: StandardBackupSetupViewState
     job_status: BackupJobStatusViewState
     read_model_available: bool
     has_more_jobs: bool
+    jobs: tuple[BackupJobListItemViewState, ...] = ()
+    limit: int = 10
+    offset: int = 0
     selected_job_id: str | None = None
 
 
@@ -317,7 +328,12 @@ def backup_overview_from_response(response: IpcResponse | None) -> BackupOvervie
     draft = _setup_draft_from_payload(overview.get("draft"))
     jobs = overview.get("jobs")
     job_payloads = tuple(item for item in jobs if isinstance(item, dict)) if isinstance(jobs, list) else ()
-    selected_job_id = _required_text(job_payloads[0].get("job_id")) if job_payloads else None
+    job_rows = tuple(
+        row
+        for payload in job_payloads
+        if (row := _job_list_item_from_payload(payload)) is not None
+    )
+    selected_job_id = job_rows[0].job_id if job_rows else None
     return BackupOverviewViewState(
         setup=build_standard_backup_setup_state(
             draft or BackupSetupDraft.empty(),
@@ -326,6 +342,9 @@ def backup_overview_from_response(response: IpcResponse | None) -> BackupOvervie
         job_status=_job_status_from_payload(job_payloads[0]) if job_payloads else empty_backup_job_status_state(),
         read_model_available=bool(overview.get("read_model_available", False)),
         has_more_jobs=bool(overview.get("has_more", False)),
+        jobs=job_rows,
+        limit=_positive_int(overview.get("limit")) or 10,
+        offset=_non_negative_int(overview.get("offset")) or 0,
         selected_job_id=selected_job_id,
     )
 
@@ -523,6 +542,44 @@ def _job_status_from_payload(payload: dict[object, object]) -> BackupJobStatusVi
     )
 
 
+def _job_list_item_from_payload(
+    payload: dict[object, object],
+) -> BackupJobListItemViewState | None:
+    job_id = _required_text(payload.get("job_id"))
+    if job_id is None:
+        return None
+    targets = _target_details_from_payload(payload.get("targets"))
+    configured_target_count = (
+        _non_negative_int(payload.get("configured_target_count"))
+        if payload.get("configured_target_count") is not None
+        else len(targets)
+    )
+    if configured_target_count is None:
+        configured_target_count = len(targets)
+    independent_device_count = _non_negative_int(payload.get("independent_device_count"))
+    if independent_device_count is None:
+        independent_device_count = len(
+            {target.independent_device_id for target in targets if target.independent_device_id}
+        )
+    return BackupJobListItemViewState(
+        job_id=job_id,
+        title=(
+            _required_text(payload.get("title"))
+            or _required_text(payload.get("source_name"))
+            or "Backupjobb"
+        ),
+        source_label=(
+            _required_text(payload.get("source_path_label"))
+            or _required_text(payload.get("source_name"))
+            or "Kilde mangler"
+        ),
+        target_summary_label=(
+            f"{_count_label(configured_target_count, 'mål', 'mål')} / "
+            f"{_count_label(independent_device_count, 'uavhengig enhet', 'uavhengige enheter')}"
+        ),
+    )
+
+
 def _job_detail_from_payload(payload: dict[object, object], *, job_id: str | None) -> BackupJobDetailViewState:
     targets = _target_details_from_payload(payload.get("targets"))
     configured_target_count = _non_negative_int(payload.get("configured_target_count")) or len(targets)
@@ -661,6 +718,11 @@ def _non_negative_int(value: object) -> int | None:
     if isinstance(value, int) and value >= 0:
         return value
     return None
+
+
+def _positive_int(value: object) -> int | None:
+    parsed = _non_negative_int(value)
+    return parsed if parsed is not None and parsed > 0 else None
 
 
 def _activity_status_from_run_payload(payload: dict[object, object]) -> BackupJobStatusViewState:

@@ -51,6 +51,7 @@ from mediasync_home.presentation.view_models.backup_setup import (
     backup_job_detail_from_response,
     backup_overview_from_response,
     build_standard_backup_setup_state,
+    empty_backup_overview_state,
     empty_backup_job_detail_state,
     empty_backup_job_status_state,
 )
@@ -217,6 +218,7 @@ class MediaSyncWindow(QMainWindow):
         self._start_idempotency_key: str | None = None
         self._queued_backup_job_ids: set[str] = set()
         self._setup_state = build_standard_backup_setup_state(self._setup_draft)
+        self._backup_overview_state = empty_backup_overview_state()
         self._job_status_state = empty_backup_job_status_state()
         self._job_detail_state = empty_backup_job_detail_state()
         self._plan_preview_state = empty_plan_operation_preview_state()
@@ -232,6 +234,17 @@ class MediaSyncWindow(QMainWindow):
         self._workspace_stack: QStackedWidget | None = None
         self._dashboard_page: QWidget | None = None
         self._dashboard_scroll_area: QScrollArea | None = None
+        self._jobs_page: QWidget | None = None
+        self._jobs_scroll_area: QScrollArea | None = None
+        self._jobs_list: QListWidget | None = None
+        self._jobs_empty_label: QLabel | None = None
+        self._jobs_title_label: QLabel | None = None
+        self._jobs_page_label: QLabel | None = None
+        self._jobs_previous_button: QToolButton | None = None
+        self._jobs_next_button: QToolButton | None = None
+        self._jobs_page_limit = 25
+        self._jobs_page_offset = 0
+        self._selected_job_id: str | None = None
         self._dashboard_detail_layout: QBoxLayout | None = None
         self._setup_stepper_layout: QGridLayout | None = None
         self._compact_dashboard_layout: bool | None = None
@@ -268,6 +281,20 @@ class MediaSyncWindow(QMainWindow):
         self._job_detail_plan_value: QLabel | None = None
         self._start_backup_button: QPushButton | None = None
         self._job_detail_target_rows: list[QLabel] = []
+        self._jobs_detail_title: QLabel | None = None
+        self._jobs_detail_source_label: QLabel | None = None
+        self._jobs_detail_targets_label: QLabel | None = None
+        self._jobs_detail_defaults_label: QLabel | None = None
+        self._jobs_detail_revision_label: QLabel | None = None
+        self._jobs_detail_plan_label: QLabel | None = None
+        self._jobs_detail_target_heading: QLabel | None = None
+        self._jobs_detail_source_value: QLabel | None = None
+        self._jobs_detail_targets_value: QLabel | None = None
+        self._jobs_detail_defaults_value: QLabel | None = None
+        self._jobs_detail_revision_value: QLabel | None = None
+        self._jobs_detail_plan_value: QLabel | None = None
+        self._jobs_detail_target_rows: list[QLabel] = []
+        self._jobs_start_backup_button: QPushButton | None = None
         self._engine_title_label: QLabel | None = None
         self._engine_scope_label: QLabel | None = None
         self._engine_contract_label: QLabel | None = None
@@ -393,10 +420,12 @@ class MediaSyncWindow(QMainWindow):
         _refresh_style(self._engine_chip)
 
     def apply_backup_overview(self, state: BackupOverviewViewState) -> None:
+        self._backup_overview_state = state
         self._setup_state = state.setup
         self._job_status_state = state.job_status
         self._apply_backup_setup_state(state.setup)
         self._apply_job_status_state(state.job_status)
+        self._apply_jobs_overview_state(state)
 
     def apply_backup_job_detail(self, state: BackupJobDetailViewState) -> None:
         self._job_detail_state = state
@@ -422,21 +451,119 @@ class MediaSyncWindow(QMainWindow):
         if self._engine_client is None or not hasattr(self._engine_client, "get_backup_overview"):
             return
         provider = cast(BackupOverviewProvider, self._engine_client)
-        state = backup_overview_from_response(provider.get_backup_overview())
+        state = backup_overview_from_response(
+            provider.get_backup_overview(
+                limit=self._jobs_page_limit,
+                offset=self._jobs_page_offset,
+            )
+        )
+        job_ids = {job.job_id for job in state.jobs}
+        if self._selected_job_id not in job_ids:
+            self._selected_job_id = state.selected_job_id
         self.apply_backup_overview(state)
-        if state.selected_job_id is None:
+        if self._selected_job_id is None:
             self.apply_backup_job_detail(empty_backup_job_detail_state())
             return
-        self._refresh_backup_job_detail(state.selected_job_id)
+        self._refresh_backup_job_detail(self._selected_job_id)
 
-    def _refresh_backup_job_detail(self, job_id: str) -> None:
+    def _refresh_backup_job_detail(self, job_id: str) -> BackupJobDetailViewState | None:
         if self._engine_client is None or not hasattr(self._engine_client, "get_backup_job_detail"):
-            return
+            return None
         provider = cast(BackupJobDetailProvider, self._engine_client)
         state = backup_job_detail_from_response(
             provider.get_backup_job_detail(job_id=job_id)
         )
         self.apply_backup_job_detail(state)
+        return state
+
+    def _apply_jobs_overview_state(self, state: BackupOverviewViewState) -> None:
+        jobs_list = self._jobs_list
+        if jobs_list is None:
+            return
+        jobs_list.blockSignals(True)
+        jobs_list.clear()
+        selected_row = -1
+        for index, job in enumerate(state.jobs):
+            item = QListWidgetItem(
+                f"{self._display(job.title)}\n"
+                f"{self._display(job.target_summary_label)}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, job.job_id)
+            item.setToolTip(job.source_label)
+            item.setSizeHint(QSize(0, 58))
+            jobs_list.addItem(item)
+            if job.job_id == self._selected_job_id:
+                selected_row = index
+        if selected_row >= 0:
+            jobs_list.setCurrentRow(selected_row)
+        jobs_list.blockSignals(False)
+
+        has_jobs = bool(state.jobs)
+        jobs_list.setVisible(state.read_model_available and has_jobs)
+        jobs_list.setEnabled(state.read_model_available)
+        if self._jobs_empty_label is not None:
+            self._jobs_empty_label.setText(
+                self._texts().jobs_empty
+                if state.read_model_available
+                else self._texts().jobs_unavailable
+            )
+            self._jobs_empty_label.setVisible(not has_jobs or not state.read_model_available)
+        if self._jobs_page_label is not None:
+            first = state.offset + 1 if has_jobs else 0
+            last = state.offset + len(state.jobs)
+            self._jobs_page_label.setText(f"{first}-{last}")
+        if self._jobs_previous_button is not None:
+            self._jobs_previous_button.setEnabled(state.offset > 0)
+            self._jobs_previous_button.setToolTip(
+                self._texts().previous_page_tooltip
+            )
+            self._jobs_previous_button.setAccessibleName(
+                self._texts().previous_page_tooltip
+            )
+        if self._jobs_next_button is not None:
+            self._jobs_next_button.setEnabled(state.has_more_jobs)
+            self._jobs_next_button.setToolTip(self._texts().next_page_tooltip)
+            self._jobs_next_button.setAccessibleName(
+                self._texts().next_page_tooltip
+            )
+        self._refresh_dashboard_geometry()
+
+    def _select_job_item(
+        self,
+        current: QListWidgetItem | None,
+        previous: QListWidgetItem | None,
+    ) -> None:
+        del previous
+        if current is None:
+            return
+        job_id = current.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(job_id, str) or not job_id:
+            return
+        if job_id != self._selected_job_id:
+            self._start_request_id = None
+            self._start_idempotency_key = None
+        self._selected_job_id = job_id
+        state = self._refresh_backup_job_detail(job_id)
+        if state is None or state.plan_id is None:
+            self.apply_plan_operation_preview(empty_plan_operation_preview_state())
+            self.apply_plan_endpoint_preview(empty_plan_endpoint_preview_state())
+            self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
+            return
+        self._refresh_plan_previews(state.plan_id)
+
+    def _show_previous_jobs_page(self) -> None:
+        if self._jobs_page_offset <= 0:
+            return
+        self._jobs_page_offset = max(0, self._jobs_page_offset - self._jobs_page_limit)
+        self._selected_job_id = None
+        self._refresh_backup_overview()
+
+    def _show_next_jobs_page(self) -> None:
+        if not self._backup_overview_state.has_more_jobs:
+            return
+        self._jobs_page_offset += self._jobs_page_limit
+        self._selected_job_id = None
+        self._refresh_backup_overview()
 
     def _refresh_activity_overview(self) -> None:
         if self._engine_client is None or not hasattr(self._engine_client, "get_activity_overview"):
@@ -798,6 +925,8 @@ class MediaSyncWindow(QMainWindow):
         self._setup_draft_id = None
         self._setup_request_id = None
         self._setup_idempotency_key = None
+        self._selected_job_id = None
+        self._jobs_page_offset = 0
         self._refresh_backup_overview()
         self._refresh_activity_overview()
 
@@ -857,27 +986,52 @@ class MediaSyncWindow(QMainWindow):
         )
 
     def _apply_backup_job_detail_state(self, state: BackupJobDetailViewState) -> None:
-        if self._job_detail_title is not None:
-            self._job_detail_title.setText(self._display(state.title))
-        if self._job_detail_source_value is not None:
-            self._job_detail_source_value.setText(self._display(state.source_label))
-        if self._job_detail_revision_value is not None:
-            self._job_detail_revision_value.setText(self._display(state.revision_label))
-        if self._job_detail_targets_value is not None:
-            self._job_detail_targets_value.setText(self._display(state.target_summary_label))
-        if self._job_detail_defaults_value is not None:
-            self._job_detail_defaults_value.setText(self._display(state.defaults_summary_label))
-        if self._job_detail_plan_value is not None:
-            self._job_detail_plan_value.setText(self._display(state.plan_summary_label))
+        for label in (self._job_detail_title, self._jobs_detail_title):
+            if label is not None:
+                label.setText(self._display(state.title))
+        for labels, value in (
+            (
+                (self._job_detail_source_value, self._jobs_detail_source_value),
+                state.source_label,
+            ),
+            (
+                (self._job_detail_revision_value, self._jobs_detail_revision_value),
+                state.revision_label,
+            ),
+            (
+                (self._job_detail_targets_value, self._jobs_detail_targets_value),
+                state.target_summary_label,
+            ),
+            (
+                (self._job_detail_defaults_value, self._jobs_detail_defaults_value),
+                state.defaults_summary_label,
+            ),
+            (
+                (self._job_detail_plan_value, self._jobs_detail_plan_value),
+                state.plan_summary_label,
+            ),
+        ):
+            for label in labels:
+                if label is not None:
+                    label.setText(self._display(value))
         lines = state.target_lines or ("Ingen mål å vise.",)
-        for index, row in enumerate(self._job_detail_target_rows):
-            if index < len(lines):
-                row.setText(self._display(lines[index]))
-                row.setVisible(True)
-            else:
-                row.setText("")
-                row.setVisible(False)
-        if self._start_backup_button is not None:
+        for target_rows in (
+            self._job_detail_target_rows,
+            self._jobs_detail_target_rows,
+        ):
+            for index, row in enumerate(target_rows):
+                if index < len(lines):
+                    row.setText(self._display(lines[index]))
+                    row.setVisible(True)
+                else:
+                    row.setText("")
+                    row.setVisible(False)
+        for start_button in (
+            self._start_backup_button,
+            self._jobs_start_backup_button,
+        ):
+            if start_button is None:
+                continue
             has_plan = (
                 state.found
                 and state.plan_state == "SEALED"
@@ -885,18 +1039,18 @@ class MediaSyncWindow(QMainWindow):
                 and state.plan_checksum is not None
             )
             queued = state.job_id in self._queued_backup_job_ids
-            self._start_backup_button.setVisible(has_plan)
-            self._start_backup_button.setEnabled(
+            start_button.setVisible(has_plan)
+            start_button.setEnabled(
                 has_plan
                 and state.plan_runnable
                 and not queued
                 and self._engine_client is not None
                 and hasattr(self._engine_client, "start_backup")
             )
-            self._start_backup_button.setText(
+            start_button.setText(
                 self._texts().backup_queued if queued else self._texts().start_backup
             )
-            self._start_backup_button.setToolTip(self._texts().start_backup_tooltip)
+            start_button.setToolTip(self._texts().start_backup_tooltip)
         self._refresh_dashboard_geometry()
 
     def _start_selected_backup(self) -> None:
@@ -1118,7 +1272,11 @@ class MediaSyncWindow(QMainWindow):
         self._dashboard_page = dashboard_page
         self._dashboard_scroll_area = dashboard_scroll
         stack.addWidget(dashboard_scroll)
-        stack.addWidget(self._build_placeholder_page("Jobs", "Saved backup jobs will appear here."))
+        jobs_page = self._build_jobs_page()
+        jobs_scroll = _scrollable_page(jobs_page, "jobsScrollArea")
+        self._jobs_page = jobs_page
+        self._jobs_scroll_area = jobs_scroll
+        stack.addWidget(jobs_scroll)
         stack.addWidget(self._build_placeholder_page("History", "Completed and blocked runs will appear here."))
         stack.addWidget(
             self._build_placeholder_page("Settings", "Local preview settings will appear here.")
@@ -1135,6 +1293,8 @@ class MediaSyncWindow(QMainWindow):
             self._workspace_stack.setCurrentIndex(self._selected_navigation_index)
         if self._workspace_heading is not None:
             self._workspace_heading.setText(self._current_navigation_label())
+        if self._selected_navigation_index == 1 and self._engine_client is not None:
+            self._refresh_backup_overview()
 
     def _current_navigation_label(self) -> str:
         labels = (
@@ -1159,6 +1319,150 @@ class MediaSyncWindow(QMainWindow):
         layout.addWidget(self._build_dashboard_detail_row())
         layout.addStretch(1)
         return page
+
+    def _build_jobs_page(self) -> QWidget:
+        texts = self._texts()
+        page = QWidget()
+        page.setObjectName("jobsPage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        layout.setSizeConstraints(
+            QLayout.SizeConstraint.SetNoConstraint,
+            QLayout.SizeConstraint.SetMinAndMaxSize,
+        )
+
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
+        title = QLabel(texts.saved_jobs)
+        title.setObjectName("sectionTitle")
+        self._jobs_title_label = title
+        page_label = QLabel("0-0")
+        page_label.setObjectName("mutedLabel")
+        page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._jobs_page_label = page_label
+        previous = QToolButton()
+        previous.setObjectName("jobsPreviousButton")
+        previous.setIcon(self._icons.icon("back"))
+        previous.setIconSize(QSize(20, 20))
+        previous.setToolTip(texts.previous_page_tooltip)
+        previous.setAccessibleName(texts.previous_page_tooltip)
+        previous.setEnabled(False)
+        previous.clicked.connect(self._show_previous_jobs_page)
+        self._jobs_previous_button = previous
+        next_button = QToolButton()
+        next_button.setObjectName("jobsNextButton")
+        next_button.setIcon(self._icons.icon("next"))
+        next_button.setIconSize(QSize(20, 20))
+        next_button.setToolTip(texts.next_page_tooltip)
+        next_button.setAccessibleName(texts.next_page_tooltip)
+        next_button.setEnabled(False)
+        next_button.clicked.connect(self._show_next_jobs_page)
+        self._jobs_next_button = next_button
+        header_layout.addWidget(title)
+        header_layout.addStretch(1)
+        header_layout.addWidget(previous)
+        header_layout.addWidget(page_label)
+        header_layout.addWidget(next_button)
+        layout.addWidget(header)
+
+        jobs_list = QListWidget()
+        jobs_list.setObjectName("jobsList")
+        jobs_list.setAccessibleName(texts.saved_jobs)
+        jobs_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        jobs_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        jobs_list.setWordWrap(True)
+        jobs_list.setMinimumHeight(148)
+        jobs_list.setMaximumHeight(232)
+        jobs_list.currentItemChanged.connect(self._select_job_item)
+        self._jobs_list = jobs_list
+        layout.addWidget(jobs_list)
+
+        empty = QLabel(texts.jobs_unavailable)
+        empty.setObjectName("jobsEmptyLabel")
+        _configure_responsive_label(empty)
+        self._jobs_empty_label = empty
+        layout.addWidget(empty)
+        layout.addWidget(self._build_jobs_detail_panel(self._job_detail_state))
+        layout.addStretch(1)
+        self._apply_jobs_overview_state(self._backup_overview_state)
+        return page
+
+    def _build_jobs_detail_panel(self, state: BackupJobDetailViewState) -> QFrame:
+        texts = self._texts()
+        panel = QFrame()
+        panel.setObjectName("jobsDetailPanel")
+        layout = QGridLayout(panel)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setHorizontalSpacing(18)
+        layout.setVerticalSpacing(8)
+
+        title = QLabel(self._display(state.title))
+        title.setObjectName("jobsDetailTitle")
+        _configure_responsive_label(title)
+        self._jobs_detail_title = title
+        layout.addWidget(title, 0, 0, 1, 3)
+
+        self._jobs_detail_source_label, self._jobs_detail_source_value = _add_labeled_text_value(
+            layout,
+            1,
+            texts.source,
+            self._display(state.source_label),
+        )
+        self._jobs_detail_source_value.setObjectName("jobsDetailSourceValue")
+        self._jobs_detail_targets_label, self._jobs_detail_targets_value = _add_labeled_text_value(
+            layout,
+            2,
+            texts.target,
+            self._display(state.target_summary_label),
+        )
+        self._jobs_detail_targets_value.setObjectName("jobsDetailTargetsValue")
+        self._jobs_detail_defaults_label, self._jobs_detail_defaults_value = _add_labeled_text_value(
+            layout,
+            3,
+            texts.defaults,
+            self._display(state.defaults_summary_label),
+        )
+        self._jobs_detail_defaults_value.setObjectName("jobsDetailDefaultsValue")
+        self._jobs_detail_revision_label, self._jobs_detail_revision_value = _add_labeled_text_value(
+            layout,
+            4,
+            texts.revision,
+            self._display(state.revision_label),
+        )
+        self._jobs_detail_revision_value.setObjectName("jobsDetailRevisionValue")
+        self._jobs_detail_plan_label, self._jobs_detail_plan_value = _add_labeled_text_value(
+            layout,
+            5,
+            texts.plan,
+            self._display(state.plan_summary_label),
+        )
+        self._jobs_detail_plan_value.setObjectName("jobsDetailPlanValue")
+
+        target_heading = QLabel(texts.job_detail_targets_heading)
+        target_heading.setObjectName("mutedLabel")
+        self._jobs_detail_target_heading = target_heading
+        layout.addWidget(target_heading, 6, 0)
+        target_lines = state.target_lines or ("Ingen mål å vise.",)
+        for index in range(3):
+            row = QLabel(self._display(target_lines[index]) if index < len(target_lines) else "")
+            row.setObjectName("jobsDetailTargetRow")
+            _configure_responsive_label(row, selectable=True)
+            row.setVisible(index < len(target_lines))
+            self._jobs_detail_target_rows.append(row)
+            layout.addWidget(row, 6 + index, 1, 1, 2)
+
+        start_backup = QPushButton(texts.start_backup)
+        start_backup.setObjectName("jobsStartBackupButton")
+        start_backup.setToolTip(texts.start_backup_tooltip)
+        start_backup.setVisible(False)
+        start_backup.clicked.connect(self._start_selected_backup)
+        self._jobs_start_backup_button = start_backup
+        layout.addWidget(start_backup, 9, 2)
+        layout.setColumnStretch(1, 1)
+        return panel
 
     def _build_placeholder_page(self, title: str, detail: str) -> QFrame:
         page = QFrame()
@@ -1681,7 +1985,20 @@ class MediaSyncWindow(QMainWindow):
         self._refresh_dashboard_geometry()
 
     def _refresh_dashboard_geometry(self) -> None:
-        page = self._dashboard_page
+        self._refresh_responsive_page_geometry(
+            self._dashboard_page,
+            self._dashboard_scroll_area,
+        )
+        self._refresh_responsive_page_geometry(
+            self._jobs_page,
+            self._jobs_scroll_area,
+        )
+
+    def _refresh_responsive_page_geometry(
+        self,
+        page: QWidget | None,
+        scroll_area: QScrollArea | None,
+    ) -> None:
         if page is None:
             return
         layout = page.layout()
@@ -1707,9 +2024,9 @@ class MediaSyncWindow(QMainWindow):
             layout.activate()
             page.setMinimumHeight(max(0, layout.minimumSize().height()))
         page.updateGeometry()
-        if self._dashboard_scroll_area is not None:
-            self._dashboard_scroll_area.updateGeometry()
-            self._dashboard_scroll_area.viewport().updateGeometry()
+        if scroll_area is not None:
+            scroll_area.updateGeometry()
+            scroll_area.viewport().updateGeometry()
 
     def _apply_selected_language(self) -> None:
         for code, label in self._language_options:
@@ -1740,6 +2057,10 @@ class MediaSyncWindow(QMainWindow):
             self._setup_title_label.setText(texts.setup_title)
         if self._setup_subtitle_label is not None:
             self._setup_subtitle_label.setText(texts.setup_subtitle)
+        if self._jobs_title_label is not None:
+            self._jobs_title_label.setText(texts.saved_jobs)
+        if self._jobs_list is not None:
+            self._jobs_list.setAccessibleName(texts.saved_jobs)
         for text_label, text in (
             (self._setup_source_label, texts.source),
             (self._setup_target_label, texts.target),
@@ -1751,6 +2072,12 @@ class MediaSyncWindow(QMainWindow):
             (self._job_detail_revision_label, texts.revision),
             (self._job_detail_plan_label, texts.plan),
             (self._job_detail_target_heading, texts.job_detail_targets_heading),
+            (self._jobs_detail_source_label, texts.source),
+            (self._jobs_detail_targets_label, texts.target),
+            (self._jobs_detail_defaults_label, texts.defaults),
+            (self._jobs_detail_revision_label, texts.revision),
+            (self._jobs_detail_plan_label, texts.plan),
+            (self._jobs_detail_target_heading, texts.job_detail_targets_heading),
             (self._engine_title_label, texts.engine_host),
             (self._engine_scope_label, texts.scope),
             (self._engine_contract_label, texts.contract),
@@ -1764,6 +2091,7 @@ class MediaSyncWindow(QMainWindow):
             self._workspace_heading.setText(self._current_navigation_label())
         self.apply_engine_status(self._engine_status_state)
         self._apply_backup_setup_state(self._setup_state)
+        self._apply_jobs_overview_state(self._backup_overview_state)
         self._apply_backup_job_detail_state(self._job_detail_state)
         self._apply_job_status_state(self._job_status_state)
         self._apply_plan_operation_preview_state(self._plan_preview_state)

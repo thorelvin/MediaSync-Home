@@ -33,6 +33,11 @@ class ShellText:
     add_target_tooltip: str
     remove_target_tooltip: str
     back_tooltip: str
+    saved_jobs: str
+    jobs_empty: str
+    jobs_unavailable: str
+    previous_page_tooltip: str
+    next_page_tooltip: str
     job_detail_targets_heading: str
     engine_host: str
     scope: str
@@ -87,6 +92,11 @@ NB_TEXT = ShellText(
     add_target_tooltip="Legg til målmappe",
     remove_target_tooltip="Fjern målmappe",
     back_tooltip="Tilbake",
+    saved_jobs="Lagrede backupjobber",
+    jobs_empty="Ingen lagrede backupjobber",
+    jobs_unavailable="Jobblisten er ikke tilgjengelig.",
+    previous_page_tooltip="Forrige side",
+    next_page_tooltip="Neste side",
     job_detail_targets_heading="Målsteder",
     engine_host="Engine Host",
     scope="Scope",
@@ -128,6 +138,11 @@ EN_TEXT = ShellText(
     add_target_tooltip="Add target folder",
     remove_target_tooltip="Remove target folder",
     back_tooltip="Back",
+    saved_jobs="Saved backup jobs",
+    jobs_empty="No saved backup jobs",
+    jobs_unavailable="The job list is not available.",
+    previous_page_tooltip="Previous page",
+    next_page_tooltip="Next page",
     job_detail_targets_heading="Target locations",
     engine_host="Engine Host",
     scope="Scope",

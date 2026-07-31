@@ -12,6 +12,7 @@ ICON_COLORS = {
     "back": "#94a3b8",
     "dashboard": "#0f766e",
     "history": "#9a6a12",
+    "next": "#94a3b8",
     "refresh": "#475569",
     "remove-target": "#ef4444",
     "settings": "#64748b",
@@ -80,6 +81,10 @@ class IconRegistry:
             painter.drawLine(19, 12, 6, 12)
             painter.drawLine(6, 12, 11, 7)
             painter.drawLine(6, 12, 11, 17)
+        elif name == "next":
+            painter.drawLine(5, 12, 18, 12)
+            painter.drawLine(18, 12, 13, 7)
+            painter.drawLine(18, 12, 13, 17)
         else:
             painter.drawEllipse(QRectF(5, 5, 14, 14))
             painter.drawLine(12, 7, 12, 13)
