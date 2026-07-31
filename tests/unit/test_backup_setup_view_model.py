@@ -209,6 +209,17 @@ def test_backup_job_detail_view_model_renders_exact_job_revision() -> None:
                             "independent_device_id": "disk-a",
                         }
                     ],
+                    "initial_plan": {
+                        "state": "SEALED",
+                        "reason_code": "INITIAL_BACKUP_PLAN_READY_FOR_REVIEW",
+                        "analysis_id": "analysis-a",
+                        "plan_id": "plan-a",
+                        "plan_checksum": "a" * 64,
+                        "operation_count": 3,
+                        "planned_bytes": 256,
+                        "plan_runnable": False,
+                        "next_action": "Review the plan.",
+                    },
                 },
             }
         }
@@ -225,6 +236,12 @@ def test_backup_job_detail_view_model_renders_exact_job_revision() -> None:
     assert state.target_summary_label == "1 mål / 1 uavhengig enhet"
     assert state.defaults_summary_label == "Oppdater backup - Alle brukerfiler - Standard kontroll"
     assert state.target_lines == ("USB 1: E:/Backup",)
+    assert state.plan_id == "plan-a"
+    assert state.plan_checksum == "a" * 64
+    assert state.plan_state == "SEALED"
+    assert state.plan_summary_label == (
+        "3 operasjoner fra plan-a. · 256 B · Kun forhåndsvisning"
+    )
 
 
 def test_backup_job_detail_view_model_handles_missing_read_model() -> None:

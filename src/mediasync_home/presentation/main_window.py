@@ -239,11 +239,13 @@ class MediaSyncWindow(QMainWindow):
         self._job_detail_targets_label: QLabel | None = None
         self._job_detail_defaults_label: QLabel | None = None
         self._job_detail_revision_label: QLabel | None = None
+        self._job_detail_plan_label: QLabel | None = None
         self._job_detail_target_heading: QLabel | None = None
         self._job_detail_source_value: QLabel | None = None
         self._job_detail_revision_value: QLabel | None = None
         self._job_detail_targets_value: QLabel | None = None
         self._job_detail_defaults_value: QLabel | None = None
+        self._job_detail_plan_value: QLabel | None = None
         self._job_detail_target_rows: list[QLabel] = []
         self._engine_title_label: QLabel | None = None
         self._engine_scope_label: QLabel | None = None
@@ -410,7 +412,10 @@ class MediaSyncWindow(QMainWindow):
         if self._engine_client is None or not hasattr(self._engine_client, "get_backup_job_detail"):
             return
         provider = cast(BackupJobDetailProvider, self._engine_client)
-        self.apply_backup_job_detail(backup_job_detail_from_response(provider.get_backup_job_detail(job_id=job_id)))
+        state = backup_job_detail_from_response(
+            provider.get_backup_job_detail(job_id=job_id)
+        )
+        self.apply_backup_job_detail(state)
 
     def _refresh_activity_overview(self) -> None:
         if self._engine_client is None or not hasattr(self._engine_client, "get_activity_overview"):
@@ -420,13 +425,17 @@ class MediaSyncWindow(QMainWindow):
         if state.job_status is not None:
             self._job_status_state = state.job_status
             self._apply_job_status_state(state.job_status)
-        if state.latest_plan_id is None:
+        plan_id = state.latest_plan_id or self._job_detail_state.plan_id
+        if plan_id is None:
             self.apply_plan_operation_preview(empty_plan_operation_preview_state())
             self.apply_plan_endpoint_preview(empty_plan_endpoint_preview_state())
             self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
             return
-        self._refresh_plan_operation_preview(state.latest_plan_id)
-        endpoint_state = self._refresh_plan_endpoint_preview(state.latest_plan_id)
+        self._refresh_plan_previews(plan_id)
+
+    def _refresh_plan_previews(self, plan_id: str) -> None:
+        self._refresh_plan_operation_preview(plan_id)
+        endpoint_state = self._refresh_plan_endpoint_preview(plan_id)
         if endpoint_state.source_snapshot_id is None:
             self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
             return
@@ -742,6 +751,8 @@ class MediaSyncWindow(QMainWindow):
             self._job_detail_targets_value.setText(self._display(state.target_summary_label))
         if self._job_detail_defaults_value is not None:
             self._job_detail_defaults_value.setText(self._display(state.defaults_summary_label))
+        if self._job_detail_plan_value is not None:
+            self._job_detail_plan_value.setText(self._display(state.plan_summary_label))
         lines = state.target_lines or ("Ingen mål å vise.",)
         for index, row in enumerate(self._job_detail_target_rows):
             if index < len(lines):
@@ -1104,10 +1115,18 @@ class MediaSyncWindow(QMainWindow):
         )
         self._job_detail_revision_value.setObjectName("jobDetailRevisionValue")
 
+        self._job_detail_plan_label, self._job_detail_plan_value = _add_labeled_text_value(
+            layout,
+            5,
+            texts.plan,
+            self._display(state.plan_summary_label),
+        )
+        self._job_detail_plan_value.setObjectName("jobDetailPlanValue")
+
         target_heading = QLabel(texts.job_detail_targets_heading)
         target_heading.setObjectName("mutedLabel")
         self._job_detail_target_heading = target_heading
-        layout.addWidget(target_heading, 5, 0)
+        layout.addWidget(target_heading, 6, 0)
         self._job_detail_target_rows = []
         target_lines = state.target_lines or ("Ingen mål å vise.",)
         for index in range(3):
@@ -1116,7 +1135,7 @@ class MediaSyncWindow(QMainWindow):
             _configure_responsive_label(row, selectable=True)
             row.setVisible(index < len(target_lines))
             self._job_detail_target_rows.append(row)
-            layout.addWidget(row, 5 + index, 1, 1, 2)
+            layout.addWidget(row, 6 + index, 1, 1, 2)
 
         layout.setColumnStretch(1, 1)
         return panel
@@ -1465,6 +1484,7 @@ class MediaSyncWindow(QMainWindow):
             (self._job_detail_targets_label, texts.target),
             (self._job_detail_defaults_label, texts.defaults),
             (self._job_detail_revision_label, texts.revision),
+            (self._job_detail_plan_label, texts.plan),
             (self._job_detail_target_heading, texts.job_detail_targets_heading),
             (self._engine_title_label, texts.engine_host),
             (self._engine_scope_label, texts.scope),

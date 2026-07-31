@@ -5,7 +5,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Protocol
 
-from mediasync_home.application.plans import PlanEndpoint, PlanEndpointRole, PlanStore, SealedPlan, verify_plan_checksum
+from mediasync_home.application.plans import (
+    PlanEndpoint,
+    PlanEndpointRole,
+    PlanOperationType,
+    PlanStore,
+    SealedPlan,
+    verify_plan_checksum,
+)
 from mediasync_home.domain.capabilities import MutationPermit
 
 
@@ -1024,6 +1031,11 @@ def _readiness_for_plan(*, command: StartRunCommand, plan: SealedPlan) -> RunSta
         validation_codes.append("PLAN_NOT_IMMUTABLE")
     if plan.risk_summary.get("highest") == "BLOCKED":
         validation_codes.append("PLAN_BLOCKED")
+    if any(
+        operation.operation_type is PlanOperationType.CREATE_DIRECTORY
+        for operation in plan.operations
+    ):
+        validation_codes.append("PLAN_CREATE_DIRECTORY_EXECUTION_UNAVAILABLE")
     if plan.operation_count < 1:
         validation_codes.append("PLAN_REQUIRES_OPERATIONS")
     if not _target_endpoints(plan):

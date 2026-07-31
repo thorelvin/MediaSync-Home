@@ -739,6 +739,23 @@ Planen som vises og godkjennes er samme plan Engine Host utfører. Følgende opp
 
 En forseglet plan og dens operasjoner oppdateres aldri in-place. GUI-kommandoren refererer bare `plan_id`; Engine Host laster, verifiserer checksum og revaliderer preconditions.
 
+0B-implementasjonsnote: Etter vellykket lokal målregistrering bygger Engine Host nå
+den første standard-backupplanen fra den aktive jobbrevisjonens eksakte, forseglede
+kilde- og målsnapshots. Planleggingen støtter foreløpig nøyaktig ett skrivbart mål;
+flere mål blokkeres til hver operasjon kan bindes eksplisitt til riktig mål. Alle
+relative stier kanoniseres under målets dokumenterte case-modus, og casekollisjoner
+blokkerer planlegging. En eksisterende målfil behandles konservativt som en
+versjonert erstatning med `MATCH_FINGERPRINT`; lik filstørrelse tolkes aldri alene
+som identisk innhold. Mål-ekstra beholdes.
+
+Catalog migration 31 lagrer ett materialiseringsutfall per eksakte aktive
+jobbrevisjon. `SEALED` og `NO_CHANGES` er immutable og gjenbrukes ved startup og
+idempotent command-replay. `BLOCKED` og `FAILED` kan oppdateres etter ny
+klassifisering eller nye snapshots. GUI viser den forseglede planen også før en run
+finnes, og ingen run opprettes automatisk. Planer med `CREATE_DIRECTORY` kan
+kontrolleres, men markeres som ikke kjørbare; run admission avviser dem til
+journalført katalogoppretting finnes i executoren.
+
 ### 4.4 Eierskap, leases, preconditions og destruktiv sperre
 
 Ingen muterende target-operasjon utføres uten:
@@ -2158,8 +2175,17 @@ og utføre en avgrenset write/read/delete-test; den kopierer ingen brukerfiler.
 Vellykket registrering vises som **Skrivbar og registrert** i jobbdeltaljen. Dersom
 registreringen ikke kan fullføres, beholdes hele det gjennomgåtte utkastet og knappen
 endres til **Prøv registrering på nytt**. Feilteksten brytes vertikalt i arbeidsflaten
-uten horisontal scrolling eller clipping. Første automatiske plan/kontroll etter
-registrering er neste slice og skal ikke påstås utført av denne handlingen ennå.
+uten horisontal scrolling eller clipping. Alle dynamiske source-, target-, status- og
+planetiketter reserverer høyden som den aktuelle bredden faktisk krever, også etter
+at et langt mål er valgt og jobbdeltaljen utvides.
+
+Etter registrering materialiserer Engine Host nå en immutable første plan fra de
+eksakte forseglede source-/target-snapshottene. Den aktive jobbdeltaljen viser
+planstatus, operasjonsantall, bytes og en bounded operasjonspreview selv når ingen
+run finnes. Dette starter aldri kopiering automatisk. Lokale planer som trenger
+katalogoppretting vises som **Kun forhåndsvisning** og kan ikke startes før den
+journalførte katalogoperasjonen er implementert. Første eksplisitte
+**Start backup**-kommando er neste slice.
 
 Etter første vellykkede manuelle backup kan programmet vise én diskret anbefaling: `Vil du kjøre denne backupen automatisk?` med handlingen **Sett opp automatikk**. Den skal ikke avbryte fullføringsoppsummeringen.
 
@@ -4943,6 +4969,35 @@ Muterende operasjoner skal alltid ha en eksplisitt target-precondition. `NONE` e
 - `CHECK (operation_id <> depends_on_operation_id)`
 
 Bruk eksplisitte avhengigheter bare når fase/dybde ikke er nok. Seal-valideringen må avvise syklus.
+
+#### `initial_backup_plan_materializations`
+
+Catalog migration 31 materialiserer utfallet av første standard-backupplan for én
+eksakt aktiv jobbrevisjon:
+
+- `job_id TEXT NOT NULL`
+- `job_revision_id TEXT NOT NULL`
+- `analysis_id TEXT REFERENCES analyses(id) ON DELETE RESTRICT`
+- `plan_id TEXT UNIQUE REFERENCES plan_seal_details(plan_id) ON DELETE RESTRICT`
+- `state TEXT NOT NULL` — `SEALED`, `NO_CHANGES`, `BLOCKED` eller `FAILED`
+- `reason_code TEXT NOT NULL`
+- `operation_count INTEGER NOT NULL`
+- `planned_bytes INTEGER NOT NULL`
+- `plan_runnable INTEGER NOT NULL`
+- `next_action TEXT NOT NULL`
+- `started_utc TEXT NOT NULL`
+- `completed_utc TEXT NOT NULL`
+- `row_version INTEGER NOT NULL`
+- primærnøkkel og sammensatt FK `(job_id, job_revision_id)`
+
+`SEALED` krever både eksakt `analysis_id` og `plan_id`; `NO_CHANGES` krever eksakt
+analyse uten plan og med null operasjoner/bytes. Terminale `SEALED`- og
+`NO_CHANGES`-rader kan verken oppdateres eller slettes. Materializeren aksepterer
+bare forseglede source/target-snapshots fra samme aktive jobbrevisjon, en
+`READ_ONLY_READY`-kilde og et `WRITABLE_READY`-mål med eksakt
+registration-/markerbevis. Utfallet opprettes i samme katalogtransaksjon som
+planforseglingen, slik at restart og command-replay aldri lager en ny planidentitet
+for samme terminale input.
 
 #### `runs`
 
@@ -7929,6 +7984,15 @@ python -m importlinter
 - Implementer intern backup/migration epoch etter valgt databasearkitektur og AppData-kapasitetsmåling/preflight.
 - Opprett falsk monoton/UTC-klokke, fake ports og feilinjeksjonsgrensesnitt.
 - Generer schema-/state-/reason-code-dokumentasjon og typer i CI; håndskrevet drift skal feile builden.
+
+0B-evidence 2026-07-31: Catalog migration 31 og
+`initial_backup_plan_materializations` binder første standard-backupplan til den
+aktive jobbrevisjonens eksakte forseglede source-/target-snapshots. Terminal
+`SEALED`/`NO_CHANGES` er immutable og replayes uten ny plan-ID. Planleggeren
+normaliserer under target case-semantikk, blokkerer casekollisjon og bruker
+konservative target-preconditions. GUI kan lese planen uten at en run finnes.
+Ingen run startes automatisk; `CREATE_DIRECTORY`-planer er preview-only til
+directory executor/journal er ferdig.
 
 #### Kvalitetsport
 

@@ -104,6 +104,20 @@ invariants:
     active_heads_advanced:
       - endpoint_heads
       - job_heads
+  - id: SYNC-002_INITIAL_BACKUP_PLAN_MATERIALIZATION
+    requirement_id: SYNC-002
+    assertion: >
+      The first backup plan is derived from exact sealed snapshots, saved with
+      its active job revision as one catalog transaction, and never starts a
+      run without a separate explicit command.
+    materialization_table: initial_backup_plan_materializations
+    terminal_states: [SEALED, NO_CHANGES]
+    terminal_immutable: true
+    exact_bindings:
+      active_revision_columns: [job_id, job_revision_id]
+      analysis_column: analysis_id
+      plan_column: plan_id
+    execution_requires_explicit_start: true
   - id: DB-007_PARENT_SCOPE_COMPOSITE_KEYS
     requirement_id: DB-007
     assertion: Security-relevant child rows are bound to their parent scope with composite keys.
@@ -145,6 +159,10 @@ invariants:
         parent_table: job_revisions
         parent_columns: [job_id, id]
       - child_table: standard_backup_job_snapshot_materializations
+        child_columns: [job_id, job_revision_id]
+        parent_table: job_revisions
+        parent_columns: [job_id, id]
+      - child_table: initial_backup_plan_materializations
         child_columns: [job_id, job_revision_id]
         parent_table: job_revisions
         parent_columns: [job_id, id]

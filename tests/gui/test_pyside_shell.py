@@ -520,6 +520,7 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         job_detail_targets = window.findChild(QLabel, "jobDetailTargetsValue")
         job_detail_defaults = window.findChild(QLabel, "jobDetailDefaultsValue")
         job_detail_revision = window.findChild(QLabel, "jobDetailRevisionValue")
+        job_detail_plan = window.findChild(QLabel, "jobDetailPlanValue")
         job_detail_rows = window.findChildren(QLabel, "jobDetailTargetRow")
         plan_preview_summary = window.findChild(QLabel, "planPreviewSummary")
         plan_preview_rows = window.findChildren(QLabel, "planPreviewRow")
@@ -559,6 +560,9 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert job_detail_defaults.text() == "Oppdater backup - Alle brukerfiler - Standard kontroll"
         assert job_detail_revision is not None
         assert job_detail_revision.text() == "Revisjon: job-rev-a - Filter: filter-a"
+        assert job_detail_plan is not None
+        assert job_detail_plan.text().startswith("2 operasjoner fra plan-a.")
+        assert "2048 B" in job_detail_plan.text()
         assert job_detail_rows[0].text() == (
             "USB 1: E:/Backup · Skrivbar og registrert"
         )
@@ -591,6 +595,8 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert job_detail_targets.text() == "1 target / 1 independent device"
         assert job_detail_defaults.text() == "Update backup - All user files - Standard verification"
         assert job_detail_revision.text() == "Revision: job-rev-a - Filter: filter-a"
+        assert job_detail_plan.text().startswith("2 operations from plan-a.")
+        assert job_detail_plan.text().endswith("Preview only")
         assert plan_preview_summary.text() == "2 operations from plan-a."
         assert plan_preview_rows[0].text() == "Low: Create folder: Photos"
         assert plan_preview_rows[1].text() == "Low: Copy new: Photos/2026/a.jpg - 2.0 KiB"
@@ -614,6 +620,7 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert job_detail_targets.text() == "1 mål / 1 uavhengig enhet"
         assert job_detail_defaults.text() == "Oppdater backup - Alle brukerfiler - Standard kontroll"
         assert job_detail_revision.text() == "Revisjon: job-rev-a - Filter: filter-a"
+        assert job_detail_plan.text().startswith("2 operasjoner fra plan-a.")
         assert plan_preview_summary.text() == "2 operasjoner fra plan-a."
         assert plan_preview_rows[0].text() == "Lav: Opprett mappe: Photos"
         assert plan_preview_rows[1].text() == "Lav: Kopier ny: Photos/2026/a.jpg - 2.0 KiB"
@@ -643,6 +650,30 @@ def test_component_gallery_is_development_only(qapp) -> None:
 
     try:
         assert window.findChild(QWidget, "componentGallery") is not None
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_current_job_plan_remains_visible_without_any_run(qapp) -> None:
+    provider = _FakePlanOnlyDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.refresh_engine_status()
+
+        plan_summary = window.findChild(QLabel, "planPreviewSummary")
+        job_plan = window.findChild(QLabel, "jobDetailPlanValue")
+        assert plan_summary is not None
+        assert plan_summary.text() == "2 operasjoner fra plan-a."
+        assert job_plan is not None
+        assert job_plan.text().startswith("2 operasjoner fra plan-a.")
+        assert provider.calls.count("get_plan_operations") == 1
+        assert provider.calls.count("get_plan_endpoints") == 1
     finally:
         window.close()
         window.deleteLater()
@@ -813,6 +844,17 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                                 ),
                             }
                         ],
+                        "initial_plan": {
+                            "state": "SEALED",
+                            "reason_code": "INITIAL_BACKUP_PLAN_READY_FOR_REVIEW",
+                            "analysis_id": "analysis-a",
+                            "plan_id": "plan-a",
+                            "plan_checksum": "a" * 64,
+                            "operation_count": 2,
+                            "planned_bytes": 2048,
+                            "plan_runnable": False,
+                            "next_action": "Review the plan.",
+                        },
                     },
                 }
             }
@@ -1071,6 +1113,27 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                             "recorded_utc": "2026-07-20T12:00:00.000Z",
                         }
                     ],
+                }
+            }
+        )
+
+
+class _FakePlanOnlyDashboardEngineClient(_FakeDashboardEngineClient):
+    def get_activity_overview(
+        self,
+        *,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        del job_id, limit, offset
+        self.calls.append("get_activity_overview")
+        return IpcResponse.accepted(
+            {
+                "activity_overview": {
+                    "read_model_available": True,
+                    "has_more": False,
+                    "runs": [],
                 }
             }
         )

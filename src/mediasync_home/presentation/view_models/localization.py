@@ -28,6 +28,7 @@ class ShellText:
     defaults: str
     retention: str
     revision: str
+    plan: str
     create_backup_tooltip: str
     job_detail_targets_heading: str
     engine_host: str
@@ -62,6 +63,7 @@ NB_TEXT = ShellText(
     defaults="Standard",
     retention="Bevaring",
     revision="Revisjon",
+    plan="Plan",
     create_backup_tooltip=(
         "Opprett jobb og registrer valgte mål som skrivbare MediaSync-endepunkter"
     ),
@@ -99,6 +101,7 @@ EN_TEXT = ShellText(
     defaults="Defaults",
     retention="Retention",
     revision="Revision",
+    plan="Plan",
     create_backup_tooltip=(
         "Create the job and register selected targets as writable MediaSync endpoints"
     ),
@@ -139,6 +142,8 @@ _NB_TO_EN = {
     "Ingen kilde valgt": "No source selected",
     "Ingen kildesnapshot å vise.": "No source snapshot to inspect.",
     "Ingen lagret backupjobb": "No saved backup job",
+    "Ingen endringer": "No changes",
+    "Ingen plan ennå.": "No plan yet.",
     "Ingen mål konfigurert": "No targets configured",
     "Ingen mål valgt": "No targets selected",
     "Ingen mål å vise.": "No targets to show.",
@@ -160,6 +165,7 @@ _NB_TO_EN = {
     ),
     "Kontroller resultatet før neste backup.": "Check the result before the next backup.",
     "Kontrollerer": "Checking",
+    "Klar til kontroll": "Ready for review",
     "Kontrollerer mål før lease og revalidering.": "Checking targets before lease and revalidation.",
     "Kontrollerer måltilgang.": "Checking target access.",
     "Kontrakt": "Contract",
@@ -183,6 +189,9 @@ _NB_TO_EN = {
     "Prøv målregistrering igjen": "Retry target registration",
     "Opprett mappe": "Create folder",
     "Pauset": "Paused",
+    "Plan venter": "Plan waiting",
+    "Planlegging feilet": "Planning failed",
+    "Planstatus": "Plan status",
     "Planforhåndsvisning": "Plan preview",
     "Planendepunkter": "Plan endpoints",
     "Planendepunktvisningen er ikke tilgjengelig.": "Plan endpoint read model is not available.",
@@ -191,6 +200,7 @@ _NB_TO_EN = {
     "Protokoll venter": "Protocol pending",
     "Revisjon": "Revision",
     "Registrering venter": "Registration pending",
+    "Kun forhåndsvisning": "Preview only",
     "Se gjennom blokkeringen før ny kjøring.": "Review the block before a new run.",
     "Se gjennom målfeilen.": "Review the target error.",
     "Sist sikkerhetskopiert": "Last backed up",

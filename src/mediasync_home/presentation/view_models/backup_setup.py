@@ -140,6 +140,10 @@ class BackupJobDetailViewState:
     target_lines: tuple[str, ...]
     read_model_available: bool
     found: bool
+    plan_summary_label: str = "Ingen plan ennå."
+    plan_id: str | None = None
+    plan_checksum: str | None = None
+    plan_state: str | None = None
 
 
 @dataclass(frozen=True)
@@ -528,6 +532,8 @@ def _job_detail_from_payload(payload: dict[object, object], *, job_id: str | Non
         )
     job_revision_id = _required_text(payload.get("job_revision_id"))
     filter_set_id = _required_text(payload.get("filter_set_id"))
+    initial_plan = payload.get("initial_plan")
+    plan_payload = initial_plan if isinstance(initial_plan, dict) else {}
     return BackupJobDetailViewState(
         job_id=_required_text(payload.get("job_id")) or job_id,
         title=(
@@ -549,6 +555,38 @@ def _job_detail_from_payload(payload: dict[object, object], *, job_id: str | Non
         target_lines=tuple(_target_detail_line(target) for target in targets),
         read_model_available=True,
         found=True,
+        plan_summary_label=_initial_plan_summary(plan_payload),
+        plan_id=_optional_text(plan_payload.get("plan_id")),
+        plan_checksum=_optional_text(plan_payload.get("plan_checksum")),
+        plan_state=_optional_text(plan_payload.get("state")),
+    )
+
+
+def _initial_plan_summary(payload: dict[object, object]) -> str:
+    state = _optional_text(payload.get("state"))
+    if state is None:
+        return "Ingen plan ennå."
+    reason_code = _required_text(payload.get("reason_code")) or "ukjent årsak"
+    if state == "NO_CHANGES":
+        return "Ingen endringer"
+    if state == "BLOCKED":
+        return f"Plan venter: {reason_code}"
+    if state == "FAILED":
+        return f"Planlegging feilet: {reason_code}"
+    if state != "SEALED":
+        return f"Planstatus: {state}"
+    operation_count = _non_negative_int(payload.get("operation_count")) or 0
+    planned_bytes = _non_negative_int(payload.get("planned_bytes")) or 0
+    plan_id = _required_text(payload.get("plan_id")) or "ukjent plan"
+    operation_word = "operasjon" if operation_count == 1 else "operasjoner"
+    readiness = (
+        "Klar til kontroll"
+        if payload.get("plan_runnable") is True
+        else "Kun forhåndsvisning"
+    )
+    return (
+        f"{operation_count} {operation_word} fra {plan_id}. · "
+        f"{planned_bytes} B · {readiness}"
     )
 
 

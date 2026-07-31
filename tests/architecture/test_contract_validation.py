@@ -116,6 +116,26 @@ def test_database_contract_rejects_missing_parent_scope_foreign_key() -> None:
         validate_contracts.validate_database_contract(document)
 
 
+def test_database_contract_rejects_mutable_initial_plan_terminal_evidence() -> None:
+    yaml = _yaml_loader()
+    document = validate_contracts.load_yaml(
+        validate_contracts.ROOT / "schema/database-contract.yaml",
+        yaml,
+    )
+    document = copy.deepcopy(document)
+    invariant = _database_invariant(
+        document,
+        "SYNC-002_INITIAL_BACKUP_PLAN_MATERIALIZATION",
+    )
+    invariant["terminal_immutable"] = False
+
+    with pytest.raises(
+        validate_contracts.ContractValidationError,
+        match="terminal evidence must be immutable",
+    ):
+        validate_contracts.validate_database_contract(document)
+
+
 def test_database_contract_rejects_missing_immutable_revision_table() -> None:
     yaml = _yaml_loader()
     document = validate_contracts.load_yaml(

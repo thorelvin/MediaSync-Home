@@ -59,6 +59,9 @@ from mediasync_home.application.job_read_models import (
     query_backup_job_detail,
     query_backup_overview,
 )
+from mediasync_home.application.initial_backup_planning import (
+    InitialBackupPlanRefreshReport,
+)
 from mediasync_home.application.outbox import OutboxStore, command_effect_outbox_message
 from mediasync_home.application.plan_read_models import (
     PlanEndpointsQueryError,
@@ -216,6 +219,9 @@ class EngineHostIpcService:
     writable_endpoint_registration_utc_now: Callable[[], str] | None = None
     job_snapshot_refresh: (
         Callable[[], SnapshotMaterializationRefreshReport] | None
+    ) = None
+    initial_backup_plan_refresh: (
+        Callable[[], InitialBackupPlanRefreshReport] | None
     ) = None
     run_activity_read_store: RunActivityReadModelStore | None = None
     run_progress_snapshot_store: RunProgressSnapshotStore | None = None
@@ -1160,7 +1166,8 @@ class EngineHostIpcService:
             envelope=envelope,
         )
         response = self._refresh_endpoint_classification_after_job_command(response)
-        return self._refresh_job_snapshots_after_job_command(response)
+        response = self._refresh_job_snapshots_after_job_command(response)
+        return self._refresh_initial_backup_plan_after_job_command(response)
 
     def _register_writable_targets_after_job_command(
         self,
@@ -1268,6 +1275,39 @@ class EngineHostIpcService:
             payload["job_snapshot_refresh"] = {
                 "completed": False,
                 "reason_code": "JOB_SNAPSHOT_REFRESH_FAILED",
+            }
+        return IpcResponse.accepted(payload)
+
+    def _refresh_initial_backup_plan_after_job_command(
+        self,
+        response: IpcResponse,
+    ) -> IpcResponse:
+        if (
+            response.status is not IpcStatus.ACCEPTED
+            or self.initial_backup_plan_refresh is None
+        ):
+            return response
+        payload = dict(response.payload)
+        snapshot_refresh = payload.get("job_snapshot_refresh")
+        if (
+            isinstance(snapshot_refresh, dict)
+            and snapshot_refresh.get("completed") is False
+        ):
+            payload["initial_backup_plan_refresh"] = {
+                "completed": False,
+                "reason_code": "INITIAL_BACKUP_PLAN_SNAPSHOT_REFRESH_REQUIRED",
+            }
+            return IpcResponse.accepted(payload)
+        try:
+            report = self.initial_backup_plan_refresh()
+            payload["initial_backup_plan_refresh"] = {
+                "completed": True,
+                "report": report.to_dict(),
+            }
+        except Exception:
+            payload["initial_backup_plan_refresh"] = {
+                "completed": False,
+                "reason_code": "INITIAL_BACKUP_PLAN_REFRESH_FAILED",
             }
         return IpcResponse.accepted(payload)
 

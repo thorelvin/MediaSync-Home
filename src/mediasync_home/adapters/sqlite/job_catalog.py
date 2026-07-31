@@ -22,6 +22,7 @@ from mediasync_home.application.job_drafts import (
     draft_path_labels_overlap,
 )
 from mediasync_home.application.job_read_models import (
+    InitialBackupPlanSummary,
     StandardBackupJobDetail,
     StandardBackupJobSummary,
     StandardBackupTargetSummary,
@@ -295,6 +296,26 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
             )
             for registration_row in registration_rows
         }
+        initial_plan_row = self._connection.execute(
+            """
+            SELECT
+                materializations.state,
+                materializations.reason_code,
+                materializations.analysis_id,
+                materializations.plan_id,
+                seals.plan_checksum,
+                materializations.operation_count,
+                materializations.planned_bytes,
+                materializations.plan_runnable,
+                materializations.next_action
+            FROM initial_backup_plan_materializations AS materializations
+            LEFT JOIN plan_seal_details AS seals
+                ON seals.plan_id = materializations.plan_id
+            WHERE materializations.job_id = ?
+                AND materializations.job_revision_id = ?
+            """,
+            (detail.job_id, detail.job_revision_id),
+        ).fetchone()
         return replace(
             detail,
             targets=tuple(
@@ -304,6 +325,11 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                     registration_reason_code=registrations.get(index, (None, None))[1],
                 )
                 for index, target in enumerate(detail.targets, start=1)
+            ),
+            initial_plan=(
+                None
+                if initial_plan_row is None
+                else _initial_plan_summary_from_row(initial_plan_row)
             ),
         )
 
@@ -389,6 +415,22 @@ def _job_detail_from_row(row: sqlite3.Row | tuple[object, ...]) -> StandardBacku
             for target in targets
         ),
         filter_set_version=_required_int(row[7]),
+    )
+
+
+def _initial_plan_summary_from_row(
+    row: sqlite3.Row | tuple[object, ...],
+) -> InitialBackupPlanSummary:
+    return InitialBackupPlanSummary(
+        state=str(row[0]),
+        reason_code=str(row[1]),
+        analysis_id=_optional_str(row[2]),
+        plan_id=_optional_str(row[3]),
+        plan_checksum=_optional_str(row[4]),
+        operation_count=_required_non_negative_int(row[5]),
+        planned_bytes=_required_non_negative_int(row[6]),
+        plan_runnable=bool(_required_non_negative_int(row[7])),
+        next_action=str(row[8]),
     )
 
 
@@ -497,4 +539,10 @@ def _optional_str(value: object) -> str | None:
 def _required_int(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise SqliteJobCatalogError("STANDARD_BACKUP_JOB_FILTER_VERSION_INVALID")
+    return value
+
+
+def _required_non_negative_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise SqliteJobCatalogError("INITIAL_BACKUP_PLAN_SUMMARY_INVALID")
     return value

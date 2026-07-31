@@ -40,6 +40,9 @@ from mediasync_home.application.job_read_models import (
     StandardBackupJobSummary,
     StandardBackupTargetSummary,
 )
+from mediasync_home.application.initial_backup_planning import (
+    InitialBackupPlanRefreshReport,
+)
 from mediasync_home.application.plans import (
     PlanEndpoint,
     PlanEndpointCursor,
@@ -1808,6 +1811,12 @@ def test_enabled_create_standard_backup_job_persists_job_and_succeeds_receipt() 
     service.standard_backup_job_catalog = catalog
     service.standard_backup_job_id_factory = id_factory
     service.command_receipt_store = receipts
+    service.job_snapshot_refresh = lambda: SnapshotMaterializationRefreshReport(
+        0, 0, 0, 0, 0
+    )
+    service.initial_backup_plan_refresh = lambda: InitialBackupPlanRefreshReport(
+        0, 0, 0, 0, 0
+    )
     ipc_client = _client(service=service)
     ipc_client.connect()
 
@@ -1832,6 +1841,17 @@ def test_enabled_create_standard_backup_job_persists_job_and_succeeds_receipt() 
     assert response.payload["receipt"]["state"] == CommandReceiptState.SUCCEEDED.value
     assert response.payload["receipt"]["result_entity_type"] == "standard_backup_job"
     assert response.payload["receipt"]["result_entity_id"] == "job-a"
+    assert response.payload["initial_backup_plan_refresh"] == {
+        "completed": True,
+        "report": {
+            "sealed_plan_count": 0,
+            "reused_plan_count": 0,
+            "no_changes_count": 0,
+            "blocked_job_count": 0,
+            "failed_job_count": 0,
+            "results": [],
+        },
+    }
     assert receipt is not None
     assert receipt.state is CommandReceiptState.SUCCEEDED
     assert catalog.load_standard_backup_job("job-a") is not None
@@ -1932,7 +1952,15 @@ def test_created_job_stays_accepted_when_post_commit_snapshot_refresh_fails() ->
     def fail_refresh() -> SnapshotMaterializationRefreshReport:
         raise RuntimeError("private filesystem detail")
 
+    initial_plan_refresh_calls = 0
+
+    def refresh_initial_plan() -> InitialBackupPlanRefreshReport:
+        nonlocal initial_plan_refresh_calls
+        initial_plan_refresh_calls += 1
+        return InitialBackupPlanRefreshReport(0, 0, 0, 0, 0)
+
     service.job_snapshot_refresh = fail_refresh
+    service.initial_backup_plan_refresh = refresh_initial_plan
     ipc_client = _client(service=service)
     ipc_client.connect()
 
@@ -1950,6 +1978,11 @@ def test_created_job_stays_accepted_when_post_commit_snapshot_refresh_fails() ->
         "completed": False,
         "reason_code": "JOB_SNAPSHOT_REFRESH_FAILED",
     }
+    assert response.payload["initial_backup_plan_refresh"] == {
+        "completed": False,
+        "reason_code": "INITIAL_BACKUP_PLAN_SNAPSHOT_REFRESH_REQUIRED",
+    }
+    assert initial_plan_refresh_calls == 0
     assert catalog.load_standard_backup_job("job-a") is not None
     receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
     assert receipt is not None

@@ -91,6 +91,18 @@ REQUIRED_DATABASE_PARENT_SCOPE_FKS = {
     ),
     ("analyses", ("job_id", "job_revision_id"), "job_revisions", ("job_id", "id")),
     (
+        "standard_backup_job_snapshot_materializations",
+        ("job_id", "job_revision_id"),
+        "job_revisions",
+        ("job_id", "id"),
+    ),
+    (
+        "initial_backup_plan_materializations",
+        ("job_id", "job_revision_id"),
+        "job_revisions",
+        ("job_id", "id"),
+    ),
+    (
         "analysis_targets",
         ("endpoint_id", "endpoint_revision_id"),
         "endpoint_revisions",
@@ -623,6 +635,39 @@ def _validate_writable_endpoint_registration_invariant(
         fail("CTRL-001 registration active heads drifted")
 
 
+def _validate_initial_backup_plan_materialization_invariant(
+    invariant: dict[str, Any],
+) -> None:
+    if invariant.get("requirement_id") != "SYNC-002":
+        fail("initial backup plan materialization invariant must reference SYNC-002")
+    if invariant.get("materialization_table") != "initial_backup_plan_materializations":
+        fail("initial backup plan materialization must use its catalog evidence table")
+    if set(
+        _column_tuple(
+            invariant.get("terminal_states"),
+            "SYNC-002 terminal_states",
+        )
+    ) != {"SEALED", "NO_CHANGES"}:
+        fail("initial backup plan terminal states must be SEALED and NO_CHANGES")
+    if invariant.get("terminal_immutable") is not True:
+        fail("initial backup plan terminal evidence must be immutable")
+    bindings = require_mapping(
+        invariant.get("exact_bindings"),
+        "SYNC-002 exact_bindings",
+    )
+    if _column_tuple(
+        bindings.get("active_revision_columns"),
+        "SYNC-002 active_revision_columns",
+    ) != ("job_id", "job_revision_id"):
+        fail("initial backup plan must bind the exact active job revision")
+    if bindings.get("analysis_column") != "analysis_id":
+        fail("initial backup plan must bind its sealed analysis")
+    if bindings.get("plan_column") != "plan_id":
+        fail("initial backup plan must bind its sealed plan")
+    if invariant.get("execution_requires_explicit_start") is not True:
+        fail("initial backup plan materialization must not start a run automatically")
+
+
 def validate_state_machines(document: dict[str, Any]) -> int:
     if document.get("schema_version") != 1:
         fail("state-machines.yaml schema_version must be 1")
@@ -703,6 +748,7 @@ def validate_database_contract(document: dict[str, Any]) -> int:
         "DB-006_ENDPOINT_HEADS_ARE_SEPARATE",
         "DB-006_JOB_HEADS_ARE_SEPARATE",
         "DB-007_PARENT_SCOPE_COMPOSITE_KEYS",
+        "SYNC-002_INITIAL_BACKUP_PLAN_MATERIALIZATION",
     }
     missing = sorted(required_ids - set(invariant_by_id))
     if missing:
@@ -732,6 +778,9 @@ def validate_database_contract(document: dict[str, Any]) -> int:
     )
     _validate_writable_endpoint_registration_invariant(
         invariant_by_id["CTRL-001_WRITABLE_ENDPOINT_REGISTRATION"]
+    )
+    _validate_initial_backup_plan_materialization_invariant(
+        invariant_by_id["SYNC-002_INITIAL_BACKUP_PLAN_MATERIALIZATION"]
     )
     _validate_parent_scope_invariant(invariant_by_id["DB-007_PARENT_SCOPE_COMPOSITE_KEYS"])
     return len(invariants)

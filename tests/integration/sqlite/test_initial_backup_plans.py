@@ -1,0 +1,469 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+
+from tests.support.sqlite_catalog import insert_default_filter_set_version
+
+from mediasync_home.adapters.local_endpoint_classifier import (
+    LocalEndpointControlAreaClassifier,
+)
+from mediasync_home.adapters.local_snapshot_scanner import (
+    LocalFilesystemSnapshotScanner,
+)
+from mediasync_home.adapters.sqlite.connection_policy import (
+    apply_sqlite_connection_policy,
+    catalog_critical_writer_policy,
+)
+from mediasync_home.adapters.sqlite.endpoint_classifications import (
+    SqliteEndpointClassificationRefresher,
+)
+from mediasync_home.adapters.sqlite.initial_backup_plans import (
+    SqliteInitialBackupPlanMaterializer,
+)
+from mediasync_home.adapters.sqlite.job_catalog import SqliteStandardBackupJobCatalog
+from mediasync_home.adapters.sqlite.job_snapshots import (
+    SqliteJobSnapshotMaterializer,
+)
+from mediasync_home.adapters.sqlite.migrations import (
+    apply_sqlite_migrations,
+    catalog_migration_plan,
+)
+from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
+from mediasync_home.adapters.sqlite.snapshots import SqliteSnapshotEntryStore
+from mediasync_home.adapters.sqlite.writable_endpoint_registrations import (
+    SqliteWritableEndpointRegistrationStore,
+)
+from mediasync_home.adapters.writable_endpoint_registration import (
+    LocalWritableEndpointControlAreaProvisioner,
+)
+from mediasync_home.application.initial_backup_planning import (
+    InitialBackupPlanIdFactory,
+)
+from mediasync_home.application.snapshot_scanning import (
+    DirectoryCaseContext,
+    SnapshotMaterializationIds,
+)
+from mediasync_home.application.writable_endpoint_registration import (
+    WritableEndpointRegistrationCandidate,
+    WritableEndpointRegistrationCoordinator,
+    WritableEndpointRegistrationIds,
+    WritableEndpointTargetIds,
+)
+
+
+INSTALLATION_ID = "11111111-1111-4111-8111-111111111111"
+JOB_ID = "22222222-2222-4222-8222-222222222222"
+JOB_REVISION_ID = "33333333-3333-4333-8333-333333333333"
+SOURCE_ENDPOINT_ID = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+SOURCE_REVISION_ID = "bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb"
+TARGET_ENDPOINT_ID = "44444444-4444-4444-8444-444444444444"
+TARGET_REVISION_ID = "55555555-5555-4555-8555-555555555555"
+NEW_TARGET_REVISION_ID = "66666666-6666-4666-8666-666666666666"
+CONTROL_AREA_ID = "77777777-7777-4777-8777-777777777777"
+INTENT_ID = "88888888-8888-4888-8888-888888888888"
+NEW_JOB_REVISION_ID = "99999999-9999-4999-8999-999999999999"
+
+
+@dataclass
+class _FixedPlanIds(InitialBackupPlanIdFactory):
+    calls: int = 0
+
+    def new_initial_backup_plan_id(self) -> str:
+        self.calls += 1
+        return f"plan-{self.calls}"
+
+
+class _FixedRegistrationIds:
+    def new_registration_ids(
+        self,
+        candidates: tuple[WritableEndpointRegistrationCandidate, ...],
+    ) -> WritableEndpointRegistrationIds:
+        assert len(candidates) == 1
+        return WritableEndpointRegistrationIds(
+            intent_id=INTENT_ID,
+            resulting_job_revision_id=NEW_JOB_REVISION_ID,
+            targets=(
+                WritableEndpointTargetIds(
+                    target_ordinal=1,
+                    endpoint_revision_id=NEW_TARGET_REVISION_ID,
+                    control_area_id=CONTROL_AREA_ID,
+                ),
+            ),
+        )
+
+
+class _FixedSnapshotIds:
+    def new_snapshot_materialization_ids(
+        self,
+        *,
+        snapshot_count: int,
+    ) -> SnapshotMaterializationIds:
+        assert snapshot_count == 2
+        return SnapshotMaterializationIds(
+            analysis_id="analysis-a",
+            snapshot_ids=("snapshot-source", "snapshot-target"),
+        )
+
+
+class _FixedCaseModeProbe:
+    def inspect_directory_case_context(self, path: Path) -> DirectoryCaseContext:
+        del path
+        return DirectoryCaseContext(
+            case_mode="CASE_INSENSITIVE",
+            evidence="FIXED_TEST_CASE_MODE_V1",
+        )
+
+
+def test_initial_plan_materializer_seals_exact_registered_snapshots_and_replays(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    (source / "Photos").mkdir(parents=True)
+    target.mkdir()
+    (source / "Readme.txt").write_text("new-readme", encoding="utf-8")
+    (source / "Photos" / "Image.jpg").write_bytes(b"image")
+    (target / "Readme.txt").write_text("old", encoding="utf-8")
+
+    with sqlite3.connect(database) as connection:
+        _prepare_registered_snapshots(
+            connection,
+            database=database,
+            source=source,
+            target=target,
+        )
+        plan_ids = _FixedPlanIds()
+        plans = SqlitePlanStore(connection)
+        materializer = SqliteInitialBackupPlanMaterializer(
+            connection,
+            plans=plans,
+            id_factory=plan_ids,
+        )
+
+        first = materializer.refresh_initial_backup_plans(
+            observed_utc="2026-07-31T15:03:00Z",
+        )
+        replay = materializer.refresh_initial_backup_plans(
+            observed_utc="2026-07-31T15:04:00Z",
+        )
+
+        assert first.sealed_plan_count == 1
+        assert first.reused_plan_count == 0
+        assert first.results[0].state == "SEALED"
+        assert first.results[0].job_revision_id == NEW_JOB_REVISION_ID
+        assert first.results[0].plan_id == "plan-1"
+        assert first.results[0].operation_count == 3
+        assert first.results[0].planned_bytes == 15
+        assert first.results[0].plan_runnable is False
+        assert replay.sealed_plan_count == 0
+        assert replay.reused_plan_count == 1
+        assert replay.results[0].idempotent_replay is True
+        assert plan_ids.calls == 1
+
+        plan = plans.load_sealed_plan("plan-1")
+        assert plan is not None
+        assert [operation.target_relative_path for operation in plan.operations] == [
+            "Photos",
+            "Readme.txt",
+            "Photos/Image.jpg",
+        ]
+        assert [endpoint.snapshot_id for endpoint in plan.endpoints] == [
+            "snapshot-source",
+            "snapshot-target",
+        ]
+        assert connection.execute(
+            """
+            SELECT state, analysis_id, plan_id, operation_count, planned_bytes,
+                   plan_runnable, row_version
+            FROM initial_backup_plan_materializations
+            """
+        ).fetchone() == (
+            "SEALED",
+            "analysis-a",
+            "plan-1",
+            3,
+            15,
+            0,
+            1,
+        )
+        detail = SqliteStandardBackupJobCatalog(
+            connection
+        ).load_standard_backup_job_detail(JOB_ID)
+        assert detail is not None
+        assert detail.initial_plan is not None
+        assert detail.initial_plan.plan_id == "plan-1"
+        assert detail.initial_plan.plan_checksum == plan.plan_checksum
+        assert detail.initial_plan.plan_runnable is False
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="INITIAL_BACKUP_PLAN_MATERIALIZATION_IMMUTABLE",
+        ):
+            connection.execute(
+                """
+                UPDATE initial_backup_plan_materializations
+                SET reason_code = 'CHANGED'
+                """
+            )
+
+
+def test_initial_plan_materializer_records_immutable_no_changes(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+
+    with sqlite3.connect(database) as connection:
+        _prepare_registered_snapshots(
+            connection,
+            database=database,
+            source=source,
+            target=target,
+        )
+        plan_ids = _FixedPlanIds()
+        materializer = SqliteInitialBackupPlanMaterializer(
+            connection,
+            plans=SqlitePlanStore(connection),
+            id_factory=plan_ids,
+        )
+
+        first = materializer.refresh_initial_backup_plans(
+            observed_utc="2026-07-31T16:03:00Z",
+        )
+        replay = materializer.refresh_initial_backup_plans(
+            observed_utc="2026-07-31T16:04:00Z",
+        )
+
+        assert first.no_changes_count == 1
+        assert first.results[0].state == "NO_CHANGES"
+        assert first.results[0].plan_id is None
+        assert replay.results[0].idempotent_replay is True
+        assert plan_ids.calls == 1
+        assert connection.execute("SELECT count(*) FROM plans").fetchone() == (0,)
+
+
+def _prepare_registered_snapshots(
+    connection: sqlite3.Connection,
+    *,
+    database: Path,
+    source: Path,
+    target: Path,
+) -> None:
+    _prepare_catalog(
+        connection,
+        database=database,
+        source=source,
+        target=target,
+    )
+    refresher = SqliteEndpointClassificationRefresher(
+        connection,
+        classifier=LocalEndpointControlAreaClassifier(),
+        local_installation_id=INSTALLATION_ID,
+    )
+    refresher.refresh_endpoint_classifications(
+        observed_utc="2026-07-31T15:00:00Z",
+    )
+    WritableEndpointRegistrationCoordinator(
+        store=SqliteWritableEndpointRegistrationStore(connection),
+        provisioner=LocalWritableEndpointControlAreaProvisioner(),
+        id_factory=_FixedRegistrationIds(),
+        owner_installation_id=INSTALLATION_ID,
+    ).register_job_targets(
+        job_id=JOB_ID,
+        job_revision_id=JOB_REVISION_ID,
+        command_request_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        command_idempotency_key="dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        observed_utc="2026-07-31T15:01:00Z",
+    )
+    refresher.refresh_endpoint_classifications(
+        observed_utc="2026-07-31T15:02:00Z",
+    )
+    snapshots = SqliteSnapshotEntryStore(connection)
+    report = SqliteJobSnapshotMaterializer(
+        connection,
+        scanner=LocalFilesystemSnapshotScanner(
+            case_mode_probe=_FixedCaseModeProbe(),
+        ),
+        id_factory=_FixedSnapshotIds(),
+        entry_store=snapshots,
+        seal_store=snapshots,
+    ).refresh_job_snapshots(
+        observed_utc="2026-07-31T15:02:30Z",
+    )
+    assert report.scanned_job_count == 1
+    assert report.sealed_snapshot_count == 2
+
+
+def _prepare_catalog(
+    connection: sqlite3.Connection,
+    *,
+    database: Path,
+    source: Path,
+    target: Path,
+) -> None:
+    apply_sqlite_connection_policy(
+        connection,
+        catalog_critical_writer_policy(database),
+    )
+    apply_sqlite_migrations(connection, catalog_migration_plan())
+    connection.execute(
+        "INSERT INTO jobs (id, kind) VALUES (?, 'multi_target_backup')",
+        (JOB_ID,),
+    )
+    connection.execute(
+        "INSERT INTO filter_sets (job_id, id) VALUES (?, 'filter-a')",
+        (JOB_ID,),
+    )
+    insert_default_filter_set_version(
+        connection,
+        job_id=JOB_ID,
+        filter_set_id="filter-a",
+    )
+    connection.execute(
+        """
+        INSERT INTO job_revisions (job_id, id, filter_set_id, filter_set_version)
+        VALUES (?, ?, 'filter-a', 1)
+        """,
+        (JOB_ID, JOB_REVISION_ID),
+    )
+    defaults_json = (
+        '{"behavior":"UPDATE_BACKUP","extra_files":"KEEP_ON_TARGET",'
+        '"file_selection":"ALL_USER_FILES","performance":"AUTO",'
+        '"retention":"THIRTY_DAYS","verification":"STANDARD"}'
+    )
+    targets_json = json.dumps(
+        [
+            {
+                "independent_device_id": None,
+                "name": "Target",
+                "path_label": str(target),
+            }
+        ],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    connection.execute(
+        """
+        INSERT INTO standard_backup_job_drafts (
+            draft_id,
+            schema_version,
+            source_name,
+            source_path_label,
+            defaults_json,
+            targets_json
+        )
+        VALUES ('draft-a', 1, 'Source', ?, ?, ?)
+        """,
+        (str(source), defaults_json, targets_json),
+    )
+    connection.execute(
+        """
+        INSERT INTO standard_backup_job_revision_details (
+            job_id,
+            job_revision_id,
+            draft_id,
+            command_request_id,
+            idempotency_key,
+            source_name,
+            source_path_label,
+            defaults_json,
+            targets_json
+        )
+        VALUES (?, ?, 'draft-a', 'request-a', 'create-a', 'Source', ?, ?, ?)
+        """,
+        (
+            JOB_ID,
+            JOB_REVISION_ID,
+            str(source),
+            defaults_json,
+            targets_json,
+        ),
+    )
+    connection.execute(
+        "INSERT INTO job_heads (job_id, active_revision_id) VALUES (?, ?)",
+        (JOB_ID, JOB_REVISION_ID),
+    )
+    _insert_endpoint(
+        connection,
+        endpoint_id=SOURCE_ENDPOINT_ID,
+        endpoint_revision_id=SOURCE_REVISION_ID,
+        root=source,
+        role="SOURCE",
+        ordinal=0,
+    )
+    _insert_endpoint(
+        connection,
+        endpoint_id=TARGET_ENDPOINT_ID,
+        endpoint_revision_id=TARGET_REVISION_ID,
+        root=target,
+        role="TARGET",
+        ordinal=1,
+    )
+    connection.commit()
+
+
+def _insert_endpoint(
+    connection: sqlite3.Connection,
+    *,
+    endpoint_id: str,
+    endpoint_revision_id: str,
+    root: Path,
+    role: str,
+    ordinal: int,
+) -> None:
+    connection.execute("INSERT INTO endpoints (id) VALUES (?)", (endpoint_id,))
+    connection.execute(
+        """
+        INSERT INTO endpoint_revisions (
+            endpoint_id,
+            id,
+            display_name,
+            root_uri,
+            generation
+        )
+        VALUES (?, ?, ?, ?, 1)
+        """,
+        (endpoint_id, endpoint_revision_id, role.title(), root.as_uri()),
+    )
+    connection.execute(
+        """
+        INSERT INTO endpoint_heads (endpoint_id, active_revision_id)
+        VALUES (?, ?)
+        """,
+        (endpoint_id, endpoint_revision_id),
+    )
+    connection.execute(
+        """
+        INSERT INTO standard_backup_job_endpoint_bindings (
+            job_id,
+            job_revision_id,
+            role,
+            ordinal,
+            endpoint_id,
+            endpoint_revision_id,
+            registration_state,
+            registration_reason_code
+        )
+        VALUES (
+            ?, ?, ?, ?, ?, ?,
+            'REGISTRATION_PENDING',
+            'ENDPOINT_CLASSIFICATION_PENDING'
+        )
+        """,
+        (
+            JOB_ID,
+            JOB_REVISION_ID,
+            role,
+            ordinal,
+            endpoint_id,
+            endpoint_revision_id,
+        ),
+    )

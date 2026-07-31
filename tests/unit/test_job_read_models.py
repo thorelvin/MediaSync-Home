@@ -111,15 +111,16 @@ def test_backup_job_detail_query_returns_exact_job_revision_payload() -> None:
             "source_path_label": "C:/Data/job-a",
             "configured_target_count": 1,
             "independent_device_count": 1,
-            "defaults": {
+                "defaults": {
                 "behavior": "UPDATE_BACKUP",
                 "file_selection": "ALL_USER_FILES",
                 "verification": "STANDARD",
                 "retention": "THIRTY_DAYS",
                 "extra_files": "KEEP_ON_TARGET",
-                "performance": "AUTO",
-            },
-            "targets": [
+                    "performance": "AUTO",
+                },
+                "initial_plan": None,
+                "targets": [
                 {
                     "name": "USB",
                     "path_label": "E:/Backup/job-a",

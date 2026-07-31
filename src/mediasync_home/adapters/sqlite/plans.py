@@ -38,8 +38,10 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
         self._connection = connection
 
     def save_sealed_plan(self, plan: SealedPlan) -> None:
+        outer_transaction = self._connection.in_transaction
         try:
-            self._connection.execute("BEGIN IMMEDIATE")
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
             self._connection.execute(
                 "INSERT INTO plans (id, analysis_id) VALUES (?, ?)",
                 (plan.plan_id, plan.analysis_id),
@@ -182,9 +184,10 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
                     plan.planned_bytes,
                 ),
             )
-            self._connection.execute("COMMIT")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
         except sqlite3.Error as exc:
-            if self._connection.in_transaction:
+            if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
             raise SqlitePlanStoreError("SEALED_PLAN_PERSISTENCE_FAILED") from exc
 

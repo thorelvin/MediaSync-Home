@@ -188,6 +188,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_writable_endpoint_registrations",
                 statements=CATALOG_WRITABLE_ENDPOINT_REGISTRATIONS,
             ),
+            SqliteMigration(
+                version=31,
+                name="catalog_initial_backup_plan_materializations",
+                statements=CATALOG_INITIAL_BACKUP_PLAN_MATERIALIZATIONS,
+            ),
         ),
     )
 
@@ -2190,6 +2195,74 @@ CATALOG_WRITABLE_ENDPOINT_REGISTRATIONS = (
     BEFORE DELETE ON writable_endpoint_registrations
     BEGIN
         SELECT RAISE(ABORT, 'WRITABLE_ENDPOINT_REGISTRATION_IMMUTABLE');
+    END
+    """,
+)
+
+CATALOG_INITIAL_BACKUP_PLAN_MATERIALIZATIONS = (
+    """
+    CREATE TABLE initial_backup_plan_materializations (
+        job_id TEXT NOT NULL,
+        job_revision_id TEXT NOT NULL,
+        analysis_id TEXT,
+        plan_id TEXT UNIQUE,
+        state TEXT NOT NULL CHECK (
+            state IN ('SEALED', 'NO_CHANGES', 'BLOCKED', 'FAILED')
+        ),
+        reason_code TEXT NOT NULL CHECK (length(trim(reason_code)) > 0),
+        operation_count INTEGER NOT NULL DEFAULT 0 CHECK (operation_count >= 0),
+        planned_bytes INTEGER NOT NULL DEFAULT 0 CHECK (planned_bytes >= 0),
+        plan_runnable INTEGER NOT NULL DEFAULT 0 CHECK (plan_runnable IN (0, 1)),
+        next_action TEXT NOT NULL CHECK (length(trim(next_action)) > 0),
+        started_utc TEXT NOT NULL,
+        completed_utc TEXT NOT NULL,
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+        PRIMARY KEY (job_id, job_revision_id),
+        FOREIGN KEY (job_id, job_revision_id)
+            REFERENCES job_revisions (job_id, id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (analysis_id)
+            REFERENCES analyses (id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (plan_id)
+            REFERENCES plan_seal_details (plan_id)
+            ON DELETE RESTRICT,
+        CHECK (
+            (state = 'SEALED' AND analysis_id IS NOT NULL AND plan_id IS NOT NULL)
+            OR (
+                state = 'NO_CHANGES'
+                AND analysis_id IS NOT NULL
+                AND plan_id IS NULL
+                AND operation_count = 0
+                AND planned_bytes = 0
+                AND plan_runnable = 0
+            )
+            OR (state IN ('BLOCKED', 'FAILED') AND plan_id IS NULL)
+        )
+    )
+    """,
+    """
+    CREATE INDEX idx_initial_backup_plan_materializations_state
+        ON initial_backup_plan_materializations (
+            state,
+            completed_utc,
+            job_id,
+            job_revision_id
+        )
+    """,
+    """
+    CREATE TRIGGER trg_initial_backup_plan_materializations_terminal_immutable
+    BEFORE UPDATE ON initial_backup_plan_materializations
+    WHEN OLD.state IN ('SEALED', 'NO_CHANGES')
+    BEGIN
+        SELECT RAISE(ABORT, 'INITIAL_BACKUP_PLAN_MATERIALIZATION_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_initial_backup_plan_materializations_no_delete
+    BEFORE DELETE ON initial_backup_plan_materializations
+    BEGIN
+        SELECT RAISE(ABORT, 'INITIAL_BACKUP_PLAN_MATERIALIZATION_IMMUTABLE');
     END
     """,
 )

@@ -783,6 +783,35 @@ Muterende operasjoner skal alltid ha en eksplisitt target-precondition. `NONE` e
 
 Bruk eksplisitte avhengigheter bare når fase/dybde ikke er nok. Seal-valideringen må avvise syklus.
 
+#### `initial_backup_plan_materializations`
+
+Catalog migration 31 materialiserer utfallet av første standard-backupplan for én
+eksakt aktiv jobbrevisjon:
+
+- `job_id TEXT NOT NULL`
+- `job_revision_id TEXT NOT NULL`
+- `analysis_id TEXT REFERENCES analyses(id) ON DELETE RESTRICT`
+- `plan_id TEXT UNIQUE REFERENCES plan_seal_details(plan_id) ON DELETE RESTRICT`
+- `state TEXT NOT NULL` — `SEALED`, `NO_CHANGES`, `BLOCKED` eller `FAILED`
+- `reason_code TEXT NOT NULL`
+- `operation_count INTEGER NOT NULL`
+- `planned_bytes INTEGER NOT NULL`
+- `plan_runnable INTEGER NOT NULL`
+- `next_action TEXT NOT NULL`
+- `started_utc TEXT NOT NULL`
+- `completed_utc TEXT NOT NULL`
+- `row_version INTEGER NOT NULL`
+- primærnøkkel og sammensatt FK `(job_id, job_revision_id)`
+
+`SEALED` krever både eksakt `analysis_id` og `plan_id`; `NO_CHANGES` krever eksakt
+analyse uten plan og med null operasjoner/bytes. Terminale `SEALED`- og
+`NO_CHANGES`-rader kan verken oppdateres eller slettes. Materializeren aksepterer
+bare forseglede source/target-snapshots fra samme aktive jobbrevisjon, en
+`READ_ONLY_READY`-kilde og et `WRITABLE_READY`-mål med eksakt
+registration-/markerbevis. Utfallet opprettes i samme katalogtransaksjon som
+planforseglingen, slik at restart og command-replay aldri lager en ny planidentitet
+for samme terminale input.
+
 #### `runs`
 
 - `id TEXT PRIMARY KEY`

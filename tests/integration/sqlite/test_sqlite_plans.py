@@ -51,6 +51,24 @@ def test_sqlite_plan_store_persists_sealed_plan(tmp_path: Path) -> None:
         assert _row_count(connection, "plan_operation_seal_details") == 2
 
 
+def test_sqlite_plan_store_joins_and_rolls_back_with_outer_transaction(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        connection.commit()
+        store = SqlitePlanStore(connection)
+
+        connection.execute("BEGIN IMMEDIATE")
+        store.save_sealed_plan(_sealed_plan())
+        connection.execute("ROLLBACK")
+
+        assert _row_count(connection, "plans") == 0
+        assert _row_count(connection, "plan_seal_details") == 0
+
+
 def test_sqlite_plan_store_pages_operations_by_stable_order(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:

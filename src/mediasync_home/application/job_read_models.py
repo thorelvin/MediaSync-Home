@@ -72,6 +72,32 @@ class StandardBackupJobSummary:
 
 
 @dataclass(frozen=True)
+class InitialBackupPlanSummary:
+    state: str
+    reason_code: str
+    operation_count: int
+    planned_bytes: int
+    plan_runnable: bool
+    next_action: str
+    analysis_id: str | None = None
+    plan_id: str | None = None
+    plan_checksum: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "state": self.state,
+            "reason_code": self.reason_code,
+            "analysis_id": self.analysis_id,
+            "plan_id": self.plan_id,
+            "plan_checksum": self.plan_checksum,
+            "operation_count": self.operation_count,
+            "planned_bytes": self.planned_bytes,
+            "plan_runnable": self.plan_runnable,
+            "next_action": self.next_action,
+        }
+
+
+@dataclass(frozen=True)
 class StandardBackupJobDetail:
     job_id: str
     job_revision_id: str
@@ -81,12 +107,13 @@ class StandardBackupJobDetail:
     targets: tuple[StandardBackupTargetSummary, ...]
     defaults: StandardBackupDefaults
     filter_set_version: int = 1
+    initial_plan: InitialBackupPlanSummary | None = None
 
     def to_dict(self) -> dict[str, object]:
         independent_device_ids = {
             target.independent_device_id for target in self.targets if target.independent_device_id
         }
-        return {
+        payload: dict[str, object] = {
             "job_id": self.job_id,
             "job_revision_id": self.job_revision_id,
             "filter_set_id": self.filter_set_id,
@@ -99,6 +126,10 @@ class StandardBackupJobDetail:
             "defaults": _defaults_to_dict(self.defaults),
             "targets": [target.to_dict() for target in self.targets],
         }
+        payload["initial_plan"] = (
+            None if self.initial_plan is None else self.initial_plan.to_dict()
+        )
+        return payload
 
 
 @dataclass(frozen=True)

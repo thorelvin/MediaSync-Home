@@ -49,9 +49,10 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
         26,
         27,
         28,
-        29,
-        30,
-    ]
+            29,
+            30,
+            31,
+        ]
     assert [migration.version for migration in recovery.migrations] == [1, 2, 3, 4, 5]
     assert catalog.migrations[0].name == "catalog_core_contract_skeleton"
     assert catalog.migrations[1].name == "catalog_standard_backup_drafts"

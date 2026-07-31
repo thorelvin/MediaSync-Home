@@ -833,8 +833,17 @@ og utføre en avgrenset write/read/delete-test; den kopierer ingen brukerfiler.
 Vellykket registrering vises som **Skrivbar og registrert** i jobbdeltaljen. Dersom
 registreringen ikke kan fullføres, beholdes hele det gjennomgåtte utkastet og knappen
 endres til **Prøv registrering på nytt**. Feilteksten brytes vertikalt i arbeidsflaten
-uten horisontal scrolling eller clipping. Første automatiske plan/kontroll etter
-registrering er neste slice og skal ikke påstås utført av denne handlingen ennå.
+uten horisontal scrolling eller clipping. Alle dynamiske source-, target-, status- og
+planetiketter reserverer høyden som den aktuelle bredden faktisk krever, også etter
+at et langt mål er valgt og jobbdeltaljen utvides.
+
+Etter registrering materialiserer Engine Host nå en immutable første plan fra de
+eksakte forseglede source-/target-snapshottene. Den aktive jobbdeltaljen viser
+planstatus, operasjonsantall, bytes og en bounded operasjonspreview selv når ingen
+run finnes. Dette starter aldri kopiering automatisk. Lokale planer som trenger
+katalogoppretting vises som **Kun forhåndsvisning** og kan ikke startes før den
+journalførte katalogoperasjonen er implementert. Første eksplisitte
+**Start backup**-kommando er neste slice.
 
 Etter første vellykkede manuelle backup kan programmet vise én diskret anbefaling: `Vil du kjøre denne backupen automatisk?` med handlingen **Sett opp automatikk**. Den skal ikke avbryte fullføringsoppsummeringen.
 

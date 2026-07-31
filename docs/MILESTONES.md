@@ -168,6 +168,15 @@ python -m importlinter
 - Opprett falsk monoton/UTC-klokke, fake ports og feilinjeksjonsgrensesnitt.
 - Generer schema-/state-/reason-code-dokumentasjon og typer i CI; håndskrevet drift skal feile builden.
 
+0B-evidence 2026-07-31: Catalog migration 31 og
+`initial_backup_plan_materializations` binder første standard-backupplan til den
+aktive jobbrevisjonens eksakte forseglede source-/target-snapshots. Terminal
+`SEALED`/`NO_CHANGES` er immutable og replayes uten ny plan-ID. Planleggeren
+normaliserer under target case-semantikk, blokkerer casekollisjon og bruker
+konservative target-preconditions. GUI kan lese planen uten at en run finnes.
+Ingen run startes automatisk; `CREATE_DIRECTORY`-planer er preview-only til
+directory executor/journal er ferdig.
+
 #### Kvalitetsport
 
 - Bare én kompatibel Engine Host blir tilstandseier ved samtidige launcherforsøk.

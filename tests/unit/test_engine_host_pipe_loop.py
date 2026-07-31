@@ -924,16 +924,19 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.recovery_connection is not None
         assert runtime.installation_state is not None
         assert runtime.installation_state.product_channel == "local-preview"
-        assert runtime.installation_state.catalog_schema_version == 30
+        assert runtime.installation_state.catalog_schema_version == 31
         assert runtime.installation_state.recovery_schema_version == 5
         assert runtime.installation_state.ipc_protocol_major == 1
         assert runtime.snapshot_materialization_refresh is not None
         assert runtime.snapshot_materialization_refresh.scanned_job_count == 0
+        assert runtime.initial_backup_plan_refresh is not None
+        assert runtime.initial_backup_plan_refresh.sealed_plan_count == 0
         assert runtime.service.job_draft_store is not None
         assert runtime.service.standard_backup_job_read_store is not None
         assert runtime.service.standard_backup_job_detail_store is not None
         assert runtime.service.standard_backup_job_endpoint_registrar is not None
         assert runtime.service.job_snapshot_refresh is not None
+        assert runtime.service.initial_backup_plan_refresh is not None
         assert runtime.service.snapshot_entry_read_store is not None
         assert runtime.service.snapshot_coverage_read_store is not None
         assert runtime.service.snapshot_issue_read_store is not None
@@ -959,7 +962,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
             runtime.run_executor_recovery_object_cleanup_port
             is runtime.run_executor_final_commit_port
         )
-        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 30
+        assert current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG) == 31
         assert current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY) == 5
         assert runtime.startup_reconciliation is not None
         assert runtime.startup_reconciliation.reconciler_instance_id == "host-new"

@@ -51,6 +51,9 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     recovery_writer_policy,
 )
 from mediasync_home.adapters.sqlite.installation_state import SqliteInstallationStateStore
+from mediasync_home.adapters.sqlite.initial_backup_plans import (
+    SqliteInitialBackupPlanMaterializer,
+)
 from mediasync_home.adapters.sqlite.endpoint_roots import SqliteEndpointRootResolver
 from mediasync_home.adapters.sqlite.endpoint_classifications import (
     SqliteEndpointClassificationRefresher,
@@ -126,6 +129,9 @@ from mediasync_home.application.endpoint_registration import (
     EndpointClassificationRefreshReport,
 )
 from mediasync_home.application.job_creation import StandardBackupJobIds
+from mediasync_home.application.initial_backup_planning import (
+    InitialBackupPlanRefreshReport,
+)
 from mediasync_home.application.job_endpoints import EndpointIds
 from mediasync_home.application.installation_state import InstallationState
 from mediasync_home.application.snapshot_scanning import (
@@ -282,6 +288,11 @@ class UuidSnapshotMaterializationIdFactory:
         )
 
 
+class UuidInitialBackupPlanIdFactory:
+    def new_initial_backup_plan_id(self) -> str:
+        return f"plan-{uuid4().hex}"
+
+
 class RetainedRunTargetPermitValidator:
     def __init__(self, lease_registry: RunTargetLeaseRegistry) -> None:
         self._lease_registry = lease_registry
@@ -340,6 +351,7 @@ class EngineHostRuntime:
     snapshot_materialization_refresh: (
         SnapshotMaterializationRefreshReport | None
     ) = None
+    initial_backup_plan_refresh: InitialBackupPlanRefreshReport | None = None
     state_layout: StateStoreLayout | None = None
     state_capacity_gate: StateCapacityGate | None = None
     state_capacity_report: StateCapacityReport | None = None
@@ -1486,6 +1498,16 @@ def build_engine_host_runtime(
         )
         state_capacity_report = capacity_gate.latest_report()
         plans = SqlitePlanStore(catalog_connection)
+        initial_backup_plan_materializer = SqliteInitialBackupPlanMaterializer(
+            catalog_connection,
+            plans=plans,
+            id_factory=UuidInitialBackupPlanIdFactory(),
+        )
+        initial_backup_plan_refresh = (
+            initial_backup_plan_materializer.refresh_initial_backup_plans(
+                observed_utc=runtime_clock.utc_now(),
+            )
+        )
         runs = SqliteRunStore(catalog_connection)
         schedules = SqliteScheduleStore(catalog_connection)
         trigger_occurrences = SqliteTriggerOccurrenceStore(catalog_connection)
@@ -1552,6 +1574,11 @@ def build_engine_host_runtime(
                     observed_utc=runtime_clock.utc_now(),
                 )
             ),
+            initial_backup_plan_refresh=lambda: (
+                initial_backup_plan_materializer.refresh_initial_backup_plans(
+                    observed_utc=runtime_clock.utc_now(),
+                )
+            ),
             standard_backup_job_id_factory=UuidStandardBackupJobIdFactory(),
             snapshot_entry_read_store=snapshots,
             snapshot_coverage_read_store=snapshots,
@@ -1588,6 +1615,7 @@ def build_engine_host_runtime(
         installation_state=installation_state,
         endpoint_classification_refresh=endpoint_classification_refresh,
         snapshot_materialization_refresh=snapshot_materialization_refresh,
+        initial_backup_plan_refresh=initial_backup_plan_refresh,
         state_layout=layout,
         state_capacity_gate=capacity_gate,
         state_capacity_report=state_capacity_report,

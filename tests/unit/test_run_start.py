@@ -361,6 +361,41 @@ def test_start_run_blocks_plan_with_blocked_risk() -> None:
     assert outcome.readiness.validation_codes == ("PLAN_BLOCKED",)
 
 
+def test_start_run_blocks_directory_operations_until_executor_support_exists() -> None:
+    plan = seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(_target_endpoint(),),
+        operations=(
+            PlanOperation(
+                operation_id="op-directory",
+                operation_type=PlanOperationType.CREATE_DIRECTORY,
+                sequence_no=10,
+                execution_phase=10,
+                stable_order_key="010:Pictures",
+                target_precondition_kind=TargetPreconditionKind.ABSENT,
+                target_relative_path="Pictures",
+                reason_code="CREATE_MISSING_DIRECTORY",
+                risk_level=PlanRiskLevel.LOW,
+            ),
+        ),
+    )
+
+    outcome = start_run_from_sealed_plan(
+        command=_start_command(plan),
+        plans=InMemoryPlanStore(plan),
+        runs=InMemoryRunStore(),
+        id_factory=FixedRunIdFactory(),
+    )
+
+    assert outcome.created is False
+    assert outcome.readiness.validation_codes == (
+        "PLAN_CREATE_DIRECTORY_EXECUTION_UNAVAILABLE",
+    )
+
+
 def _sealed_plan() -> SealedPlan:
     return seal_plan(
         plan_id="plan-a",

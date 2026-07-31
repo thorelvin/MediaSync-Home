@@ -259,6 +259,23 @@ Planen som vises og godkjennes er samme plan Engine Host utfører. Følgende opp
 
 En forseglet plan og dens operasjoner oppdateres aldri in-place. GUI-kommandoren refererer bare `plan_id`; Engine Host laster, verifiserer checksum og revaliderer preconditions.
 
+0B-implementasjonsnote: Etter vellykket lokal målregistrering bygger Engine Host nå
+den første standard-backupplanen fra den aktive jobbrevisjonens eksakte, forseglede
+kilde- og målsnapshots. Planleggingen støtter foreløpig nøyaktig ett skrivbart mål;
+flere mål blokkeres til hver operasjon kan bindes eksplisitt til riktig mål. Alle
+relative stier kanoniseres under målets dokumenterte case-modus, og casekollisjoner
+blokkerer planlegging. En eksisterende målfil behandles konservativt som en
+versjonert erstatning med `MATCH_FINGERPRINT`; lik filstørrelse tolkes aldri alene
+som identisk innhold. Mål-ekstra beholdes.
+
+Catalog migration 31 lagrer ett materialiseringsutfall per eksakte aktive
+jobbrevisjon. `SEALED` og `NO_CHANGES` er immutable og gjenbrukes ved startup og
+idempotent command-replay. `BLOCKED` og `FAILED` kan oppdateres etter ny
+klassifisering eller nye snapshots. GUI viser den forseglede planen også før en run
+finnes, og ingen run opprettes automatisk. Planer med `CREATE_DIRECTORY` kan
+kontrolleres, men markeres som ikke kjørbare; run admission avviser dem til
+journalført katalogoppretting finnes i executoren.
+
 ### 4.4 Eierskap, leases, preconditions og destruktiv sperre
 
 Ingen muterende target-operasjon utføres uten:
