@@ -41,6 +41,10 @@ class RunProgressViewState:
     active_relative_path: str | None
     active_phase: str | None
     active_planned_bytes: int | None
+    active_staging_failure_count: int | None
+    active_retry_backoff_ms: int | None
+    active_retry_not_before_utc: str | None
+    active_last_error_code: str | None
     bytes_per_second: float | None
     eta_seconds: int | None
     stop_requested: bool
@@ -71,6 +75,10 @@ def empty_run_progress_state() -> RunProgressViewState:
         active_relative_path=None,
         active_phase=None,
         active_planned_bytes=None,
+        active_staging_failure_count=None,
+        active_retry_backoff_ms=None,
+        active_retry_not_before_utc=None,
+        active_last_error_code=None,
         bytes_per_second=None,
         eta_seconds=None,
         stop_requested=False,
@@ -133,6 +141,16 @@ def run_progress_from_response(
         active_relative_path=_text(snapshot.get("active_relative_path")),
         active_phase=_text(snapshot.get("active_phase")),
         active_planned_bytes=_non_negative_int(snapshot.get("active_planned_bytes")),
+        active_staging_failure_count=_non_negative_int(
+            snapshot.get("active_staging_failure_count")
+        ),
+        active_retry_backoff_ms=_non_negative_int(
+            snapshot.get("active_retry_backoff_ms")
+        ),
+        active_retry_not_before_utc=_text(
+            snapshot.get("active_retry_not_before_utc")
+        ),
+        active_last_error_code=_text(snapshot.get("active_last_error_code")),
         bytes_per_second=_non_negative_float(snapshot.get("bytes_per_second")),
         eta_seconds=_non_negative_int(snapshot.get("eta_seconds")),
         stop_requested=bool(snapshot.get("stop_requested", False)),

@@ -94,6 +94,7 @@ class RunExecutorCycleAction(str, Enum):
     OPERATION_LEASE_REBOUND = "OPERATION_LEASE_REBOUND"
     COMMIT_INTENT_REFRESHED = "COMMIT_INTENT_REFRESHED"
     STAGING_ADVANCED = "STAGING_ADVANCED"
+    STAGING_RETRY_WAITING = "STAGING_RETRY_WAITING"
     WAITING_FOR_STAGING = "WAITING_FOR_STAGING"
     IDLE = "IDLE"
     BLOCKED = "BLOCKED"
@@ -307,12 +308,13 @@ def execute_one_run_executor_cycle(
             next_action="Run paused at a safe operation boundary and released endpoint leases.",
         )
 
-    retained = _next_retained_executing_target(
+    retained_targets = _retained_executing_targets(
         runs=runs,
         lease_registry=lease_registry,
     )
-    if retained is not None:
-        return _advance_retained_target(
+    deferred_retry: RunExecutorCycleOutcome | None = None
+    for retained in retained_targets:
+        retained_outcome = _advance_retained_target(
             runs=runs,
             lease_registry=lease_registry,
             plans=plans,
@@ -326,6 +328,12 @@ def execute_one_run_executor_cycle(
             staging_transfer_port=staging_transfer_port,
             retained=retained,
         )
+        if retained_outcome.action is RunExecutorCycleAction.STAGING_RETRY_WAITING:
+            deferred_retry = retained_outcome
+            continue
+        return retained_outcome
+    if deferred_retry is not None:
+        return deferred_retry
 
     reacquired = execute_one_executing_run_target_lease_reacquire_step(
         runs=runs,
@@ -841,6 +849,16 @@ def _advance_retained_target(
                 run_target_id=staging_outcome.run_target_id,
                 next_action=staging_outcome.next_action,
             )
+        if staging_outcome.retry_deferred:
+            return RunExecutorCycleOutcome(
+                action=RunExecutorCycleAction.STAGING_RETRY_WAITING,
+                advanced=False,
+                idle=True,
+                run_id=staging_outcome.run_id,
+                run_target_id=staging_outcome.run_target_id,
+                validation_codes=(),
+                next_action=staging_outcome.next_action,
+            )
         if staging_outcome.endpoint_wait_reason_code is not None:
             waiting = runs.record_run_target_waiting_for_endpoint(
                 run_id=staging_outcome.run_id,
@@ -885,11 +903,12 @@ def _advance_retained_target(
     )
 
 
-def _next_retained_executing_target(
+def _retained_executing_targets(
     *,
     runs: RunExecutorQueueStore,
     lease_registry: RunTargetLeaseRegistry,
-) -> _RetainedTarget | None:
+) -> tuple[_RetainedTarget, ...]:
+    retained_targets: list[_RetainedTarget] = []
     for run_id, run_target_id in lease_registry.retained_run_target_keys():
         run = runs.load_started_run(run_id)
         if run is None:
@@ -917,8 +936,8 @@ def _next_retained_executing_target(
         if lease is None:
             continue
         permit = lease.issue_mutation_permit()
-        return _RetainedTarget(run=run, target=target, permit=permit)
-    return None
+        retained_targets.append(_RetainedTarget(run=run, target=target, permit=permit))
+    return tuple(retained_targets)
 
 
 def _has_phase(

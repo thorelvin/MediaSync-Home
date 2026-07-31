@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 from mediasync_home.application.progress_read_models import (
@@ -16,6 +16,17 @@ from mediasync_home.application.runs import RunState
 _SEQUENCE_FACTOR = 1_000_000_000
 _RATE_WINDOW = timedelta(seconds=60)
 _MAX_RATE_SAMPLES = 128
+
+
+@dataclass(frozen=True)
+class _ActiveOperation:
+    relative_path: str
+    phase: str
+    planned_bytes: int
+    staging_failure_count: int
+    retry_backoff_ms: int | None
+    retry_not_before_utc: str | None
+    last_error_code: str | None
 
 
 class SqliteRunProgressSnapshotStore(RunProgressSnapshotStore):
@@ -84,14 +95,30 @@ class SqliteRunProgressSnapshotStore(RunProgressSnapshotStore):
             targets=targets,
             transferred_operations=transferred_operations,
             transferred_bytes=transferred_bytes,
-            active_relative_path=None if terminal or active is None else active[0],
-            active_phase=None if terminal or active is None else active[1],
-            active_planned_bytes=None if terminal or active is None else active[2],
+            active_relative_path=(
+                None if terminal or active is None else active.relative_path
+            ),
+            active_phase=None if terminal or active is None else active.phase,
+            active_planned_bytes=(
+                None if terminal or active is None else active.planned_bytes
+            ),
+            active_staging_failure_count=(
+                None if terminal or active is None else active.staging_failure_count
+            ),
+            active_retry_backoff_ms=(
+                None if terminal or active is None else active.retry_backoff_ms
+            ),
+            active_retry_not_before_utc=(
+                None if terminal or active is None else active.retry_not_before_utc
+            ),
+            active_last_error_code=(
+                None if terminal or active is None else active.last_error_code
+            ),
             bytes_per_second=None if terminal else bytes_per_second,
             eta_seconds=None if terminal else eta_seconds,
         )
 
-    def _load_active_operation(self, run_id: str) -> tuple[str, str, int] | None:
+    def _load_active_operation(self, run_id: str) -> _ActiveOperation | None:
         terminal_values = tuple(phase.value for phase in TERMINAL_PHASES)
         placeholders = ", ".join("?" for _ in terminal_values)
         row = self._recovery_connection.execute(
@@ -99,7 +126,11 @@ class SqliteRunProgressSnapshotStore(RunProgressSnapshotStore):
             SELECT
                 coalesce(source_relative_path, final_relative_path),
                 phase,
-                planned_bytes
+                planned_bytes,
+                staging_failure_count,
+                staging_retry_backoff_ms,
+                staging_retry_not_before_utc,
+                last_error_code
             FROM recovery_operations
             WHERE run_id = ?
                 AND phase NOT IN ({placeholders})
@@ -113,7 +144,15 @@ class SqliteRunProgressSnapshotStore(RunProgressSnapshotStore):
         ).fetchone()
         if row is None:
             return None
-        return str(row[0]), str(row[1]), int(row[2])
+        return _ActiveOperation(
+            relative_path=str(row[0]),
+            phase=str(row[1]),
+            planned_bytes=int(row[2]),
+            staging_failure_count=int(row[3]),
+            retry_backoff_ms=None if row[4] is None else int(row[4]),
+            retry_not_before_utc=None if row[5] is None else str(row[5]),
+            last_error_code=None if row[6] is None else str(row[6]),
+        )
 
     def _load_transfer_totals(self, run_id: str) -> tuple[int, int]:
         row = self._recovery_connection.execute(

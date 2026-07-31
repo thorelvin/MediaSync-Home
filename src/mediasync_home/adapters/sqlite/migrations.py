@@ -286,6 +286,11 @@ def recovery_migration_plan() -> SqliteMigrationPlan:
                 name="recovery_staging_failure_count",
                 statements=RECOVERY_STAGING_FAILURE_COUNT,
             ),
+            SqliteMigration(
+                version=10,
+                name="recovery_staging_retry_timing",
+                statements=RECOVERY_STAGING_RETRY_TIMING,
+            ),
         ),
     )
 
@@ -3659,5 +3664,27 @@ RECOVERY_STAGING_FAILURE_COUNT = (
     ALTER TABLE recovery_operations
         ADD COLUMN staging_failure_count INTEGER NOT NULL DEFAULT 0
             CHECK (staging_failure_count >= 0)
+    """,
+)
+
+RECOVERY_STAGING_RETRY_TIMING = (
+    """
+    ALTER TABLE recovery_operations
+        ADD COLUMN staging_retry_backoff_ms INTEGER
+            CHECK (
+                staging_retry_backoff_ms IS NULL
+                OR staging_retry_backoff_ms BETWEEN 1 AND 30000
+            )
+    """,
+    """
+    ALTER TABLE recovery_operations
+        ADD COLUMN staging_retry_not_before_utc TEXT
+            CHECK (
+                staging_retry_not_before_utc IS NULL
+                OR (
+                    length(staging_retry_not_before_utc) BETWEEN 20 AND 64
+                    AND substr(staging_retry_not_before_utc, -1, 1) = 'Z'
+                )
+            )
     """,
 )

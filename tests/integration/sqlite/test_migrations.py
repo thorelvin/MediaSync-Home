@@ -873,7 +873,7 @@ def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(
 
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 9
+        assert current_schema_version(connection, plan.store) == 10
         assert _table_names(connection) >= {
             "lease_counters",
             "resource_leases",
@@ -904,6 +904,10 @@ def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(
             connection,
             "recovery_operations",
         )
+        assert {
+            "staging_retry_backoff_ms",
+            "staging_retry_not_before_utc",
+        } <= _column_names(connection, "recovery_operations")
 
 
 def test_migration_runner_rejects_wrong_store_identity(tmp_path: Path) -> None:

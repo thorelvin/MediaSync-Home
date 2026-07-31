@@ -71,6 +71,7 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
         7,
         8,
         9,
+        10,
     ]
     assert catalog.migrations[0].name == "catalog_core_contract_skeleton"
     assert catalog.migrations[1].name == "catalog_standard_backup_drafts"
@@ -128,6 +129,7 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
     assert recovery.migrations[6].name == "recovery_operation_planned_bytes"
     assert recovery.migrations[7].name == "recovery_source_file_preconditions"
     assert recovery.migrations[8].name == "recovery_staging_failure_count"
+    assert recovery.migrations[9].name == "recovery_staging_retry_timing"
 
 
 def test_migration_plan_requires_contiguous_versions() -> None:

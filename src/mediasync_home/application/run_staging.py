@@ -24,6 +24,8 @@ class RunTargetEndpointWaitRequired(RuntimeError):
 
 
 class RunTargetStagingOperationStore(RecoveryOperationStore, Protocol):
+    def staging_retry_is_due(self, operation: RecoveryOperation) -> bool: ...
+
     def record_staging_failure(
         self,
         *,
@@ -129,6 +131,10 @@ class RunTargetStagingOutcome:
     validation_codes: tuple[str, ...]
     next_action: str
     endpoint_wait_reason_code: str | None = None
+    retry_deferred: bool = False
+    retry_attempt: int | None = None
+    retry_backoff_ms: int | None = None
+    retry_not_before_utc: str | None = None
 
 
 STAGING_EXECUTION_PHASES = (
@@ -194,6 +200,24 @@ def execute_next_run_target_staging_step(
             validation_code="RUN_TARGET_STAGING_PERMIT_MISMATCH",
             next_action="Reacquire the endpoint lease before staging this operation.",
         )
+    if not recovery_operations.staging_retry_is_due(operation):
+        return RunTargetStagingOutcome(
+            idle=True,
+            advanced=False,
+            run_id=permit.run_id,
+            run_target_id=permit.run_target_id,
+            operation_id=operation.operation_id,
+            phase=operation.phase,
+            validation_codes=(),
+            next_action=(
+                "Staging retry is scheduled after "
+                f"{operation.staging_retry_not_before_utc}."
+            ),
+            retry_deferred=True,
+            retry_attempt=operation.staging_failure_count + 1,
+            retry_backoff_ms=operation.staging_retry_backoff_ms,
+            retry_not_before_utc=operation.staging_retry_not_before_utc,
+        )
 
     try:
         next_phase, metadata, payload = _execute_phase(
@@ -249,8 +273,14 @@ def execute_next_run_target_staging_step(
                 next_action=(
                     f"Skipped file after {attempt_number} failed staging attempts."
                     if exhausted
-                    else f"Staging attempt {attempt_number} failed; retry scheduled."
+                    else (
+                        f"Staging attempt {attempt_number} failed; retry scheduled "
+                        f"after {updated.staging_retry_not_before_utc}."
+                    )
                 ),
+                retry_attempt=(None if exhausted else attempt_number + 1),
+                retry_backoff_ms=updated.staging_retry_backoff_ms,
+                retry_not_before_utc=updated.staging_retry_not_before_utc,
             )
         return _failed(
             permit=permit,

@@ -286,7 +286,7 @@ def test_bounded_executor_cycle_retries_transient_file_failure_then_advances() -
     recovery_operations = _FakeRecoveryOperationStore(())
     staging_port = _TransientStagingPort(failures=2)
 
-    outcome = execute_bounded_run_executor_cycle(
+    first = execute_bounded_run_executor_cycle(
         runs=runs,
         leases=_FakeLeaseAuthority(_FakeLiveLease()),
         lease_registry=registry,
@@ -300,11 +300,49 @@ def test_bounded_executor_cycle_retries_transient_file_failure_then_advances() -
     )
 
     operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
-    assert outcome.stopped_reason is RunExecutorPumpStopReason.STEP_LIMIT_REACHED
+    assert first.stopped_reason is RunExecutorPumpStopReason.IDLE
+    assert operation is not None
+    assert operation.phase is RecoveryOperationPhase.PLANNED
+    assert operation.staging_failure_count == 1
+    assert operation.staging_retry_not_before_utc is not None
+    assert operation.last_error_code == "LOCAL_STAGING_SOURCE_FILE_UNREADABLE"
+    assert staging_port.calls == 1
+
+    recovery_operations.allow_staging_retries()
+    second = execute_bounded_run_executor_cycle(
+        runs=runs,
+        leases=_FakeLeaseAuthority(_FakeLiveLease()),
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=recovery_operations,
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        staging_transfer_port=staging_port,
+        process_instance_id="host-a",
+        max_steps=2,
+    )
+    assert second.stopped_reason is RunExecutorPumpStopReason.IDLE
+    assert staging_port.calls == 2
+
+    recovery_operations.allow_staging_retries()
+    third = execute_bounded_run_executor_cycle(
+        runs=runs,
+        leases=_FakeLeaseAuthority(_FakeLiveLease()),
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=recovery_operations,
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        staging_transfer_port=staging_port,
+        process_instance_id="host-a",
+        max_steps=1,
+    )
+    operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+    assert third.stopped_reason is RunExecutorPumpStopReason.STEP_LIMIT_REACHED
     assert operation is not None
     assert operation.phase is RecoveryOperationPhase.SOURCE_VALIDATED
     assert operation.staging_failure_count == 2
-    assert operation.last_error_code == "LOCAL_STAGING_SOURCE_FILE_UNREADABLE"
+    assert operation.staging_retry_not_before_utc is None
     assert staging_port.calls == 3
 
 
@@ -399,7 +437,7 @@ def test_bounded_executor_cycle_skips_file_after_three_transient_failures() -> N
     registry = HeldRunTargetLeaseRegistry()
     recovery_operations = _FakeRecoveryOperationStore(())
 
-    outcome = execute_bounded_run_executor_cycle(
+    first = execute_bounded_run_executor_cycle(
         runs=runs,
         leases=_FakeLeaseAuthority(_FakeLiveLease()),
         lease_registry=registry,
@@ -412,6 +450,22 @@ def test_bounded_executor_cycle_skips_file_after_three_transient_failures() -> N
         max_steps=10,
     )
 
+    assert first.stopped_reason is RunExecutorPumpStopReason.IDLE
+    for _ in range(2):
+        recovery_operations.allow_staging_retries()
+        outcome = execute_bounded_run_executor_cycle(
+            runs=runs,
+            leases=_FakeLeaseAuthority(_FakeLiveLease()),
+            lease_registry=registry,
+            plans=_SinglePlanStore(plan),
+            recovery_operations=recovery_operations,
+            intent_segments=_FakeIntentSegmentStore(),
+            catalog_handoffs=_FakeCatalogHandoffStore(),
+            staging_transfer_port=_TransientStagingPort(failures=3),
+            process_instance_id="host-a",
+            max_steps=10,
+        )
+
     operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
     loaded = runs.load_started_run("run-a")
     assert outcome.stopped_reason is RunExecutorPumpStopReason.IDLE
@@ -423,6 +477,98 @@ def test_bounded_executor_cycle_skips_file_after_three_transient_failures() -> N
     assert loaded.warning_count == 1
     assert loaded.targets[0].state is RunTargetState.SUCCEEDED_WITH_WARNINGS
     assert registry.retained_count == 0
+
+
+def test_executor_advances_another_target_while_first_target_retry_waits() -> None:
+    plan = _sealed_plan()
+    first_target = replace(
+        _target(state=RunTargetState.EXECUTING),
+        last_lease_id="lease-a",
+        last_ownership_epoch=1,
+        last_fencing_token=42,
+    )
+    second_target = replace(
+        first_target,
+        run_target_id="run-a-target-0001",
+        endpoint_id="target-b",
+        endpoint_revision_id="target-rev-b",
+        lease_resource_key="endpoint:target-b",
+        last_lease_id="lease-b",
+        last_fencing_token=43,
+    )
+    run = replace(
+        _run(
+            state=RunState.EXECUTING,
+            plan=plan,
+            target_state=RunTargetState.EXECUTING,
+        ),
+        planned_operations=2,
+        planned_bytes=256,
+        targets=(first_target, second_target),
+    )
+    runs = _InMemoryRunStore(run)
+    first_operation = replace(
+        _planned_operation(),
+        staging_failure_count=1,
+        staging_retry_backoff_ms=1_000,
+        staging_retry_not_before_utc="2026-07-31T00:00:01.000Z",
+    )
+    second_operation = replace(
+        _planned_operation(),
+        run_target_id="run-a-target-0001",
+        operation_id="op-b",
+        target_endpoint_id="target-b",
+        target_endpoint_revision_id="target-rev-b",
+        lease_id="lease-b",
+        lease_resource_key="endpoint:target-b",
+        fencing_token=43,
+    )
+    recovery_operations = _FakeRecoveryOperationStore(
+        (first_operation, second_operation)
+    )
+    registry = HeldRunTargetLeaseRegistry()
+    registry.retain_run_target_lease(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+        lease=_FakeLiveLease(),
+    )
+    registry.retain_run_target_lease(
+        run_id="run-a",
+        run_target_id="run-a-target-0001",
+        lease=_FakeLiveLease(
+            "lease-b",
+            fencing_token=43,
+            run_target_id="run-a-target-0001",
+            endpoint_id="target-b",
+            endpoint_revision_id="target-rev-b",
+            resource_key="endpoint:target-b",
+        ),
+    )
+
+    outcome = execute_one_run_executor_cycle(
+        runs=runs,
+        leases=_FakeLeaseAuthority(_FakeLiveLease()),
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=recovery_operations,
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        staging_transfer_port=_FakeStagingPort(),
+        process_instance_id="host-a",
+    )
+
+    first_loaded = recovery_operations.load_operation(
+        run_id="run-a", operation_id="op-a"
+    )
+    second_loaded = recovery_operations.load_operation(
+        run_id="run-a", operation_id="op-b"
+    )
+    assert outcome.action is RunExecutorCycleAction.STAGING_ADVANCED
+    assert outcome.run_target_id == "run-a-target-0001"
+    assert first_loaded is not None
+    assert first_loaded.phase is RecoveryOperationPhase.PLANNED
+    assert second_loaded is not None
+    assert second_loaded.phase is RecoveryOperationPhase.SOURCE_VALIDATED
 
 
 def test_bounded_executor_cycle_reports_missing_staging_port_after_planning() -> None:
@@ -1371,6 +1517,19 @@ class _FakeRecoveryOperationStore(RunExecutorCycleRecoveryOperationStore):
             (operation.run_id, operation.operation_id): operation
             for operation in operations
         }
+        self.due_staging_retries: set[tuple[str, str]] = set()
+
+    def allow_staging_retries(self) -> None:
+        self.due_staging_retries.update(
+            key
+            for key, operation in self.operations.items()
+            if operation.staging_retry_not_before_utc is not None
+        )
+
+    def staging_retry_is_due(self, operation: RecoveryOperation) -> bool:
+        if operation.staging_retry_not_before_utc is None:
+            return True
+        return (operation.run_id, operation.operation_id) in self.due_staging_retries
 
     def record_planned_operation(
         self,
@@ -1427,6 +1586,8 @@ class _FakeRecoveryOperationStore(RunExecutorCycleRecoveryOperationStore):
         updated = replace(
             operation,
             phase=next_phase,
+            staging_retry_backoff_ms=None,
+            staging_retry_not_before_utc=None,
             intent_segment_id=intent_segment_id or operation.intent_segment_id,
             intent_ordinal=operation.intent_ordinal
             if intent_ordinal is None
@@ -1435,6 +1596,7 @@ class _FakeRecoveryOperationStore(RunExecutorCycleRecoveryOperationStore):
             **cast(Any, metadata_updates),
         )
         self.operations[(run_id, operation_id)] = updated
+        self.due_staging_retries.discard((run_id, operation_id))
         return updated
 
     def record_staging_failure(
@@ -1461,8 +1623,17 @@ class _FakeRecoveryOperationStore(RunExecutorCycleRecoveryOperationStore):
             phase=next_phase,
             last_error_code=error_code,
             staging_failure_count=expected_failure_count + 1,
+            staging_retry_backoff_ms=(
+                None if next_phase is RecoveryOperationPhase.SKIPPED else 1_000
+            ),
+            staging_retry_not_before_utc=(
+                None
+                if next_phase is RecoveryOperationPhase.SKIPPED
+                else "2026-07-31T00:00:01.000Z"
+            ),
         )
         self.operations[(run_id, operation_id)] = updated
+        self.due_staging_retries.discard((run_id, operation_id))
         return updated
 
     def record_operation_lease_rebound(
@@ -1756,9 +1927,22 @@ class _FakeLiveLease:
     owner_installation_id = "owner-a"
     ownership_epoch = 1
 
-    def __init__(self, lease_id: str = "lease-a", *, fencing_token: int = 42) -> None:
+    def __init__(
+        self,
+        lease_id: str = "lease-a",
+        *,
+        fencing_token: int = 42,
+        run_target_id: str = "run-a-target-0000",
+        endpoint_id: str = "target-a",
+        endpoint_revision_id: str = "target-rev-a",
+        resource_key: str = "endpoint:target-a",
+    ) -> None:
         self.lease_id = lease_id
         self.fencing_token = fencing_token
+        self.run_target_id = run_target_id
+        self.endpoint_id = endpoint_id
+        self.endpoint_revision_id = endpoint_revision_id
+        self.resource_key = resource_key
         self.released = False
 
     def release(self) -> None:
@@ -1767,14 +1951,14 @@ class _FakeLiveLease:
     def issue_mutation_permit(self) -> MutationPermit:
         return _issue_mutation_permit(
             lease_id=self.lease_id,
-            resource_key="endpoint:target-a",
+            resource_key=self.resource_key,
             owner_installation_id=self.owner_installation_id,
             ownership_epoch=self.ownership_epoch,
             fencing_token=self.fencing_token,
             run_id="run-a",
-            run_target_id="run-a-target-0000",
-            endpoint_id="target-a",
-            endpoint_revision_id="target-rev-a",
+            run_target_id=self.run_target_id,
+            endpoint_id=self.endpoint_id,
+            endpoint_revision_id=self.endpoint_revision_id,
         )
 
 

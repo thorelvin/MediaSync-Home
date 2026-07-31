@@ -1330,10 +1330,42 @@ class MediaSyncWindow(QMainWindow):
                     if state.active_planned_bytes is None
                     else f" · {_format_bytes(state.active_planned_bytes)}"
                 )
+                retry_detail = ""
+                active_tooltip_lines = [active_path or ""]
+                if (
+                    state.active_retry_not_before_utc is not None
+                    and state.active_staging_failure_count is not None
+                ):
+                    english = self._selected_language_code is LanguageCode.ENGLISH
+                    attempt = state.active_staging_failure_count + 1
+                    retry_time = self._format_endpoint_retry_time(
+                        state.active_retry_not_before_utc
+                    )
+                    retry_label = "Retry" if english else "Nytt forsøk"
+                    retry_detail = f" · {retry_label} {attempt}"
+                    if retry_time is not None:
+                        after_label = "after" if english else "etter"
+                        retry_detail += f" {after_label} {retry_time}"
+                    if state.active_last_error_code is not None:
+                        reason_label = "Reason" if english else "Årsak"
+                        active_tooltip_lines.append(
+                            f"{reason_label}: {state.active_last_error_code}"
+                        )
+                    if state.active_retry_backoff_ms is not None:
+                        backoff_label = (
+                            "Scheduled backoff" if english else "Planlagt ventetid"
+                        )
+                        active_tooltip_lines.append(
+                            f"{backoff_label}: "
+                            f"{state.active_retry_backoff_ms / 1000:.1f} s"
+                        )
                 self._jobs_run_active_file.setText(
-                    f"{self._texts().current_file}: {active_path}{active_size} · {phase}"
+                    f"{self._texts().current_file}: {active_path}{active_size} "
+                    f"· {phase}{retry_detail}"
                 )
-                self._jobs_run_active_file.setToolTip(active_path or "")
+                self._jobs_run_active_file.setToolTip(
+                    "\n".join(active_tooltip_lines)
+                )
             else:
                 self._jobs_run_active_file.setText("")
                 self._jobs_run_active_file.setToolTip("")
@@ -1762,6 +1794,14 @@ class MediaSyncWindow(QMainWindow):
             remove_tooltip = f"{self._texts().remove_target_tooltip}: {target.name}"
             button.setToolTip(remove_tooltip)
             button.setAccessibleName(remove_tooltip)
+        controls_layout = controls.layout()
+        if controls_layout is not None:
+            controls_layout.invalidate()
+            controls_layout.activate()
+            controls.setMinimumHeight(
+                controls_layout.minimumSize().height() if editing_targets else 0
+            )
+        controls.updateGeometry()
 
     def _create_standard_backup_job(self) -> None:
         if self._engine_client is None:
@@ -3117,6 +3157,10 @@ class MediaSyncWindow(QMainWindow):
         texts = self._texts()
         panel = QFrame()
         panel.setObjectName("standardBackupPanel")
+        panel.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Minimum,
+        )
         layout = QGridLayout(panel)
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setHorizontalSpacing(18)
@@ -3164,7 +3208,7 @@ class MediaSyncWindow(QMainWindow):
         target_controls.setMinimumWidth(0)
         target_controls.setSizePolicy(
             QSizePolicy.Policy.Ignored,
-            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Minimum,
         )
         target_controls_layout = QVBoxLayout(target_controls)
         target_controls_layout.setContentsMargins(0, 0, 0, 0)
@@ -3175,7 +3219,7 @@ class MediaSyncWindow(QMainWindow):
             target_row.setMinimumWidth(0)
             target_row.setSizePolicy(
                 QSizePolicy.Policy.Ignored,
-                QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Minimum,
             )
             target_row_layout = QHBoxLayout(target_row)
             target_row_layout.setContentsMargins(0, 0, 0, 0)

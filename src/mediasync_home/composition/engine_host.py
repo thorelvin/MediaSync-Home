@@ -147,6 +147,7 @@ from mediasync_home.application.backup_analysis import (
 )
 from mediasync_home.application.clocks import ClockPort
 from mediasync_home.application.endpoint_retry import MonotonicEndpointRetryScheduler
+from mediasync_home.application.staging_retry import MonotonicStagingRetryScheduler
 from mediasync_home.application.run_executor_cycle import (
     RunExecutorCyclePumpOutcome,
     RunExecutorCycleRecoveryOperationStore,
@@ -383,6 +384,7 @@ class EngineHostRuntime:
     service: EngineHostIpcService
     clock: ClockPort = field(default_factory=SystemClock)
     endpoint_retry_scheduler: MonotonicEndpointRetryScheduler | None = None
+    staging_retry_scheduler: MonotonicStagingRetryScheduler | None = None
     installation_state: InstallationState | None = None
     endpoint_classification_refresh: EndpointClassificationRefreshReport | None = None
     snapshot_materialization_refresh: SnapshotMaterializationRefreshReport | None = None
@@ -1398,6 +1400,7 @@ def run_engine_host(
                 service_status=service_status,
                 output=output,
                 endpoint_retry_scheduler=runtime.endpoint_retry_scheduler,
+                staging_retry_scheduler=runtime.staging_retry_scheduler,
             )
             executor_maintenance_loop.start()
         if host_locator_publication is not None:
@@ -1494,11 +1497,15 @@ def build_engine_host_runtime(
     state_capacity_probe: StateCapacityProbe | None = None,
     clock: ClockPort | None = None,
     endpoint_retry_scheduler: MonotonicEndpointRetryScheduler | None = None,
+    staging_retry_scheduler: MonotonicStagingRetryScheduler | None = None,
     recover_interrupted_analyses: bool = True,
 ) -> EngineHostRuntime:
     runtime_clock = clock or SystemClock()
     runtime_endpoint_retry_scheduler = (
         endpoint_retry_scheduler or MonotonicEndpointRetryScheduler(runtime_clock)
+    )
+    runtime_staging_retry_scheduler = (
+        staging_retry_scheduler or MonotonicStagingRetryScheduler(runtime_clock)
     )
     if state_root is None:
         return EngineHostRuntime(
@@ -1649,7 +1656,10 @@ def build_engine_host_runtime(
         external_resource_state = SqliteExternalResourceStateStore(catalog_connection)
         catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
         resource_leases = SqliteResourceLeaseStore(recovery_connection)
-        recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
+        recovery_operations = SqliteRecoveryOperationStore(
+            recovery_connection,
+            staging_retry_scheduler=runtime_staging_retry_scheduler,
+        )
         run_progress = SqliteRunProgressSnapshotStore(
             catalog_runs=runs,
             recovery_connection=recovery_connection,
@@ -1767,6 +1777,7 @@ def build_engine_host_runtime(
         service=service,
         clock=runtime_clock,
         endpoint_retry_scheduler=runtime_endpoint_retry_scheduler,
+        staging_retry_scheduler=runtime_staging_retry_scheduler,
         installation_state=installation_state,
         endpoint_classification_refresh=endpoint_classification_refresh,
         snapshot_materialization_refresh=snapshot_materialization_refresh,
@@ -1968,6 +1979,7 @@ def _build_executor_maintenance_loop(
     service_status: RuntimeStatus,
     output: Emit,
     endpoint_retry_scheduler: MonotonicEndpointRetryScheduler | None = None,
+    staging_retry_scheduler: MonotonicStagingRetryScheduler | None = None,
 ) -> ExecutorMaintenanceLoop:
     if args.state_root is None:
         raise RuntimeError("RUN_EXECUTOR_MAINTENANCE_REQUIRES_STATE_ROOT")
@@ -1981,6 +1993,7 @@ def _build_executor_maintenance_loop(
             reconciler_instance_id=f"{args.installation_id}-executor-maintenance",
             run_executor_staging_backend=args.run_executor_staging_backend,
             endpoint_retry_scheduler=endpoint_retry_scheduler,
+            staging_retry_scheduler=staging_retry_scheduler,
             recover_interrupted_analyses=False,
         )
 

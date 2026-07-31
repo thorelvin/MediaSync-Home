@@ -7,7 +7,7 @@ from typing import Protocol
 from mediasync_home.application.runs import RunState, RunTargetState
 
 
-PROGRESS_SNAPSHOT_SCHEMA_VERSION = 3
+PROGRESS_SNAPSHOT_SCHEMA_VERSION = 4
 MAX_PROGRESS_SNAPSHOT_TARGETS = 32
 MAX_PROGRESS_QUERY_ID_LENGTH = 256
 MAX_PROGRESS_ACTIVE_PATH_LENGTH = 32767
@@ -116,6 +116,10 @@ class RunProgressSnapshot:
     active_relative_path: str | None = None
     active_phase: str | None = None
     active_planned_bytes: int | None = None
+    active_staging_failure_count: int | None = None
+    active_retry_backoff_ms: int | None = None
+    active_retry_not_before_utc: str | None = None
+    active_last_error_code: str | None = None
     bytes_per_second: float | None = None
     eta_seconds: int | None = None
     stop_requested: bool = False
@@ -160,6 +164,28 @@ class RunProgressSnapshot:
             _validate_snapshot_text(self.active_phase, "RUN_PROGRESS_ACTIVE_PHASE_INVALID")
         if self.active_planned_bytes is not None and self.active_planned_bytes < 0:
             raise ProgressSnapshotQueryError("RUN_PROGRESS_ACTIVE_BYTES_INVALID")
+        if self.active_staging_failure_count is not None and (
+            self.active_staging_failure_count < 0
+        ):
+            raise ProgressSnapshotQueryError("RUN_PROGRESS_ACTIVE_FAILURE_COUNT_INVALID")
+        if (self.active_retry_backoff_ms is None) != (
+            self.active_retry_not_before_utc is None
+        ):
+            raise ProgressSnapshotQueryError("RUN_PROGRESS_ACTIVE_RETRY_PAIR_INVALID")
+        if self.active_retry_backoff_ms is not None and not (
+            1 <= self.active_retry_backoff_ms <= 30_000
+        ):
+            raise ProgressSnapshotQueryError("RUN_PROGRESS_ACTIVE_RETRY_BACKOFF_INVALID")
+        if self.active_retry_not_before_utc is not None and (
+            not self.active_retry_not_before_utc.endswith("Z")
+            or len(self.active_retry_not_before_utc) > 64
+        ):
+            raise ProgressSnapshotQueryError("RUN_PROGRESS_ACTIVE_RETRY_UTC_INVALID")
+        if self.active_last_error_code is not None:
+            _validate_snapshot_text(
+                self.active_last_error_code,
+                "RUN_PROGRESS_ACTIVE_ERROR_CODE_INVALID",
+            )
         if self.bytes_per_second is not None and (
             not math.isfinite(self.bytes_per_second) or self.bytes_per_second < 0
         ):
@@ -191,6 +217,10 @@ class RunProgressSnapshot:
             "active_relative_path": self.active_relative_path,
             "active_phase": self.active_phase,
             "active_planned_bytes": self.active_planned_bytes,
+            "active_staging_failure_count": self.active_staging_failure_count,
+            "active_retry_backoff_ms": self.active_retry_backoff_ms,
+            "active_retry_not_before_utc": self.active_retry_not_before_utc,
+            "active_last_error_code": self.active_last_error_code,
             "bytes_per_second": self.bytes_per_second,
             "eta_seconds": self.eta_seconds,
             "stop_requested": self.stop_requested,

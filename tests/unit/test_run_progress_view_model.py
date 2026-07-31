@@ -25,6 +25,13 @@ def test_run_progress_view_model_parses_snapshot_and_retains_unchanged_state() -
                     "completed_bytes": 100,
                     "warning_count": 0,
                     "error_count": 0,
+                    "active_relative_path": "photos/a.jpg",
+                    "active_phase": "STAGING_ALLOCATED",
+                    "active_planned_bytes": 100,
+                    "active_staging_failure_count": 1,
+                    "active_retry_backoff_ms": 900,
+                    "active_retry_not_before_utc": "2026-07-31T00:00:00.900Z",
+                    "active_last_error_code": "LOCAL_STAGING_TRANSFER_FAILED",
                     "targets": [
                         {
                             "endpoint_id": "target-a",
@@ -69,6 +76,10 @@ def test_run_progress_view_model_parses_snapshot_and_retains_unchanged_state() -
     assert state.active is True
     assert state.sequence_no == 7
     assert state.completed_operations == 1
+    assert state.active_staging_failure_count == 1
+    assert state.active_retry_backoff_ms == 900
+    assert state.active_retry_not_before_utc == "2026-07-31T00:00:00.900Z"
+    assert state.active_last_error_code == "LOCAL_STAGING_TRANSFER_FAILED"
     assert state.targets[0].endpoint_id == "target-a"
     assert state.targets[0].endpoint_wait_attempts == 2
     assert state.targets[0].endpoint_wait_total_backoff_ms == 14_250

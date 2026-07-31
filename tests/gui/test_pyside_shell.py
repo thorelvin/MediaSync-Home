@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QFrame,
     QLabel,
     QListWidget,
     QProgressBar,
@@ -379,6 +380,9 @@ def test_target_selection_reflows_without_horizontal_clipping(
         add_target = window.findChild(QToolButton, "addTargetButton")
         setup_back = window.findChild(QToolButton, "setupBackButton")
         target_paths = window.findChildren(QLabel, "setupTargetPathRow")
+        target_controls = window.findChild(QWidget, "setupTargetControls")
+        setup_panel = window.findChild(QFrame, "standardBackupPanel")
+        setup_actions = window.findChild(QWidget, "setupActions")
         dashboard_scroll = window.findChild(QScrollArea, "dashboardScrollArea")
         activity_scroll = window.findChild(QScrollArea, "activityScrollArea")
 
@@ -386,6 +390,9 @@ def test_target_selection_reflows_without_horizontal_clipping(
         assert add_target is not None
         assert setup_back is not None
         assert len(target_paths) == 3
+        assert target_controls is not None
+        assert setup_panel is not None
+        assert setup_actions is not None
         assert dashboard_scroll is not None
         assert activity_scroll is not None
         QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
@@ -422,6 +429,18 @@ def test_target_selection_reflows_without_horizontal_clipping(
         assert activity_scroll.horizontalScrollBar().maximum() == 0
         assert dashboard_scroll.verticalScrollBar().maximum() > 0
         assert activity_scroll.verticalScrollBar().maximum() > 0
+        assert target_controls.height() >= target_controls.minimumSizeHint().height()
+        assert setup_panel.height() >= setup_panel.minimumSizeHint().height()
+        assert setup_panel.rect().contains(setup_actions.geometry())
+        for target_path in target_paths:
+            target_position = target_path.mapTo(
+                target_controls,
+                target_path.rect().topLeft(),
+            )
+            assert target_position.x() >= 0
+            assert target_position.y() >= 0
+            assert target_position.x() + target_path.width() <= target_controls.width()
+            assert target_position.y() + target_path.height() <= target_controls.height()
         dashboard_page = dashboard_scroll.widget()
         assert dashboard_page is not None
         assert dashboard_page.height() >= dashboard_page.minimumSizeHint().height()
@@ -1462,6 +1481,34 @@ def test_jobs_page_wraps_endpoint_retry_diagnostics_without_clipping(qapp) -> No
         window.deleteLater()
 
 
+def test_jobs_page_wraps_file_retry_diagnostics_without_clipping(qapp) -> None:
+    provider = _FakeRunControlDashboardEngineClient()
+    provider.staging_retry_waiting = True
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(700, 500)
+        window.show()
+        window.refresh_engine_status()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+        active_file = window.findChild(QLabel, "jobsRunActiveFile")
+
+        assert active_file is not None
+        assert active_file.wordWrap()
+        assert "Nytt forsøk 2" in active_file.text()
+        assert "LOCAL_STAGING_TRANSFER_FAILED" in active_file.toolTip()
+        assert "0.9 s" in active_file.toolTip()
+        assert active_file.height() >= active_file.heightForWidth(active_file.width())
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def _ready_state() -> EngineStatusViewState:
     return engine_status_from_response(
         IpcResponse.accepted({"host_status": startup_status(ProcessRole.ENGINE_HOST).to_dict()})
@@ -1953,6 +2000,7 @@ class _FakeRunControlDashboardEngineClient(_FakeBackupStartDashboardEngineClient
         self.controls: list[str] = []
         self.stop_requested = False
         self.target_waiting = False
+        self.staging_retry_waiting = False
         self.endpoint_wait_reason = "ENDPOINT_ROOT_UNAVAILABLE"
 
     def get_run_progress(
@@ -1980,6 +2028,22 @@ class _FakeRunControlDashboardEngineClient(_FakeBackupStartDashboardEngineClient
             "active_relative_path": "Photos/2026/current.jpg",
             "active_phase": "STAGING_ALLOCATED",
             "active_planned_bytes": 2048,
+            "active_staging_failure_count": (
+                1 if self.staging_retry_waiting else 0
+            ),
+            "active_retry_backoff_ms": (
+                900 if self.staging_retry_waiting else None
+            ),
+            "active_retry_not_before_utc": (
+                "2026-07-31T00:00:00.900Z"
+                if self.staging_retry_waiting
+                else None
+            ),
+            "active_last_error_code": (
+                "LOCAL_STAGING_TRANSFER_FAILED"
+                if self.staging_retry_waiting
+                else None
+            ),
             "bytes_per_second": 512.0,
             "eta_seconds": 3,
             "stop_requested": self.stop_requested,

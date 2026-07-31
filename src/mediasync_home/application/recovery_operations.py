@@ -13,6 +13,10 @@ from mediasync_home.application.source_preconditions import (
     SourceFilePrecondition,
     SourceFilePreconditionError,
 )
+from mediasync_home.application.staging_retry import (
+    StagingRetryViolation,
+    validate_staging_retry_persistence,
+)
 
 
 HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -83,6 +87,8 @@ class RecoveryOperation:
     catalog_handoff_id: str | None = None
     last_error_code: str | None = None
     staging_failure_count: int = 0
+    staging_retry_backoff_ms: int | None = None
+    staging_retry_not_before_utc: str | None = None
 
 
 @dataclass(frozen=True)
@@ -327,6 +333,18 @@ def validate_recovery_operation(operation: RecoveryOperation) -> None:
         raise RecoveryOperationViolation(
             "RECOVERY_OPERATION_REQUIRES_NONNEGATIVE_FAILURE_COUNT"
         )
+    try:
+        validate_staging_retry_persistence(
+            backoff_ms=operation.staging_retry_backoff_ms,
+            retry_not_before_utc=operation.staging_retry_not_before_utc,
+        )
+    except StagingRetryViolation as exc:
+        raise RecoveryOperationViolation(str(exc)) from exc
+    if operation.staging_retry_backoff_ms is not None and (
+        operation.staging_failure_count < 1
+        or operation.phase not in PRE_COMMIT_LEASE_REBIND_PHASES[:-1]
+    ):
+        raise RecoveryOperationViolation("RECOVERY_OPERATION_STAGING_RETRY_STATE_INVALID")
     if not _valid_relative_path(operation.final_relative_path):
         raise RecoveryOperationViolation(
             "RECOVERY_OPERATION_REQUIRES_RELATIVE_FINAL_PATH"

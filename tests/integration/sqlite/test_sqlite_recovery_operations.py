@@ -30,6 +30,7 @@ from mediasync_home.application.recovery_operations import (
     RecoveryTargetPreconditionKind,
     planned_recovery_operation,
 )
+from tests.support.fake_clock import FakeClock
 
 
 def test_sqlite_recovery_operation_store_records_planned_operation_and_event(
@@ -568,7 +569,8 @@ def test_sqlite_recovery_operation_store_journals_bounded_staging_failures(
     connection = _prepared_recovery_connection(tmp_path)
     try:
         _register_resource_lease(connection)
-        store = SqliteRecoveryOperationStore(connection)
+        clock = FakeClock()
+        store = SqliteRecoveryOperationStore(connection, clock=clock)
         store.record_planned_operation(_operation(), process_instance_id="host-a")
 
         for expected_count in range(3):
@@ -588,6 +590,15 @@ def test_sqlite_recovery_operation_store_journals_bounded_staging_failures(
             )
             assert updated is not None
             assert updated.staging_failure_count == expected_count + 1
+            if expected_count < 2:
+                assert updated.staging_retry_backoff_ms is not None
+                assert updated.staging_retry_not_before_utc is not None
+                assert store.staging_retry_is_due(updated) is False
+                clock.advance_monotonic_ms(updated.staging_retry_backoff_ms)
+                assert store.staging_retry_is_due(updated) is True
+            else:
+                assert updated.staging_retry_backoff_ms is None
+                assert updated.staging_retry_not_before_utc is None
 
         operation = store.load_operation(run_id="run-a", operation_id="operation-a")
         assert operation is not None
@@ -614,6 +625,8 @@ def test_sqlite_recovery_operation_store_journals_bounded_staging_failures(
             3,
         ]
         assert json.loads(str(rows[-1][2]))["retry_scheduled"] is False
+        assert json.loads(str(rows[-3][2]))["retry_backoff_ms"] is not None
+        assert json.loads(str(rows[-3][2]))["retry_not_before_utc"].endswith("Z")
     finally:
         connection.close()
 

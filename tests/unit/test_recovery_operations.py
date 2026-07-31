@@ -94,6 +94,31 @@ def test_recovery_operation_requires_intent_segment_after_commit_intent() -> Non
     )
 
 
+def test_recovery_operation_validates_persisted_staging_retry_pair() -> None:
+    retrying = replace(
+        _operation(),
+        staging_failure_count=1,
+        staging_retry_backoff_ms=900,
+        staging_retry_not_before_utc="2026-07-31T00:00:00.900Z",
+    )
+
+    validate_recovery_operation(retrying)
+    with pytest.raises(
+        RecoveryOperationViolation,
+        match="STAGING_RETRY_TIMING_PAIR_INVALID",
+    ):
+        validate_recovery_operation(
+            replace(retrying, staging_retry_not_before_utc=None)
+        )
+    with pytest.raises(
+        RecoveryOperationViolation,
+        match="RECOVERY_OPERATION_STAGING_RETRY_STATE_INVALID",
+    ):
+        validate_recovery_operation(
+            replace(retrying, phase=RecoveryOperationPhase.SKIPPED)
+        )
+
+
 def _operation(**overrides: object):
     values: dict[str, object] = {
         "run_id": "run-a",

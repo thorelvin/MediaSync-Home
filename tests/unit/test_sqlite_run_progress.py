@@ -31,9 +31,13 @@ def test_sqlite_run_progress_combines_active_file_transfer_rate_and_eta() -> Non
             operation_id TEXT NOT NULL,
             phase TEXT NOT NULL,
             source_relative_path TEXT,
-            final_relative_path TEXT NOT NULL,
-            planned_bytes INTEGER NOT NULL,
-            plan_sequence_no INTEGER NOT NULL
+                final_relative_path TEXT NOT NULL,
+                planned_bytes INTEGER NOT NULL,
+                plan_sequence_no INTEGER NOT NULL,
+                staging_failure_count INTEGER NOT NULL DEFAULT 0,
+                staging_retry_backoff_ms INTEGER,
+                staging_retry_not_before_utc TEXT,
+                last_error_code TEXT
         );
         CREATE TABLE recovery_events (
             event_id INTEGER PRIMARY KEY,
@@ -84,6 +88,17 @@ def test_sqlite_run_progress_combines_active_file_transfer_rate_and_eta() -> Non
     )
     connection.execute(
         """
+        UPDATE recovery_operations
+        SET
+            staging_failure_count = 1,
+            staging_retry_backoff_ms = 900,
+            staging_retry_not_before_utc = '2026-07-31T10:01:01.000Z',
+            last_error_code = 'LOCAL_STAGING_TRANSFER_FAILED'
+        WHERE operation_id = 'operation-b'
+        """
+    )
+    connection.execute(
+        """
         INSERT INTO recovery_events (
             event_id,
             run_id,
@@ -108,6 +123,10 @@ def test_sqlite_run_progress_combines_active_file_transfer_rate_and_eta() -> Non
     assert snapshot.active_relative_path == "photos/b.jpg"
     assert snapshot.active_phase == "STAGING_ALLOCATED"
     assert snapshot.active_planned_bytes == 120_000_000
+    assert snapshot.active_staging_failure_count == 1
+    assert snapshot.active_retry_backoff_ms == 900
+    assert snapshot.active_retry_not_before_utc == "2026-07-31T10:01:01.000Z"
+    assert snapshot.active_last_error_code == "LOCAL_STAGING_TRANSFER_FAILED"
     assert snapshot.completed_operations == 1
     assert snapshot.completed_bytes == 120_000_000
     assert snapshot.transferred_operations == 1

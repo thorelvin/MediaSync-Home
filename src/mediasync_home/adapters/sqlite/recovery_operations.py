@@ -6,6 +6,8 @@ import sqlite3
 from dataclasses import replace
 from typing import Any, Mapping
 
+from mediasync_home.adapters.system_clock import SystemClock
+from mediasync_home.application.clocks import ClockPort
 from mediasync_home.application.recovery_operations import (
     PRE_COMMIT_LEASE_REBIND_PHASES,
     TERMINAL_PHASES,
@@ -19,6 +21,11 @@ from mediasync_home.application.recovery_operations import (
     validate_recovery_phase_transition,
 )
 from mediasync_home.application.runs import RunTargetStopProgress
+from mediasync_home.application.staging_retry import (
+    MonotonicStagingRetryScheduler,
+    StagingRetryViolation,
+    staging_retry_backoff_ms,
+)
 
 
 class SqliteRecoveryOperationStoreError(ValueError):
@@ -26,8 +33,22 @@ class SqliteRecoveryOperationStoreError(ValueError):
 
 
 class SqliteRecoveryOperationStore(RecoveryOperationStore):
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        clock: ClockPort | None = None,
+        staging_retry_scheduler: MonotonicStagingRetryScheduler | None = None,
+    ) -> None:
+        if clock is not None and staging_retry_scheduler is not None:
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_RETRY_CLOCK_IS_AMBIGUOUS"
+            )
         self._connection = connection
+        self._staging_retries = (
+            staging_retry_scheduler
+            or MonotonicStagingRetryScheduler(clock or SystemClock())
+        )
 
     def record_planned_operation(
         self,
@@ -159,6 +180,8 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                     final_durability_state = ?,
                     catalog_handoff_id = ?,
                     last_error_code = ?,
+                    staging_retry_backoff_ms = NULL,
+                    staging_retry_not_before_utc = NULL,
                     updated_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 WHERE run_id = ?
                     AND operation_id = ?
@@ -209,6 +232,10 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                 )
             if not outer_transaction:
                 self._connection.execute("COMMIT")
+            self._staging_retries.discard(
+                run_id=run_id,
+                operation_id=operation_id,
+            )
             return loaded
         except SqliteRecoveryOperationStoreError:
             if not outer_transaction and self._connection.in_transaction:
@@ -249,7 +276,7 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
             raise SqliteRecoveryOperationStoreError(
                 "RECOVERY_OPERATION_REQUIRES_ERROR_CODE"
             )
-        if expected_phase not in PRE_COMMIT_LEASE_REBIND_PHASES:
+        if expected_phase not in PRE_COMMIT_LEASE_REBIND_PHASES[:-1]:
             raise SqliteRecoveryOperationStoreError(
                 "RECOVERY_OPERATION_STAGING_FAILURE_PHASE_UNSUPPORTED"
             )
@@ -273,11 +300,28 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                 return None
 
             failure_count = expected_failure_count + 1
+            retry_timing = None
+            if next_phase is expected_phase:
+                retry_timing = self._staging_retries.plan(
+                    backoff_ms=staging_retry_backoff_ms(
+                        run_id=run_id,
+                        operation_id=operation_id,
+                        attempt_no=failure_count,
+                    )
+                )
             updated = replace(
                 operation,
                 phase=next_phase,
                 last_error_code=normalized_error_code,
                 staging_failure_count=failure_count,
+                staging_retry_backoff_ms=(
+                    None if retry_timing is None else retry_timing.backoff_ms
+                ),
+                staging_retry_not_before_utc=(
+                    None
+                    if retry_timing is None
+                    else retry_timing.retry_not_before_utc
+                ),
             )
             validate_recovery_operation(updated)
             self._require_active_matching_lease(updated)
@@ -288,6 +332,8 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                     phase = ?,
                     last_error_code = ?,
                     staging_failure_count = ?,
+                    staging_retry_backoff_ms = ?,
+                    staging_retry_not_before_utc = ?,
                     updated_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                 WHERE run_id = ?
                     AND operation_id = ?
@@ -298,6 +344,8 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                     next_phase.value,
                     normalized_error_code,
                     failure_count,
+                    updated.staging_retry_backoff_ms,
+                    updated.staging_retry_not_before_utc,
                     run_id,
                     operation_id,
                     expected_phase.value,
@@ -315,6 +363,8 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                 "error_code": normalized_error_code,
                 "event_kind": "STAGING_ATTEMPT_FAILED",
                 "retry_scheduled": next_phase is expected_phase,
+                "retry_backoff_ms": updated.staging_retry_backoff_ms,
+                "retry_not_before_utc": updated.staging_retry_not_before_utc,
             }
             self._append_event(
                 run_id=run_id,
@@ -331,6 +381,17 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                 )
             if not outer_transaction:
                 self._connection.execute("COMMIT")
+            if retry_timing is not None:
+                self._staging_retries.activate(
+                    run_id=run_id,
+                    operation_id=operation_id,
+                    timing=retry_timing,
+                )
+            else:
+                self._staging_retries.discard(
+                    run_id=run_id,
+                    operation_id=operation_id,
+                )
             return loaded
         except SqliteRecoveryOperationStoreError:
             if not outer_transaction and self._connection.in_transaction:
@@ -342,11 +403,36 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
             raise SqliteRecoveryOperationStoreError(
                 "RECOVERY_OPERATION_PERSISTENCE_CONFLICT"
             ) from exc
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, StagingRetryViolation) as exc:
             if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
             raise SqliteRecoveryOperationStoreError(
                 "RECOVERY_OPERATION_PERSISTENCE_FAILED"
+            ) from exc
+
+    def staging_retry_is_due(self, operation: RecoveryOperation) -> bool:
+        if (
+            operation.staging_retry_backoff_ms is None
+            and operation.staging_retry_not_before_utc is None
+        ):
+            return True
+        if (
+            operation.staging_retry_backoff_ms is None
+            or operation.staging_retry_not_before_utc is None
+        ):
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_STAGING_RETRY_INVALID"
+            )
+        try:
+            return self._staging_retries.is_due(
+                run_id=operation.run_id,
+                operation_id=operation.operation_id,
+                backoff_ms=operation.staging_retry_backoff_ms,
+                retry_not_before_utc=operation.staging_retry_not_before_utc,
+            )
+        except StagingRetryViolation as exc:
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_STAGING_RETRY_INVALID"
             ) from exc
 
     def record_operation_lease_rebound(
@@ -914,6 +1000,11 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                     "RECOVERY_OPERATION_UNEXPECTED_CATALOG_HANDOFF"
                 )
             updated = replace(operation, phase=next_phase)
+        updated = replace(
+            updated,
+            staging_retry_backoff_ms=None,
+            staging_retry_not_before_utc=None,
+        )
         updated = _apply_operation_metadata(updated, operation_metadata)
         validate_recovery_operation(updated)
         return updated
@@ -1110,6 +1201,8 @@ RECOVERY_OPERATION_COLUMN_NAMES = (
     "last_error_code",
     "planned_bytes",
     "staging_failure_count",
+    "staging_retry_backoff_ms",
+    "staging_retry_not_before_utc",
 )
 RECOVERY_OPERATION_COLUMNS = ", ".join(RECOVERY_OPERATION_COLUMN_NAMES)
 RECOVERY_OPERATION_PLACEHOLDERS = ", ".join(
@@ -1165,6 +1258,8 @@ def _operation_values(operation: RecoveryOperation) -> tuple[object, ...]:
         operation.last_error_code,
         operation.planned_bytes,
         operation.staging_failure_count,
+        operation.staging_retry_backoff_ms,
+        operation.staging_retry_not_before_utc,
     )
 
 
@@ -1216,6 +1311,8 @@ def _operation_from_row(row: sqlite3.Row | tuple[Any, ...]) -> RecoveryOperation
         last_error_code=None if row[43] is None else str(row[43]),
         planned_bytes=int(row[44]),
         staging_failure_count=int(row[45]),
+        staging_retry_backoff_ms=None if row[46] is None else int(row[46]),
+        staging_retry_not_before_utc=None if row[47] is None else str(row[47]),
     )
 
 

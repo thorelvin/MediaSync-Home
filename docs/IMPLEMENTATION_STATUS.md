@@ -18,18 +18,20 @@ viser **Venter på mål** med forsøksnummer og lokal retrytid; tooltip lokalise
 nettverksårsaken og viser samlet planlagt ventetid. Volume-arrival hints gjenstår.
 
 Oppdatering 2026-07-31: Feil på enkeltfiler har nå en varig, avgrenset
-retryflyt. Recovery schema 9 lagrer `staging_failure_count`, og hvert transient
-stagingforsøk appendes som en hashkjedet recovery-event med forsøksnummer,
-feilkode og retryutfall. Bare eksplisitt klassifiserte lokale I/O- og
-Robocopy-feil prøves på nytt; precondition-, reparse-, containment- og andre
-sikkerhetsfeil forblir blokkert. Tredje transientfeil flytter operasjonen til
-`SKIPPED`, resten av filene fortsetter, og et ellers ferdig mål avsluttes som
-`SUCCEEDED_WITH_WARNINGS`. Run blir `COMPLETED_WITH_WARNINGS`, med samme
-varseltilstand og varselantall i Jobs-fremdrift og Historikk. Lokal staging
-normaliserer nå også allocation-, transfer-, durability- og verification-I/O
-til retryklassifiserbare feilkoder. Nettverksbrudd bruker i stedet den tidsstyrte
-retryflyten for hele målet. Persistente catalog-`operation_attempts` og
-tidsstyrt backoff for enkeltfilforsøk gjenstår.
+retryflyt. Recovery schema 10 lagrer `staging_failure_count`, faktisk jitteret
+backoff og neste tillatte retrytid på operasjonen; samme timing bindes til den
+hashkjedede failure-eventen. Levende venting bruker monotonic clock, mens lagret
+UTC avstemmes én gang etter restart. Første og andre transientfeil venter omtrent
+ett og to sekunder; tredje feil flytter operasjonen til `SKIPPED`. Bare
+eksplisitt klassifiserte lokale I/O- og Robocopy-feil prøves på nytt;
+precondition-, reparse-, containment- og andre sikkerhetsfeil forblir blokkert.
+Mens ett mål venter kan et annet retained mål fortsette, uten at senere
+operasjoner på samme mål går forbi den ventende operasjonen. Et ellers ferdig
+mål avsluttes som `SUCCEEDED_WITH_WARNINGS`, og run blir
+`COMPLETED_WITH_WARNINGS`. Progress schema 4 og Jobs viser neste filforsøk,
+lokal retrytid, feilkode og backoff i en tekstflate som reflowes. Nettverksbrudd
+bruker fortsatt den separate tidsstyrte retryflyten for hele målet. Persistente
+catalog-`operation_attempts` gjenstår.
 
 Oppdatering 2026-07-31: Kildebytes er nå bundet til analysen som opprettet
 planen. Snapshot schema 2 og catalog schema 37 lagrer et stabilt
@@ -123,7 +125,9 @@ endre historisk checksumtolkning. IPC og planpreview eksponerer mål-ID-en.
 Dashboardet nullstiller og beregner deretter breddesensitive labelhøyder og
 sidens minimumshøyde på nytt; GUI-beviset dekker lange valgte kilde-/målstier ved
 900×560, 1000×650 og 1120×700 uten utilgjengelig eller horisontalt klippet
-innhold.
+innhold. Targetkontrollen og hvert synlig targetrow bruker nå også eksplisitt
+vertikal minimumspolicy, og panelet reserverer den dynamiske layouthøyden før
+primærhandlingen scrolles inn i viewporten.
 
 Oppdatering 2026-07-31: Navigasjonssiden **Jobber** er ikke lenger en
 placeholder. Den viser opptil 25 aktive jobber per bounded Engine Host-query,
