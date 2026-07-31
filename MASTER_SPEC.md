@@ -223,6 +223,7 @@ schema/
 └── state-machines.yaml
 tools/
 ├── build_adr_docs.py
+├── build_contract_types.py
 ├── build_master.py
 └── validate_handoff.py
 ```

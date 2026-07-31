@@ -6,6 +6,12 @@ Alle filer i denne katalogen er utkast eller blokkerte plassholdere. Status og e
 
 `catalog.sql` og `recovery.sql` er bevisst ikke implementert som kjørbar schema ennå. ADR-003 har valgt to lokale SQLite-databaser, men Milepæl 1 produserer faktiske migrasjoner, composite constraints og negative tester etter at gjenværende styrende ADR-er er klare. Kommentarplassholderne må aldri brukes som produktdatabase.
 
+`state-machines.yaml` og `reason-codes.yaml` genererer
+`src/mediasync_home/generated/contract_types.py` og
+`docs/generated/CONTRACT_TYPES.md` gjennom `tools/build_contract_types.py`.
+Kjør `python tools/build_contract_types.py --check` i alle kvalitetsporter; runtime
+skal importere genererte kontrakttyper i stedet for å duplisere enumverdiene.
+
 ## Autoritetsregel
 
 En kontrakt blir autoritativ bare når:

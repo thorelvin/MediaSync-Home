@@ -29,6 +29,7 @@ jobs:
       - name: Validate contracts and generated docs
         run: |
           python tools\validate_contracts.py
+          python tools\build_contract_types.py --check
           python tools\validate_handoff.py
           python tools\build_adr_docs.py --check
           python tools\build_master.py --check

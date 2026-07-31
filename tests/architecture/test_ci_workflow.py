@@ -13,6 +13,7 @@ WORKFLOW = ROOT / ".github/workflows/ci.yml"
 REQUIRED_COMMANDS = {
     "python -m pip install -r requirements-dev.txt",
     "python tools\\validate_contracts.py",
+    "python tools\\build_contract_types.py --check",
     "python tools\\validate_handoff.py",
     "python tools\\build_adr_docs.py --check",
     "python tools\\build_master.py --check",

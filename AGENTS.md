@@ -106,6 +106,7 @@ Kjør alle kontroller som faktisk finnes. Minimum for Milepæl 1:
 
 ```powershell
 python tools\validate_contracts.py
+python tools\build_contract_types.py --check
 python tools\validate_handoff.py
 python tools\build_adr_docs.py --check
 python tools\build_master.py --check

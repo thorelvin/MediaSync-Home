@@ -2,31 +2,19 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from enum import Enum
 from typing import Protocol, TypeVar
+
+from mediasync_home.generated.contract_types import (
+    COMMAND_RECEIPT_TERMINAL_STATES,
+    COMMAND_RECEIPT_TRANSITIONS,
+    CommandReceiptState as CommandReceiptState,
+)
 
 
 _T = TypeVar("_T")
 
 
-class CommandReceiptState(str, Enum):
-    RECEIVED = "RECEIVED"
-    VALIDATED = "VALIDATED"
-    EFFECT_PREPARED = "EFFECT_PREPARED"
-    ACCEPTED = "ACCEPTED"
-    RUNNING = "RUNNING"
-    SUCCEEDED = "SUCCEEDED"
-    REJECTED = "REJECTED"
-    FAILED = "FAILED"
-    CANCELLED = "CANCELLED"
-
-
-TERMINAL_COMMAND_RECEIPT_STATES = {
-    CommandReceiptState.SUCCEEDED,
-    CommandReceiptState.REJECTED,
-    CommandReceiptState.FAILED,
-    CommandReceiptState.CANCELLED,
-}
+TERMINAL_COMMAND_RECEIPT_STATES = COMMAND_RECEIPT_TERMINAL_STATES
 
 EARLY_RECONCILABLE_COMMAND_RECEIPT_STATES = {
     CommandReceiptState.RECEIVED,
@@ -43,30 +31,6 @@ MAX_COMMAND_RECEIPT_STARTUP_RECONCILIATION_LIMIT = 1000
 COMMAND_RECEIPT_REJECTED_AFTER_STARTUP_RECONCILIATION = (
     "COMMAND_RECEIPT_REJECTED_AFTER_STARTUP_RECONCILIATION"
 )
-
-COMMAND_RECEIPT_TRANSITIONS = {
-    CommandReceiptState.RECEIVED: (CommandReceiptState.VALIDATED, CommandReceiptState.REJECTED),
-    CommandReceiptState.VALIDATED: (
-        CommandReceiptState.EFFECT_PREPARED,
-        CommandReceiptState.REJECTED,
-    ),
-    CommandReceiptState.EFFECT_PREPARED: (
-        CommandReceiptState.ACCEPTED,
-        CommandReceiptState.FAILED,
-    ),
-    CommandReceiptState.ACCEPTED: (
-        CommandReceiptState.RUNNING,
-        CommandReceiptState.SUCCEEDED,
-        CommandReceiptState.FAILED,
-        CommandReceiptState.CANCELLED,
-    ),
-    CommandReceiptState.RUNNING: (
-        CommandReceiptState.SUCCEEDED,
-        CommandReceiptState.FAILED,
-        CommandReceiptState.CANCELLED,
-    ),
-}
-
 
 class CommandReceiptConflict(ValueError):
     pass

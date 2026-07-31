@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping, Protocol
 
+from mediasync_home.generated.contract_types import (
+    RECOVERY_OPERATION_TERMINAL_PHASES,
+    RecoveryOperationPhase as RecoveryOperationPhase,
+)
+
 
 HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
@@ -12,33 +17,6 @@ WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
 
 class RecoveryOperationViolation(ValueError):
     pass
-
-
-class RecoveryOperationPhase(str, Enum):
-    PLANNED = "PLANNED"
-    SOURCE_VALIDATED = "SOURCE_VALIDATED"
-    SOURCE_STABILITY_BOUND = "SOURCE_STABILITY_BOUND"
-    TARGET_PRECONDITION_VALIDATED = "TARGET_PRECONDITION_VALIDATED"
-    STAGING_ALLOCATED = "STAGING_ALLOCATED"
-    TRANSFERRED = "TRANSFERRED"
-    STAGING_DURABLE = "STAGING_DURABLE"
-    STAGING_VERIFIED = "STAGING_VERIFIED"
-    COMMIT_INTENT_RECORDED = "COMMIT_INTENT_RECORDED"
-    COMMIT_PRECONDITIONS_REVALIDATED = "COMMIT_PRECONDITIONS_REVALIDATED"
-    OLD_TARGET_PRESERVED = "OLD_TARGET_PRESERVED"
-    FILESYSTEM_APPLIED = "FILESYSTEM_APPLIED"
-    FINAL_DURABLE = "FINAL_DURABLE"
-    FINAL_VERIFIED = "FINAL_VERIFIED"
-    CATALOG_RECORDED = "CATALOG_RECORDED"
-    CLEANED = "CLEANED"
-    SKIPPED = "SKIPPED"
-    CONFLICT = "CONFLICT"
-    DEFERRED = "DEFERRED"
-    FAILED_RETRYABLE = "FAILED_RETRYABLE"
-    FAILED_BLOCKED = "FAILED_BLOCKED"
-    CANCELLED = "CANCELLED"
-    ROLLBACK_REQUIRED = "ROLLBACK_REQUIRED"
-    USER_DECISION_REQUIRED = "USER_DECISION_REQUIRED"
 
 
 class RecoveryTargetPreconditionKind(str, Enum):
@@ -216,17 +194,7 @@ SUCCESS_TRANSITIONS: Mapping[RecoveryOperationPhase, tuple[RecoveryOperationPhas
     RecoveryOperationPhase.FINAL_VERIFIED: (RecoveryOperationPhase.CATALOG_RECORDED,),
     RecoveryOperationPhase.CATALOG_RECORDED: (RecoveryOperationPhase.CLEANED,),
 }
-TERMINAL_PHASES = {
-    RecoveryOperationPhase.CLEANED,
-    RecoveryOperationPhase.SKIPPED,
-    RecoveryOperationPhase.CONFLICT,
-    RecoveryOperationPhase.DEFERRED,
-    RecoveryOperationPhase.FAILED_RETRYABLE,
-    RecoveryOperationPhase.FAILED_BLOCKED,
-    RecoveryOperationPhase.CANCELLED,
-    RecoveryOperationPhase.ROLLBACK_REQUIRED,
-    RecoveryOperationPhase.USER_DECISION_REQUIRED,
-}
+TERMINAL_PHASES = RECOVERY_OPERATION_TERMINAL_PHASES
 PHASES_REQUIRING_INTENT = {
     RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
     RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
