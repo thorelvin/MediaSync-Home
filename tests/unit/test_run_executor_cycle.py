@@ -50,6 +50,7 @@ from mediasync_home.application.run_executor_cycle import (
     execute_one_run_executor_cycle,
 )
 from mediasync_home.application.run_staging import (
+    RunTargetEndpointWaitRequired,
     SourceStabilityEvidence,
     SourceValidationEvidence,
     StagingAllocation,
@@ -305,6 +306,91 @@ def test_bounded_executor_cycle_retries_transient_file_failure_then_advances() -
     assert operation.staging_failure_count == 2
     assert operation.last_error_code == "LOCAL_STAGING_SOURCE_FILE_UNREADABLE"
     assert staging_port.calls == 3
+
+
+def test_executor_waits_after_network_loss_then_rebinds_before_resuming() -> None:
+    plan = _sealed_plan()
+    runs = _InMemoryRunStore(
+        _run(
+            state=RunState.EXECUTING,
+            plan=plan,
+            target_state=RunTargetState.EXECUTING,
+        )
+    )
+    original_lease = _FakeLiveLease()
+    registry = HeldRunTargetLeaseRegistry()
+    registry.retain_run_target_lease(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+        lease=original_lease,
+    )
+    recovery_operations = _FakeRecoveryOperationStore(
+        (
+            replace(
+                _planned_operation(),
+                phase=RecoveryOperationPhase.STAGING_ALLOCATED,
+                staging_object_id="op-a",
+            ),
+        )
+    )
+    staging_port = _EndpointLossOnceStagingPort()
+
+    interrupted = execute_one_run_executor_cycle(
+        runs=runs,
+        leases=_FakeLeaseAuthority(original_lease),
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=recovery_operations,
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        staging_transfer_port=staging_port,
+        process_instance_id="host-a",
+    )
+
+    waiting_run = runs.load_started_run("run-a")
+    interrupted_operation = recovery_operations.load_operation(
+        run_id="run-a",
+        operation_id="op-a",
+    )
+    assert interrupted.action is RunExecutorCycleAction.TARGET_WAITING_FOR_ENDPOINT
+    assert interrupted.advanced is True
+    assert runs.endpoint_wait_reasons == ["NETWORK_INTERRUPTED"]
+    assert original_lease.released is True
+    assert registry.retained_count == 0
+    assert waiting_run is not None
+    assert waiting_run.targets[0].state is RunTargetState.WAITING_FOR_ENDPOINT
+    assert interrupted_operation is not None
+    assert interrupted_operation.phase is RecoveryOperationPhase.STAGING_ALLOCATED
+    assert interrupted_operation.staging_failure_count == 0
+
+    replacement_lease = _FakeLiveLease("lease-b", fencing_token=43)
+    resumed = execute_bounded_run_executor_cycle(
+        runs=runs,
+        leases=_FakeLeaseAuthority(replacement_lease),
+        lease_registry=registry,
+        plans=_SinglePlanStore(plan),
+        recovery_operations=recovery_operations,
+        intent_segments=_FakeIntentSegmentStore(),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        staging_transfer_port=staging_port,
+        process_instance_id="host-a",
+        max_steps=6,
+    )
+
+    resumed_operation = recovery_operations.load_operation(
+        run_id="run-a",
+        operation_id="op-a",
+    )
+    resumed_run = runs.load_started_run("run-a")
+    assert resumed.stopped_reason is RunExecutorPumpStopReason.STEP_LIMIT_REACHED
+    assert resumed_operation is not None
+    assert resumed_operation.phase is RecoveryOperationPhase.STAGING_VERIFIED
+    assert resumed_operation.lease_id == "lease-b"
+    assert resumed_operation.fencing_token == 43
+    assert resumed_operation.staging_failure_count == 0
+    assert staging_port.calls == 2
+    assert resumed_run is not None
+    assert resumed_run.targets[0].state is RunTargetState.EXECUTING
 
 
 def test_bounded_executor_cycle_skips_file_after_three_transient_failures() -> None:
@@ -820,6 +906,7 @@ def test_executor_cycle_marks_restored_old_target_cancelled_and_releases_lease()
 class _InMemoryRunStore(RunExecutorCycleRunStore):
     def __init__(self, run: StartedRun | None) -> None:
         self.run = run
+        self.endpoint_wait_reasons: list[str] = []
 
     def save_started_run(self, run: StartedRun) -> None:
         self.run = run
@@ -1054,6 +1141,7 @@ class _InMemoryRunStore(RunExecutorCycleRunStore):
                 updated_targets.append(target)
         if waiting is None:
             return None
+        self.endpoint_wait_reasons.append(reason_code)
         self.run = replace(run, targets=tuple(updated_targets))
         return waiting
 
@@ -1586,6 +1674,22 @@ class _TransientStagingPort(_FakeStagingPort):
         if self.calls <= self.failures:
             raise RuntimeError("LOCAL_STAGING_SOURCE_FILE_UNREADABLE")
         return super().validate_source_file(operation)
+
+
+class _EndpointLossOnceStagingPort(_FakeStagingPort):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def transfer_to_staging(
+        self, operation: RecoveryOperation
+    ) -> StagingTransferEvidence:
+        self.calls += 1
+        if self.calls == 1:
+            raise RunTargetEndpointWaitRequired(
+                reason_code="NETWORK_INTERRUPTED",
+                next_action="Reconnect the endpoint; this target will retry safely.",
+            )
+        return super().transfer_to_staging(operation)
 
 
 class _FakeFinalCommitPort(FinalCommitPort):

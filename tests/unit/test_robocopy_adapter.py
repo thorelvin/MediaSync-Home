@@ -40,6 +40,7 @@ from mediasync_home.application.recovery_operations import (
     planned_recovery_operation,
 )
 from mediasync_home.application.source_preconditions import SourceFilePrecondition
+from mediasync_home.application.run_staging import RunTargetEndpointWaitRequired
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
@@ -734,6 +735,39 @@ def test_robocopy_staging_transfer_rejects_fatal_exit_code(tmp_path: Path) -> No
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
+def test_robocopy_staging_network_loss_waits_target_and_cleans_inbox(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_file = source_root / "Pictures" / "A.jpg"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"image-bytes")
+    target_root.mkdir()
+    supervisor = _FakeRobocopySupervisor(
+        exit_code=8,
+        remove_endpoint_root_after_copy=target_root,
+    )
+    adapter = RobocopyStagingTransferAdapter(
+        root_resolver=_RootResolver(
+            source_root=source_root,
+            target_root=target_root,
+        ),
+        staging_root=tmp_path / "staging",
+        robocopy_work_root=tmp_path / "work",
+        process_supervisor=supervisor,
+        executable_resolver=_FakeExecutableResolver(_resolved_executable(tmp_path)),
+    )
+
+    with pytest.raises(RunTargetEndpointWaitRequired) as exc_info:
+        adapter.transfer_to_staging(_operation(source_file))
+
+    assert exc_info.value.reason_code == "NETWORK_INTERRUPTED"
+    assert not (tmp_path / "work" / "inbox" / "object-a").exists()
+    assert not (tmp_path / "staging" / "object-a.payload").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
 def test_robocopy_staging_transfer_rejects_invalid_negative_exit_code(
     tmp_path: Path,
 ) -> None:
@@ -971,6 +1005,7 @@ class _FakeRobocopySupervisor:
         terminate_error: Exception | None = None,
         close_error: Exception | None = None,
         mutate_source_after_copy: bytes | None = None,
+        remove_endpoint_root_after_copy: Path | None = None,
     ) -> None:
         self.exit_code = exit_code
         self.copied_payload = copied_payload
@@ -981,6 +1016,7 @@ class _FakeRobocopySupervisor:
         self.terminate_error = terminate_error
         self.close_error = close_error
         self.mutate_source_after_copy = mutate_source_after_copy
+        self.remove_endpoint_root_after_copy = remove_endpoint_root_after_copy
         self.launch_plans: list[object] = []
         self.process: _FakeRobocopyProcess | None = None
 
@@ -1008,6 +1044,8 @@ class _FakeRobocopySupervisor:
                     source_parent / file_name,
                     ns=(current.st_atime_ns, current.st_mtime_ns + 1_000_000_000),
                 )
+            if self.remove_endpoint_root_after_copy is not None:
+                self.remove_endpoint_root_after_copy.rmdir()
         self.process = _FakeRobocopyProcess(
             exit_code=self.exit_code,
             wait_error=self.wait_error,

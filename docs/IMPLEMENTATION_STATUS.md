@@ -9,10 +9,13 @@ målrot og en opptatt `mutation.lock` flytter bare det aktuelle målet til
 identitetsfeil forblir harde sikkerhetsblokker. Retry bruker deterministisk
 jitteret eksponentiell backoff fra fem sekunder til maksimalt fem minutter.
 Levende deadlines bruker monotonic clock; lagret UTC brukes én gang etter
-restart for bounded reconciliation og til visning. Jobs viser **Venter på mål**
-med forsøksnummer og lokal retrytid, mens tooltip viser årsak og samlet planlagt
-ventetid. Volume-arrival hints og klassifisering av nettverksbrudd under aktiv
-transfer gjenstår.
+restart for bounded reconciliation og til visning. Klassifiserte Windows-
+nettverksbrudd eller en endpointrot som forsvinner under lokal/Robocopy-transfer
+flytter også hele målet til samme ventetilstand med `NETWORK_INTERRUPTED`.
+Upublisert temp-/inboxinnhold ryddes, operasjonsfasen og failure count beholdes,
+stale lease frigis, og resume krever ny preflight, lease og recovery-rebind. Jobs
+viser **Venter på mål** med forsøksnummer og lokal retrytid; tooltip lokaliserer
+nettverksårsaken og viser samlet planlagt ventetid. Volume-arrival hints gjenstår.
 
 Oppdatering 2026-07-31: Feil på enkeltfiler har nå en varig, avgrenset
 retryflyt. Recovery schema 9 lagrer `staging_failure_count`, og hvert transient
@@ -24,8 +27,9 @@ sikkerhetsfeil forblir blokkert. Tredje transientfeil flytter operasjonen til
 `SUCCEEDED_WITH_WARNINGS`. Run blir `COMPLETED_WITH_WARNINGS`, med samme
 varseltilstand og varselantall i Jobs-fremdrift og Historikk. Lokal staging
 normaliserer nå også allocation-, transfer-, durability- og verification-I/O
-til retryklassifiserbare feilkoder. Persistente catalog-`operation_attempts`,
-tidsstyrt backoff og nettverksbrudd som setter hele målet på vent gjenstår.
+til retryklassifiserbare feilkoder. Nettverksbrudd bruker i stedet den tidsstyrte
+retryflyten for hele målet. Persistente catalog-`operation_attempts` og
+tidsstyrt backoff for enkeltfilforsøk gjenstår.
 
 Oppdatering 2026-07-31: Kildebytes er nå bundet til analysen som opprettet
 planen. Snapshot schema 2 og catalog schema 37 lagrer et stabilt

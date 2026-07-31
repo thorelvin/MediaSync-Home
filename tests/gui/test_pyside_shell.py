@@ -1433,6 +1433,7 @@ def test_jobs_page_shows_live_progress_and_run_controls(qapp) -> None:
 def test_jobs_page_wraps_endpoint_retry_diagnostics_without_clipping(qapp) -> None:
     provider = _FakeRunControlDashboardEngineClient()
     provider.target_waiting = True
+    provider.endpoint_wait_reason = "NETWORK_INTERRUPTED"
     window = build_main_window(
         initial_state=EngineStatusViewState.disconnected(),
         engine_client=provider,
@@ -1452,7 +1453,8 @@ def test_jobs_page_wraps_endpoint_retry_diagnostics_without_clipping(qapp) -> No
         assert "Venter på mål" in row.text()
         assert "Forsøk 2" in row.text()
         assert "nytt forsøk etter" in row.text()
-        assert "ENDPOINT_ROOT_UNAVAILABLE" in row.toolTip()
+        assert "Nettverksforbindelsen ble avbrutt" in row.toolTip()
+        assert "NETWORK_INTERRUPTED" in row.toolTip()
         assert "14.2 s" in row.toolTip()
         assert row.height() >= row.fontMetrics().height()
     finally:
@@ -1951,6 +1953,7 @@ class _FakeRunControlDashboardEngineClient(_FakeBackupStartDashboardEngineClient
         self.controls: list[str] = []
         self.stop_requested = False
         self.target_waiting = False
+        self.endpoint_wait_reason = "ENDPOINT_ROOT_UNAVAILABLE"
 
     def get_run_progress(
         self,
@@ -2009,9 +2012,7 @@ class _FakeRunControlDashboardEngineClient(_FakeBackupStartDashboardEngineClient
                         else None
                     ),
                     "endpoint_wait_reason_code": (
-                        "ENDPOINT_ROOT_UNAVAILABLE"
-                        if self.target_waiting
-                        else None
+                        self.endpoint_wait_reason if self.target_waiting else None
                     ),
                     "endpoint_wait_started_utc": (
                         "2026-07-31T00:00:00.000Z"

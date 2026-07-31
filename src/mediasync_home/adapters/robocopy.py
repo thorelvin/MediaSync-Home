@@ -30,7 +30,10 @@ from mediasync_home.application.process_supervision import (
     build_transfer_child_launch_plan,
 )
 from mediasync_home.application.recovery_operations import RecoveryOperation
-from mediasync_home.application.run_staging import StagingTransferEvidence
+from mediasync_home.application.run_staging import (
+    RunTargetEndpointWaitRequired,
+    StagingTransferEvidence,
+)
 
 
 FORBIDDEN_ROBOCOPY_SWITCH_NAMES = frozenset(("MIR", "PURGE", "MOVE", "MOV"))
@@ -250,12 +253,12 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
                 "ROBOCOPY_STAGING_INBOX_EXISTS",
                 "Inspect and remove the stale Robocopy staging inbox before retrying.",
             )
-        inbox.mkdir(parents=True)
         log_path = self._robocopy_log_path(operation)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
         manifest: RobocopyBatchManifest | None = None
 
         try:
+            inbox.mkdir(parents=True)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
             manifest = build_robocopy_batch_manifest(
                 batch_id=_safe_staging_name(operation),
                 source_parent=source_path.parent,
@@ -287,11 +290,18 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
             )
             self._validate_source_identity(operation, source_path)
             if result.failed or result.exit_code > self._profile.success_max_exit_code:
+                self._raise_endpoint_wait_if_unavailable(
+                    operation,
+                    include_source=True,
+                )
                 raise LocalFileStagingError(
                     "ROBOCOPY_TRANSFER_FAILED",
                     "Retry the transfer after reviewing the Robocopy batch log.",
                 )
             publish_robocopy_batch_inbox(manifest)
+        except RunTargetEndpointWaitRequired:
+            discard_robocopy_batch_inbox(inbox=inbox, manifest=manifest)
+            raise
         except LocalFileStagingError as exc:
             if exc.validation_code in _DISCARD_ROBOCOPY_INBOX_ERROR_CODES:
                 discard_robocopy_batch_inbox(inbox=inbox, manifest=manifest)
@@ -301,6 +311,17 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
             raise LocalFileStagingError(
                 "ROBOCOPY_TRANSFER_CONFIGURATION_INVALID",
                 "Fix the Robocopy executable/profile configuration before retrying.",
+            ) from exc
+        except OSError as exc:
+            discard_robocopy_batch_inbox(inbox=inbox, manifest=manifest)
+            self._raise_endpoint_wait_if_unavailable(
+                operation,
+                error=exc,
+                include_source=True,
+            )
+            raise LocalFileStagingError(
+                "ROBOCOPY_TRANSFER_FAILED",
+                "Retry after source and staging storage become readable and writable.",
             ) from exc
 
         return StagingTransferEvidence(

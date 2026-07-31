@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import mediasync_home.adapters.staging as staging_module
 from mediasync_home.adapters.staging import (
     LocalFileStagingError,
     LocalFileStagingTransferAdapter,
@@ -22,6 +23,7 @@ from mediasync_home.application.recovery_operations import (
 )
 from mediasync_home.application.directory_artifacts import DIRECTORY_MARKER_NAME
 from mediasync_home.application.source_preconditions import SourceFilePrecondition
+from mediasync_home.application.run_staging import RunTargetEndpointWaitRequired
 from mediasync_home.domain.capabilities import MutationPermit, _issue_mutation_permit
 
 
@@ -221,6 +223,89 @@ def test_local_staging_rejects_source_changed_after_sealed_analysis(tmp_path: Pa
         adapter.validate_source_file(operation)
 
     assert exc_info.value.validation_code == "LOCAL_STAGING_SOURCE_IDENTITY_CHANGED"
+
+
+def test_local_staging_network_loss_discards_partial_transfer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    staging_root = tmp_path / "staging"
+    source_file = source_root / "Pictures" / "A.jpg"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"image-bytes")
+    target_root.mkdir()
+    adapter = LocalFileStagingTransferAdapter(
+        root_resolver=_SourceAndTargetRootResolver(
+            source_root=source_root,
+            target_root=target_root,
+        ),
+        staging_root=staging_root,
+    )
+    operation = _source_operation(source_file)
+    validation = adapter.validate_source_file(operation)
+    allocation = adapter.allocate_staging_object(operation)
+    operation = replace(
+        operation,
+        expected_source_fingerprint_json=validation.fingerprint_json,
+        staging_object_id=allocation.staging_object_id,
+    )
+
+    def interrupt_copy(**kwargs: object) -> dict[str, object]:
+        destination = kwargs["destination"]
+        assert isinstance(destination, Path)
+        destination.write_bytes(b"partial")
+        error = OSError("network name deleted")
+        error.winerror = 64  # type: ignore[attr-defined]
+        raise error
+
+    monkeypatch.setattr(staging_module, "_copy_file_with_hash", interrupt_copy)
+
+    with pytest.raises(RunTargetEndpointWaitRequired) as exc_info:
+        adapter.transfer_to_staging(operation)
+
+    assert exc_info.value.reason_code == "NETWORK_INTERRUPTED"
+    assert not (staging_root / "op-a.payload").exists()
+    assert tuple(staging_root.glob("*.tmp")) == ()
+
+
+def test_local_staging_permission_failure_remains_a_file_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    staging_root = tmp_path / "staging"
+    source_file = source_root / "Pictures" / "A.jpg"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"image-bytes")
+    target_root.mkdir()
+    adapter = LocalFileStagingTransferAdapter(
+        root_resolver=_SourceAndTargetRootResolver(
+            source_root=source_root,
+            target_root=target_root,
+        ),
+        staging_root=staging_root,
+    )
+    operation = _source_operation(source_file)
+    validation = adapter.validate_source_file(operation)
+    allocation = adapter.allocate_staging_object(operation)
+    operation = replace(
+        operation,
+        expected_source_fingerprint_json=validation.fingerprint_json,
+        staging_object_id=allocation.staging_object_id,
+    )
+
+    def reject_copy(**kwargs: object) -> dict[str, object]:
+        raise PermissionError(13, "permission denied")
+
+    monkeypatch.setattr(staging_module, "_copy_file_with_hash", reject_copy)
+
+    with pytest.raises(LocalFileStagingError) as exc_info:
+        adapter.transfer_to_staging(operation)
+
+    assert exc_info.value.validation_code == "LOCAL_STAGING_TRANSFER_FAILED"
 
 
 class _RootResolver:

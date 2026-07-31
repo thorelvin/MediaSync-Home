@@ -888,9 +888,13 @@ for samme terminale input.
 Catalog schema 38 oppretter eventloggen, og schema 39 legger til varig
 retrytiming. Radene er immutable med update-/delete-triggere, og nye events må
 ha en RFC3339-Z-verdi i `retry_not_before_utc`. En klassifisert utilgjengelig
-målrot eller opptatt endpointlock appender eventen i samme transaksjon som
+målrot, opptatt endpointlock eller `NETWORK_INTERRUPTED` under aktiv staging
+appender eventen i samme transaksjon som
 `run_targets.state` flyttes til `WAITING_FOR_ENDPOINT`; stale leasefelt
-nullstilles. Backoff er deterministisk jitteret og eksponentiell fra fem
+nullstilles. Ved aktiv staging beholdes recovery-operasjonen på siste durable
+fase uten å øke enkeltfilens failure count. Upublisert temp-/Robocopy-inbox
+ryddes når roten er tilgjengelig, og senere resume må gjennom ny preflight,
+endpointlease og recovery-lease-rebind. Backoff er deterministisk jitteret og eksponentiell fra fem
 sekunder til maksimalt fem minutter. Engine Host holder levende deadlines mot
 monotonic clock. Etter restart oversettes lagret UTC én gang til en ny bounded
 monotonic deadline; senere wall-clock-hopp påvirker ikke ventetiden. En bounded

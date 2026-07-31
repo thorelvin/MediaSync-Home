@@ -725,7 +725,7 @@ def acquire_run_target_lease(
             validation_codes=("RUN_NOT_FOUND",),
             next_action="Create a queued run before acquiring an endpoint lease.",
         )
-    if run.state is not RunState.PREFLIGHT:
+    if run.state not in {RunState.PREFLIGHT, RunState.EXECUTING}:
         return RunTargetLeaseOutcome(
             acquired=False,
             run_id=run_id,

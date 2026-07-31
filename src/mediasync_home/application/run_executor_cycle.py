@@ -841,6 +841,32 @@ def _advance_retained_target(
                 run_target_id=staging_outcome.run_target_id,
                 next_action=staging_outcome.next_action,
             )
+        if staging_outcome.endpoint_wait_reason_code is not None:
+            waiting = runs.record_run_target_waiting_for_endpoint(
+                run_id=staging_outcome.run_id,
+                run_target_id=staging_outcome.run_target_id,
+                expected_state=RunTargetState.EXECUTING,
+                reason_code=staging_outcome.endpoint_wait_reason_code,
+            )
+            if waiting is None:
+                return _blocked(
+                    run_id=staging_outcome.run_id,
+                    run_target_id=staging_outcome.run_target_id,
+                    validation_codes=("RUN_TARGET_ENDPOINT_WAIT_STATE_CONFLICT",),
+                    next_action=(
+                        "Reload the run target before recording interrupted endpoint access."
+                    ),
+                )
+            lease_registry.release_retained_run_target_lease(
+                run_id=staging_outcome.run_id,
+                run_target_id=staging_outcome.run_target_id,
+            )
+            return _advanced(
+                action=RunExecutorCycleAction.TARGET_WAITING_FOR_ENDPOINT,
+                run_id=staging_outcome.run_id,
+                run_target_id=staging_outcome.run_target_id,
+                next_action=staging_outcome.next_action,
+            )
         return _blocked(
             run_id=staging_outcome.run_id,
             run_target_id=staging_outcome.run_target_id,

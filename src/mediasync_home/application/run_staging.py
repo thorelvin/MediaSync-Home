@@ -12,6 +12,17 @@ from mediasync_home.application.recovery_operations import (
 from mediasync_home.domain.capabilities import MutationPermit
 
 
+class RunTargetEndpointWaitRequired(RuntimeError):
+    def __init__(self, *, reason_code: str, next_action: str) -> None:
+        normalized_reason = reason_code.strip()
+        normalized_action = next_action.strip()
+        if not normalized_reason or not normalized_action:
+            raise ValueError("ENDPOINT_WAIT_SIGNAL_REQUIRES_REASON_AND_ACTION")
+        super().__init__(normalized_reason)
+        self.reason_code = normalized_reason
+        self.next_action = normalized_action
+
+
 class RunTargetStagingOperationStore(RecoveryOperationStore, Protocol):
     def record_staging_failure(
         self,
@@ -117,6 +128,7 @@ class RunTargetStagingOutcome:
     phase: RecoveryOperationPhase | None
     validation_codes: tuple[str, ...]
     next_action: str
+    endpoint_wait_reason_code: str | None = None
 
 
 STAGING_EXECUTION_PHASES = (
@@ -188,6 +200,18 @@ def execute_next_run_target_staging_step(
             permit=permit,
             operation=operation,
             staging_port=staging_port,
+        )
+    except RunTargetEndpointWaitRequired as exc:
+        return RunTargetStagingOutcome(
+            idle=False,
+            advanced=False,
+            run_id=permit.run_id,
+            run_target_id=permit.run_target_id,
+            operation_id=operation.operation_id,
+            phase=operation.phase,
+            validation_codes=(),
+            next_action=exc.next_action,
+            endpoint_wait_reason_code=exc.reason_code,
         )
     except RuntimeError as exc:
         validation_code = _error_code(exc)

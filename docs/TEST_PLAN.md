@@ -631,6 +631,7 @@ Registrer kvalitative funn. Et raskt feilvalg er fortsatt en alvorlig UX-/sikker
 | `AC-END-12` | En gyldig finalsti nær endepunktets grense kan stages, versjoneres, settes i karantene og gjenopprettes via kort objektsti selv når en speilet intern sti ville vært for lang. |
 | `AC-END-13` | Uten pålitelig global endpointlock er eneste mulige mutasjon bevist `COPY_NEW_ONLY_NO_REPLACE`; replace, metadataendring, karantene, speiling, toveis og automatikk blokkeres. |
 | `AC-END-14` | Kontrollområdet er globalt for marker/lock og namespacet per installasjon for objekter/recovery; én installasjon rydder aldri en annens namespace automatisk. |
+| `AC-END-15` | Nettverks-/endpointtap under aktiv transfer publiserer ingen delvis payload, øker ikke enkeltfilens retryteller og flytter bare berørt mål til varig tidsstyrt venting; resume krever ny preflight, lease og recovery-rebind. |
 
 ### 22.5 Robocopy, ytelse og ressursbruk
 

@@ -40,6 +40,7 @@ from mediasync_home.application.plans import (
     seal_plan,
 )
 from mediasync_home.application.recovery_operations import (
+    RecoveryOperation,
     RecoveryOperationPhase,
     RecoveryTargetPreconditionKind,
 )
@@ -47,6 +48,10 @@ from mediasync_home.application.run_executor import HeldRunTargetLeaseRegistry, 
 from mediasync_home.application.run_executor_cycle import (
     RunExecutorCycleAction,
     execute_bounded_run_executor_cycle,
+)
+from mediasync_home.application.run_staging import (
+    RunTargetEndpointWaitRequired,
+    StagingTransferEvidence,
 )
 from mediasync_home.application.runs import (
     EndpointLeaseAttempt,
@@ -121,6 +126,17 @@ class FixedLiveLease:
         assert permit.run_target_id == "run-a-target-0000"
         assert permit.endpoint_id == "target-a"
         assert permit.endpoint_revision_id == "target-rev-a"
+
+
+class EndpointLossStagingAdapter(LocalFileStagingTransferAdapter):
+    def transfer_to_staging(
+        self,
+        operation: RecoveryOperation,
+    ) -> StagingTransferEvidence:
+        raise RunTargetEndpointWaitRequired(
+            reason_code="NETWORK_INTERRUPTED",
+            next_action="Reconnect the endpoint and retry after fresh preflight.",
+        )
 
 
 def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
@@ -216,6 +232,106 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
         assert (staging_root / "op-a.payload").read_bytes() == payload
         assert handoff is not None
         assert handoff.content_hash == content_hash
+    finally:
+        catalog_connection.close()
+        recovery_connection.close()
+
+
+def test_sqlite_run_executor_cycle_durably_waits_after_network_interruption(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    staging_root = tmp_path / "staging"
+    source_file = source_root / "Pictures" / "A.jpg"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"image")
+    (target_root / "Pictures").mkdir(parents=True)
+    _write_endpoint_marker(target_root)
+
+    catalog_connection = _prepared_catalog_connection(tmp_path)
+    recovery_connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _insert_plan_parent_rows(
+            catalog_connection,
+            source_root=source_root,
+            target_root=target_root,
+        )
+        _insert_receipt(catalog_connection)
+        plans = SqlitePlanStore(catalog_connection)
+        runs = SqliteRunStore(catalog_connection)
+        recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
+        intent_segments = SqliteRecoveryIntentSegmentStore(recovery_connection)
+        catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
+        lease = FixedLiveLease()
+        registry = HeldRunTargetLeaseRegistry()
+        staging = EndpointLossStagingAdapter(
+            root_resolver=SqliteEndpointRootResolver(catalog_connection),
+            staging_root=staging_root,
+        )
+        plan = _sealed_plan(source_file=source_file, planned_bytes=5)
+        plans.save_sealed_plan(plan)
+        start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        _register_resource_lease(recovery_connection)
+
+        waiting_step = None
+        for _ in range(12):
+            outcome = execute_bounded_run_executor_cycle(
+                runs=runs,
+                leases=FixedLeaseAuthority(lease),
+                lease_registry=registry,
+                plans=plans,
+                recovery_operations=recovery_operations,
+                intent_segments=intent_segments,
+                catalog_handoffs=catalog_handoffs,
+                staging_transfer_port=staging,
+                process_instance_id="host-a",
+                max_steps=1,
+            )
+            if (
+                outcome.last_step is not None
+                and outcome.last_step.action
+                is RunExecutorCycleAction.TARGET_WAITING_FOR_ENDPOINT
+            ):
+                waiting_step = outcome.last_step
+                break
+
+        loaded_run = runs.load_started_run("run-a")
+        operation = recovery_operations.load_operation(
+            run_id="run-a",
+            operation_id="op-a",
+        )
+        event = catalog_connection.execute(
+            """
+            SELECT attempt_no, reason_code, backoff_ms, retry_not_before_utc
+            FROM run_target_endpoint_wait_events
+            WHERE run_id = 'run-a' AND run_target_id = 'run-a-target-0000'
+            """
+        ).fetchone()
+        assert waiting_step is not None
+        assert registry.retained_count == 0
+        assert lease.released is True
+        assert loaded_run is not None
+        assert loaded_run.state is RunState.EXECUTING
+        assert loaded_run.targets[0].state is RunTargetState.WAITING_FOR_ENDPOINT
+        assert operation is not None
+        assert operation.phase is RecoveryOperationPhase.STAGING_ALLOCATED
+        assert operation.staging_failure_count == 0
+        assert event is not None
+        assert event[0] == 1
+        assert event[1] == "NETWORK_INTERRUPTED"
+        assert int(event[2]) > 0
+        assert str(event[3]).endswith("Z")
+        assert not (staging_root / "op-a.payload").exists()
     finally:
         catalog_connection.close()
         recovery_connection.close()

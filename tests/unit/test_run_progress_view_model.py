@@ -41,7 +41,7 @@ def test_run_progress_view_model_parses_snapshot_and_retains_unchanged_state() -
                             "endpoint_retry_not_before_utc": (
                                 "2026-07-31T00:00:09.500Z"
                             ),
-                            "endpoint_wait_reason_code": "ENDPOINT_ROOT_UNAVAILABLE",
+                            "endpoint_wait_reason_code": "NETWORK_INTERRUPTED",
                             "endpoint_wait_started_utc": "2026-07-31T00:00:00.000Z",
                         }
                     ],
@@ -74,7 +74,7 @@ def test_run_progress_view_model_parses_snapshot_and_retains_unchanged_state() -
     assert state.targets[0].endpoint_wait_total_backoff_ms == 14_250
     assert state.targets[0].endpoint_retry_backoff_ms == 9_500
     assert (
-        state.targets[0].endpoint_wait_reason_code == "ENDPOINT_ROOT_UNAVAILABLE"
+        state.targets[0].endpoint_wait_reason_code == "NETWORK_INTERRUPTED"
     )
     assert unchanged == state
 

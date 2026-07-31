@@ -1085,6 +1085,20 @@ class MediaSyncWindow(QMainWindow):
             return None
         return parsed.astimezone().strftime("%H:%M:%S")
 
+    def _endpoint_wait_reason_label(self, reason_code: str) -> str:
+        english = self._selected_language_code is LanguageCode.ENGLISH
+        labels = {
+            "NETWORK_INTERRUPTED": (
+                "Network connection interrupted",
+                "Nettverksforbindelsen ble avbrutt",
+            ),
+        }
+        pair = labels.get(reason_code)
+        if pair is None:
+            return reason_code
+        label = pair[0] if english else pair[1]
+        return f"{label} ({reason_code})"
+
     def _run_operation_phase_label(self, phase: str | None) -> str:
         english = self._selected_language_code is LanguageCode.ENGLISH
         labels = {
@@ -1352,7 +1366,8 @@ class MediaSyncWindow(QMainWindow):
                 if target.endpoint_wait_reason_code is not None:
                     reason_label = "Reason" if english else "Årsak"
                     tooltip_lines.append(
-                        f"{reason_label}: {target.endpoint_wait_reason_code}"
+                        f"{reason_label}: "
+                        f"{self._endpoint_wait_reason_label(target.endpoint_wait_reason_code)}"
                     )
                 backoff_label = "Scheduled backoff" if english else "Planlagt ventetid"
                 total_label = (
