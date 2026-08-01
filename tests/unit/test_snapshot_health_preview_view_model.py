@@ -164,7 +164,7 @@ def test_snapshot_health_preview_names_named_stream_risk_in_both_languages() -> 
                         {
                             "relative_path": "Archive/document.txt",
                             "issue_type": "NAMED_STREAM_PRESENT",
-                            "blocks_destructive_actions": True,
+                            "blocks_destructive_actions": False,
                         }
                     ],
                 }
@@ -185,9 +185,9 @@ def test_snapshot_health_preview_names_named_stream_risk_in_both_languages() -> 
 
     english = state.rows[0].display_line
     assert english == (
-        "Blocking issue: Archive/document.txt · Extra Windows file data found"
+        "Portability notice: Archive/document.txt · Extra Windows file data found"
     )
     assert localize_display_value(LanguageCode.NORWEGIAN, english) == (
-        "Blokkerende problem: Archive/document.txt · "
+        "Portabilitetsmerknad: Archive/document.txt · "
         "Ekstra Windows-fildata funnet"
     )

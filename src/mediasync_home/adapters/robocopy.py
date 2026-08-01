@@ -29,6 +29,9 @@ from mediasync_home.application.process_supervision import (
     ProcessLaunchViolation,
     build_transfer_child_launch_plan,
 )
+from mediasync_home.application.file_object_fingerprints import (
+    file_object_fingerprints_match,
+)
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
     RecoveryOperationKind,
@@ -236,8 +239,8 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
         payload_path = self._staging_payload_path(operation)
         self._ensure_staging_manifest(operation)
         if payload_path.exists():
-            existing = _fingerprint_file(payload_path)
-            if existing == expected:
+            existing = self._file_object_fingerprints.fingerprint(payload_path)
+            if file_object_fingerprints_match(existing, expected):
                 return StagingTransferEvidence(
                     transfer_state="ROBOCOPY_TRANSFERRED_EXISTING_MATCH"
                 )

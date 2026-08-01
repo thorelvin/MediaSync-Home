@@ -9,6 +9,7 @@ from ctypes import wintypes
 
 from mediasync_home.application.named_streams import (
     NamedStreamInspection,
+    NamedStreamRecord,
     NamedStreamState,
 )
 
@@ -51,14 +52,25 @@ class Win32NamedStreamProbe:
                 error_code="SNAPSHOT_NAMED_STREAM_ENUMERATION_UNCONFIRMED",
             )
 
+        named_streams: list[NamedStreamRecord] = []
         try:
             for record_index in range(MAX_STREAM_RECORDS):
                 stream_name = str(data.stream_name)
                 if not _is_default_data_stream(stream_name):
-                    return NamedStreamInspection(
-                        state=NamedStreamState.PRESENT,
-                        observed_named_stream_count=1,
-                    )
+                    try:
+                        named_streams.append(
+                            NamedStreamRecord(
+                                stream_name=stream_name,
+                                size_bytes=int(data.stream_size.value),
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        return NamedStreamInspection(
+                            state=NamedStreamState.UNKNOWN,
+                            error_code=(
+                                "SNAPSHOT_NAMED_STREAM_ENUMERATION_UNCONFIRMED"
+                            ),
+                        )
                 if record_index == MAX_STREAM_RECORDS - 1:
                     return NamedStreamInspection(
                         state=NamedStreamState.UNKNOWN,
@@ -68,7 +80,19 @@ class Win32NamedStreamProbe:
                     continue
                 error = ctypes.get_last_error()
                 if error == ERROR_HANDLE_EOF:
-                    return NamedStreamInspection(state=NamedStreamState.NONE)
+                    if not named_streams:
+                        return NamedStreamInspection(state=NamedStreamState.NONE)
+                    canonical = tuple(
+                        sorted(
+                            named_streams,
+                            key=lambda record: record.stream_name.casefold(),
+                        )
+                    )
+                    return NamedStreamInspection(
+                        state=NamedStreamState.PRESENT,
+                        observed_named_stream_count=len(canonical),
+                        named_streams=canonical,
+                    )
                 return NamedStreamInspection(
                     state=NamedStreamState.UNKNOWN,
                     error_code="SNAPSHOT_NAMED_STREAM_ENUMERATION_UNCONFIRMED",

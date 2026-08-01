@@ -1176,6 +1176,11 @@ _NB_TO_EN = {
     "Bevaring": "Retention",
     "Blokkert": "Blocked",
     "Blokkerende problem": "Blocking issue",
+    "Portabilitetsmerknad": "Portability notice",
+    "Snapshotmerknad": "Snapshot notice",
+    "Windows-katalogdata som ikke støttes funnet": (
+        "Unsupported Windows directory data found"
+    ),
     "Dekningsadvarsel": "Coverage warning",
     "Ekstra filer på målet beholdes": "Extra files on the target are kept",
     "Fortsett": "Continue",

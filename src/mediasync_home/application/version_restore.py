@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol, cast
 
+from mediasync_home.application.file_object_fingerprints import (
+    FileObjectFingerprintError,
+    file_object_fingerprint_from_json,
+)
+
 from mediasync_home.application.runs import (
     EndpointLeaseAuthority,
     EndpointLeaseRequest,
@@ -367,19 +372,11 @@ def canonical_fingerprint_json(raw: str) -> str:
         if value.get("entry_count") != 0 or value.get("kind") != "DIRECTORY_EMPTY":
             raise VersionRestoreError("VERSION_RESTORE_FINGERPRINT_INVALID")
         return json.dumps(value, sort_keys=True, separators=(",", ":"))
-    if set(value) != {"byte_count", "content_hash"}:
-        raise VersionRestoreError("VERSION_RESTORE_FINGERPRINT_INVALID")
-    byte_count = value.get("byte_count")
-    content_hash = value.get("content_hash")
-    if (
-        isinstance(byte_count, bool)
-        or not isinstance(byte_count, int)
-        or byte_count < 0
-        or not isinstance(content_hash, str)
-        or _HASH_PATTERN.fullmatch(content_hash) is None
-    ):
-        raise VersionRestoreError("VERSION_RESTORE_FINGERPRINT_INVALID")
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    try:
+        file_object_fingerprint_from_json(raw)
+    except FileObjectFingerprintError as exc:
+        raise VersionRestoreError("VERSION_RESTORE_FINGERPRINT_INVALID") from exc
+    return raw
 
 
 def _validate_operation(operation: VersionRestoreOperation) -> None:

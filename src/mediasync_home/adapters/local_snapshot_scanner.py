@@ -226,6 +226,12 @@ class LocalFilesystemSnapshotScanner:
                     )
                 )
                 continue
+            self._append_named_stream_issue(
+                issues,
+                path=queued.path,
+                relative_path=queued.relative_path,
+                object_type="directory",
+            )
             case_context = self._case_mode_probe.inspect_directory_case_context(queued.path)
             before = _directory_signature(queued.path)
             if before is None:
@@ -354,11 +360,12 @@ class LocalFilesystemSnapshotScanner:
                             "SNAPSHOT_BIRTHTIME_UNAVAILABLE",
                         )
                     )
-                if stat.S_ISDIR(child_stat.st_mode) or stat.S_ISREG(child_stat.st_mode):
+                if stat.S_ISREG(child_stat.st_mode):
                     self._append_named_stream_issue(
                         issues,
                         path=queued.path / child.name,
                         relative_path=relative_path,
+                        object_type="file",
                     )
                 if stat.S_ISDIR(child_stat.st_mode):
                     entries.append(
@@ -519,6 +526,7 @@ class LocalFilesystemSnapshotScanner:
         *,
         path: Path,
         relative_path: str,
+        object_type: str,
     ) -> None:
         inspection = self._named_stream_probe.inspect_named_streams(path)
         if inspection.state is NamedStreamState.NONE:
@@ -528,6 +536,7 @@ class LocalFilesystemSnapshotScanner:
                 relative_path=relative_path,
                 inspection=inspection,
                 policy=self._named_stream_policy,
+                object_type=object_type,
             )
         )
 
@@ -602,19 +611,46 @@ def _named_stream_issue(
     relative_path: str,
     inspection: NamedStreamInspection,
     policy: NamedStreamPolicy,
+    object_type: str,
 ) -> SnapshotIssue:
-    if policy is not NamedStreamPolicy.BLOCK_IF_PRESENT_OR_UNCONFIRMED:
-        raise ValueError("NAMED_STREAM_POLICY_UNSUPPORTED")
     if inspection.state is NamedStreamState.PRESENT:
-        return _issue(
-            relative_path,
-            "NAMED_STREAM_PRESENT",
-            "SNAPSHOT_NAMED_STREAM_PRESENT",
-            sanitized_message=(
-                "The item contains a Windows named stream, and full-object copying "
-                "is not enabled."
-            ),
-        )
+        if policy is NamedStreamPolicy.BLOCK_IF_PRESENT_OR_UNCONFIRMED:
+            return _issue(
+                relative_path,
+                "NAMED_STREAM_PRESENT",
+                "SNAPSHOT_NAMED_STREAM_PRESENT",
+                sanitized_message=(
+                    "The item contains a Windows named stream, and full-object "
+                    "copying is not enabled."
+                ),
+            )
+        if policy is NamedStreamPolicy.PRESERVE_WHEN_PORTABLE_BLOCK_IF_UNCONFIRMED:
+            if object_type == "directory":
+                return _issue(
+                    relative_path,
+                    "DIRECTORY_NAMED_STREAM_PRESENT",
+                    "SNAPSHOT_DIRECTORY_NAMED_STREAM_PRESENT",
+                    sanitized_message=(
+                        "The directory contains a Windows named stream that "
+                        "cannot yet be preserved."
+                    ),
+                )
+            return SnapshotIssue(
+                relative_path=relative_path,
+                issue_type="NAMED_STREAM_PRESENT",
+                blocks_destructive_actions=False,
+                error_code="SNAPSHOT_NAMED_STREAM_PRESENT",
+                sanitized_message=(
+                    "The item contains Windows named streams that must be preserved "
+                    "and verified on every target."
+                ),
+            )
+        raise ValueError("NAMED_STREAM_POLICY_UNSUPPORTED")
+    if policy not in {
+        NamedStreamPolicy.BLOCK_IF_PRESENT_OR_UNCONFIRMED,
+        NamedStreamPolicy.PRESERVE_WHEN_PORTABLE_BLOCK_IF_UNCONFIRMED,
+    }:
+        raise ValueError("NAMED_STREAM_POLICY_UNSUPPORTED")
     return _issue(
         relative_path,
         "NAMED_STREAM_ENUMERATION_UNCONFIRMED",

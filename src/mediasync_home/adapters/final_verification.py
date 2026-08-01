@@ -1,23 +1,27 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import re
 from pathlib import Path
 
 from mediasync_home.adapters.endpoint_leases import EndpointLeaseUnavailable, EndpointRootResolver
+from mediasync_home.adapters.file_object_fingerprints import (
+    LocalFileObjectFingerprintAdapter,
+    LocalFileObjectFingerprintError,
+)
 from mediasync_home.adapters.reparse_guard import (
     LocalReparseGuard,
     ReparseGuard,
     ReparseGuardError,
 )
 from mediasync_home.application.ports import FinalArtifactVerificationEvidence
+from mediasync_home.application.file_object_fingerprints import (
+    FileObjectFingerprintError,
+    file_object_fingerprint_from_json,
+    has_named_stream_inventory,
+)
 from mediasync_home.application.directory_artifacts import directory_artifact_fingerprint, directory_artifact_matches
 from mediasync_home.application.recovery_operations import RecoveryOperation, RecoveryOperationKind
 from mediasync_home.application.safe_paths import SafePathViolation, parse_endpoint_relative_path
-
-
-HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class FinalArtifactVerificationError(RuntimeError):
@@ -33,9 +37,13 @@ class LocalFinalArtifactVerificationAdapter:
         *,
         root_resolver: EndpointRootResolver,
         reparse_guard: ReparseGuard | None = None,
+        file_object_fingerprints: LocalFileObjectFingerprintAdapter | None = None,
     ) -> None:
         self._root_resolver = root_resolver
         self._reparse_guard = reparse_guard or LocalReparseGuard()
+        self._file_object_fingerprints = (
+            file_object_fingerprints or LocalFileObjectFingerprintAdapter()
+        )
 
     def verify_final_artifact(
         self,
@@ -74,7 +82,18 @@ class LocalFinalArtifactVerificationAdapter:
                 "FINAL_ARTIFACT_VERIFY_FILE_MISSING",
                 "Reacquire the endpoint lease and inspect final filesystem state manually.",
             )
-        actual = _fingerprint_file(final_path)
+        try:
+            actual = self._file_object_fingerprints.fingerprint(final_path)
+        except LocalFileObjectFingerprintError as exc:
+            raise FinalArtifactVerificationError(
+                exc.validation_code,
+                "Reverify final filesystem state after every data stream is readable.",
+            ) from exc
+        if not has_named_stream_inventory(expected):
+            actual = {
+                "byte_count": actual["byte_count"],
+                "content_hash": actual["content_hash"],
+            }
         if actual != expected:
             raise FinalArtifactVerificationError(
                 "FINAL_ARTIFACT_VERIFY_FINGERPRINT_MISMATCH",
@@ -140,30 +159,12 @@ def _expected_fingerprint(operation: RecoveryOperation) -> dict[str, object]:
             "Reverify final filesystem state with explicit fingerprint evidence.",
         )
     try:
-        payload = json.loads(raw_payload)
-    except json.JSONDecodeError as exc:
+        return file_object_fingerprint_from_json(raw_payload)
+    except FileObjectFingerprintError as exc:
         raise FinalArtifactVerificationError(
             "FINAL_ARTIFACT_VERIFY_EXPECTED_FINGERPRINT_INVALID",
             "Refresh recovery fingerprint evidence before final verification.",
         ) from exc
-    if not isinstance(payload, dict):
-        raise FinalArtifactVerificationError(
-            "FINAL_ARTIFACT_VERIFY_EXPECTED_FINGERPRINT_INVALID",
-            "Refresh recovery fingerprint evidence before final verification.",
-        )
-    content_hash = payload.get("content_hash")
-    byte_count = payload.get("byte_count")
-    if not isinstance(content_hash, str) or HASH_PATTERN.fullmatch(content_hash) is None:
-        raise FinalArtifactVerificationError(
-            "FINAL_ARTIFACT_VERIFY_EXPECTED_FINGERPRINT_INVALID",
-            "Refresh recovery fingerprint evidence before final verification.",
-        )
-    if not isinstance(byte_count, int) or byte_count < 0:
-        raise FinalArtifactVerificationError(
-            "FINAL_ARTIFACT_VERIFY_EXPECTED_FINGERPRINT_INVALID",
-            "Refresh recovery fingerprint evidence before final verification.",
-        )
-    return {"byte_count": byte_count, "content_hash": content_hash}
 
 
 def _relative_parts(value: str) -> tuple[str, ...]:
@@ -204,19 +205,6 @@ def _reject_reparse_in_path(*, guard: ReparseGuard, root: Path, path: Path) -> N
         )
     except ReparseGuardError as exc:
         raise FinalArtifactVerificationError(exc.validation_code, exc.next_action) from exc
-
-
-def _fingerprint_file(path: Path) -> dict[str, object]:
-    digest = hashlib.sha256()
-    byte_count = 0
-    with path.open("rb") as handle:
-        while True:
-            chunk = handle.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-            byte_count += len(chunk)
-    return {"byte_count": byte_count, "content_hash": digest.hexdigest()}
 
 
 def _canonical_json(payload: dict[str, object]) -> str:

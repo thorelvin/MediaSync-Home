@@ -786,16 +786,24 @@ def _validate_windows_birthtime_invariant(invariant: dict[str, Any]) -> None:
 def _validate_named_stream_invariant(invariant: dict[str, Any]) -> None:
     expected = {
         "requirement_id": "META-002",
-        "active_policy": "BLOCK_IF_PRESENT_OR_UNCONFIRMED",
+        "active_policy": "PRESERVE_WHEN_PORTABLE_BLOCK_IF_UNCONFIRMED",
         "issue_table": "snapshot_issues",
         "present_issue_code": "SNAPSHOT_NAMED_STREAM_PRESENT",
         "unconfirmed_issue_code": (
             "SNAPSHOT_NAMED_STREAM_ENUMERATION_UNCONFIRMED"
         ),
         "findings_checksum_bound": True,
-        "findings_block_snapshot_seal": True,
+        "present_findings_block_snapshot_seal": False,
+        "unconfirmed_findings_block_snapshot_seal": True,
+        "directory_stream_findings_block_snapshot_seal": True,
+        "source_and_target_capability_required": True,
+        "target_without_named_stream_support_blocks_plan": True,
+        "stream_hash_algorithm": "SHA-256",
+        "recovery_fingerprint_includes_stream_inventory": True,
+        "retained_versions_restore_and_undo_preserve_streams": True,
         "primary_stream_only_can_claim_full_object": False,
         "full_object_assurance_requires_named_stream_verification": True,
+        "named_stream_assurance_level": "NAMED_STREAMS_VERIFIED",
     }
     drifted = sorted(
         key
@@ -809,6 +817,16 @@ def _validate_named_stream_invariant(invariant: dict[str, Any]) -> None:
         "META-002 enumeration APIs",
     ) != ("FindFirstStreamW", "FindNextStreamW"):
         fail("META-002 named-stream enumeration APIs drifted")
+    if _column_tuple(
+        invariant.get("stream_fingerprint_fields"),
+        "META-002 stream fingerprint fields",
+    ) != ("name", "byte_count", "content_hash"):
+        fail("META-002 named-stream fingerprint fields drifted")
+    if _column_tuple(
+        invariant.get("exact_verification_stages"),
+        "META-002 exact verification stages",
+    ) != ("source", "staging", "final"):
+        fail("META-002 named-stream verification stages drifted")
 
 
 def _validate_endpoint_capability_invariant(invariant: dict[str, Any]) -> None:
@@ -1117,7 +1135,7 @@ def validate_database_contract(document: dict[str, Any]) -> int:
         "END-001_ENDPOINT_CAPABILITY_EVIDENCE",
         "HASH-001_CURRENT_READ_HASH_EVIDENCE",
         "META-001_WINDOWS_BIRTHTIME",
-        "META-002_NAMED_STREAM_FAIL_CLOSED",
+        "META-002_NAMED_STREAM_PRESERVATION",
         "SRC-001_SOURCE_FILE_PRECONDITION",
         "SYNC-002_INITIAL_BACKUP_PLAN_MATERIALIZATION",
         "VER-001_OPERATION_RESULT_AXES",
@@ -1164,7 +1182,7 @@ def validate_database_contract(document: dict[str, Any]) -> int:
         invariant_by_id["META-001_WINDOWS_BIRTHTIME"]
     )
     _validate_named_stream_invariant(
-        invariant_by_id["META-002_NAMED_STREAM_FAIL_CLOSED"]
+        invariant_by_id["META-002_NAMED_STREAM_PRESERVATION"]
     )
     _validate_endpoint_capability_invariant(
         invariant_by_id["END-001_ENDPOINT_CAPABILITY_EVIDENCE"]

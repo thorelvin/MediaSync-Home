@@ -51,7 +51,8 @@ def snapshot_health_preview_from_responses(
     if not bool(coverage_page.get("read_model_available", False)):
         return _unavailable(normalized_snapshot_id)
 
-    issue_rows = tuple(_issue_row(normalized_snapshot_id, issue) for issue in _dict_items(issue_page, "issues"))
+    issues = _dict_items(issue_page, "issues")
+    issue_rows = tuple(_issue_row(normalized_snapshot_id, issue) for issue in issues)
     coverage_rows = tuple(
         _coverage_row(normalized_snapshot_id, coverage)
         for coverage in _dict_items(coverage_page, "coverage")
@@ -64,7 +65,10 @@ def snapshot_health_preview_from_responses(
         title="Snapshot health",
         summary_label=_summary_label(
             snapshot_id=normalized_snapshot_id,
-            blocking_issue_count=len(issue_rows),
+            blocking_issue_count=sum(
+                bool(issue.get("blocks_destructive_actions", False))
+                for issue in issues
+            ),
             coverage_warning_count=len(coverage_rows),
             has_more=has_more,
         ),
@@ -104,11 +108,19 @@ def _issue_row(snapshot_id: str, payload: dict[object, object]) -> SnapshotHealt
     issue_type = _required_text(payload.get("issue_type")) or "ISSUE"
     issue_label = {
         "NAMED_STREAM_PRESENT": "Extra Windows file data found",
+        "DIRECTORY_NAMED_STREAM_PRESENT": (
+            "Unsupported Windows directory data found"
+        ),
         "NAMED_STREAM_ENUMERATION_UNCONFIRMED": (
             "Windows file data check incomplete"
         ),
     }.get(issue_type, issue_type)
-    severity_label = "Blocking issue"
+    if bool(payload.get("blocks_destructive_actions", False)):
+        severity_label = "Blocking issue"
+    elif issue_type == "NAMED_STREAM_PRESENT":
+        severity_label = "Portability notice"
+    else:
+        severity_label = "Snapshot notice"
     return SnapshotHealthPreviewRow(
         snapshot_id=snapshot_id,
         severity_label=severity_label,

@@ -18,6 +18,7 @@ from mediasync_home.adapters.reparse_guard import (
 from mediasync_home.application.snapshot_scanning import DirectoryCaseContext
 from mediasync_home.application.named_streams import (
     NamedStreamInspection,
+    NamedStreamRecord,
     NamedStreamState,
 )
 
@@ -280,7 +281,9 @@ def test_local_snapshot_scanner_revalidates_queued_directory_before_traversal(
     assert scan.issues[0].error_code == "SNAPSHOT_REPARSE_POINT_BLOCKED"
 
 
-def test_local_snapshot_scanner_blocks_detected_named_streams(tmp_path: Path) -> None:
+def test_local_snapshot_scanner_records_named_streams_for_portable_preservation(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "source"
     root.mkdir()
     (root / "document.txt").write_text("primary", encoding="utf-8")
@@ -291,6 +294,12 @@ def test_local_snapshot_scanner_blocks_detected_named_streams(tmp_path: Path) ->
                 "document.txt": NamedStreamInspection(
                     state=NamedStreamState.PRESENT,
                     observed_named_stream_count=1,
+                    named_streams=(
+                        NamedStreamRecord(
+                            stream_name=":metadata:$DATA",
+                            size_bytes=8,
+                        ),
+                    ),
                 )
             }
         ),
@@ -303,11 +312,11 @@ def test_local_snapshot_scanner_blocks_detected_named_streams(tmp_path: Path) ->
     )
 
     assert [entry.relative_path for entry in scan.entries] == ["document.txt"]
-    assert scan.complete is False
+    assert scan.complete is True
     assert len(scan.issues) == 1
     assert scan.issues[0].issue_type == "NAMED_STREAM_PRESENT"
     assert scan.issues[0].error_code == "SNAPSHOT_NAMED_STREAM_PRESENT"
-    assert scan.issues[0].blocks_destructive_actions is True
+    assert scan.issues[0].blocks_destructive_actions is False
 
 
 def test_local_snapshot_scanner_blocks_unconfirmed_named_stream_enumeration(
@@ -338,3 +347,40 @@ def test_local_snapshot_scanner_blocks_unconfirmed_named_stream_enumeration(
     assert len(scan.issues) == 1
     assert scan.issues[0].issue_type == "NAMED_STREAM_ENUMERATION_UNCONFIRMED"
     assert scan.issues[0].error_code == "WIN32_NAMED_STREAM_ENUMERATION_FAILED_5"
+
+
+def test_local_snapshot_scanner_blocks_directory_named_streams(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "Archive").mkdir()
+    scanner = LocalFilesystemSnapshotScanner(
+        case_mode_probe=_FixedCaseModeProbe(),
+        named_stream_probe=_FixedNamedStreamProbe(
+            {
+                "Archive": NamedStreamInspection(
+                    state=NamedStreamState.PRESENT,
+                    observed_named_stream_count=1,
+                    named_streams=(
+                        NamedStreamRecord(
+                            stream_name=":metadata:$DATA",
+                            size_bytes=8,
+                        ),
+                    ),
+                )
+            }
+        ),
+    )
+
+    scan = scanner.scan(
+        root,
+        snapshot_id="snapshot-directory-named-stream",
+        exclude_control_area=False,
+    )
+
+    assert scan.complete is False
+    assert len(scan.issues) == 1
+    assert scan.issues[0].issue_type == "DIRECTORY_NAMED_STREAM_PRESENT"
+    assert scan.issues[0].error_code == "SNAPSHOT_DIRECTORY_NAMED_STREAM_PRESENT"
+    assert scan.issues[0].blocks_destructive_actions is True

@@ -40,7 +40,10 @@ def test_local_staging_binds_match_fingerprint_target_precondition(tmp_path: Pat
         _operation(RecoveryTargetPreconditionKind.MATCH_FINGERPRINT),
     )
 
-    assert json.loads(evidence.fingerprint_json) == _fingerprint(b"old-image")
+    assert json.loads(evidence.fingerprint_json) == {
+        **_fingerprint(b"old-image"),
+        "named_streams": [],
+    }
 
 
 def test_local_staging_rejects_match_fingerprint_target_drift(tmp_path: Path) -> None:

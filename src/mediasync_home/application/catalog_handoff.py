@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping, Protocol
 
+from mediasync_home.application.file_object_fingerprints import (
+    FileObjectFingerprintError,
+    file_object_fingerprint_from_json,
+)
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
     RecoveryOperationKind,
@@ -472,16 +476,14 @@ def _canonical_fingerprint_json(
             "Record a canonical original fingerprint for the retained version.",
         )
     if object_role == "OLD_TARGET_VERSION":
-        byte_count = fingerprint.get("byte_count")
-        content_hash = fingerprint.get("content_hash")
-        valid = (
-            set(fingerprint) == {"byte_count", "content_hash"}
-            and isinstance(byte_count, int)
-            and not isinstance(byte_count, bool)
-            and byte_count >= 0
-            and isinstance(content_hash, str)
-            and HASH_PATTERN.fullmatch(content_hash) is not None
-        )
+        try:
+            file_object_fingerprint_from_json(raw_fingerprint)
+        except FileObjectFingerprintError as exc:
+            raise CatalogHandoffError(
+                "CATALOG_HANDOFF_RETAINED_VERSION_FINGERPRINT_INVALID",
+                "Record a canonical original fingerprint for the retained version.",
+            ) from exc
+        return raw_fingerprint
     else:
         valid = (
             object_role == "EMPTY_DIRECTORY_QUARANTINE"

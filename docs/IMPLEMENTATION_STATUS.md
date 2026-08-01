@@ -493,16 +493,22 @@ Reparasjon av pre-migration-30 pending jobs er nå også levert gjennom den
 eksplisitte, revisjonsbundne **Registrer mål**-handlingen. Den senere
 oppdateringen øverst dekker også kontrollert lokal fremmed-overtakelse.
 
-Nyeste 0B-slice: `META-002` har nå en eksplisitt fail-closed policy for Windows
-named streams. Snapshotscanneren bruker bounded `FindFirstStreamW`/
-`FindNextStreamW`-enumerering for hver vanlig fil og katalog. Et funnet stream,
-en enumerering som ikke kan bekreftes, eller overskredet enumereringsgrense blir en
-checksumbundet, blokkerende snapshot-finding; snapshotet kan derfor ikke
-forsegles eller brukes til kopiering. GUI-et viser funnet som ekstra
-Windows-fildata eller ufullstendig kontroll på norsk og engelsk. Kontrakten
-forbyr samtidig at bare primærstreamen omtales som full object-ekvivalens.
-Kopiering, hashing, gjenoppretting og ende-til-ende-verifisering av selve named
-streams gjenstår, så `META-002` er fortsatt `in_progress`.
+Nyeste 0B-slice: `META-002` bruker nå
+`PRESERVE_WHEN_PORTABLE_BLOCK_IF_UNCONFIRMED` for Windows named streams.
+Bounded `FindFirstStreamW`/`FindNextStreamW`-enumerering gjør funne filstreams
+til en checksumbundet portabilitetsmerknad, mens katalogstreams, ukjent eller
+ufullstendig enumerering fortsatt blokkerer snapshotforsegling. Planforsegling krever
+bekreftet named-stream-støtte hos både kilde og hvert mål og blokkerer et mål
+som ville miste data. Kilde, staging og finalfil bindes til en kanonisk
+SHA-256-fingerprint med eksakt streamnavn, størrelse og innholdshash. Lokal
+kopiering og Robocopy blir kontrollert uavhengig mot denne fingerprinten, og
+audit bruker `NAMED_STREAMS_VERIFIED`. Replacement, beholdte versjoner,
+restore, rollback, undo og retention-verifisering bevarer samme streams;
+eldre primærstream-only recoveryevidence forblir lesbart uten å bli oppgradert
+til full object-ekvivalens. Live NTFS-bevis dekker begge transfer-backends og
+restore/undo. Katalogstreams, andre Windows-metadataegenskaper og writable
+SMB-evidens gjenstår,
+så `META-002` er fortsatt `in_progress`.
 
 Forrige 0B-slice: `VER-001` har nå tre kanoniske og uavhengige resultatakser:
 transfer, assurance og durability. Catalog migration 51 normaliserer eldre
@@ -513,9 +519,9 @@ final-eventens `file_flush_succeeded`/`write_through_move_used` i
 `verification_json`; manglende suksessevidens gir ingen terminal suksessrad.
 Historikk viser transferstatus, byte, verifisering og durability i separate
 norske/engelske rader ved 900×560. `WRITE_THROUGH_REQUEST_CONFIRMED` vises som
-bekreftet forespørsel, aldri som fysisk mediegaranti. Named streams,
-full-object-verifisering og writable SMB-evidens gjenstår, så `VER-001` er
-fortsatt `in_progress`.
+bekreftet forespørsel, aldri som fysisk mediegaranti. Named-stream-assurance er
+nå levert som `NAMED_STREAMS_VERIFIED`; øvrig full-object-verifisering og
+writable SMB-evidens gjenstår, så `VER-001` er fortsatt `in_progress`.
 
 Forrige 0B-slice: `DUR-001` bruker nå `MoveFileExW` med
 `MOVEFILE_WRITE_THROUGH` for no-overwrite finalfil, replacement og

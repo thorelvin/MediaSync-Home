@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 from pathlib import Path
 
@@ -100,6 +101,40 @@ def test_retained_version_restore_preserves_current_and_applies_historical(
             "RESTORE_COMPLETED",
         ]
         assert leases.leases and all(lease.released for lease in leases.leases)
+    finally:
+        connection.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows named streams only")
+def test_retained_version_restore_and_undo_preserve_named_streams(
+    tmp_path: Path,
+) -> None:
+    connection, target_root = _prepared_restore(tmp_path, named_streams=True)
+    try:
+        store = SqliteVersionRetentionStore(connection)
+        _complete_restore(store, target_root=target_root)
+        final_path = target_root / "Photos/image.jpg"
+
+        assert final_path.read_bytes() == b"old-image"
+        assert Path(f"{final_path}:metadata").read_bytes() == b"historical-metadata"
+        rollback_payload = next(
+            (target_root / ".mediasync/objects/restores").glob("*.payload")
+        )
+        assert Path(f"{rollback_payload}:metadata").read_bytes() == b"current-metadata"
+
+        _schedule_undo(store)
+        undone = apply_next_version_restore_undo(
+            rollbacks=store,
+            leases=_LeaseAuthority(),
+            filesystem=LocalRetainedVersionRestoreAdapter(
+                root_resolver=_RootResolver(target_root)
+            ),
+            event_utc="2026-08-11T00:00:01.000Z",
+        )
+
+        assert undone.completed
+        assert final_path.read_bytes() == b"current-image"
+        assert Path(f"{final_path}:metadata").read_bytes() == b"current-metadata"
     finally:
         connection.close()
 
@@ -697,6 +732,7 @@ def _prepared_restore(
     tmp_path: Path,
     *,
     protect: bool = True,
+    named_streams: bool = False,
 ) -> tuple[sqlite3.Connection, Path]:
     database = tmp_path / "catalog.sqlite"
     connection = sqlite3.connect(database)
@@ -704,10 +740,12 @@ def _prepared_restore(
     apply_sqlite_migrations(connection, catalog_migration_plan())
     connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'STANDARD_BACKUP')")
     target_root = tmp_path / "target"
-    manifest = _write_version_object(target_root)
+    manifest = _write_version_object(target_root, named_streams=named_streams)
     final_path = target_root / "Photos/image.jpg"
     final_path.parent.mkdir(parents=True)
     final_path.write_bytes(b"current-image")
+    if named_streams:
+        Path(f"{final_path}:metadata").write_bytes(b"current-metadata")
     SqliteFinalFileCatalogHandoffStore(connection).record_final_file_handoff(
         _handoff_from_manifest(manifest)
     )
@@ -780,10 +818,24 @@ def _restore_id_for_test() -> str:
     return f"restore-{hashlib.sha256(b'restore-key').hexdigest()[:32]}"
 
 
-def _write_version_object(target_root: Path) -> VersionObjectManifest:
+def _write_version_object(
+    target_root: Path,
+    *,
+    named_streams: bool = False,
+) -> VersionObjectManifest:
     payload = b"old-image"
     object_root = target_root / ".mediasync" / "objects" / "versions"
     object_root.mkdir(parents=True)
+    named_stream_fingerprints: list[dict[str, object]] = []
+    if named_streams:
+        named_stream_payload = b"historical-metadata"
+        named_stream_fingerprints.append(
+            {
+                "name": ":metadata:$DATA",
+                "byte_count": len(named_stream_payload),
+                "content_hash": hashlib.sha256(named_stream_payload).hexdigest(),
+            }
+        )
     manifest = create_version_object_manifest(
         version_object_id="version-a",
         operation_id="operation-a",
@@ -800,11 +852,19 @@ def _write_version_object(target_root: Path) -> VersionObjectManifest:
         fingerprint={
             "byte_count": len(payload),
             "content_hash": hashlib.sha256(payload).hexdigest(),
+            **(
+                {"named_streams": named_stream_fingerprints}
+                if named_streams
+                else {}
+            ),
         },
         created_utc="2026-08-01T00:00:00.000Z",
         retention_policy="THIRTY_DAYS",
     )
-    (object_root / "version-a.payload").write_bytes(payload)
+    payload_path = object_root / "version-a.payload"
+    payload_path.write_bytes(payload)
+    if named_streams:
+        Path(f"{payload_path}:metadata").write_bytes(b"historical-metadata")
     (object_root / "version-a.manifest.json").write_text(
         manifest.canonical_json,
         encoding="utf-8",
@@ -831,11 +891,7 @@ def _handoff_from_manifest(manifest: VersionObjectManifest) -> FinalFileCatalogH
             endpoint_generation=manifest.endpoint_generation,
             owner_installation_id=manifest.owner_installation_id,
             ownership_epoch=manifest.ownership_epoch,
-            original_fingerprint_json=(
-                '{"byte_count":9,"content_hash":"'
-                + manifest.fingerprint_content_hash
-                + '"}'
-            ),
+            original_fingerprint_json=manifest.fingerprint_json,
             created_utc=manifest.created_utc,
             retention_policy=manifest.retention_policy,
             retention_until_utc=manifest.retention_until_utc,

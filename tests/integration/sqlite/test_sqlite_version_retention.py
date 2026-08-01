@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -26,6 +27,9 @@ from mediasync_home.adapters.sqlite.recovery_operations import SqliteRecoveryOpe
 from mediasync_home.adapters.sqlite.version_retention import (
     SqliteVersionRetentionStore,
     SqliteVersionRetentionStoreError,
+)
+from mediasync_home.adapters.file_object_fingerprints import (
+    LocalFileObjectFingerprintAdapter,
 )
 from mediasync_home.adapters.version_retention import (
     LocalVersionRetentionDeletionAdapter,
@@ -460,6 +464,47 @@ def test_sqlite_retention_execution_blocks_tampered_payload_without_deleting(
         connection.close()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows named streams only")
+def test_sqlite_retention_blocks_tampered_named_stream_without_deleting(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_catalog_connection(tmp_path)
+    target_root = tmp_path / "target"
+    try:
+        manifest, payload_path, stream_path = _write_version_object_with_stream(
+            target_root
+        )
+        stream_path.write_bytes(b"tampered-stream")
+        _insert_job(connection)
+        SqliteFinalFileCatalogHandoffStore(connection).record_final_file_handoff(
+            _handoff_from_manifest(manifest)
+        )
+        store = SqliteVersionRetentionStore(connection)
+        _create_due_plan(store)
+
+        outcome = apply_next_version_retention_item(
+            versions=store,
+            recovery_references=_ReleasedReferences(),
+            leases=_LeaseAuthority(_Lease()),
+            deletion=LocalVersionRetentionDeletionAdapter(
+                root_resolver=_RootResolver(target_root)
+            ),
+            event_utc="2026-09-01T00:00:02.000Z",
+        )
+
+        assert outcome.deleted is False
+        assert outcome.validation_codes == (
+            "VERSION_RETENTION_PAYLOAD_FINGERPRINT_MISMATCH",
+        )
+        assert payload_path.read_bytes() == b"old-image"
+        assert stream_path.read_bytes() == b"tampered-stream"
+        assert connection.execute(
+            "SELECT state FROM retained_version_objects"
+        ).fetchone() == ("BLOCKED",)
+    finally:
+        connection.close()
+
+
 def test_sqlite_retention_execution_blocks_tampered_manifest_without_deleting(
     tmp_path: Path,
 ) -> None:
@@ -843,6 +888,43 @@ def _write_version_object(target_root: Path) -> VersionObjectManifest:
         encoding="utf-8",
     )
     return manifest
+
+
+def _write_version_object_with_stream(
+    target_root: Path,
+) -> tuple[VersionObjectManifest, Path, Path]:
+    object_root = target_root / ".mediasync" / "objects" / "versions"
+    object_root.mkdir(parents=True)
+    payload_path = object_root / "version-a.payload"
+    payload_path.write_bytes(b"old-image")
+    stream_path = Path(f"{payload_path}:retention-test")
+    try:
+        stream_path.write_bytes(b"retained-stream")
+    except OSError:
+        pytest.skip("the temporary filesystem does not support named streams")
+    fingerprint = LocalFileObjectFingerprintAdapter().fingerprint(payload_path)
+    manifest = create_version_object_manifest(
+        version_object_id="version-a",
+        operation_id="operation-a",
+        run_id="run-a",
+        run_target_id="run-target-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        target_endpoint_id="target-a",
+        target_endpoint_revision_id="target-rev-a",
+        endpoint_generation=2,
+        owner_installation_id="owner-a",
+        ownership_epoch=3,
+        final_relative_path="Photos/image.jpg",
+        fingerprint=fingerprint,
+        created_utc="2026-08-01T00:00:00.000Z",
+        retention_policy="THIRTY_DAYS",
+    )
+    (object_root / "version-a.manifest.json").write_text(
+        manifest.canonical_json,
+        encoding="utf-8",
+    )
+    return manifest, payload_path, stream_path
 
 
 def _write_quarantine_object(target_root: Path) -> VersionObjectManifest:

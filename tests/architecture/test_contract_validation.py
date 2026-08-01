@@ -179,7 +179,7 @@ def test_database_contract_rejects_named_stream_full_object_overclaim() -> None:
     document = copy.deepcopy(document)
     invariant = _database_invariant(
         document,
-        "META-002_NAMED_STREAM_FAIL_CLOSED",
+        "META-002_NAMED_STREAM_PRESERVATION",
     )
     invariant["primary_stream_only_can_claim_full_object"] = True
 

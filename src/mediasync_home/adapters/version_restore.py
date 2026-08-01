@@ -12,8 +12,16 @@ from mediasync_home.adapters.endpoint_leases import (
     EndpointLeaseUnavailable,
     EndpointRootResolver,
 )
+from mediasync_home.adapters.file_object_fingerprints import (
+    LocalFileObjectFingerprintAdapter,
+    LocalFileObjectFingerprintError,
+)
 from mediasync_home.adapters.reparse_guard import LocalReparseGuard, ReparseGuardError
 from mediasync_home.application.safe_paths import SafePathViolation, parse_endpoint_relative_path
+from mediasync_home.application.file_object_fingerprints import (
+    file_object_fingerprints_match,
+    has_named_stream_inventory,
+)
 from mediasync_home.application.version_objects import (
     EMPTY_DIRECTORY_QUARANTINE_ROLE,
     OLD_TARGET_VERSION_ROLE,
@@ -42,6 +50,7 @@ from mediasync_home.domain.capabilities import MutationPermit
 
 
 _OBJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_FILE_OBJECT_FINGERPRINTS = LocalFileObjectFingerprintAdapter()
 
 
 class VersionRestoreFilesystemError(RuntimeError):
@@ -102,7 +111,12 @@ class LocalRetainedVersionRestoreAdapter:
         return VersionRestoreInspectionReceipt(
             historical_fingerprint_json=historical_json,
             current_final_fingerprint_json=current_json,
-            already_current=current_json == historical_json,
+            already_current=(
+                current_json == historical_json
+                if operation.record.object_role
+                == EMPTY_DIRECTORY_QUARANTINE_ROLE
+                else _fingerprints_match(current, historical)
+            ),
         )
 
     def preserve_current_final(
@@ -130,6 +144,7 @@ class LocalRetainedVersionRestoreAdapter:
             missing_code="VERSION_RESTORE_CURRENT_FINAL_MISSING",
             invalid_code="VERSION_RESTORE_CURRENT_FINAL_TYPE_INVALID",
             read_code="VERSION_RESTORE_CURRENT_FINAL_READ_FAILED",
+            expected=expected_current,
         )
         if observed_current != expected_current:
             raise VersionRestoreFilesystemError(
@@ -194,12 +209,13 @@ class LocalRetainedVersionRestoreAdapter:
                 missing_code="VERSION_RESTORE_CURRENT_FINAL_MISSING",
                 invalid_code="VERSION_RESTORE_CURRENT_FINAL_TYPE_INVALID",
                 read_code="VERSION_RESTORE_CURRENT_FINAL_READ_FAILED",
+                expected=expected_current,
             )
-            if observed == historical:
+            if _fingerprints_match(observed, historical):
                 return VersionRestoreApplyReceipt(
                     historical_fingerprint_json=historical_json
                 )
-            if observed != expected_current:
+            if not _fingerprints_match(observed, expected_current):
                 raise VersionRestoreFilesystemError(
                     "VERSION_RESTORE_CURRENT_FINAL_CHANGED_BEFORE_APPLY",
                     "Review the final file and rollback object before resuming restore.",
@@ -237,6 +253,7 @@ class LocalRetainedVersionRestoreAdapter:
         observed = _restored_final_fingerprint(
             final_path=final_path,
             object_role=operation.record.object_role,
+            expected=historical,
         )
         if observed != historical:
             raise VersionRestoreFilesystemError(
@@ -279,7 +296,14 @@ class LocalRetainedVersionRestoreAdapter:
             expected=rollback,
         )
         observed = _current_final_fingerprint(final_path)
-        if observed not in (expected_final, rollback):
+        if observed is None:
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_UNDO_FINAL_MISSING",
+                "Keep the rollback object and review the final file before undoing.",
+            )
+        if not _fingerprints_match(
+            observed, expected_final
+        ) and not _fingerprints_match(observed, rollback):
             raise VersionRestoreFilesystemError(
                 "VERSION_RESTORE_UNDO_FINAL_CHANGED",
                 "Keep the rollback object and review the final file before undoing.",
@@ -287,7 +311,7 @@ class LocalRetainedVersionRestoreAdapter:
         return VersionRestoreUndoInspectionReceipt(
             current_final_fingerprint_json=_fingerprint_json(observed),
             rollback_fingerprint_json=_fingerprint_json(rollback),
-            already_undone=observed == rollback,
+            already_undone=_fingerprints_match(observed, rollback),
         )
 
     def apply_restore_undo(
@@ -327,8 +351,10 @@ class LocalRetainedVersionRestoreAdapter:
             expected=rollback,
         )
         observed = _current_final_fingerprint(final_path, allow_missing=True)
-        if observed != rollback:
-            if observed is not None and observed != expected_final:
+        if observed is None or not _fingerprints_match(observed, rollback):
+            if observed is not None and not _fingerprints_match(
+                observed, expected_final
+            ):
                 raise VersionRestoreFilesystemError(
                     "VERSION_RESTORE_UNDO_FINAL_CHANGED_BEFORE_APPLY",
                     "Keep the rollback object and review the changed final file.",
@@ -386,6 +412,7 @@ class LocalRetainedVersionRestoreAdapter:
             missing_code="VERSION_RESTORE_UNDO_FINAL_MISSING_AFTER_APPLY",
             invalid_code="VERSION_RESTORE_UNDO_FINAL_TYPE_INVALID_AFTER_APPLY",
             read_code="VERSION_RESTORE_UNDO_FINAL_READ_FAILED_AFTER_APPLY",
+            expected=rollback,
         )
         if observed != rollback:
             raise VersionRestoreFilesystemError(
@@ -643,6 +670,7 @@ class LocalRetainedVersionRestoreAdapter:
                 missing_code="VERSION_RESTORE_HISTORICAL_PAYLOAD_MISSING",
                 invalid_code="VERSION_RESTORE_HISTORICAL_PAYLOAD_TYPE_INVALID",
                 read_code="VERSION_RESTORE_HISTORICAL_PAYLOAD_READ_FAILED",
+                expected=expected,
             )
         )
         if observed != expected:
@@ -722,6 +750,7 @@ class LocalRetainedVersionRestoreAdapter:
             missing_code="VERSION_RESTORE_ROLLBACK_PAYLOAD_MISSING",
             invalid_code="VERSION_RESTORE_ROLLBACK_PAYLOAD_TYPE_INVALID",
             read_code="VERSION_RESTORE_ROLLBACK_PAYLOAD_READ_FAILED",
+            expected=expected,
         )
         if observed != expected:
             raise VersionRestoreFilesystemError(
@@ -1020,6 +1049,7 @@ def _preserve_payload(
             missing_code="VERSION_RESTORE_ROLLBACK_PAYLOAD_MISSING",
             invalid_code="VERSION_RESTORE_ROLLBACK_PAYLOAD_TYPE_INVALID",
             read_code="VERSION_RESTORE_ROLLBACK_PAYLOAD_READ_FAILED",
+            expected=expected,
         )
         if observed != expected:
             raise VersionRestoreFilesystemError(
@@ -1029,8 +1059,12 @@ def _preserve_payload(
         return
     temp_path = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
     try:
-        _copy_file_durable(source=source, destination=temp_path)
-        if _fingerprint_file(temp_path) != expected:
+        _copy_file_durable(
+            source=source,
+            destination=temp_path,
+            expected=expected,
+        )
+        if _fingerprint_file(temp_path, expected=expected) != expected:
             raise VersionRestoreFilesystemError(
                 "VERSION_RESTORE_CURRENT_FINAL_CHANGED_DURING_PRESERVE",
                 "Review the current final before retrying restore.",
@@ -1058,8 +1092,12 @@ def _replace_with_verified_payload(
         f".{final_path.name}.{uuid4().hex}.mediasync-version-restore.tmp"
     )
     try:
-        _copy_file_durable(source=source, destination=temp_path)
-        if _fingerprint_file(temp_path) != expected:
+        _copy_file_durable(
+            source=source,
+            destination=temp_path,
+            expected=expected,
+        )
+        if _fingerprint_file(temp_path, expected=expected) != expected:
             raise VersionRestoreFilesystemError(
                 "VERSION_RESTORE_TEMP_FINGERPRINT_MISMATCH",
                 "Keep the rollback object and review the historical payload.",
@@ -1101,6 +1139,7 @@ def _apply_empty_directory_restore(
             missing_code="VERSION_RESTORE_CURRENT_FINAL_MISSING",
             invalid_code="VERSION_RESTORE_CURRENT_FINAL_TYPE_INVALID",
             read_code="VERSION_RESTORE_CURRENT_FINAL_READ_FAILED",
+            expected=expected_current,
         )
         if observed != expected_current:
             raise VersionRestoreFilesystemError(
@@ -1165,8 +1204,12 @@ def _replace_empty_directory_with_verified_file(
         f".{final_path.name}.{uuid4().hex}.mediasync-quarantine-undo.tmp"
     )
     try:
-        _copy_file_durable(source=source, destination=temp_path)
-        if _fingerprint_file(temp_path) != expected:
+        _copy_file_durable(
+            source=source,
+            destination=temp_path,
+            expected=expected,
+        )
+        if _fingerprint_file(temp_path, expected=expected) != expected:
             raise VersionRestoreFilesystemError(
                 "VERSION_RESTORE_UNDO_TEMP_FINGERPRINT_MISMATCH",
                 "Keep the rollback object and review its payload.",
@@ -1188,14 +1231,26 @@ def _replace_empty_directory_with_verified_file(
         temp_path.unlink(missing_ok=True)
 
 
-def _copy_file_durable(*, source: Path, destination: Path) -> None:
+def _copy_file_durable(
+    *,
+    source: Path,
+    destination: Path,
+    expected: dict[str, object],
+) -> None:
     try:
+        if has_named_stream_inventory(expected):
+            _FILE_OBJECT_FINGERPRINTS.copy_file_object(
+                source=source,
+                destination=destination,
+                expected_fingerprint=expected,
+            )
+            return
         with source.open("rb") as source_handle, destination.open("xb") as target_handle:
             while chunk := source_handle.read(1024 * 1024):
                 target_handle.write(chunk)
             target_handle.flush()
             os.fsync(target_handle.fileno())
-    except OSError as exc:
+    except (OSError, LocalFileObjectFingerprintError) as exc:
         raise VersionRestoreFilesystemError(
             "VERSION_RESTORE_COPY_FAILED",
             "Retry after checking source and destination access.",
@@ -1207,6 +1262,7 @@ def _current_final_fingerprint(
     path: Path,
     *,
     allow_missing: bool = False,
+    expected: dict[str, object] | None = None,
 ) -> dict[str, object] | None:
     if not path.exists() and not path.is_symlink():
         if allow_missing:
@@ -1227,6 +1283,7 @@ def _current_final_fingerprint(
         missing_code="VERSION_RESTORE_CURRENT_FINAL_MISSING",
         invalid_code="VERSION_RESTORE_CURRENT_FINAL_TYPE_INVALID",
         read_code="VERSION_RESTORE_CURRENT_FINAL_READ_FAILED",
+        expected=expected,
     )
 
 
@@ -1234,6 +1291,7 @@ def _restored_final_fingerprint(
     *,
     final_path: Path,
     object_role: str,
+    expected: dict[str, object],
 ) -> dict[str, object]:
     if object_role == EMPTY_DIRECTORY_QUARANTINE_ROLE:
         return _require_empty_directory_fingerprint(
@@ -1247,6 +1305,7 @@ def _restored_final_fingerprint(
         missing_code="VERSION_RESTORE_FINAL_MISSING_AFTER_APPLY",
         invalid_code="VERSION_RESTORE_FINAL_TYPE_INVALID_AFTER_APPLY",
         read_code="VERSION_RESTORE_FINAL_READ_FAILED_AFTER_APPLY",
+        expected=expected,
     )
 
 
@@ -1288,6 +1347,7 @@ def _require_regular_file_fingerprint(
     missing_code: str,
     invalid_code: str,
     read_code: str,
+    expected: dict[str, object] | None = None,
 ) -> dict[str, object]:
     if not path.exists():
         raise VersionRestoreFilesystemError(
@@ -1300,8 +1360,8 @@ def _require_regular_file_fingerprint(
             "Review the restore paths before retrying.",
         )
     try:
-        return _fingerprint_file(path)
-    except OSError as exc:
+        return _fingerprint_file(path, expected=expected)
+    except (OSError, LocalFileObjectFingerprintError) as exc:
         raise VersionRestoreFilesystemError(
             read_code,
             "Retry after checking file access.",
@@ -1309,14 +1369,18 @@ def _require_regular_file_fingerprint(
         ) from exc
 
 
-def _fingerprint_file(path: Path) -> dict[str, object]:
-    digest = hashlib.sha256()
-    byte_count = 0
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            byte_count += len(chunk)
-            digest.update(chunk)
-    return {"byte_count": byte_count, "content_hash": digest.hexdigest()}
+def _fingerprint_file(
+    path: Path,
+    *,
+    expected: dict[str, object] | None = None,
+) -> dict[str, object]:
+    observed = _FILE_OBJECT_FINGERPRINTS.fingerprint(path)
+    if expected is not None and not has_named_stream_inventory(expected):
+        return {
+            "byte_count": observed["byte_count"],
+            "content_hash": observed["content_hash"],
+        }
+    return observed
 
 
 def _fingerprint_from_json(
@@ -1342,6 +1406,16 @@ def _fingerprint_from_json(
 
 def _fingerprint_json(fingerprint: Mapping[str, object]) -> str:
     return canonical_fingerprint_json(_canonical_json(fingerprint))
+
+
+def _fingerprints_match(
+    observed: Mapping[str, object],
+    expected: Mapping[str, object],
+) -> bool:
+    directory_keys = {"entry_count", "kind"}
+    if set(observed) == directory_keys or set(expected) == directory_keys:
+        return observed == expected
+    return file_object_fingerprints_match(observed, expected)
 
 
 def _canonical_json(value: Mapping[str, object]) -> str:

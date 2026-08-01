@@ -9,6 +9,10 @@ from typing import Protocol, cast
 from uuid import uuid4
 
 from mediasync_home.adapters.endpoint_leases import EndpointLeaseUnavailable, EndpointRootResolver
+from mediasync_home.adapters.file_object_fingerprints import (
+    LocalFileObjectFingerprintAdapter,
+    LocalFileObjectFingerprintError,
+)
 from mediasync_home.adapters.reparse_guard import LocalReparseGuard, ReparseGuardError
 from mediasync_home.adapters.system_clock import SystemClock
 from mediasync_home.adapters.windows_durability import move_path_write_through
@@ -26,6 +30,12 @@ from mediasync_home.application.directory_artifacts import (
     DIRECTORY_MARKER_NAME,
     directory_artifact_fingerprint,
     directory_artifact_matches,
+)
+from mediasync_home.application.file_object_fingerprints import (
+    FileObjectFingerprintError,
+    canonical_file_object_fingerprint_json,
+    file_object_fingerprint_from_json,
+    has_named_stream_inventory,
 )
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
@@ -55,6 +65,7 @@ HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 OBJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 LAB_MARKER_NAME = ".mediasync_test_root"
 DEFAULT_REPARSE_GUARD = LocalReparseGuard()
+FILE_OBJECT_FINGERPRINTS = LocalFileObjectFingerprintAdapter()
 
 
 class FinalCommitAdapterError(RuntimeError):
@@ -89,6 +100,7 @@ class LabNoOverwriteFinalCommitAdapter(FinalCommitPort):
         _require_lab_marker(self._target_root, permit.run_id)
         staging_payload = _staging_payload_path(self._staging_root, artifact)
         final_path = _final_path(self._target_root, artifact)
+        expected_fingerprint = _artifact_fingerprint(artifact)
         if _hash_file(staging_payload) != artifact.content_hash:
             raise FinalCommitAdapterError(
                 "LAB_FINAL_COMMIT_STAGING_HASH_MISMATCH",
@@ -98,6 +110,7 @@ class LabNoOverwriteFinalCommitAdapter(FinalCommitPort):
             staging_payload=staging_payload,
             final_path=final_path,
             content_hash=artifact.content_hash,
+            expected_fingerprint=expected_fingerprint,
         )
         return _flushed_file_commit_receipt(
             artifact=artifact,
@@ -157,7 +170,7 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
                 "LOCAL_REPLACE_FINAL_COMMIT_TARGET_MISSING",
                 "Refresh analysis because the target to replace is no longer a regular file.",
             )
-        observed = _fingerprint_file(final_path)
+        observed = _fingerprint_file(final_path, expected=expected)
         if observed != expected:
             raise FinalCommitAdapterError(
                 "LOCAL_REPLACE_FINAL_COMMIT_TARGET_FINGERPRINT_MISMATCH",
@@ -323,7 +336,7 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
                 "LOCAL_REPLACE_OLD_TARGET_RESTORE_VERSION_PAYLOAD_MISSING",
                 "Recover or reconcile the preserved old target payload before restore.",
             )
-        if _fingerprint_file(version_payload) != expected_old:
+        if _fingerprint_file(version_payload, expected=expected_old) != expected_old:
             raise FinalCommitAdapterError(
                 "LOCAL_REPLACE_OLD_TARGET_RESTORE_VERSION_PAYLOAD_MISMATCH",
                 "Enter recovery because the preserved old target no longer matches its manifest.",
@@ -337,7 +350,7 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
             )
         fingerprint_json = _canonical_json(expected_old)
         if final_path.is_file():
-            if _fingerprint_file(final_path) == expected_old:
+            if _fingerprint_file(final_path, expected=expected_old) == expected_old:
                 return OldTargetRestoreReceipt(
                     operation_id=operation.operation_id,
                     final_relative_path=RelativePath(operation.final_relative_path),
@@ -465,6 +478,7 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
         )
         staging_payload = _replace_staging_payload_path(self._staging_root, artifact)
         final_path = _replace_final_path(self._target_root, artifact.relative_path.value)
+        expected_fingerprint = _artifact_fingerprint(artifact)
         version_payload, version_manifest = _version_object_paths(
             target_root=self._target_root,
             version_object_id=artifact.object_id,
@@ -482,7 +496,7 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
                 "LOCAL_REPLACE_FINAL_COMMIT_VERSION_PAYLOAD_MISSING",
                 "Preserve the old target before replacing the final file.",
             )
-        if _fingerprint_file(version_payload) != expected_old:
+        if _fingerprint_file(version_payload, expected=expected_old) != expected_old:
             raise FinalCommitAdapterError(
                 "LOCAL_REPLACE_FINAL_COMMIT_VERSION_PAYLOAD_MISMATCH",
                 "Enter recovery because the preserved old target no longer matches its manifest.",
@@ -498,7 +512,7 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
                 "Enter recovery because the final target path is no longer a regular file or absent.",
             )
         if final_path.is_file():
-            if _fingerprint_file(final_path) != expected_old:
+            if _fingerprint_file(final_path, expected=expected_old) != expected_old:
                 raise FinalCommitAdapterError(
                     "LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE",
                     "Refresh analysis because the final target changed after old-target preservation.",
@@ -507,6 +521,7 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
                 staging_payload=staging_payload,
                 final_path=final_path,
                 content_hash=artifact.content_hash,
+                expected_fingerprint=expected_fingerprint,
             )
             return _flushed_file_commit_receipt(
                 artifact=artifact,
@@ -517,6 +532,7 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
             staging_payload=staging_payload,
             final_path=final_path,
             content_hash=artifact.content_hash,
+            expected_fingerprint=expected_fingerprint,
         )
         return _flushed_file_commit_receipt(
             artifact=artifact,
@@ -570,10 +586,15 @@ def _insert_replacement_payload_without_overwrite(
     staging_payload: Path,
     final_path: Path,
     content_hash: str,
+    expected_fingerprint: dict[str, object] | None,
 ) -> None:
     temp_path = final_path.parent / f".{final_path.name}.{uuid4().hex}.mediasync-replace-missing.tmp"
     try:
-        _copy_file_durable(source=staging_payload, destination=temp_path)
+        _copy_file_durable(
+            source=staging_payload,
+            destination=temp_path,
+            expected_fingerprint=expected_fingerprint,
+        )
         if _hash_file(temp_path) != content_hash:
             raise FinalCommitAdapterError(
                 "LOCAL_REPLACE_FINAL_COMMIT_TEMP_HASH_MISMATCH",
@@ -607,8 +628,12 @@ def _restore_version_payload_without_overwrite(
 ) -> None:
     temp_path = final_path.parent / f".{final_path.name}.{uuid4().hex}.mediasync-restore-old.tmp"
     try:
-        _copy_file_durable(source=version_payload, destination=temp_path)
-        if _fingerprint_file(temp_path) != expected_fingerprint:
+        _copy_file_durable(
+            source=version_payload,
+            destination=temp_path,
+            expected_fingerprint=expected_fingerprint,
+        )
+        if _fingerprint_file(temp_path, expected=expected_fingerprint) != expected_fingerprint:
             raise FinalCommitAdapterError(
                 "LOCAL_REPLACE_OLD_TARGET_RESTORE_TEMP_MISMATCH",
                 "Recover or reconcile the preserved old target payload before restore.",
@@ -670,6 +695,9 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
             operation_kind=operation.operation_kind,
             fingerprint_content_hash=str(staging_fingerprint["content_hash"]),
             fingerprint_byte_count=cast(int, staging_fingerprint["byte_count"]),
+            fingerprint_json=canonical_file_object_fingerprint_json(
+                staging_fingerprint
+            ),
             operation_id=operation.operation_id,
         )
         return self._replace_adapter(target_root).preserve_old_target(permit, operation)
@@ -750,6 +778,7 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
             final_relative_path=artifact.relative_path.value,
             operation_kind=artifact.operation_kind,
             fingerprint_content_hash=artifact.content_hash,
+            fingerprint_json=artifact.fingerprint_json,
         )
         if artifact.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
             return self._commit_new_directory(
@@ -783,6 +812,7 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
         )
         staging_payload = _local_staging_payload_path(staging_root, artifact)
         final_path = _local_final_path(target_root, artifact.relative_path.value)
+        expected_fingerprint = _artifact_fingerprint(artifact)
         if final_path.exists() or final_path.is_symlink():
             raise FinalCommitAdapterError(
                 "LOCAL_FINAL_COMMIT_TARGET_EXISTS",
@@ -797,6 +827,7 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
             staging_payload=staging_payload,
             final_path=final_path,
             content_hash=artifact.content_hash,
+            expected_fingerprint=expected_fingerprint,
         )
         return _flushed_file_commit_receipt(
             artifact=artifact,
@@ -992,6 +1023,7 @@ def _require_staging_manifest_binding(
     operation_kind: RecoveryOperationKind,
     fingerprint_content_hash: str,
     fingerprint_byte_count: int | None = None,
+    fingerprint_json: str | None = None,
     operation_id: str | None = None,
 ) -> None:
     if OBJECT_ID_PATTERN.fullmatch(staging_object_id) is None:
@@ -1039,6 +1071,7 @@ def _require_staging_manifest_binding(
             operation_kind=operation_kind,
             fingerprint_content_hash=fingerprint_content_hash,
             fingerprint_byte_count=fingerprint_byte_count,
+            fingerprint_json=fingerprint_json,
             operation_id=operation_id,
         )
     except StagingObjectManifestError as exc:
@@ -1095,6 +1128,7 @@ def _cleanup_staging_object(
         operation_kind=operation.operation_kind,
         fingerprint_content_hash=str(expected["content_hash"]),
         fingerprint_byte_count=cast(int, expected["byte_count"]),
+        fingerprint_json=canonical_file_object_fingerprint_json(expected),
         operation_id=operation.operation_id,
     )
     if payload_exists:
@@ -1129,7 +1163,7 @@ def _cleanup_staging_file_payload(
             "Enter recovery because the staging payload is not a regular file.",
         )
     try:
-        observed = _fingerprint_file(payload_path)
+        observed = _fingerprint_file(payload_path, expected=expected)
     except OSError as exc:
         raise FinalCommitAdapterError(
             "LOCAL_STAGING_CLEANUP_PAYLOAD_READ_FAILED",
@@ -1506,10 +1540,15 @@ def _link_verified_payload_without_overwrite(
     staging_payload: Path,
     final_path: Path,
     content_hash: str,
+    expected_fingerprint: dict[str, object] | None,
 ) -> None:
     temp_path = final_path.parent / f".{final_path.name}.{uuid4().hex}.mediasync-commit.tmp"
     try:
-        _copy_file_durable(source=staging_payload, destination=temp_path)
+        _copy_file_durable(
+            source=staging_payload,
+            destination=temp_path,
+            expected_fingerprint=expected_fingerprint,
+        )
         if _hash_file(temp_path) != content_hash:
             raise FinalCommitAdapterError(
                 "LAB_FINAL_COMMIT_TEMP_HASH_MISMATCH",
@@ -1540,10 +1579,15 @@ def _link_local_payload_without_overwrite(
     staging_payload: Path,
     final_path: Path,
     content_hash: str,
+    expected_fingerprint: dict[str, object] | None,
 ) -> None:
     temp_path = final_path.parent / f".{final_path.name}.{uuid4().hex}.mediasync-commit.tmp"
     try:
-        _copy_file_durable(source=staging_payload, destination=temp_path)
+        _copy_file_durable(
+            source=staging_payload,
+            destination=temp_path,
+            expected_fingerprint=expected_fingerprint,
+        )
         if _hash_file(temp_path) != content_hash:
             raise FinalCommitAdapterError(
                 "LOCAL_FINAL_COMMIT_TEMP_HASH_MISMATCH",
@@ -1574,10 +1618,15 @@ def _replace_with_verified_payload(
     staging_payload: Path,
     final_path: Path,
     content_hash: str,
+    expected_fingerprint: dict[str, object] | None,
 ) -> None:
     temp_path = final_path.parent / f".{final_path.name}.{uuid4().hex}.mediasync-replace.tmp"
     try:
-        _copy_file_durable(source=staging_payload, destination=temp_path)
+        _copy_file_durable(
+            source=staging_payload,
+            destination=temp_path,
+            expected_fingerprint=expected_fingerprint,
+        )
         if _hash_file(temp_path) != content_hash:
             raise FinalCommitAdapterError(
                 "LOCAL_REPLACE_FINAL_COMMIT_TEMP_HASH_MISMATCH",
@@ -1971,7 +2020,7 @@ def _preserve_version_payload(
                 "LOCAL_REPLACE_FINAL_COMMIT_VERSION_PAYLOAD_INVALID",
                 "Enter recovery because the version object path is not a regular file.",
             )
-        if _fingerprint_file(destination) != expected_fingerprint:
+        if _fingerprint_file(destination, expected=expected_fingerprint) != expected_fingerprint:
             raise FinalCommitAdapterError(
                 "LOCAL_REPLACE_FINAL_COMMIT_VERSION_PAYLOAD_MISMATCH",
                 "Enter recovery because the existing version object differs from the old target.",
@@ -1979,8 +2028,12 @@ def _preserve_version_payload(
         return
     temp_path = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
     try:
-        _copy_file_durable(source=source, destination=temp_path)
-        if _fingerprint_file(temp_path) != expected_fingerprint:
+        _copy_file_durable(
+            source=source,
+            destination=temp_path,
+            expected_fingerprint=expected_fingerprint,
+        )
+        if _fingerprint_file(temp_path, expected=expected_fingerprint) != expected_fingerprint:
             raise FinalCommitAdapterError(
                 "LOCAL_REPLACE_FINAL_COMMIT_VERSION_HASH_MISMATCH",
                 "Refresh analysis because the target changed while preserving the old version.",
@@ -1993,10 +2046,13 @@ def _preserve_version_payload(
 def _version_manifest_fingerprint(
     manifest: VersionObjectManifest,
 ) -> dict[str, object]:
-    return {
-        "byte_count": manifest.fingerprint_byte_count,
-        "content_hash": manifest.fingerprint_content_hash,
-    }
+    try:
+        return file_object_fingerprint_from_json(manifest.fingerprint_json)
+    except FileObjectFingerprintError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_REPLACE_FINAL_COMMIT_VERSION_MANIFEST_FINGERPRINT_INVALID",
+            "Enter recovery because the preserved version fingerprint is invalid.",
+        ) from exc
 
 
 def _require_version_payload_matches_manifest(
@@ -2009,7 +2065,7 @@ def _require_version_payload_matches_manifest(
             "LOCAL_REPLACE_FINAL_COMMIT_VERSION_PAYLOAD_MISSING",
             "Enter recovery because the preserved old target payload is missing.",
         )
-    if _fingerprint_file(version_payload) != fingerprint:
+    if _fingerprint_file(version_payload, expected=fingerprint) != fingerprint:
         raise FinalCommitAdapterError(
             "LOCAL_REPLACE_FINAL_COMMIT_VERSION_PAYLOAD_MISMATCH",
             "Enter recovery because the preserved old target no longer matches its manifest.",
@@ -2107,13 +2163,11 @@ def _manifest_fingerprint(
     raw_fingerprint = manifest.get("fingerprint")
     if not isinstance(raw_fingerprint, dict):
         raise FinalCommitAdapterError(validation_code, next_action)
-    content_hash = raw_fingerprint.get("content_hash")
-    byte_count = raw_fingerprint.get("byte_count")
-    if not isinstance(content_hash, str) or HASH_PATTERN.fullmatch(content_hash) is None:
-        raise FinalCommitAdapterError(validation_code, next_action)
-    if not isinstance(byte_count, int) or byte_count < 0:
-        raise FinalCommitAdapterError(validation_code, next_action)
-    return {"byte_count": byte_count, "content_hash": content_hash}
+    try:
+        canonical_json = canonical_file_object_fingerprint_json(raw_fingerprint)
+        return file_object_fingerprint_from_json(canonical_json)
+    except FileObjectFingerprintError as exc:
+        raise FinalCommitAdapterError(validation_code, next_action) from exc
 
 
 def _expected_fingerprint(
@@ -2125,18 +2179,9 @@ def _expected_fingerprint(
     if raw_payload is None:
         raise FinalCommitAdapterError(validation_code, next_action)
     try:
-        payload = json.loads(raw_payload)
-    except json.JSONDecodeError as exc:
+        return file_object_fingerprint_from_json(raw_payload)
+    except FileObjectFingerprintError as exc:
         raise FinalCommitAdapterError(validation_code, next_action) from exc
-    if not isinstance(payload, dict):
-        raise FinalCommitAdapterError(validation_code, next_action)
-    content_hash = payload.get("content_hash")
-    byte_count = payload.get("byte_count")
-    if not isinstance(content_hash, str) or HASH_PATTERN.fullmatch(content_hash) is None:
-        raise FinalCommitAdapterError(validation_code, next_action)
-    if not isinstance(byte_count, int) or byte_count < 0:
-        raise FinalCommitAdapterError(validation_code, next_action)
-    return {"byte_count": byte_count, "content_hash": content_hash}
 
 
 def _expected_empty_directory_precondition(
@@ -2163,15 +2208,35 @@ def _expected_empty_directory_precondition(
     }
 
 
-def _copy_file_durable(*, source: Path, destination: Path) -> None:
-    with source.open("rb") as reader, destination.open("xb") as writer:
-        while True:
-            chunk = reader.read(1024 * 1024)
-            if not chunk:
-                break
-            writer.write(chunk)
-        writer.flush()
-        os.fsync(writer.fileno())
+def _copy_file_durable(
+    *,
+    source: Path,
+    destination: Path,
+    expected_fingerprint: dict[str, object] | None = None,
+) -> None:
+    if expected_fingerprint is None or not has_named_stream_inventory(
+        expected_fingerprint
+    ):
+        with source.open("rb") as reader, destination.open("xb") as writer:
+            while True:
+                chunk = reader.read(1024 * 1024)
+                if not chunk:
+                    break
+                writer.write(chunk)
+            writer.flush()
+            os.fsync(writer.fileno())
+        return
+    try:
+        FILE_OBJECT_FINGERPRINTS.copy_file_object(
+            source=source,
+            destination=destination,
+            expected_fingerprint=expected_fingerprint,
+        )
+    except LocalFileObjectFingerprintError as exc:
+        raise FinalCommitAdapterError(
+            exc.validation_code,
+            "Keep recovery state because the complete file object could not be copied.",
+        ) from exc
 
 
 def _flushed_file_commit_receipt(
@@ -2181,6 +2246,21 @@ def _flushed_file_commit_receipt(
     write_through_move_used: bool,
 ) -> CommitReceipt:
     _flush_committed_file(final_path)
+    expected_fingerprint = _artifact_fingerprint(artifact)
+    if (
+        expected_fingerprint is not None
+        and has_named_stream_inventory(expected_fingerprint)
+    ):
+        try:
+            FILE_OBJECT_FINGERPRINTS.flush_named_streams(
+                path=final_path,
+                expected_fingerprint=expected_fingerprint,
+            )
+        except LocalFileObjectFingerprintError as exc:
+            raise FinalCommitAdapterError(
+                exc.validation_code,
+                "Keep recovery state until every final data stream can be flushed.",
+            ) from exc
     return CommitReceipt(
         operation_id=artifact.object_id,
         final_relative_path=artifact.relative_path,
@@ -2241,17 +2321,46 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _fingerprint_file(path: Path) -> dict[str, object]:
-    digest = hashlib.sha256()
-    byte_count = 0
-    with path.open("rb") as handle:
-        while True:
-            chunk = handle.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-            byte_count += len(chunk)
-    return {"byte_count": byte_count, "content_hash": digest.hexdigest()}
+def _artifact_fingerprint(
+    artifact: VerifiedStagingArtifact,
+) -> dict[str, object] | None:
+    if artifact.fingerprint_json is None:
+        return None
+    try:
+        fingerprint = file_object_fingerprint_from_json(
+            artifact.fingerprint_json
+        )
+    except FileObjectFingerprintError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_FINAL_COMMIT_ARTIFACT_FINGERPRINT_INVALID",
+            "Restage and verify the complete file object before final commit.",
+        ) from exc
+    if fingerprint["content_hash"] != artifact.content_hash:
+        raise FinalCommitAdapterError(
+            "LOCAL_FINAL_COMMIT_ARTIFACT_FINGERPRINT_MISMATCH",
+            "Restage and verify the complete file object before final commit.",
+        )
+    return fingerprint
+
+
+def _fingerprint_file(
+    path: Path,
+    *,
+    expected: dict[str, object] | None = None,
+) -> dict[str, object]:
+    try:
+        observed = FILE_OBJECT_FINGERPRINTS.fingerprint(path)
+    except LocalFileObjectFingerprintError as exc:
+        raise FinalCommitAdapterError(
+            exc.validation_code,
+            "Keep recovery state until every file data stream can be verified.",
+        ) from exc
+    if expected is not None and not has_named_stream_inventory(expected):
+        return {
+            "byte_count": observed["byte_count"],
+            "content_hash": observed["content_hash"],
+        }
+    return observed
 
 
 def _canonical_json(payload: dict[str, object]) -> str:

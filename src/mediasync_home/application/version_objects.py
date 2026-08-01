@@ -12,6 +12,10 @@ from mediasync_home.application.safe_paths import (
     SafePathViolation,
     parse_endpoint_relative_path,
 )
+from mediasync_home.application.file_object_fingerprints import (
+    FileObjectFingerprintError,
+    canonical_file_object_fingerprint,
+)
 
 
 VERSION_OBJECT_MANIFEST_SCHEMA_VERSION = 1
@@ -438,17 +442,15 @@ def _fingerprint_from_json(raw_fingerprint: str | None) -> Mapping[str, object]:
 
 
 def _fingerprint_values(fingerprint: Mapping[str, object]) -> tuple[int, str]:
-    if set(fingerprint) != {"byte_count", "content_hash"}:
-        raise VersionObjectManifestError("VERSION_OBJECT_MANIFEST_FINGERPRINT_INVALID")
-    byte_count = fingerprint.get("byte_count")
-    content_hash = fingerprint.get("content_hash")
-    if (
-        not isinstance(byte_count, int)
-        or isinstance(byte_count, bool)
-        or byte_count < 0
-        or not isinstance(content_hash, str)
-        or _HASH_PATTERN.fullmatch(content_hash) is None
-    ):
+    try:
+        canonical = canonical_file_object_fingerprint(fingerprint)
+    except FileObjectFingerprintError as exc:
+        raise VersionObjectManifestError(
+            "VERSION_OBJECT_MANIFEST_FINGERPRINT_INVALID"
+        ) from exc
+    byte_count = canonical["byte_count"]
+    content_hash = canonical["content_hash"]
+    if not isinstance(byte_count, int) or not isinstance(content_hash, str):
         raise VersionObjectManifestError("VERSION_OBJECT_MANIFEST_FINGERPRINT_INVALID")
     return byte_count, content_hash
 
@@ -458,8 +460,12 @@ def _canonical_fingerprint(
     fingerprint: Mapping[str, object],
 ) -> dict[str, object]:
     if object_role == OLD_TARGET_VERSION_ROLE:
-        byte_count, content_hash = _fingerprint_values(fingerprint)
-        return {"byte_count": byte_count, "content_hash": content_hash}
+        try:
+            return canonical_file_object_fingerprint(fingerprint)
+        except FileObjectFingerprintError as exc:
+            raise VersionObjectManifestError(
+                "VERSION_OBJECT_MANIFEST_FINGERPRINT_INVALID"
+            ) from exc
     if object_role == EMPTY_DIRECTORY_QUARANTINE_ROLE:
         if (
             set(fingerprint) != {"entry_count", "kind"}

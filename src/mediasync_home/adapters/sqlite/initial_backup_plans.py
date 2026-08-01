@@ -388,6 +388,7 @@ class SqliteInitialBackupPlanMaterializer:
                 "INITIAL_BACKUP_PLAN_ENDPOINT_SNAPSHOT_IDENTITY_MISMATCH",
                 "Refresh every endpoint snapshot against the active job revision before planning.",
             )
+        self._validate_named_stream_portability(rows)
         endpoints = tuple(self._planning_endpoint(row) for row in rows)
         if sum(endpoint.role is PlanEndpointRole.SOURCE for endpoint in endpoints) != 1:
             raise InitialBackupPlanningError(
@@ -404,6 +405,49 @@ class SqliteInitialBackupPlanMaterializer:
                 "Register every writable target before planning changes.",
             )
         return endpoints
+
+    def _validate_named_stream_portability(
+        self,
+        rows: list[sqlite3.Row] | list[tuple[object, ...]],
+    ) -> None:
+        source_rows = [row for row in rows if str(row[0]) == "SOURCE"]
+        if len(source_rows) != 1:
+            return
+        source_snapshot_id = str(source_rows[0][10])
+        named_stream_item_count = int(
+            self._connection.execute(
+                """
+                SELECT count(*)
+                FROM snapshot_issues
+                WHERE snapshot_id = ?
+                    AND issue_type = 'NAMED_STREAM_PRESENT'
+                """,
+                (source_snapshot_id,),
+            ).fetchone()[0]
+        )
+        if named_stream_item_count == 0:
+            return
+        if not _profile_supports_named_streams(
+            source_rows[0][20],
+            source_rows[0][21],
+            expected_scope=EndpointCapabilityProbeScope.READ_ONLY,
+        ):
+            raise InitialBackupPlanningError(
+                "INITIAL_BACKUP_PLAN_SOURCE_NAMED_STREAMS_UNSUPPORTED",
+                "Refresh source capabilities before preserving Windows named streams.",
+            )
+        for row in rows:
+            if str(row[0]) != "TARGET":
+                continue
+            if not _profile_supports_named_streams(
+                row[22],
+                row[23],
+                expected_scope=EndpointCapabilityProbeScope.CONTROLLED_WRITABLE,
+            ):
+                raise InitialBackupPlanningError(
+                    "INITIAL_BACKUP_PLAN_TARGET_NAMED_STREAMS_UNSUPPORTED",
+                    "Choose a target that can preserve Windows named streams.",
+                )
 
     def _planning_endpoint(
         self,
@@ -857,6 +901,24 @@ def _validated_capability_hash(
             "Re-register the target to measure file flush and write-through move support.",
         )
     return capabilities_hash
+
+
+def _profile_supports_named_streams(
+    profile_json: object,
+    capabilities_hash: object,
+    *,
+    expected_scope: EndpointCapabilityProbeScope,
+) -> bool:
+    if not isinstance(profile_json, str) or not isinstance(capabilities_hash, str):
+        return False
+    try:
+        profile = EndpointCapabilityEvidence(
+            profile_json=profile_json,
+            capabilities_hash=capabilities_hash,
+        ).validated_profile(expected_scope=expected_scope)
+    except EndpointCapabilityEvidenceError:
+        return False
+    return profile.supports_named_streams
 
 
 def _materialization_id(

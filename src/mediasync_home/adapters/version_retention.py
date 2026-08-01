@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from pathlib import Path
 
 from mediasync_home.adapters.endpoint_leases import EndpointLeaseUnavailable, EndpointRootResolver
+from mediasync_home.adapters.file_object_fingerprints import (
+    LocalFileObjectFingerprintAdapter,
+    LocalFileObjectFingerprintError,
+)
 from mediasync_home.adapters.reparse_guard import LocalReparseGuard, ReparseGuardError
 from mediasync_home.application.version_objects import (
     EMPTY_DIRECTORY_QUARANTINE_ROLE,
@@ -13,6 +16,11 @@ from mediasync_home.application.version_objects import (
     VersionObjectManifest,
     VersionObjectManifestError,
     parse_version_object_manifest,
+)
+from mediasync_home.application.file_object_fingerprints import (
+    FileObjectFingerprintError,
+    file_object_fingerprint_from_json,
+    file_object_fingerprints_match,
 )
 from mediasync_home.application.version_retention import (
     VersionRetentionDeleteReceipt,
@@ -23,6 +31,7 @@ from mediasync_home.domain.capabilities import MutationPermit
 
 
 _OBJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_FILE_OBJECT_FINGERPRINTS = LocalFileObjectFingerprintAdapter()
 
 
 class VersionRetentionDeletionError(RuntimeError):
@@ -263,36 +272,25 @@ def _require_payload_matches_manifest(
             "VERSION_RETENTION_PAYLOAD_TYPE_INVALID",
             "Do not delete a retained-version path that is not a regular file.",
         )
-    if manifest.fingerprint_byte_count is None or manifest.fingerprint_content_hash is None:
+    try:
+        expected = file_object_fingerprint_from_json(manifest.fingerprint_json)
+    except FileObjectFingerprintError as exc:
         raise VersionRetentionDeletionError(
             "VERSION_RETENTION_MANIFEST_FINGERPRINT_INVALID",
             "Reconcile the retained-version manifest before expiry.",
-        )
-    byte_count, content_hash = _fingerprint_file(payload_path)
-    if (
-        byte_count != manifest.fingerprint_byte_count
-        or content_hash != manifest.fingerprint_content_hash
-    ):
+        ) from exc
+    try:
+        observed = _FILE_OBJECT_FINGERPRINTS.fingerprint(payload_path)
+    except LocalFileObjectFingerprintError as exc:
+        raise VersionRetentionDeletionError(
+            "VERSION_RETENTION_PAYLOAD_READ_FAILED",
+            "Retry after checking every retained version data stream.",
+        ) from exc
+    if not file_object_fingerprints_match(observed, expected):
         raise VersionRetentionDeletionError(
             "VERSION_RETENTION_PAYLOAD_FINGERPRINT_MISMATCH",
             "Do not delete retained bytes that differ from their immutable manifest.",
         )
-
-
-def _fingerprint_file(path: Path) -> tuple[int, str]:
-    digest = hashlib.sha256()
-    byte_count = 0
-    try:
-        with path.open("rb") as handle:
-            while chunk := handle.read(1024 * 1024):
-                byte_count += len(chunk)
-                digest.update(chunk)
-    except OSError as exc:
-        raise VersionRetentionDeletionError(
-            "VERSION_RETENTION_PAYLOAD_READ_FAILED",
-            "Retry after checking access to the retained version payload.",
-        ) from exc
-    return byte_count, digest.hexdigest()
 
 
 def _require_permit_binding(

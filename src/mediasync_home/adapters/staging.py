@@ -14,6 +14,10 @@ from mediasync_home.adapters.endpoint_leases import (
     EndpointRootResolver,
 )
 from mediasync_home.adapters.file_identity import stable_file_identity_hash
+from mediasync_home.adapters.file_object_fingerprints import (
+    LocalFileObjectFingerprintAdapter,
+    LocalFileObjectFingerprintError,
+)
 from mediasync_home.adapters.reparse_guard import (
     LocalReparseGuard,
     ReparseGuard,
@@ -29,6 +33,12 @@ from mediasync_home.application.directory_artifacts import (
     directory_artifact_fingerprint,
     directory_artifact_matches,
     directory_marker_bytes,
+)
+from mediasync_home.application.file_object_fingerprints import (
+    FileObjectFingerprintError,
+    canonical_file_object_fingerprint_json,
+    file_object_fingerprint_from_json,
+    has_named_stream_inventory,
 )
 from mediasync_home.application.run_staging import (
     RunTargetEndpointWaitRequired,
@@ -98,10 +108,14 @@ class LocalFileStagingTransferAdapter:
         root_resolver: EndpointRootResolver,
         staging_root: Path | None = None,
         reparse_guard: ReparseGuard | None = None,
+        file_object_fingerprints: LocalFileObjectFingerprintAdapter | None = None,
     ) -> None:
         self._root_resolver = root_resolver
         self._staging_root = None if staging_root is None else Path(staging_root)
         self._reparse_guard = reparse_guard or LocalReparseGuard()
+        self._file_object_fingerprints = (
+            file_object_fingerprints or LocalFileObjectFingerprintAdapter()
+        )
 
     def validate_source_file(
         self, operation: RecoveryOperation
@@ -122,10 +136,21 @@ class LocalFileStagingTransferAdapter:
                 "Refresh analysis because the planned source file is no longer readable.",
             )
         try:
-            fingerprint = _fingerprint_source_file(
+            primary_fingerprint = _fingerprint_source_file(
                 source_path,
                 precondition=_source_precondition(operation),
             )
+            fingerprint = self._file_object_fingerprints.fingerprint(source_path)
+            if (
+                fingerprint.get("byte_count") != primary_fingerprint["byte_count"]
+                or fingerprint.get("content_hash")
+                != primary_fingerprint["content_hash"]
+            ):
+                raise LocalFileStagingError(
+                    "LOCAL_STAGING_SOURCE_CHANGED_DURING_STREAM_INVENTORY",
+                    "Refresh analysis because the source changed during validation.",
+                )
+            self._validate_source_identity(operation, source_path)
         except LocalFileStagingError as exc:
             self._raise_endpoint_wait_if_unavailable(
                 operation,
@@ -133,9 +158,19 @@ class LocalFileStagingTransferAdapter:
                 include_source=True,
             )
             raise
+        except LocalFileObjectFingerprintError as exc:
+            self._raise_endpoint_wait_if_unavailable(
+                operation,
+                error=exc.__cause__,
+                include_source=True,
+            )
+            raise LocalFileStagingError(
+                exc.validation_code,
+                "Retry after every source data stream becomes readable and stable.",
+            ) from exc
         return SourceValidationEvidence(
-            fingerprint_json=_canonical_json(fingerprint),
-            hash_evidence_kind="SHA256_CURRENT_SOURCE_FILE",
+            fingerprint_json=canonical_file_object_fingerprint_json(fingerprint),
+            hash_evidence_kind="SHA256_CURRENT_SOURCE_FILE_OBJECT_STREAMS_V1",
         )
 
     def bind_source_stability(
@@ -237,7 +272,13 @@ class LocalFileStagingTransferAdapter:
                 "Refresh analysis because the target to replace is no longer a regular file.",
             )
         try:
-            observed = _fingerprint_file(final_path)
+            observed = self._file_object_fingerprints.fingerprint(final_path)
+        except LocalFileObjectFingerprintError as exc:
+            self._raise_endpoint_wait_if_unavailable(operation, error=exc.__cause__)
+            raise LocalFileStagingError(
+                exc.validation_code,
+                "Refresh analysis after every target data stream becomes readable.",
+            ) from exc
         except OSError as exc:
             self._raise_endpoint_wait_if_unavailable(operation, error=exc)
             raise LocalFileStagingError(
@@ -330,8 +371,8 @@ class LocalFileStagingTransferAdapter:
         self._ensure_staging_manifest(operation)
         if payload_path.exists():
             try:
-                existing = _fingerprint_file(payload_path)
-            except OSError as exc:
+                existing = self._file_object_fingerprints.fingerprint(payload_path)
+            except (OSError, LocalFileObjectFingerprintError) as exc:
                 self._raise_endpoint_wait_if_unavailable(operation, error=exc)
                 raise LocalFileStagingError(
                     "LOCAL_STAGING_EXISTING_PAYLOAD_READ_FAILED",
@@ -355,16 +396,39 @@ class LocalFileStagingTransferAdapter:
                     destination=temp_path,
                     precondition=_source_precondition(operation),
                 )
-                if observed != expected:
+                if observed != {
+                    "byte_count": expected["byte_count"],
+                    "content_hash": expected["content_hash"],
+                }:
                     raise LocalFileStagingError(
                         "LOCAL_STAGING_SOURCE_CHANGED",
                         "Refresh analysis because the source file changed during transfer.",
+                    )
+                self._file_object_fingerprints.copy_named_streams(
+                    source=source_path,
+                    destination=temp_path,
+                    expected_fingerprint=expected,
+                )
+                if self._file_object_fingerprints.fingerprint(temp_path) != expected:
+                    raise LocalFileStagingError(
+                        "LOCAL_STAGING_FILE_OBJECT_MISMATCH",
+                        "Refresh analysis because the source file object changed during transfer.",
                     )
                 os.replace(temp_path, payload_path)
             finally:
                 temp_path.unlink(missing_ok=True)
         except LocalFileStagingError:
             raise
+        except LocalFileObjectFingerprintError as exc:
+            self._raise_endpoint_wait_if_unavailable(
+                operation,
+                error=exc.__cause__,
+                include_source=True,
+            )
+            raise LocalFileStagingError(
+                exc.validation_code,
+                "Retry after every source and staging data stream becomes available.",
+            ) from exc
         except OSError as exc:
             self._raise_endpoint_wait_if_unavailable(
                 operation,
@@ -404,9 +468,22 @@ class LocalFileStagingTransferAdapter:
             with payload_path.open("ab") as handle:
                 handle.flush()
                 os.fsync(handle.fileno())
-            return StagingDurabilityEvidence(durability_state="FILE_FSYNC_COMPLETED")
+            self._file_object_fingerprints.flush_named_streams(
+                path=payload_path,
+                expected_fingerprint=_expected_fingerprint(
+                    operation.expected_source_fingerprint_json
+                ),
+            )
+            return StagingDurabilityEvidence(
+                durability_state="FILE_OBJECT_STREAMS_FSYNC_COMPLETED"
+            )
         except LocalFileStagingError:
             raise
+        except LocalFileObjectFingerprintError as exc:
+            raise LocalFileStagingError(
+                exc.validation_code,
+                "Retry after every staging data stream becomes writable.",
+            ) from exc
         except OSError as exc:
             self._raise_endpoint_wait_if_unavailable(operation, error=exc)
             raise LocalFileStagingError(
@@ -423,8 +500,10 @@ class LocalFileStagingTransferAdapter:
         expected = _expected_fingerprint(operation.expected_source_fingerprint_json)
         payload_path = self._staging_payload_path(operation)
         try:
-            staging_fingerprint = _fingerprint_file(payload_path)
-        except OSError as exc:
+            staging_fingerprint = self._file_object_fingerprints.fingerprint(
+                payload_path
+            )
+        except (OSError, LocalFileObjectFingerprintError) as exc:
             self._raise_endpoint_wait_if_unavailable(operation, error=exc)
             raise LocalFileStagingError(
                 "LOCAL_STAGING_VERIFICATION_FAILED",
@@ -436,10 +515,22 @@ class LocalFileStagingTransferAdapter:
                 "Restage the source file before publishing commit intent.",
             )
         try:
-            current_source = _fingerprint_source_file(
+            current_primary = _fingerprint_source_file(
                 self._source_path(operation),
                 precondition=_source_precondition(operation),
             )
+            current_source = self._file_object_fingerprints.fingerprint(
+                self._source_path(operation)
+            )
+            if (
+                current_source.get("byte_count") != current_primary["byte_count"]
+                or current_source.get("content_hash")
+                != current_primary["content_hash"]
+            ):
+                raise LocalFileStagingError(
+                    "LOCAL_STAGING_SOURCE_CHANGED_AFTER_TRANSFER",
+                    "Refresh analysis because the source changed after transfer.",
+                )
         except LocalFileStagingError as exc:
             self._raise_endpoint_wait_if_unavailable(
                 operation,
@@ -447,16 +538,32 @@ class LocalFileStagingTransferAdapter:
                 include_source=True,
             )
             raise
+        except LocalFileObjectFingerprintError as exc:
+            self._raise_endpoint_wait_if_unavailable(
+                operation,
+                error=exc.__cause__,
+                include_source=True,
+            )
+            raise LocalFileStagingError(
+                exc.validation_code,
+                "Retry after every source data stream becomes readable and stable.",
+            ) from exc
         if current_source != expected:
             raise LocalFileStagingError(
                 "LOCAL_STAGING_SOURCE_CHANGED_AFTER_TRANSFER",
                 "Refresh analysis because the source file changed after transfer.",
             )
-        fingerprint_json = _canonical_json(staging_fingerprint)
+        fingerprint_json = canonical_file_object_fingerprint_json(
+            staging_fingerprint
+        )
         return StagingVerificationEvidence(
             fingerprint_json=fingerprint_json,
             final_fingerprint_json=fingerprint_json,
-            assurance_level="STAGING_HASH_MATCHES_POST_TRANSFER_SOURCE_HASH",
+            assurance_level=(
+                "NAMED_STREAMS_VERIFIED"
+                if has_named_stream_inventory(staging_fingerprint)
+                else "STAGING_HASH_MATCHES_POST_TRANSFER_SOURCE_HASH"
+            ),
         )
 
     def _transfer_directory_to_staging(
@@ -878,30 +985,12 @@ def _expected_fingerprint(raw_payload: str | None) -> dict[str, object]:
             "Validate the source file before transfer.",
         )
     try:
-        payload = json.loads(raw_payload)
-    except json.JSONDecodeError as exc:
+        return file_object_fingerprint_from_json(raw_payload)
+    except FileObjectFingerprintError as exc:
         raise LocalFileStagingError(
             "LOCAL_STAGING_SOURCE_FINGERPRINT_INVALID",
             "Refresh source validation before transfer.",
         ) from exc
-    if not isinstance(payload, dict):
-        raise LocalFileStagingError(
-            "LOCAL_STAGING_SOURCE_FINGERPRINT_INVALID",
-            "Refresh source validation before transfer.",
-        )
-    content_hash = payload.get("content_hash")
-    byte_count = payload.get("byte_count")
-    if not isinstance(content_hash, str) or len(content_hash) != 64:
-        raise LocalFileStagingError(
-            "LOCAL_STAGING_SOURCE_FINGERPRINT_INVALID",
-            "Refresh source validation before transfer.",
-        )
-    if not isinstance(byte_count, int) or byte_count < 0:
-        raise LocalFileStagingError(
-            "LOCAL_STAGING_SOURCE_FINGERPRINT_INVALID",
-            "Refresh source validation before transfer.",
-        )
-    return {"byte_count": byte_count, "content_hash": content_hash}
 
 
 def _expected_content_hash(raw_payload: str | None, *, validation_code: str) -> str:
@@ -916,30 +1005,12 @@ def _expected_content_hash(raw_payload: str | None, *, validation_code: str) -> 
 
 def _expected_target_fingerprint(raw_payload: str) -> dict[str, object]:
     try:
-        payload = json.loads(raw_payload)
-    except json.JSONDecodeError as exc:
+        return file_object_fingerprint_from_json(raw_payload)
+    except FileObjectFingerprintError as exc:
         raise LocalFileStagingError(
             "LOCAL_STAGING_TARGET_FINGERPRINT_INVALID",
             "Refresh target precondition evidence before staging.",
         ) from exc
-    if not isinstance(payload, dict):
-        raise LocalFileStagingError(
-            "LOCAL_STAGING_TARGET_FINGERPRINT_INVALID",
-            "Refresh target precondition evidence before staging.",
-        )
-    content_hash = payload.get("content_hash")
-    byte_count = payload.get("byte_count")
-    if not isinstance(content_hash, str) or len(content_hash) != 64:
-        raise LocalFileStagingError(
-            "LOCAL_STAGING_TARGET_FINGERPRINT_INVALID",
-            "Refresh target precondition evidence before staging.",
-        )
-    if not isinstance(byte_count, int) or byte_count < 0:
-        raise LocalFileStagingError(
-            "LOCAL_STAGING_TARGET_FINGERPRINT_INVALID",
-            "Refresh target precondition evidence before staging.",
-        )
-    return {"byte_count": byte_count, "content_hash": content_hash}
 
 
 def _copy_file_with_hash(

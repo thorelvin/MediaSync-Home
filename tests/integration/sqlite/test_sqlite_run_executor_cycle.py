@@ -241,7 +241,11 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
     staging_root = tmp_path / "staging"
     (source_root / "Pictures").mkdir(parents=True)
     (target_root / "Pictures").mkdir(parents=True)
-    (source_root / "Pictures" / "A.jpg").write_bytes(payload)
+    source_file = source_root / "Pictures" / "A.jpg"
+    source_file.write_bytes(payload)
+    named_stream_payload = b"mediasync-named-stream"
+    if os.name == "nt":
+        Path(f"{source_file}:metadata").write_bytes(named_stream_payload)
     _write_endpoint_marker(target_root)
 
     catalog_connection = _prepared_catalog_connection(tmp_path)
@@ -280,7 +284,7 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
                 staging_root=staging_root,
             )
         )
-        plan = _sealed_plan(source_file=source_root / "Pictures" / "A.jpg")
+        plan = _sealed_plan(source_file=source_file)
         plans.save_sealed_plan(plan)
         start_run_from_sealed_plan(
             command=parse_start_run_command(
@@ -349,6 +353,10 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
         assert verified_event_payload["operation_audit"]["lease_id"] == "lease-a"
         assert verified_event_payload["operation_audit"]["fencing_token"] == 1
         assert (target_root / "Pictures" / "A.jpg").read_bytes() == payload
+        if os.name == "nt":
+            assert Path(f"{target_root / 'Pictures' / 'A.jpg'}:metadata").read_bytes() == (
+                named_stream_payload
+            )
         assert not (staging_root / "op-a.payload").exists()
         assert not (staging_root / "op-a.manifest.json").exists()
         cleaned_event_payload = json.loads(
@@ -390,7 +398,7 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
             "SUCCEEDED",
             128,
             "TRANSFERRED",
-            "PRIMARY_STREAM_HASH_VERIFIED",
+            "NAMED_STREAMS_VERIFIED",
             "WRITE_THROUGH_REQUEST_CONFIRMED",
         )
         outcome_verification = json.loads(str(outcome_row[5]))
@@ -399,9 +407,13 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
             if staging_backend == "robocopy"
             else "TRANSFERRED_TO_STAGING"
         )
-        assert (
-            outcome_verification["raw_assurance_level"]
-            == "STAGING_HASH_MATCHES_POST_TRANSFER_SOURCE_HASH"
+        assert outcome_verification["raw_assurance_level"] == "NAMED_STREAMS_VERIFIED"
+        expected_final_fingerprint = json.loads(
+            outcome_verification["expected_final_fingerprint_json"]
+        )
+        assert "named_streams" in expected_final_fingerprint
+        assert len(expected_final_fingerprint["named_streams"]) == (
+            1 if os.name == "nt" else 0
         )
         assert outcome_verification["raw_final_durability_state"] == (
             "LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED"
@@ -913,6 +925,7 @@ def test_sqlite_run_executor_cycle_replaces_existing_target_from_match_fingerpri
             {
                 "byte_count": len(old_payload),
                 "content_hash": hashlib.sha256(old_payload).hexdigest(),
+                "named_streams": [],
             },
             sort_keys=True,
             separators=(",", ":"),

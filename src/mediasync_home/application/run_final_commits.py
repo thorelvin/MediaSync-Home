@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from typing import Mapping, Protocol
 
 from mediasync_home.application.journaled_commit import JournaledFinalCommitPort
+from mediasync_home.application.file_object_fingerprints import (
+    FileObjectFingerprintError,
+    file_object_fingerprint_from_json,
+)
 from mediasync_home.application.ports import (
     CommitReceipt,
     FinalCommitPort,
@@ -363,7 +367,26 @@ def _verified_artifact(operation: RecoveryOperation) -> VerifiedStagingArtifact 
         relative_path=RelativePath(operation.final_relative_path),
         content_hash=content_hash,
         operation_kind=operation.operation_kind,
+        fingerprint_json=_complete_fingerprint_json(operation),
     )
+
+
+def _complete_fingerprint_json(operation: RecoveryOperation) -> str | None:
+    for raw_payload in (
+        operation.expected_staging_fingerprint_json,
+        operation.expected_final_fingerprint_json,
+    ):
+        if raw_payload is None:
+            continue
+        try:
+            file_object_fingerprint_from_json(
+                raw_payload,
+                require_named_stream_inventory=True,
+            )
+        except FileObjectFingerprintError:
+            continue
+        return raw_payload
+    return None
 
 
 def _content_hash(operation: RecoveryOperation) -> str | None:

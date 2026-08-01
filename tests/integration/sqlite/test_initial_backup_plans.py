@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -174,6 +175,34 @@ class _FileFlushOnlyCapabilitiesProbe(EndpointCapabilitiesProbe):
         )
 
 
+class _PrimaryStreamOnlyCapabilitiesProbe(EndpointCapabilitiesProbe):
+    def __init__(self) -> None:
+        from mediasync_home.adapters.endpoint_capabilities import (
+            LocalWindowsEndpointCapabilitiesProbe,
+        )
+
+        self._inner = LocalWindowsEndpointCapabilitiesProbe()
+
+    def probe_read_only(self, root: Path) -> EndpointCapabilityEvidence:
+        return self._inner.probe_read_only(root)
+
+    def probe_controlled_writable(
+        self,
+        root: Path,
+        *,
+        probe_directory: Path,
+        probe_token: str,
+    ) -> EndpointCapabilityEvidence:
+        measured = self._inner.probe_controlled_writable(
+            root,
+            probe_directory=probe_directory,
+            probe_token=probe_token,
+        ).validated_profile()
+        return EndpointCapabilityEvidence.from_profile(
+            replace(measured, supports_named_streams=False)
+        )
+
+
 def test_initial_plan_materializer_seals_exact_registered_snapshots_and_replays(
     tmp_path: Path,
 ) -> None:
@@ -339,6 +368,40 @@ def test_initial_plan_materializer_blocks_target_without_write_through_evidence(
         assert report.blocked_job_count == 1
         assert report.results[0].reason_code == (
             "INITIAL_BACKUP_PLAN_TARGET_DURABILITY_UNSUPPORTED"
+        )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows named streams only")
+def test_initial_plan_blocks_named_stream_copy_to_nonportable_target(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    source_file = source / "Readme.txt"
+    source_file.write_text("source", encoding="utf-8")
+    Path(f"{source_file}:metadata").write_text("named", encoding="utf-8")
+
+    with sqlite3.connect(database) as connection:
+        _prepare_registered_snapshots(
+            connection,
+            database=database,
+            source=source,
+            target=target,
+            capabilities_probe=_PrimaryStreamOnlyCapabilitiesProbe(),
+        )
+
+        report = SqliteInitialBackupPlanMaterializer(
+            connection,
+            plans=SqlitePlanStore(connection),
+            id_factory=_FixedPlanIds(),
+        ).refresh_initial_backup_plans(observed_utc="2026-07-31T15:03:00Z")
+
+        assert report.blocked_job_count == 1
+        assert report.results[0].reason_code == (
+            "INITIAL_BACKUP_PLAN_TARGET_NAMED_STREAMS_UNSUPPORTED"
         )
 
 

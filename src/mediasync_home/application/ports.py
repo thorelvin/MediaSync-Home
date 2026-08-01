@@ -21,6 +21,7 @@ class VerifiedStagingArtifact:
     relative_path: RelativePath
     content_hash: str
     operation_kind: RecoveryOperationKind = RecoveryOperationKind.COPY_NEW
+    fingerprint_json: str | None = None
 
 
 @dataclass(frozen=True)

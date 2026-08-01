@@ -10,6 +10,11 @@ from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
     RecoveryOperationKind,
 )
+from mediasync_home.application.file_object_fingerprints import (
+    FileObjectFingerprintError,
+    canonical_file_object_fingerprint,
+    canonical_file_object_fingerprint_json,
+)
 from mediasync_home.application.safe_paths import (
     SafePathViolation,
     parse_endpoint_relative_path,
@@ -67,6 +72,7 @@ class StagingObjectManifest:
     source_relative_path: str | None
     final_relative_path: str
     payload_name: str
+    fingerprint_json: str
     fingerprint_byte_count: int
     fingerprint_content_hash: str
     manifest_hash: str
@@ -133,7 +139,8 @@ def create_staging_object_manifest(
         else _canonical_relative_path(source_relative_path)
     )
     canonical_final_path = _canonical_relative_path(final_relative_path)
-    byte_count, content_hash = _fingerprint_values(fingerprint)
+    canonical_fingerprint = _canonical_fingerprint(fingerprint)
+    byte_count, content_hash = _fingerprint_values(canonical_fingerprint)
     body: dict[str, object] = {
         "schema_version": STAGING_OBJECT_MANIFEST_SCHEMA_VERSION,
         "object_role": "STAGING",
@@ -150,10 +157,7 @@ def create_staging_object_manifest(
         "source_relative_path": canonical_source_path,
         "final_relative_path": canonical_final_path,
         "payload_name": f"{staging_object_id}.payload",
-        "fingerprint": {
-            "byte_count": byte_count,
-            "content_hash": content_hash,
-        },
+        "fingerprint": canonical_fingerprint,
         "manifest_hash_algorithm": STAGING_OBJECT_MANIFEST_HASH_ALGORITHM,
         "canonicalization": STAGING_OBJECT_MANIFEST_CANONICALIZATION,
     }
@@ -210,6 +214,7 @@ def require_staging_object_manifest_binding(
     operation_kind: RecoveryOperationKind,
     fingerprint_content_hash: str,
     fingerprint_byte_count: int | None = None,
+    fingerprint_json: str | None = None,
     operation_id: str | None = None,
 ) -> None:
     expected_final_path = _canonical_relative_path(final_relative_path)
@@ -223,6 +228,10 @@ def require_staging_object_manifest_binding(
         or manifest.final_relative_path != expected_final_path
         or manifest.operation_kind is not operation_kind
         or manifest.fingerprint_content_hash != fingerprint_content_hash
+        or (
+            fingerprint_json is not None
+            and manifest.fingerprint_json != fingerprint_json
+        )
         or (
             fingerprint_byte_count is not None
             and manifest.fingerprint_byte_count != fingerprint_byte_count
@@ -289,7 +298,12 @@ def _manifest_from_valid_payload(
     fingerprint = payload.get("fingerprint")
     if not isinstance(fingerprint, dict):
         raise StagingObjectManifestError("STAGING_OBJECT_MANIFEST_FINGERPRINT_INVALID")
-    byte_count, content_hash = _fingerprint_values(fingerprint)
+    canonical_fingerprint = _canonical_fingerprint(fingerprint)
+    if canonical_fingerprint != fingerprint:
+        raise StagingObjectManifestError(
+            "STAGING_OBJECT_MANIFEST_FINGERPRINT_NOT_CANONICAL"
+        )
+    byte_count, content_hash = _fingerprint_values(canonical_fingerprint)
     manifest_hash = _require_string(payload.get("manifest_hash"))
     return StagingObjectManifest(
         staging_object_id=staging_object_id,
@@ -305,6 +319,9 @@ def _manifest_from_valid_payload(
         source_relative_path=source_relative_path,
         final_relative_path=final_relative_path,
         payload_name=payload_name,
+        fingerprint_json=canonical_file_object_fingerprint_json(
+            canonical_fingerprint
+        ),
         fingerprint_byte_count=byte_count,
         fingerprint_content_hash=content_hash,
         manifest_hash=manifest_hash,
@@ -331,19 +348,23 @@ def _fingerprint_from_json(raw_fingerprint: str | None) -> Mapping[str, object]:
 
 
 def _fingerprint_values(fingerprint: Mapping[str, object]) -> tuple[int, str]:
-    if set(fingerprint) != {"byte_count", "content_hash"}:
-        raise StagingObjectManifestError("STAGING_OBJECT_MANIFEST_FINGERPRINT_INVALID")
-    byte_count = fingerprint.get("byte_count")
-    content_hash = fingerprint.get("content_hash")
-    if (
-        not isinstance(byte_count, int)
-        or isinstance(byte_count, bool)
-        or byte_count < 0
-        or not isinstance(content_hash, str)
-        or _HASH_PATTERN.fullmatch(content_hash) is None
-    ):
+    canonical = _canonical_fingerprint(fingerprint)
+    byte_count = canonical["byte_count"]
+    content_hash = canonical["content_hash"]
+    if not isinstance(byte_count, int) or not isinstance(content_hash, str):
         raise StagingObjectManifestError("STAGING_OBJECT_MANIFEST_FINGERPRINT_INVALID")
     return byte_count, content_hash
+
+
+def _canonical_fingerprint(
+    fingerprint: Mapping[str, object],
+) -> dict[str, object]:
+    try:
+        return canonical_file_object_fingerprint(fingerprint)
+    except FileObjectFingerprintError as exc:
+        raise StagingObjectManifestError(
+            "STAGING_OBJECT_MANIFEST_FINGERPRINT_INVALID"
+        ) from exc
 
 
 def _canonical_relative_path(value: str) -> str:
