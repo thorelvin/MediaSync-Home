@@ -4687,6 +4687,7 @@ class MediaSyncWindow(QMainWindow):
             self._setup_retention_value.setText(
                 self._display(state.defaults.retention_label)
             )
+        self._apply_setup_field_visibility(state)
         self._apply_setup_target_controls(state)
         if self._setup_back_button is not None:
             can_go_back = self._setup_can_go_back(state)
@@ -4706,6 +4707,24 @@ class MediaSyncWindow(QMainWindow):
             self._setup_primary_button.setToolTip(self._setup_primary_tooltip(state))
         self._refresh_dashboard_geometry()
         QTimer.singleShot(0, self._refresh_dashboard_geometry)
+
+    def _apply_setup_field_visibility(
+        self,
+        state: StandardBackupSetupViewState,
+    ) -> None:
+        if self._setup_subtitle_label is not None:
+            self._setup_subtitle_label.setVisible(
+                state.current_step is BackupSetupStep.SOURCE
+            )
+        show_defaults = state.current_step is not BackupSetupStep.TARGETS
+        for widget in (
+            self._setup_defaults_label,
+            self._setup_defaults_value,
+            self._setup_retention_label,
+            self._setup_retention_value,
+        ):
+            if widget is not None:
+                widget.setVisible(show_defaults)
 
     def _setup_primary_enabled(self, state: StandardBackupSetupViewState) -> bool:
         if self._setup_command_pending or self._command_worker_active():

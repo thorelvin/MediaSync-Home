@@ -657,6 +657,62 @@ def test_compact_target_picker_return_restores_setup_top(qapp) -> None:
         window.deleteLater()
 
 
+def test_compact_target_selection_keeps_complete_step_actions_visible(qapp) -> None:
+    window = build_main_window(initial_state=_ready_state(), theme_mode=ThemeMode.DARK)
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        qapp.processEvents()
+        choices = [
+            "C:/Users/Ada/Pictures",
+            "E:/MediaSync Backups/Primary target",
+        ]
+        window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
+        create_backup = window.findChild(QPushButton, "createBackupButton")
+        add_target = window.findChild(QToolButton, "addTargetButton")
+        setup_panel = window.findChild(QFrame, "standardBackupPanel")
+        dashboard_scroll = window.findChild(QScrollArea, "dashboardScrollArea")
+
+        assert create_backup is not None
+        assert add_target is not None
+        assert setup_panel is not None
+        assert dashboard_scroll is not None
+        assert window._setup_defaults_label is not None
+        assert window._setup_retention_label is not None
+
+        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        QTest.mouseClick(add_target, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        qapp.processEvents()
+
+        assert window._setup_defaults_label.isHidden()
+        assert window._setup_retention_label.isHidden()
+        assert create_backup.isEnabled()
+        assert create_backup.text() == "Fortsett"
+        assert dashboard_scroll.verticalScrollBar().value() == 0
+        panel_position = setup_panel.mapTo(
+            dashboard_scroll.viewport(), setup_panel.rect().topLeft()
+        )
+        action_position = create_backup.mapTo(
+            dashboard_scroll.viewport(), create_backup.rect().topLeft()
+        )
+        assert panel_position.y() >= 0
+        assert action_position.y() >= 0
+        assert (
+            action_position.y() + create_backup.height()
+            <= dashboard_scroll.viewport().height()
+        )
+        assert setup_panel.rect().contains(
+            create_backup.mapTo(setup_panel, create_backup.rect().topLeft())
+        )
+        assert dashboard_scroll.horizontalScrollBar().maximum() == 0
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_directory_picker_is_parented_and_uses_visible_qt_dialog(qapp) -> None:
     window = build_main_window(initial_state=_ready_state(), theme_mode=ThemeMode.LIGHT)
 
