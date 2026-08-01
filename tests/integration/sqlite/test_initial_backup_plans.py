@@ -44,6 +44,7 @@ from mediasync_home.adapters.sqlite.writable_endpoint_registrations import (
 )
 from mediasync_home.adapters.writable_endpoint_registration import (
     LocalWritableEndpointControlAreaProvisioner,
+    LocalWritableEndpointRootOverlapGuard,
 )
 from mediasync_home.application.initial_backup_planning import (
     InitialBackupPlanIdFactory,
@@ -680,6 +681,7 @@ def _prepare_registered_snapshots(
         provisioner=LocalWritableEndpointControlAreaProvisioner(
             capabilities_probe=capabilities_probe,
         ),
+        root_overlap_guard=LocalWritableEndpointRootOverlapGuard(),
         id_factory=_FixedRegistrationIds(),
         owner_installation_id=INSTALLATION_ID,
     ).register_job_targets(

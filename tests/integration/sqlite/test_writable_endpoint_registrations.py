@@ -30,10 +30,16 @@ from mediasync_home.adapters.sqlite.writable_endpoint_registrations import (
 )
 from mediasync_home.adapters.writable_endpoint_registration import (
     LocalWritableEndpointControlAreaProvisioner,
+    LocalWritableEndpointRootOverlapGuard,
+)
+from mediasync_home.adapters.reparse_guard import (
+    FileIdentityEvidence,
+    ReparseInspection,
 )
 from mediasync_home.application.writable_endpoint_registration import (
     PreparedWritableEndpoint,
     WritableEndpointRegistrationCoordinator,
+    WritableEndpointRegistrationError,
     WritableEndpointRegistrationIds,
     WritableEndpointRegistrationIntent,
     WritableEndpointRegistrationState,
@@ -91,6 +97,7 @@ def test_registration_coordinator_appends_revisions_and_stays_writable(
         coordinator = WritableEndpointRegistrationCoordinator(
             store=store,
             provisioner=LocalWritableEndpointControlAreaProvisioner(),
+            root_overlap_guard=LocalWritableEndpointRootOverlapGuard(),
             id_factory=_FixedIds(),
             owner_installation_id=INSTALLATION_ID,
         )
@@ -171,6 +178,130 @@ def test_registration_coordinator_appends_revisions_and_stays_writable(
         )
 
 
+def test_registration_rejects_physical_alias_before_control_area_mutation(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    alias_identity = FileIdentityEvidence("WIN32_HANDLE_VOLUME_FILE_ID", "1:2")
+    overlap_guard = LocalWritableEndpointRootOverlapGuard(
+        probe=_FixedRootProbe(
+            {
+                source: ReparseInspection(
+                    path=source,
+                    exists=True,
+                    is_reparse_point=False,
+                    identity=alias_identity,
+                    final_path=r"\\?\Volume{source}\source",
+                ),
+                target: ReparseInspection(
+                    path=target,
+                    exists=True,
+                    is_reparse_point=False,
+                    identity=alias_identity,
+                    final_path=r"\\?\Volume{alias}\target",
+                ),
+            }
+        )
+    )
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database, source=source, target=target)
+        _refresher(connection).refresh_endpoint_classifications(
+            observed_utc="2026-08-02T08:00:00Z"
+        )
+        coordinator = WritableEndpointRegistrationCoordinator(
+            store=SqliteWritableEndpointRegistrationStore(connection),
+            provisioner=LocalWritableEndpointControlAreaProvisioner(),
+            root_overlap_guard=overlap_guard,
+            id_factory=_FixedIds(),
+            owner_installation_id=INSTALLATION_ID,
+        )
+
+        with pytest.raises(
+            WritableEndpointRegistrationError,
+            match="WRITABLE_ENDPOINT_ROOT_OVERLAP",
+        ):
+            coordinator.register_job_targets(
+                job_id=JOB_ID,
+                job_revision_id=JOB_REVISION_ID,
+                command_request_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                command_idempotency_key="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                observed_utc="2026-08-02T08:01:00Z",
+            )
+
+        assert not (target / ".mediasync").exists()
+        assert connection.execute(
+            "SELECT count(*) FROM writable_endpoint_registration_intents"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT active_revision_id FROM endpoint_heads WHERE endpoint_id = ?",
+            (TARGET_ENDPOINT_ID,),
+        ).fetchone() == (TARGET_REVISION_ID,)
+
+
+def test_protected_roots_include_other_active_job_claims(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    other_source = tmp_path / "other-source"
+    source.mkdir()
+    target.mkdir()
+    other_source.mkdir()
+    other_job_id = "12121212-1212-4212-8212-121212121212"
+    other_job_revision_id = "13131313-1313-4313-8313-131313131313"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database, source=source, target=target)
+        connection.execute(
+            "INSERT INTO jobs (id, kind) VALUES (?, 'multi_target_backup')",
+            (other_job_id,),
+        )
+        connection.execute(
+            "INSERT INTO filter_sets (job_id, id) VALUES (?, 'filter-b')",
+            (other_job_id,),
+        )
+        insert_default_filter_set_version(
+            connection,
+            job_id=other_job_id,
+            filter_set_id="filter-b",
+        )
+        connection.execute(
+            """
+            INSERT INTO job_revisions (job_id, id, filter_set_id, filter_set_version)
+            VALUES (?, ?, 'filter-b', 1)
+            """,
+            (other_job_id, other_job_revision_id),
+        )
+        connection.execute(
+            "INSERT INTO job_heads (job_id, active_revision_id) VALUES (?, ?)",
+            (other_job_id, other_job_revision_id),
+        )
+        _insert_endpoint(
+            connection,
+            endpoint_id="14141414-1414-4414-8414-141414141414",
+            endpoint_revision_id="15151515-1515-4515-8515-151515151515",
+            root=other_source,
+            role="SOURCE",
+            ordinal=0,
+            job_id=other_job_id,
+            job_revision_id=other_job_revision_id,
+        )
+        connection.commit()
+
+        roots = SqliteWritableEndpointRegistrationStore(
+            connection
+        ).load_registration_protected_root_uris(
+            job_id=JOB_ID,
+            job_revision_id=JOB_REVISION_ID,
+        )
+
+        assert source.as_uri() in roots
+        assert other_source.as_uri() in roots
+        assert target.as_uri() not in roots
+
+
 def test_registration_preserves_ready_binding_while_registering_new_target(
     tmp_path: Path,
 ) -> None:
@@ -190,6 +321,7 @@ def test_registration_preserves_ready_binding_while_registering_new_target(
         first = WritableEndpointRegistrationCoordinator(
             store=SqliteWritableEndpointRegistrationStore(connection),
             provisioner=LocalWritableEndpointControlAreaProvisioner(),
+            root_overlap_guard=LocalWritableEndpointRootOverlapGuard(),
             id_factory=_FixedIds(),
             owner_installation_id=INSTALLATION_ID,
         ).register_job_targets(
@@ -224,6 +356,7 @@ def test_registration_preserves_ready_binding_while_registering_new_target(
         report = WritableEndpointRegistrationCoordinator(
             store=store,
             provisioner=LocalWritableEndpointControlAreaProvisioner(),
+            root_overlap_guard=LocalWritableEndpointRootOverlapGuard(),
             id_factory=_SecondFixedIds(),
             owner_installation_id=INSTALLATION_ID,
         ).register_job_targets(
@@ -322,6 +455,7 @@ def test_startup_reconciliation_finishes_exact_published_intent(
         coordinator = WritableEndpointRegistrationCoordinator(
             store=store,
             provisioner=LocalWritableEndpointControlAreaProvisioner(),
+            root_overlap_guard=LocalWritableEndpointRootOverlapGuard(),
             id_factory=_FixedIds(),
             owner_installation_id=INSTALLATION_ID,
         )
@@ -342,6 +476,83 @@ def test_startup_reconciliation_finishes_exact_published_intent(
         ).fetchone() == ("COMMITTED", "2026-07-31T12:02:00Z")
 
 
+def test_startup_reconciliation_blocks_newly_detected_root_alias(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database, source=source, target=target)
+        _refresher(connection).refresh_endpoint_classifications(
+            observed_utc="2026-08-02T09:00:00Z"
+        )
+        store = SqliteWritableEndpointRegistrationStore(connection)
+        provisioner = LocalWritableEndpointControlAreaProvisioner()
+        candidate = store.load_registration_candidates(
+            job_id=JOB_ID,
+            job_revision_id=JOB_REVISION_ID,
+        )[0]
+        prepared = provisioner.prepare_new_control_area(
+            candidate,
+            intent_id=INTENT_ID,
+            target_ids=WritableEndpointTargetIds(
+                target_ordinal=1,
+                endpoint_revision_id=NEW_TARGET_REVISION_ID,
+                control_area_id=CONTROL_AREA_ID,
+            ),
+            owner_installation_id=INSTALLATION_ID,
+            created_utc="2026-08-02T09:01:00Z",
+        )
+        store.save_prepared_registration_intent(
+            _intent(prepared, created_utc="2026-08-02T09:01:00Z")
+        )
+        alias_identity = FileIdentityEvidence("WIN32_HANDLE_VOLUME_FILE_ID", "1:2")
+        overlap_guard = LocalWritableEndpointRootOverlapGuard(
+            probe=_FixedRootProbe(
+                {
+                    source: ReparseInspection(
+                        path=source,
+                        exists=True,
+                        is_reparse_point=False,
+                        identity=alias_identity,
+                        final_path=r"\\?\Volume{source}\source",
+                    ),
+                    target: ReparseInspection(
+                        path=target,
+                        exists=True,
+                        is_reparse_point=False,
+                        identity=alias_identity,
+                        final_path=r"\\?\Volume{alias}\target",
+                    ),
+                }
+            )
+        )
+
+        reports = WritableEndpointRegistrationCoordinator(
+            store=store,
+            provisioner=LocalWritableEndpointControlAreaProvisioner(),
+            root_overlap_guard=overlap_guard,
+            id_factory=_FixedIds(),
+            owner_installation_id=INSTALLATION_ID,
+        ).reconcile_pending(observed_utc="2026-08-02T09:02:00Z")
+
+        assert len(reports) == 1
+        assert reports[0].state is WritableEndpointRegistrationState.BLOCKED
+        assert reports[0].validation_codes == ("WRITABLE_ENDPOINT_ROOT_OVERLAP",)
+        assert not (target / ".mediasync").exists()
+        assert connection.execute(
+            """
+            SELECT state, last_error_code
+            FROM writable_endpoint_registration_intents
+            WHERE intent_id = ?
+            """,
+            (INTENT_ID,),
+        ).fetchone() == ("BLOCKED", "WRITABLE_ENDPOINT_ROOT_OVERLAP")
+
+
 def test_explicit_ipc_command_repairs_pending_job_without_registration_intent(
     tmp_path: Path,
 ) -> None:
@@ -360,6 +571,7 @@ def test_explicit_ipc_command_repairs_pending_job_without_registration_intent(
         coordinator = WritableEndpointRegistrationCoordinator(
             store=SqliteWritableEndpointRegistrationStore(connection),
             provisioner=LocalWritableEndpointControlAreaProvisioner(),
+            root_overlap_guard=LocalWritableEndpointRootOverlapGuard(),
             id_factory=_FixedIds(),
             owner_installation_id=INSTALLATION_ID,
         )
@@ -472,6 +684,7 @@ def test_registration_tables_reject_identity_rewrite(tmp_path: Path) -> None:
         coordinator = WritableEndpointRegistrationCoordinator(
             store=SqliteWritableEndpointRegistrationStore(connection),
             provisioner=LocalWritableEndpointControlAreaProvisioner(),
+            root_overlap_guard=LocalWritableEndpointRootOverlapGuard(),
             id_factory=_FixedIds(),
             owner_installation_id=INSTALLATION_ID,
         )
@@ -541,6 +754,14 @@ class _SecondFixedIds:
                 ),
             ),
         )
+
+
+class _FixedRootProbe:
+    def __init__(self, inspections: dict[Path, ReparseInspection]) -> None:
+        self._inspections = inspections
+
+    def inspect_path(self, path: Path) -> ReparseInspection:
+        return self._inspections[path]
 
 
 def _intent(
@@ -683,6 +904,7 @@ def _insert_endpoint(
     root: Path,
     role: str,
     ordinal: int,
+    job_id: str = JOB_ID,
     job_revision_id: str = JOB_REVISION_ID,
 ) -> None:
     connection.execute("INSERT INTO endpoints (id) VALUES (?)", (endpoint_id,))
@@ -718,7 +940,7 @@ def _insert_endpoint(
         VALUES (?, ?, ?, ?, ?, ?, 'REGISTRATION_PENDING', 'ENDPOINT_CLASSIFICATION_PENDING')
         """,
         (
-            JOB_ID,
+            job_id,
             job_revision_id,
             role,
             ordinal,

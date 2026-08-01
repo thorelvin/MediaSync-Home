@@ -19,6 +19,7 @@ from mediasync_home.application.endpoint_capabilities import (
 
 
 _WRITABLE_READY_REASON = "ENDPOINT_TARGET_WRITABLE_PROBE_VERIFIED"
+_MAX_REGISTRATION_PROTECTED_ROOTS = 1_024
 
 
 class SqliteWritableEndpointRegistrationStore:
@@ -132,6 +133,92 @@ class SqliteWritableEndpointRegistrationStore:
             )
             )
         return tuple(candidates)
+
+    def load_registration_protected_root_uris(
+        self,
+        *,
+        job_id: str,
+        job_revision_id: str,
+    ) -> tuple[str, ...]:
+        active = self._connection.execute(
+            """
+            SELECT heads.active_revision_id, jobs.lifecycle_state
+            FROM jobs
+            INNER JOIN job_heads AS heads ON heads.job_id = jobs.id
+            WHERE jobs.id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+        if (
+            active is None
+            or str(active[0]) != job_revision_id
+            or str(active[1]) != "ACTIVE"
+        ):
+            raise _registration_error(
+                "WRITABLE_ENDPOINT_JOB_REVISION_STALE",
+                "Refresh the active backup job before registering its targets.",
+                retryable=False,
+            )
+        source_count = int(
+            self._connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM standard_backup_job_endpoint_bindings
+                WHERE job_id = ?
+                    AND job_revision_id = ?
+                    AND role = 'SOURCE'
+                """,
+                (job_id, job_revision_id),
+            ).fetchone()[0]
+        )
+        if source_count != 1:
+            raise _registration_error(
+                "WRITABLE_ENDPOINT_ROOT_OVERLAP_CONTEXT_MISSING",
+                "Refresh the active source root before registering this target.",
+                retryable=True,
+            )
+        rows = self._connection.execute(
+            """
+            SELECT revisions.root_uri
+            FROM standard_backup_job_endpoint_bindings AS bindings
+            INNER JOIN endpoint_revisions AS revisions
+                ON revisions.endpoint_id = bindings.endpoint_id
+                AND revisions.id = bindings.endpoint_revision_id
+            INNER JOIN jobs
+                ON jobs.id = bindings.job_id
+            INNER JOIN job_heads AS heads
+                ON heads.job_id = bindings.job_id
+                AND heads.active_revision_id = bindings.job_revision_id
+            WHERE jobs.lifecycle_state = 'ACTIVE'
+                AND NOT (
+                    bindings.job_id = ?
+                    AND bindings.job_revision_id = ?
+                    AND bindings.role = 'TARGET'
+                    AND bindings.registration_state = 'REGISTRATION_PENDING'
+                )
+            ORDER BY
+                bindings.job_id,
+                bindings.job_revision_id,
+                bindings.role,
+                bindings.ordinal
+            LIMIT ?
+            """,
+            (job_id, job_revision_id, _MAX_REGISTRATION_PROTECTED_ROOTS + 1),
+        ).fetchall()
+        if len(rows) > _MAX_REGISTRATION_PROTECTED_ROOTS:
+            raise _registration_error(
+                "WRITABLE_ENDPOINT_ROOT_OVERLAP_SET_LIMIT_EXCEEDED",
+                "Archive unused jobs before registering another writable target.",
+                retryable=False,
+            )
+        roots = tuple(dict.fromkeys(str(row[0]) for row in rows))
+        if not roots:
+            raise _registration_error(
+                "WRITABLE_ENDPOINT_ROOT_OVERLAP_CONTEXT_MISSING",
+                "Refresh every active endpoint root before registering this target.",
+                retryable=True,
+            )
+        return roots
 
     def save_prepared_registration_intent(
         self,

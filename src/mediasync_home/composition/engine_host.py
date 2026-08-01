@@ -44,6 +44,7 @@ from mediasync_home.adapters.version_retention import (
 from mediasync_home.adapters.version_restore import LocalRetainedVersionRestoreAdapter
 from mediasync_home.adapters.writable_endpoint_registration import (
     LocalWritableEndpointControlAreaProvisioner,
+    LocalWritableEndpointRootOverlapGuard,
 )
 from mediasync_home.adapters.sqlite.catalog_handoffs import (
     SqliteFinalFileCatalogHandoffStore,
@@ -1734,6 +1735,7 @@ def build_engine_host_runtime(
         writable_endpoint_registration = WritableEndpointRegistrationCoordinator(
             store=SqliteWritableEndpointRegistrationStore(catalog_connection),
             provisioner=LocalWritableEndpointControlAreaProvisioner(),
+            root_overlap_guard=LocalWritableEndpointRootOverlapGuard(),
             id_factory=UuidWritableEndpointRegistrationIdFactory(),
             owner_installation_id=installation_state.installation_id,
         )

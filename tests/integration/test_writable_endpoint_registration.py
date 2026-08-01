@@ -11,6 +11,11 @@ from mediasync_home.adapters.local_endpoint_classifier import (
 )
 from mediasync_home.adapters.writable_endpoint_registration import (
     LocalWritableEndpointControlAreaProvisioner,
+    LocalWritableEndpointRootOverlapGuard,
+)
+from mediasync_home.adapters.reparse_guard import (
+    FileIdentityEvidence,
+    ReparseInspection,
 )
 from mediasync_home.application.endpoint_classification import EndpointControlAreaState
 from mediasync_home.application.endpoint_capabilities import EndpointCapabilityProbeScope
@@ -164,6 +169,167 @@ def test_local_registration_blocks_unexpected_private_staging_content(
 
     assert unexpected.read_text(encoding="utf-8") == "preserve"
     assert not (root / ".mediasync").exists()
+
+
+def test_root_overlap_guard_rejects_a_handle_identity_alias(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    shared_identity = FileIdentityEvidence("WIN32_HANDLE_VOLUME_FILE_ID", "1:2")
+    guard = LocalWritableEndpointRootOverlapGuard(
+        probe=_FixedRootProbe(
+            {
+                source: ReparseInspection(
+                    path=source,
+                    exists=True,
+                    is_reparse_point=False,
+                    identity=shared_identity,
+                    final_path=r"\\?\Volume{source}\source",
+                ),
+                target: ReparseInspection(
+                    path=target,
+                    exists=True,
+                    is_reparse_point=False,
+                    identity=shared_identity,
+                    final_path=r"\\?\Volume{alias}\target",
+                ),
+            }
+        )
+    )
+
+    with pytest.raises(
+        WritableEndpointRegistrationError,
+        match="WRITABLE_ENDPOINT_ROOT_OVERLAP",
+    ):
+        guard.require_non_overlapping_roots(
+            target_root_uris=(target.as_uri(),),
+            protected_root_uris=(source.as_uri(),),
+        )
+
+
+def test_root_overlap_guard_rejects_resolved_nested_roots(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    guard = LocalWritableEndpointRootOverlapGuard(
+        probe=_FixedRootProbe(
+            {
+                source: _root_inspection(
+                    source,
+                    identity="1:10",
+                    final_path=r"\\?\Volume{shared}\users\source",
+                ),
+                target: _root_inspection(
+                    target,
+                    identity="1:20",
+                    final_path=r"\\?\Volume{shared}\users\source\backup",
+                ),
+            }
+        )
+    )
+
+    with pytest.raises(
+        WritableEndpointRegistrationError,
+        match="WRITABLE_ENDPOINT_ROOT_OVERLAP",
+    ):
+        guard.require_non_overlapping_roots(
+            target_root_uris=(target.as_uri(),),
+            protected_root_uris=(source.as_uri(),),
+        )
+
+
+def test_root_overlap_guard_rejects_peer_target_aliases(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    first_target = tmp_path / "target-one"
+    second_target = tmp_path / "target-two"
+    source.mkdir()
+    first_target.mkdir()
+    second_target.mkdir()
+    guard = LocalWritableEndpointRootOverlapGuard(
+        probe=_FixedRootProbe(
+            {
+                source: _root_inspection(
+                    source,
+                    identity="1:10",
+                    final_path=r"\\?\Volume{shared}\source",
+                ),
+                first_target: _root_inspection(
+                    first_target,
+                    identity="1:20",
+                    final_path=r"\\?\Volume{shared}\target",
+                ),
+                second_target: _root_inspection(
+                    second_target,
+                    identity="1:20",
+                    final_path=r"\\?\Volume{alias}\target",
+                ),
+            }
+        )
+    )
+
+    with pytest.raises(
+        WritableEndpointRegistrationError,
+        match="WRITABLE_ENDPOINT_ROOT_OVERLAP",
+    ):
+        guard.require_non_overlapping_roots(
+            target_root_uris=(first_target.as_uri(), second_target.as_uri()),
+            protected_root_uris=(source.as_uri(),),
+        )
+
+
+def test_root_overlap_guard_allows_separate_roots_on_one_volume(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    guard = LocalWritableEndpointRootOverlapGuard(
+        probe=_FixedRootProbe(
+            {
+                source: _root_inspection(
+                    source,
+                    identity="1:10",
+                    final_path=r"\\?\Volume{shared}\source",
+                ),
+                target: _root_inspection(
+                    target,
+                    identity="1:20",
+                    final_path=r"\\?\Volume{shared}\target",
+                ),
+            }
+        )
+    )
+
+    guard.require_non_overlapping_roots(
+        target_root_uris=(target.as_uri(),),
+        protected_root_uris=(source.as_uri(),),
+    )
+
+
+class _FixedRootProbe:
+    def __init__(self, inspections: dict[Path, ReparseInspection]) -> None:
+        self._inspections = inspections
+
+    def inspect_path(self, path: Path) -> ReparseInspection:
+        return self._inspections[path]
+
+
+def _root_inspection(
+    path: Path,
+    *,
+    identity: str,
+    final_path: str,
+) -> ReparseInspection:
+    return ReparseInspection(
+        path=path,
+        exists=True,
+        is_reparse_point=False,
+        identity=FileIdentityEvidence("WIN32_HANDLE_VOLUME_FILE_ID", identity),
+        final_path=final_path,
+    )
 
 
 def _candidate(

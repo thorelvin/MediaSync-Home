@@ -178,6 +178,15 @@ class WritableEndpointControlAreaProvisioner(Protocol):
     ) -> EndpointCapabilityEvidence: ...
 
 
+class WritableEndpointRootOverlapGuard(Protocol):
+    def require_non_overlapping_roots(
+        self,
+        *,
+        target_root_uris: tuple[str, ...],
+        protected_root_uris: tuple[str, ...],
+    ) -> None: ...
+
+
 class WritableEndpointRegistrationStore(Protocol):
     def load_registration_intent(
         self,
@@ -192,6 +201,13 @@ class WritableEndpointRegistrationStore(Protocol):
         job_id: str,
         job_revision_id: str,
     ) -> tuple[WritableEndpointRegistrationCandidate, ...]: ...
+
+    def load_registration_protected_root_uris(
+        self,
+        *,
+        job_id: str,
+        job_revision_id: str,
+    ) -> tuple[str, ...]: ...
 
     def save_prepared_registration_intent(
         self,
@@ -236,11 +252,13 @@ class WritableEndpointRegistrationCoordinator:
         *,
         store: WritableEndpointRegistrationStore,
         provisioner: WritableEndpointControlAreaProvisioner,
+        root_overlap_guard: WritableEndpointRootOverlapGuard,
         id_factory: WritableEndpointRegistrationIdFactory,
         owner_installation_id: str,
     ) -> None:
         self._store = store
         self._provisioner = provisioner
+        self._root_overlap_guard = root_overlap_guard
         self._id_factory = id_factory
         self._owner_installation_id = owner_installation_id
 
@@ -277,6 +295,12 @@ class WritableEndpointRegistrationCoordinator:
                 validation_codes=("WRITABLE_ENDPOINT_REGISTRATION_NOT_REQUIRED",),
                 next_action="No target registration is required.",
             )
+
+        self._require_non_overlapping_roots(
+            job_id=job_id,
+            job_revision_id=job_revision_id,
+            target_root_uris=tuple(candidate.root_uri for candidate in candidates),
+        )
 
         ids = self._id_factory.new_registration_ids(candidates)
         target_ids = {target.target_ordinal: target for target in ids.targets}
@@ -338,6 +362,13 @@ class WritableEndpointRegistrationCoordinator:
             return _report(intent, replay=replay)
         try:
             if intent.state is WritableEndpointRegistrationState.PREPARED:
+                self._require_non_overlapping_roots(
+                    job_id=intent.job_id,
+                    job_revision_id=intent.source_job_revision_id,
+                    target_root_uris=tuple(
+                        target.root_uri for target in intent.prepared_targets
+                    ),
+                )
                 applied_capabilities: list[AppliedWritableEndpointCapabilities] = []
                 for prepared in intent.prepared_targets:
                     evidence = self._provisioner.apply_prepared_control_area(
@@ -372,6 +403,22 @@ class WritableEndpointRegistrationCoordinator:
                 updated_utc=observed_utc,
             )
         return _report(intent, replay=replay)
+
+    def _require_non_overlapping_roots(
+        self,
+        *,
+        job_id: str,
+        job_revision_id: str,
+        target_root_uris: tuple[str, ...],
+    ) -> None:
+        protected_root_uris = self._store.load_registration_protected_root_uris(
+            job_id=job_id,
+            job_revision_id=job_revision_id,
+        )
+        self._root_overlap_guard.require_non_overlapping_roots(
+            target_root_uris=target_root_uris,
+            protected_root_uris=protected_root_uris,
+        )
 
 
 def parse_register_writable_targets_command(

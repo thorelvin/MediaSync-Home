@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import stat
 from pathlib import Path
@@ -8,6 +9,7 @@ from uuid import UUID
 
 from blake3 import blake3
 
+from mediasync_home.adapters.endpoint_leases import EndpointLeaseUnavailable
 from mediasync_home.adapters.local_endpoint_classifier import (
     APPLICATION_NAME,
     BLAKE3_ALGORITHM,
@@ -26,6 +28,7 @@ from mediasync_home.adapters.endpoint_capabilities import (
 from mediasync_home.adapters.reparse_guard import (
     LocalFilesystemReparsePathProbe,
     ReparseGuardError,
+    ReparseInspection,
     ReparsePathProbe,
 )
 from mediasync_home.adapters.sqlite.endpoint_roots import local_path_from_file_uri
@@ -42,12 +45,83 @@ from mediasync_home.application.writable_endpoint_registration import (
     PreparedWritableEndpoint,
     WritableEndpointRegistrationCandidate,
     WritableEndpointRegistrationError,
+    WritableEndpointRootOverlapGuard,
     WritableEndpointTargetIds,
 )
 
 
 _OWNERSHIP_EPOCH = 1
 _MAX_CONTROL_ENTRIES = 1_024
+
+
+class LocalWritableEndpointRootOverlapGuard(WritableEndpointRootOverlapGuard):
+    def __init__(self, *, probe: ReparsePathProbe | None = None) -> None:
+        self._probe = probe or LocalFilesystemReparsePathProbe()
+
+    def require_non_overlapping_roots(
+        self,
+        *,
+        target_root_uris: tuple[str, ...],
+        protected_root_uris: tuple[str, ...],
+    ) -> None:
+        if not target_root_uris or not protected_root_uris:
+            raise _registration_error(
+                "WRITABLE_ENDPOINT_ROOT_OVERLAP_CONTEXT_MISSING",
+                "Refresh every active endpoint root before registering this target.",
+                retryable=True,
+            )
+        inspected: dict[str, ReparseInspection] = {}
+        for root_uri in dict.fromkeys((*target_root_uris, *protected_root_uris)):
+            inspected[root_uri] = self._inspect_root(root_uri)
+
+        for index, target_uri in enumerate(target_root_uris):
+            target = inspected[target_uri]
+            for peer_uri in target_root_uris[index + 1 :]:
+                self._reject_overlap(target, inspected[peer_uri])
+            for protected_uri in protected_root_uris:
+                self._reject_overlap(target, inspected[protected_uri])
+
+    def _inspect_root(self, root_uri: str) -> ReparseInspection:
+        try:
+            root = local_path_from_file_uri(root_uri)
+            inspection = self._probe.inspect_path(root)
+        except (EndpointLeaseUnavailable, ReparseGuardError) as exc:
+            raise _registration_error(
+                "WRITABLE_ENDPOINT_ROOT_OVERLAP_EVIDENCE_UNAVAILABLE",
+                "Reconnect every endpoint root before registering this target.",
+                retryable=True,
+            ) from exc
+        if (
+            not inspection.exists
+            or inspection.is_reparse_point
+            or inspection.identity is None
+            or inspection.final_path is None
+        ):
+            raise _registration_error(
+                "WRITABLE_ENDPOINT_ROOT_OVERLAP_EVIDENCE_UNAVAILABLE",
+                "Reconnect every ordinary endpoint root before registering this target.",
+                retryable=True,
+            )
+        return inspection
+
+    @staticmethod
+    def _reject_overlap(
+        target: ReparseInspection,
+        protected: ReparseInspection,
+    ) -> None:
+        assert target.identity is not None
+        assert protected.identity is not None
+        assert target.final_path is not None
+        assert protected.final_path is not None
+        if (
+            target.identity == protected.identity
+            or _final_paths_overlap(target.final_path, protected.final_path)
+        ):
+            raise _registration_error(
+                "WRITABLE_ENDPOINT_ROOT_OVERLAP",
+                "Choose a target root that does not overlap any active source or target.",
+                retryable=False,
+            )
 
 
 class LocalWritableEndpointControlAreaProvisioner:
@@ -489,6 +563,24 @@ def _canonical_json(payload: object) -> str:
         ensure_ascii=False,
         allow_nan=False,
     )
+
+
+def _final_paths_overlap(first: str, second: str) -> bool:
+    normalized_first = _normalized_windows_final_path(first)
+    normalized_second = _normalized_windows_final_path(second)
+    if normalized_first == normalized_second:
+        return True
+    return normalized_first.startswith(f"{normalized_second}\\") or (
+        normalized_second.startswith(f"{normalized_first}\\")
+    )
+
+
+def _normalized_windows_final_path(value: str) -> str:
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    return ntpath.normcase(ntpath.normpath(value)).rstrip("\\/")
 
 
 def _local_root(root_uri: str) -> Path:

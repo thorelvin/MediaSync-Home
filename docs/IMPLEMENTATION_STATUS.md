@@ -1,5 +1,19 @@
 # Implementeringsstatus
 
+Update 2026-08-02: `SAF-005` writable-target registration now performs an
+authoritative physical-root overlap check before allocating an intent or
+creating `.mediasync`. OS-handle identity rejects aliases of the same directory;
+resolved final paths reject equal or nested source/target and target/target
+roots while still allowing separate roots on one volume. The bounded catalog
+scope includes the active job's source, already writable targets, and endpoint
+roots claimed by every other active job. Missing identity evidence, stale job
+state, incomplete source context, reparse roots, or more than 1024 protected
+roots fail closed. The check runs again when a prepared registration intent is
+resumed, so a post-crash alias or root drift is blocked before filesystem
+mutation. Integration tests prove no control-area mutation, durable blocked
+reconciliation, and cross-job claim coverage. Draft-time physical identity
+feedback and the `UX-006` same-device warning remain open.
+
 Update 2026-08-02: `DB-003` scanner stability now includes bounded volatile-
 directory rescans. The local scanner retries an identity or metadata change at
 most twice and rolls back every entry, coverage row, issue, filter decision,
