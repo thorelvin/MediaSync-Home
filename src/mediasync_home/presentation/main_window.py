@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -7612,7 +7613,10 @@ class MediaSyncWindow(QMainWindow):
 
     def _apply_job_status_state(self, state: BackupJobStatusViewState) -> None:
         if self._activity_status_title is not None:
-            self._activity_status_title.setText(self._display(state.title))
+            _set_activity_label_text(
+                self._activity_status_title,
+                self._display(state.title),
+            )
         texts = self._texts()
         values = (
             (texts.activity, state.activity_label),
@@ -7626,7 +7630,7 @@ class MediaSyncWindow(QMainWindow):
         for row, (label, value) in zip(
             self._activity_dimension_rows, values, strict=False
         ):
-            row.setText(f"{label}: {self._display(value)}")
+            _set_activity_label_text(row, f"{label}: {self._display(value)}")
         self._refresh_responsive_page_geometry(
             self._activity_content,
             self._activity_scroll_area,
@@ -7667,52 +7671,70 @@ class MediaSyncWindow(QMainWindow):
         self, state: PlanOperationPreviewState
     ) -> None:
         if self._plan_preview_title is not None:
-            self._plan_preview_title.setText(self._display(state.title))
+            _set_activity_label_text(
+                self._plan_preview_title,
+                self._display(state.title),
+            )
         if self._plan_preview_summary is not None:
-            self._plan_preview_summary.setText(self._display(state.summary_label))
+            _set_activity_label_text(
+                self._plan_preview_summary,
+                self._display(state.summary_label),
+            )
         lines = tuple(
             f"{row.risk_label}: {row.display_line}" for row in state.rows
         ) or ("No plan operations.",)
         for index, row in enumerate(self._plan_preview_rows):
             if index < len(lines):
-                row.setText(self._display(lines[index]))
+                _set_activity_label_text(row, self._display(lines[index]))
                 row.setVisible(True)
             else:
-                row.setText("")
+                _set_activity_label_text(row, "")
                 row.setVisible(False)
 
     def _apply_plan_endpoint_preview_state(
         self, state: PlanEndpointPreviewState
     ) -> None:
         if self._plan_endpoint_title is not None:
-            self._plan_endpoint_title.setText(self._display(state.title))
+            _set_activity_label_text(
+                self._plan_endpoint_title,
+                self._display(state.title),
+            )
         if self._plan_endpoint_summary is not None:
-            self._plan_endpoint_summary.setText(self._display(state.summary_label))
+            _set_activity_label_text(
+                self._plan_endpoint_summary,
+                self._display(state.summary_label),
+            )
         lines = tuple(row.display_line for row in state.rows) or ("No endpoint rows.",)
         for index, row in enumerate(self._plan_endpoint_rows):
             if index < len(lines):
-                row.setText(self._display(lines[index]))
+                _set_activity_label_text(row, self._display(lines[index]))
                 row.setVisible(True)
             else:
-                row.setText("")
+                _set_activity_label_text(row, "")
                 row.setVisible(False)
 
     def _apply_snapshot_health_preview_state(
         self, state: SnapshotHealthPreviewState
     ) -> None:
         if self._snapshot_health_title is not None:
-            self._snapshot_health_title.setText(self._display(state.title))
+            _set_activity_label_text(
+                self._snapshot_health_title,
+                self._display(state.title),
+            )
         if self._snapshot_health_summary is not None:
-            self._snapshot_health_summary.setText(self._display(state.summary_label))
+            _set_activity_label_text(
+                self._snapshot_health_summary,
+                self._display(state.summary_label),
+            )
         lines = tuple(row.display_line for row in state.rows) or (
             "No snapshot health rows.",
         )
         for index, row in enumerate(self._snapshot_health_rows):
             if index < len(lines):
-                row.setText(self._display(lines[index]))
+                _set_activity_label_text(row, self._display(lines[index]))
                 row.setVisible(True)
             else:
-                row.setText("")
+                _set_activity_label_text(row, "")
                 row.setVisible(False)
 
     def _apply_filter_decision_preview_state(
@@ -7720,9 +7742,13 @@ class MediaSyncWindow(QMainWindow):
         state: FilterDecisionPreviewState,
     ) -> None:
         if self._filter_decision_title is not None:
-            self._filter_decision_title.setText(self._display(state.title))
+            _set_activity_label_text(
+                self._filter_decision_title,
+                self._display(state.title),
+            )
         if self._filter_decision_summary is not None:
-            self._filter_decision_summary.setText(
+            _set_activity_label_text(
+                self._filter_decision_summary,
                 self._display(state.summary_label)
             )
         lines = tuple(row.display_line for row in state.rows) or (
@@ -7730,10 +7756,10 @@ class MediaSyncWindow(QMainWindow):
         )
         for index, row in enumerate(self._filter_decision_rows):
             if index < len(lines):
-                row.setText(self._display(lines[index]))
+                _set_activity_label_text(row, self._display(lines[index]))
                 row.setVisible(True)
             else:
-                row.setText("")
+                _set_activity_label_text(row, "")
                 row.setVisible(False)
         self._refresh_responsive_page_geometry(
             self._activity_content,
@@ -7744,18 +7770,24 @@ class MediaSyncWindow(QMainWindow):
         self, state: CatalogedFilesPreviewState
     ) -> None:
         if self._cataloged_files_title is not None:
-            self._cataloged_files_title.setText(self._display(state.title))
+            _set_activity_label_text(
+                self._cataloged_files_title,
+                self._display(state.title),
+            )
         if self._cataloged_files_summary is not None:
-            self._cataloged_files_summary.setText(self._display(state.summary_label))
+            _set_activity_label_text(
+                self._cataloged_files_summary,
+                self._display(state.summary_label),
+            )
         lines = tuple(row.display_line for row in state.rows) or (
             "No cataloged files.",
         )
         for index, row in enumerate(self._cataloged_files_rows):
             if index < len(lines):
-                row.setText(self._display(lines[index]))
+                _set_activity_label_text(row, self._display(lines[index]))
                 row.setVisible(True)
             else:
-                row.setText("")
+                _set_activity_label_text(row, "")
                 row.setVisible(False)
         self._refresh_responsive_page_geometry(
             self._activity_content,
@@ -10164,6 +10196,21 @@ def _scrollable_page(widget: QWidget, object_name: str) -> QScrollArea:
     widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
     scroll.setWidget(widget)
     return scroll
+
+
+_LONG_ACTIVITY_TOKEN_PATTERN = re.compile(r"\S{33,}")
+
+
+def _set_activity_label_text(label: QLabel, text: str) -> None:
+    display_text = _LONG_ACTIVITY_TOKEN_PATTERN.sub(
+        lambda match: (
+            f"{match.group(0)[:16]}\N{HORIZONTAL ELLIPSIS}{match.group(0)[-8:]}"
+        ),
+        text,
+    )
+    label.setText(display_text)
+    label.setToolTip(text if display_text != text else "")
+    label.setAccessibleName(text)
 
 
 def _configure_responsive_label(label: QLabel, *, selectable: bool = False) -> None:

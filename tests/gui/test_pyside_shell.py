@@ -4381,6 +4381,9 @@ def test_activity_bar_wraps_exact_filter_decisions_without_clipping(qapp) -> Non
         assert row.sizePolicy().horizontalPolicy() is QSizePolicy.Policy.Ignored
         assert "Ekskludert:" in row.text()
         assert "default-long-cache-rule" in row.text()
+        assert "\N{HORIZONTAL ELLIPSIS}" in row.text()
+        assert "ApplicationCacheFolderWithoutAnyNaturalBreakPoint" * 3 in row.toolTip()
+        assert row.accessibleName() == row.toolTip()
         assert row.width() <= activity_scroll.viewport().width()
         assert row.height() >= row.heightForWidth(row.width())
         activity_content = activity_scroll.widget()
