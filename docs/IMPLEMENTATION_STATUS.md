@@ -1,5 +1,20 @@
 # Implementeringsstatus
 
+Oppdatering 2026-08-01: **Endringer**, **Historikk**-tidslinjen og historikkens
+**Filresultater** prefetchet nå høyst én neste side per arbeidsflate. Hver cache
+er bundet til eksakt plan, aktivitet, run, filter, side, keyset-cursor og
+generasjon; navigasjon bakover, refresh, filter-/jobb-/aktivitetsskifte og
+window-close ugyldiggjør resultatet. Spekulative reads bruker én separat,
+serialisert worker-client med høyst én aktiv og én latest-wins pending request,
+og kan derfor aldri ligge foran en brukerbestilt read i den ordinære querykøen.
+Ved cachetreff bytter **Neste** side uten ny IPC-venting
+og starter eventuelt ett nytt lookahead; ved miss går den ordinære bounded
+bakgrunnsreaden som før. GUI-et materialiserer fortsatt bare gjeldende side i
+Qt-modellen, mens hver arbeidsflate kan holde høyst én plain view-model-side i
+prefetchcache. Testene dekker keyset og eldre offset-Host, cacheerstatning,
+Changes, tidslinje og filresultater samt en blokkert prefetch mens en nyere
+foreground-filterread fullfører og det gamle resultatet forkastes.
+
 Oppdatering 2026-08-01: **Historikk**-tidslinjen bruker nå en versjonert,
 typet keyset-cursor med total rekkefølge over
 `(started_utc, activity_kind, activity_id)` i stedet for produksjons-`OFFSET`.
@@ -10,7 +25,8 @@ grense 10 000. Catalog schema 41 legger globale og jobbfiltrerte
 expression-indekser på begge kontrollkildene samt analyseoppslaget; runs bruker
 de eksisterende recent-run-indeksene. SQLite-testene beviser identiske
 tidsstempler, innsetting mellom sider, faktiske index seeks og varm side ved en
-100 000-raders runkatalog. Kontrollert bakgrunnsprefetch gjenstår.
+100 000-raders runkatalog. Kontrollert bakgrunnsprefetch er levert i
+oppdateringen over.
 
 Oppdatering 2026-08-01: De tre uavgrensede resultatsflatene **Endringer**,
 **Historikk**-tidslinjen og historikkens **Filresultater** bruker nå en delt
@@ -24,8 +40,8 @@ fortsatt til immutable activity-/operation-ID. En simulert millionradkilde
 beviser at første og siste side bare holder 200 plain row records og ingen
 per-rad `QObject`/`QWidget`-graf. Reelle Qt-klikk bevarer filter, paging,
 filaudit/retry, stale-query-sperre, norsk/engelsk og null horisontal overflow
-ved 900×560. Tidslinjens keyset-migrasjon er levert i oppdateringen over;
-kontrollert bakgrunnsprefetch gjenstår.
+ved 900×560. Tidslinjens keyset-migrasjon og kontrollert bakgrunnsprefetch er
+levert i oppdateringene over.
 
 Oppdatering 2026-08-01: Alle ikke-rekonstruerbare GUI-kommandoer kjører nå på
 en egen serialisert command-worker med en separat, gjenbrukt Engine-client.
@@ -61,8 +77,8 @@ holder maksimalt 16 kanaler og anvender bare siste snapshot per kanal ved høyst
 analyse, Endringer, Historikk og filaudit med vilje, utfører reelle klikk mens de
 venter og verifiserer latest-wins, én aktiv worker, én client-factory-resolusjon,
 close-cancellation, bounded overflow, norsk/engelsk og 900×560 uten horisontal
-clipping. Virtuelle resultattabeller og historikktidslinjens keyset-migrasjon er
-levert i oppdateringene over; kontrollert prefetch gjenstår.
+clipping. Virtuelle resultattabeller, historikktidslinjens keyset-migrasjon og
+kontrollert prefetch er levert i oppdateringene over.
 
 Oppdatering 2026-07-31: **Historikk** kan nå prøve én valgt uferdig fil på
 nytt fra den bounded, paginerte filresultatvisningen. Handlingen vises bare
@@ -98,8 +114,8 @@ og materialiserer høyst 25 rader i GUI-et. Valgt endring viser beslutning,
 operasjonstype, mål, sti, rå årsakskode, målprecondition og planlagte byte.
 Norsk/engelsk språkbytte bevarer filtre og valgt detalj; to sider, to mål,
 safe/review/high/blocked og 900×560 uten horisontal overflow er dekket.
-Virtuelle resultattabeller og historikktidslinjens keyset-migrasjon er levert i
-oppdateringene over. Kontrollert sideprefetch og bredere faktisk kansellering av
+Virtuelle resultattabeller, historikktidslinjens keyset-migrasjon og kontrollert
+sideprefetch er levert i oppdateringene over. Bredere faktisk kansellering av
 allerede kjørende bakgrunnsspørringer gjenstår.
 
 Oppdatering 2026-07-31: Terminale resultater i **Jobber** viser nå et stabilt,

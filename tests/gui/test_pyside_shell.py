@@ -45,6 +45,7 @@ from mediasync_home.ipc.protocol import IpcResponse  # noqa: E402
 from mediasync_home.presentation.app import build_main_window, ensure_qapplication  # noqa: E402
 from mediasync_home.presentation.background_queries import (  # noqa: E402
     BackgroundQueryController,
+    BoundedPagePrefetchCache,
     CommandSubmissionController,
     UiUpdateCoalescer,
 )
@@ -1712,6 +1713,66 @@ def test_jobs_changes_workspace_filters_pages_and_localizes_without_clipping(
         window.deleteLater()
 
 
+def test_changes_next_page_uses_one_page_prefetch(qapp) -> None:
+    provider = _FakeChangesDashboardEngineClient()
+    worker_provider = _FakeChangesDashboardEngineClient()
+    factory_calls: list[bool] = []
+
+    def worker_factory() -> _FakeChangesDashboardEngineClient:
+        factory_calls.append(True)
+        return worker_provider
+
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=worker_factory,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.show()
+        window._changes_plan_id = "plan-a"
+        window._refresh_changes_page()
+        changes_list = window.findChild(BoundedVirtualTableView, "changesList")
+        next_button = window.findChild(QToolButton, "changesNextButton")
+        assert changes_list is not None
+        assert next_button is not None
+
+        def prefetched() -> bool:
+            return (
+                len(worker_provider.changes_queries) == 2
+                and window._changes_page_prefetch.count == 1
+                and window._page_prefetch_queries is not None
+                and not window._page_prefetch_queries.active
+                and window._ui_update_coalescer.pending_count == 0
+            )
+
+        deadline = monotonic() + 3
+        while not prefetched() and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        assert prefetched()
+        assert len(factory_calls) == 2
+        assert worker_provider.changes_queries[1][2] == {
+            "execution_phase": 20,
+            "stable_order_key": "photos/review.jpg",
+            "operation_id": "op-review",
+        }
+        assert next_button.isEnabled()
+
+        QTest.mouseClick(next_button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert len(worker_provider.changes_queries) == 2
+        assert window._changes_page_index == 1
+        assert window._changes_page_prefetch.count == 0
+        assert _virtual_row_id(changes_list, 0) == "op-high"
+        assert not window._changes_query_pending
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_changes_query_stall_does_not_block_navigation_and_keeps_latest_filter(
     qapp,
 ) -> None:
@@ -1835,6 +1896,21 @@ def test_ui_update_coalescer_is_bounded_and_applies_only_latest_value(
     assert applied == [99]
     assert coalescer.pending_count == 0
     coalescer.deleteLater()
+
+
+def test_page_prefetch_cache_keeps_only_one_exact_context() -> None:
+    cache = BoundedPagePrefetchCache[str, tuple[int, ...]]()
+
+    cache.store(context="page-a", page=(1, 2))
+    cache.store(context="page-b", page=(3, 4))
+
+    assert cache.count == 1
+    assert cache.take(context="page-a") is None
+    assert cache.count == 0
+
+    cache.store(context="page-b", page=(3, 4))
+    assert cache.take(context="page-b") == (3, 4)
+    assert cache.count == 0
 
 
 def test_background_query_close_discards_late_worker_result(qapp) -> None:
@@ -2303,6 +2379,90 @@ def test_history_workspace_pages_with_stable_cursors(qapp) -> None:
         window.deleteLater()
 
 
+@pytest.mark.parametrize(
+    ("paging_mode", "expected_second_request"),
+    [
+        (
+            "keyset",
+            (
+                "ALL",
+                None,
+                25,
+                {
+                    "cursor_version": 1,
+                    "started_utc": "2026-07-20T12:00:00.000Z",
+                    "activity_kind": "BACKUP",
+                    "activity_id": "run-a",
+                },
+                None,
+            ),
+        ),
+        (
+            "legacy",
+            ("ALL", None, 25, None, 25),
+        ),
+    ],
+)
+def test_history_next_page_uses_keyset_or_legacy_prefetch(
+    qapp,
+    paging_mode,
+    expected_second_request,
+) -> None:
+    provider = (
+        _FakePagedHistoryEngineClient()
+        if paging_mode == "keyset"
+        else _FakeLegacyPagedHistoryEngineClient()
+    )
+    worker_provider = (
+        _FakePagedHistoryEngineClient()
+        if paging_mode == "keyset"
+        else _FakeLegacyPagedHistoryEngineClient()
+    )
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=lambda: worker_provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.show()
+        window._refresh_history_timeline()
+        history_list = window.findChild(BoundedVirtualTableView, "historyList")
+        next_button = window.findChild(QToolButton, "historyNextButton")
+        assert history_list is not None
+        assert next_button is not None
+
+        def prefetched() -> bool:
+            return (
+                len(worker_provider.history_queries) == 2
+                and window._history_page_prefetch.count == 1
+                and window._page_prefetch_queries is not None
+                and not window._page_prefetch_queries.active
+                and window._ui_update_coalescer.pending_count == 0
+            )
+
+        deadline = monotonic() + 3
+        while not prefetched() and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        assert prefetched()
+        assert worker_provider.history_queries[1] == expected_second_request
+        assert next_button.isEnabled()
+
+        QTest.mouseClick(next_button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert len(worker_provider.history_queries) == 2
+        assert window._history_page_index == 1
+        assert window._history_page_prefetch.count == 0
+        assert _virtual_row_id(history_list, 0) == "BACKUP:run-z"
+        assert not window._history_query_pending
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_history_workspace_falls_back_for_legacy_offset_host(qapp) -> None:
     provider = _FakeLegacyPagedHistoryEngineClient()
     window = build_main_window(
@@ -2337,6 +2497,96 @@ def test_history_workspace_falls_back_for_legacy_offset_host(qapp) -> None:
         window.deleteLater()
 
 
+def test_stalled_history_prefetch_never_blocks_or_repaints_foreground_filter(
+    qapp,
+) -> None:
+    provider = _FakePagedHistoryEngineClient()
+    foreground_provider = _FakePagedHistoryEngineClient()
+    prefetch_provider = _BlockingPagedHistoryEngineClient(block_call_no=1)
+    factory_calls: list[object] = []
+
+    def worker_factory() -> object:
+        client: object = (
+            foreground_provider if not factory_calls else prefetch_provider
+        )
+        factory_calls.append(client)
+        return client
+
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=worker_factory,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.show()
+        window._selected_navigation_index = 2
+        assert window._workspace_stack is not None
+        window._workspace_stack.setCurrentIndex(2)
+        window._refresh_history_timeline()
+        backups = window._history_filter_buttons["BACKUPS"]
+
+        deadline = monotonic() + 3
+        while not prefetch_provider.started.is_set() and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        assert prefetch_provider.started.is_set()
+        assert window._page_prefetch_queries is not None
+        assert window._page_prefetch_queries.active
+        assert not prefetch_provider.release.is_set()
+
+        QTest.mouseClick(backups, Qt.MouseButton.LeftButton)
+
+        def foreground_settled() -> bool:
+            return (
+                len(foreground_provider.history_queries) == 2
+                and window._background_queries is not None
+                and not window._background_queries.active
+                and window._ui_update_coalescer.pending_count == 0
+                and window._history_timeline_state.activity_filter == "BACKUPS"
+            )
+
+        deadline = monotonic() + 3
+        while not foreground_settled() and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        assert foreground_settled()
+        assert not prefetch_provider.release.is_set()
+        assert window._page_prefetch_queries.active
+        assert window._page_prefetch_queries.pending_count == 1
+        assert window._history_page_prefetch.count == 0
+        assert foreground_provider.history_queries == [
+            ("ALL", None, 25, None, None),
+            ("BACKUPS", None, 25, None, None),
+        ]
+        assert factory_calls == [foreground_provider, prefetch_provider]
+
+        prefetch_provider.release.set()
+        deadline = monotonic() + 3
+        while window._page_prefetch_queries.active and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        assert not window._page_prefetch_queries.active
+        assert window._page_prefetch_queries.pending_count == 0
+        assert window._history_page_prefetch.count == 1
+        assert window._history_timeline_state.activity_filter == "BACKUPS"
+        assert prefetch_provider.history_queries[1][0] == "BACKUPS"
+
+        next_button = window.findChild(QToolButton, "historyNextButton")
+        history_list = window.findChild(BoundedVirtualTableView, "historyList")
+        assert next_button is not None and next_button.isEnabled()
+        assert history_list is not None
+        QTest.mouseClick(next_button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert len(foreground_provider.history_queries) == 2
+        assert _virtual_row_id(history_list, 0) == "BACKUP:run-z"
+    finally:
+        prefetch_provider.release.set()
+        window.close()
+        window.deleteLater()
+
+
 def test_history_query_stall_keeps_navigation_and_latest_filter_responsive(
     qapp,
 ) -> None:
@@ -2354,6 +2604,9 @@ def test_history_query_stall_keeps_navigation_and_latest_filter_responsive(
         engine_client_factory=worker_factory,
         theme_mode=ThemeMode.DARK,
     )
+    assert window._page_prefetch_queries is not None
+    window._page_prefetch_queries.close()
+    window._page_prefetch_queries = None
 
     try:
         window.resize(900, 560)
@@ -2625,6 +2878,67 @@ def test_history_file_results_page_with_bounded_plan_cursors(qapp) -> None:
 
         assert provider.operation_page_queries[-1] == ("plan-a", 200, None)
         assert _virtual_row_id(operation_list, 0) == "op-a"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_history_file_results_next_page_uses_one_page_prefetch(qapp) -> None:
+    provider = _FakePagedHistoryOperationsEngineClient()
+    worker_provider = _FakePagedHistoryOperationsEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=lambda: worker_provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.show()
+        window._selected_navigation_index = 2
+        assert window._workspace_stack is not None
+        window._workspace_stack.setCurrentIndex(2)
+        window._history_operation_activity_key = "run-a:plan-a"
+        window._history_operation_run_id = "run-a"
+        window._history_operation_plan_id = "plan-a"
+        window._refresh_history_operation_page()
+        operation_list = window.findChild(
+            BoundedVirtualTableView,
+            "historyOperationList",
+        )
+        next_button = window.findChild(QToolButton, "historyOperationNextButton")
+        assert operation_list is not None
+        assert next_button is not None
+
+        def prefetched() -> bool:
+            return (
+                len(worker_provider.operation_page_queries) == 2
+                and window._history_operation_page_prefetch.count == 1
+                and window._page_prefetch_queries is not None
+                and not window._page_prefetch_queries.active
+                and window._ui_update_coalescer.pending_count == 0
+            )
+
+        deadline = monotonic() + 3
+        while not prefetched() and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        assert prefetched()
+        assert worker_provider.operation_page_queries[1][2] == {
+            "execution_phase": 20,
+            "stable_order_key": "photos/a.jpg",
+            "operation_id": "op-a",
+        }
+        assert next_button.isEnabled()
+
+        QTest.mouseClick(next_button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert len(worker_provider.operation_page_queries) == 2
+        assert window._history_operation_page_index == 1
+        assert window._history_operation_page_prefetch.count == 0
+        assert _virtual_row_id(operation_list, 0) == "op-z"
+        assert not window._history_operation_query_pending
     finally:
         window.close()
         window.deleteLater()

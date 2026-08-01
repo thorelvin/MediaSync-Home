@@ -1,5 +1,21 @@
 # Kravsporbarhet
 
+Oppdatering 2026-08-01 for `UX-002`, `UX-004` og `PERF-001`:
+Endringer, Historikk-tidslinjen og Historikk-filresultater har nå kontrollert
+én-sides lookahead. En egen serialisert prefetch-worker med høyst én aktiv og én
+latest-wins pending request holder spekulative reads ute av foreground-køen,
+og tre one-entry-cacher holder høyst én bounded neste
+view-model-side per arbeidsflate uten å materialisere den i Qt-tabellen.
+Cachekonteksten binder generation, plan/aktivitet/run, filter, side og eksakt
+keyset-cursor eller validert legacy-offset. Reverse paging, refresh og
+kontekstskifte ugyldiggjør både callback og cache; cachetreff gjør neste side
+umiddelbar og cachemiss bruker ordinær latest-wins read. GUI-bevis dekker alle
+tre flater, keyset/legacy-kompatibilitet, one-entry-erstatning og en blokkert
+prefetch parallelt med en nyere foreground-filterread uten stale repaint.
+Bevis: `src/mediasync_home/presentation/background_queries.py`,
+`src/mediasync_home/presentation/main_window.py` og
+`tests/gui/test_pyside_shell.py`.
+
 Oppdatering 2026-08-01 for `DB-003`, `PERF-001`, `UX-002` og `UX-004`:
 Historikk-tidslinjen bruker nå en validert versjon-1-keysetcursor over
 `(started_utc, activity_kind, activity_id)` gjennom application, IPC,
@@ -9,7 +25,8 @@ kandidater per kilde merges for en vanlig 25-raders side. Legacy offset er
 beholdt additivt med grense 10 000, og GUI-et faller bare tilbake når Host ikke
 returnerer `next_cursor`. Testene dekker tie-order, insertion drift, 100 000
 runs, lagret `EXPLAIN QUERY PLAN`, malformed cursors, named-pipe-roundtrip,
-cursorstack, eldre Host og stale bakgrunnssvar. Kontrollert prefetch gjenstår.
+cursorstack, eldre Host og stale bakgrunnssvar. Kontrollert prefetch er levert i
+oppdateringen over.
 Bevis: `src/mediasync_home/application/history_read_models.py`,
 `src/mediasync_home/adapters/sqlite/history.py`,
 `src/mediasync_home/adapters/sqlite/migrations.py`,
@@ -120,8 +137,8 @@ keyset-sider; tidslinjen bruker bounded 25-raders keyset-sider.
 Millionradtesten bytter mellom første og siste 200-raders side og beviser at
 den tidligere siden ikke beholdes. GUI-testene dekker reelle radklikk,
 detalj/audit/retry, filter, språk, paging, stale-query-sperre og null
-horisontal overflow ved 900×560. Tidslinjens SQL-keyset-migrasjon er levert;
-bounded bakgrunnsprefetch gjenstår. Bevis:
+horisontal overflow ved 900×560. Tidslinjens SQL-keyset-migrasjon og bounded
+bakgrunnsprefetch er levert. Bevis:
 `src/mediasync_home/presentation/virtual_tables.py`,
 `src/mediasync_home/presentation/main_window.py`,
 `src/mediasync_home/presentation/theme/qss_builder.py`,

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from math import ceil
 from threading import Lock, Thread
 from time import monotonic
+from typing import Generic, TypeVar
 
 from PySide6.QtCore import QObject, QTimer, Qt, Signal, Slot
 
@@ -14,6 +15,9 @@ BackgroundOperation = Callable[[object], object]
 BackgroundResultHandler = Callable[[object], None]
 BackgroundErrorHandler = Callable[[Exception], None]
 UiUpdateHandler = Callable[[object], None]
+
+_ContextT = TypeVar("_ContextT")
+_PageT = TypeVar("_PageT")
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,36 @@ class _QueuedQuery:
 class _PendingUiUpdate:
     value: object
     apply: UiUpdateHandler
+
+
+@dataclass(frozen=True)
+class _PrefetchedPage(Generic[_ContextT, _PageT]):
+    context: _ContextT
+    page: _PageT
+
+
+class BoundedPagePrefetchCache(Generic[_ContextT, _PageT]):
+    """Keeps at most one speculative page bound to its exact request context."""
+
+    def __init__(self) -> None:
+        self._entry: _PrefetchedPage[_ContextT, _PageT] | None = None
+
+    @property
+    def count(self) -> int:
+        return 0 if self._entry is None else 1
+
+    def store(self, *, context: _ContextT, page: _PageT) -> None:
+        self._entry = _PrefetchedPage(context=context, page=page)
+
+    def take(self, *, context: _ContextT) -> _PageT | None:
+        entry = self._entry
+        self._entry = None
+        if entry is None or entry.context != context:
+            return None
+        return entry.page
+
+    def clear(self) -> None:
+        self._entry = None
 
 
 class _WorkerSignals(QObject):

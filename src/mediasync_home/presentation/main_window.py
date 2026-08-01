@@ -57,6 +57,7 @@ from mediasync_home.application.user_preferences import (
 )
 from mediasync_home.presentation.background_queries import (
     BackgroundQueryController,
+    BoundedPagePrefetchCache,
     CommandSubmissionController,
     UiUpdateCoalescer,
 )
@@ -176,6 +177,36 @@ class _PendingRetry:
 class _StatusQueryResult:
     response: IpcResponse
     connected: bool
+
+
+@dataclass(frozen=True)
+class _HistoryPageContext:
+    source_generation: int
+    activity_filter: str
+    job_id: str | None
+    page_index: int
+    cursor: dict[str, object] | None
+    offset: int | None
+
+
+@dataclass(frozen=True)
+class _ChangesPageContext:
+    source_generation: int
+    plan_id: str
+    page_index: int
+    cursor: dict[str, object]
+    target_endpoint_id: str | None
+    risk_levels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _HistoryOperationPageContext:
+    source_generation: int
+    activity_key: str
+    run_id: str
+    plan_id: str
+    page_index: int
+    cursor: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -392,6 +423,15 @@ class MediaSyncWindow(QMainWindow):
             if engine_client_factory is not None
             else None
         )
+        self._page_prefetch_queries = (
+            BackgroundQueryController(
+                client_factory=engine_client_factory,
+                max_pending=1,
+                parent=self,
+            )
+            if engine_client_factory is not None
+            else None
+        )
         self._command_submissions = (
             CommandSubmissionController(
                 client_factory=engine_client_factory,
@@ -496,6 +536,11 @@ class MediaSyncWindow(QMainWindow):
         self._history_page_cursors: list[dict[str, object] | None] = [None]
         self._history_legacy_offset_mode = False
         self._history_query_pending = False
+        self._history_page_generation = 0
+        self._history_page_prefetch = BoundedPagePrefetchCache[
+            _HistoryPageContext,
+            HistoryTimelineViewState,
+        ]()
         self._history_activity_filter = "ALL"
         self._history_job_id: str | None = None
         self._selected_history_activity_id: str | None = None
@@ -518,6 +563,11 @@ class MediaSyncWindow(QMainWindow):
         self._history_operation_page_index = 0
         self._history_operation_query_pending = False
         self._history_operation_page_cursors: list[dict[str, object] | None] = [None]
+        self._history_operation_page_generation = 0
+        self._history_operation_page_prefetch = BoundedPagePrefetchCache[
+            _HistoryOperationPageContext,
+            PlanOperationPreviewState,
+        ]()
         self._selected_history_operation_id: str | None = None
         self._history_audit_query_pending = False
         self._history_operation_detail_title: QLabel | None = None
@@ -593,6 +643,11 @@ class MediaSyncWindow(QMainWindow):
         self._changes_page_index = 0
         self._changes_page_cursors: list[dict[str, object] | None] = [None]
         self._changes_query_pending = False
+        self._changes_page_generation = 0
+        self._changes_page_prefetch = BoundedPagePrefetchCache[
+            _ChangesPageContext,
+            PlanOperationPreviewState,
+        ]()
         self._changes_target_filter: str | None = None
         self._changes_risk_filter = "ALL"
         self._selected_changes_operation_id: str | None = None
@@ -712,6 +767,8 @@ class MediaSyncWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._background_queries is not None:
             self._background_queries.close()
+        if self._page_prefetch_queries is not None:
+            self._page_prefetch_queries.close()
         if self._command_submissions is not None:
             self._command_submissions.close()
         self._ui_update_coalescer.cancel_all()
@@ -725,6 +782,10 @@ class MediaSyncWindow(QMainWindow):
 
     def _command_worker_active(self) -> bool:
         return self._command_submissions is not None and self._command_submissions.active
+
+    def _page_prefetch_lane_available(self) -> bool:
+        controller = self._page_prefetch_queries
+        return controller is not None and controller.pending_count == 0
 
     def _submit_engine_command(
         self,
@@ -1388,7 +1449,7 @@ class MediaSyncWindow(QMainWindow):
         ):
             return
         self._set_history_query_pending(False)
-        self._apply_history_response(response)
+        self._apply_history_response(response, schedule_prefetch=True)
 
     def _reject_background_history_response(
         self,
@@ -1445,19 +1506,109 @@ class MediaSyncWindow(QMainWindow):
             and current_offset == page_offset
         )
 
-    def _apply_history_response(self, response: IpcResponse) -> None:
+    def _apply_history_response(
+        self,
+        response: IpcResponse,
+        *,
+        schedule_prefetch: bool = False,
+    ) -> None:
         state = history_timeline_from_response(response)
+        self._apply_history_page_state(
+            state,
+            schedule_prefetch=schedule_prefetch,
+        )
+
+    def _apply_history_page_state(
+        self,
+        state: HistoryTimelineViewState,
+        *,
+        schedule_prefetch: bool,
+    ) -> None:
+        self._history_page_generation += 1
         self._history_legacy_offset_mode = not state.keyset_paging_available
         activity_ids = {activity.selection_key for activity in state.activities}
         if self._selected_history_activity_id not in activity_ids:
             self._selected_history_activity_id = state.selected_activity_id
         self.apply_history_timeline(state)
+        if schedule_prefetch:
+            self._schedule_history_page_prefetch()
 
     def _cancel_background_history_query(self) -> None:
         if self._background_queries is not None:
             self._background_queries.cancel("history-timeline")
         self._ui_update_coalescer.cancel("history-timeline")
+        self._cancel_history_page_prefetch()
         self._set_history_query_pending(False)
+
+    def _history_next_page_context(self) -> _HistoryPageContext | None:
+        state = self._history_timeline_state
+        if not state.has_more:
+            return None
+        cursor = state.next_cursor
+        if not self._history_legacy_offset_mode and cursor is None:
+            return None
+        return _HistoryPageContext(
+            source_generation=self._history_page_generation,
+            activity_filter=self._history_activity_filter,
+            job_id=self._history_job_id,
+            page_index=self._history_page_index + 1,
+            cursor=(
+                None
+                if self._history_legacy_offset_mode or cursor is None
+                else dict(cursor)
+            ),
+            offset=(
+                (self._history_page_index + 1) * self._history_page_limit
+                if self._history_legacy_offset_mode
+                else None
+            ),
+        )
+
+    def _schedule_history_page_prefetch(self) -> None:
+        self._history_page_prefetch.clear()
+        context = self._history_next_page_context()
+        controller = self._page_prefetch_queries
+        if context is None or controller is None or not self._page_prefetch_lane_available():
+            return
+        page_limit = self._history_page_limit
+
+        def query(client: object) -> object:
+            provider = cast(HistoryTimelineProvider, client)
+            return provider.get_history_timeline(
+                activity_filter=context.activity_filter,
+                job_id=context.job_id,
+                limit=page_limit,
+                after=context.cursor,
+                offset=context.offset,
+            )
+
+        def accept(response: object) -> None:
+            if self._history_next_page_context() != context:
+                return
+            state = history_timeline_from_response(cast(IpcResponse, response))
+            expected_keyset = context.offset is None
+            if (
+                not state.read_model_available
+                or len(state.activities) > page_limit
+                or state.activity_filter != context.activity_filter
+                or state.job_id != context.job_id
+                or state.keyset_paging_available != expected_keyset
+                or (context.offset is not None and state.offset != context.offset)
+            ):
+                return
+            self._history_page_prefetch.store(context=context, page=state)
+
+        controller.submit(
+            key="history-page-prefetch",
+            operation=query,
+            on_result=accept,
+            on_error=lambda _error: None,
+        )
+
+    def _cancel_history_page_prefetch(self) -> None:
+        self._history_page_prefetch.clear()
+        if self._page_prefetch_queries is not None:
+            self._page_prefetch_queries.cancel("history-page-prefetch")
 
     def _set_history_query_pending(self, pending: bool) -> None:
         self._history_query_pending = pending
@@ -1590,6 +1741,8 @@ class MediaSyncWindow(QMainWindow):
         self._refresh_history_timeline()
 
     def _reset_history_paging(self) -> None:
+        self._cancel_history_page_prefetch()
+        self._history_page_generation += 1
         self._history_page_index = 0
         self._history_page_cursors = [None]
         self._history_legacy_offset_mode = False
@@ -1598,6 +1751,7 @@ class MediaSyncWindow(QMainWindow):
     def _show_previous_history_page(self) -> None:
         if self._history_query_pending or self._history_page_index <= 0:
             return
+        self._cancel_history_page_prefetch()
         self._history_page_index -= 1
         self._selected_history_activity_id = None
         self._refresh_history_timeline()
@@ -1608,6 +1762,10 @@ class MediaSyncWindow(QMainWindow):
         next_cursor = self._history_timeline_state.next_cursor
         if not self._history_legacy_offset_mode and next_cursor is None:
             return
+        context = self._history_next_page_context()
+        if context is None:
+            return
+        prefetched_state = self._history_page_prefetch.take(context=context)
         next_index = self._history_page_index + 1
         self._history_page_cursors = self._history_page_cursors[:next_index]
         self._history_page_cursors.append(
@@ -1615,6 +1773,13 @@ class MediaSyncWindow(QMainWindow):
         )
         self._history_page_index = next_index
         self._selected_history_activity_id = None
+        if prefetched_state is not None:
+            self._apply_history_page_state(
+                prefetched_state,
+                schedule_prefetch=True,
+            )
+            return
+        self._cancel_history_page_prefetch()
         self._refresh_history_timeline()
 
     def _apply_history_job_filter_options(
@@ -1855,14 +2020,16 @@ class MediaSyncWindow(QMainWindow):
                 )
             return
         provider = cast(PlanOperationsProvider, self._engine_client)
-        self._history_operation_page_state = plan_operation_preview_from_response(
-            provider.get_plan_operations(
-                plan_id=plan_id,
-                limit=page_limit,
-                after=cursor,
-            )
+        self._install_history_operation_page_state(
+            plan_operation_preview_from_response(
+                provider.get_plan_operations(
+                    plan_id=plan_id,
+                    limit=page_limit,
+                    after=cursor,
+                )
+            ),
+            schedule_prefetch=False,
         )
-        self._apply_history_operation_page_state(self._history_operation_page_state)
 
     def _accept_background_history_operation_page(
         self,
@@ -1883,10 +2050,22 @@ class MediaSyncWindow(QMainWindow):
         ):
             return
         self._set_history_operation_query_pending(False)
-        self._history_operation_page_state = plan_operation_preview_from_response(
-            response
+        self._install_history_operation_page_state(
+            plan_operation_preview_from_response(response),
+            schedule_prefetch=True,
         )
-        self._apply_history_operation_page_state(self._history_operation_page_state)
+
+    def _install_history_operation_page_state(
+        self,
+        state: PlanOperationPreviewState,
+        *,
+        schedule_prefetch: bool,
+    ) -> None:
+        self._history_operation_page_generation += 1
+        self._history_operation_page_state = state
+        self._apply_history_operation_page_state(state)
+        if schedule_prefetch:
+            self._schedule_history_operation_page_prefetch()
 
     def _reject_background_history_operation_page(
         self,
@@ -2061,7 +2240,78 @@ class MediaSyncWindow(QMainWindow):
         if self._background_queries is not None:
             self._background_queries.cancel("history-operation-page")
         self._ui_update_coalescer.cancel("history-operation-page")
+        self._cancel_history_operation_page_prefetch()
         self._set_history_operation_query_pending(False)
+
+    def _history_operation_next_page_context(
+        self,
+    ) -> _HistoryOperationPageContext | None:
+        state = self._history_operation_page_state
+        cursor = state.next_cursor
+        activity_key = self._history_operation_activity_key
+        run_id = self._history_operation_run_id
+        plan_id = self._history_operation_plan_id
+        if (
+            not state.has_more_operations
+            or cursor is None
+            or activity_key is None
+            or run_id is None
+            or plan_id is None
+        ):
+            return None
+        return _HistoryOperationPageContext(
+            source_generation=self._history_operation_page_generation,
+            activity_key=activity_key,
+            run_id=run_id,
+            plan_id=plan_id,
+            page_index=self._history_operation_page_index + 1,
+            cursor=dict(cursor),
+        )
+
+    def _schedule_history_operation_page_prefetch(self) -> None:
+        self._history_operation_page_prefetch.clear()
+        context = self._history_operation_next_page_context()
+        controller = self._page_prefetch_queries
+        if context is None or controller is None or not self._page_prefetch_lane_available():
+            return
+        page_limit = self._history_operation_page_limit
+
+        def query(client: object) -> object:
+            provider = cast(PlanOperationsProvider, client)
+            return provider.get_plan_operations(
+                plan_id=context.plan_id,
+                limit=page_limit,
+                after=context.cursor,
+            )
+
+        def accept(response: object) -> None:
+            if self._history_operation_next_page_context() != context:
+                return
+            state = plan_operation_preview_from_response(
+                cast(IpcResponse, response)
+            )
+            if (
+                not state.read_model_available
+                or state.plan_id != context.plan_id
+                or len(state.rows) > page_limit
+            ):
+                return
+            self._history_operation_page_prefetch.store(
+                context=context,
+                page=state,
+            )
+
+        controller.submit(
+            key="history-operation-page-prefetch",
+            operation=query,
+            on_result=accept,
+            on_error=lambda _error: None,
+        )
+
+    def _cancel_history_operation_page_prefetch(self) -> None:
+        self._history_operation_page_prefetch.clear()
+        if self._page_prefetch_queries is not None:
+            self._page_prefetch_queries.cancel("history-operation-page-prefetch")
 
     def _cancel_background_history_operation_queries(self) -> None:
         self._cancel_background_history_operation_page_query()
@@ -2410,6 +2660,7 @@ class MediaSyncWindow(QMainWindow):
             or self._history_operation_page_index <= 0
         ):
             return
+        self._cancel_history_operation_page_prefetch()
         self._history_operation_page_index -= 1
         self._selected_history_operation_id = None
         self._history_operation_audit_state = empty_operation_audit_state(
@@ -2425,17 +2676,30 @@ class MediaSyncWindow(QMainWindow):
             or state.next_cursor is None
         ):
             return
+        context = self._history_operation_next_page_context()
+        if context is None:
+            return
+        prefetched_state = self._history_operation_page_prefetch.take(
+            context=context
+        )
         next_index = self._history_operation_page_index + 1
         if next_index == len(self._history_operation_page_cursors):
-            self._history_operation_page_cursors.append(state.next_cursor)
+            self._history_operation_page_cursors.append(dict(state.next_cursor))
         else:
-            self._history_operation_page_cursors[next_index] = state.next_cursor
+            self._history_operation_page_cursors[next_index] = dict(state.next_cursor)
             del self._history_operation_page_cursors[next_index + 1 :]
         self._history_operation_page_index = next_index
         self._selected_history_operation_id = None
         self._history_operation_audit_state = empty_operation_audit_state(
             run_id=self._history_operation_run_id
         )
+        if prefetched_state is not None:
+            self._install_history_operation_page_state(
+                prefetched_state,
+                schedule_prefetch=True,
+            )
+            return
+        self._cancel_history_operation_page_prefetch()
         self._refresh_history_operation_page()
 
     def _set_history_operation_widgets_visible(self, visible: bool) -> None:
@@ -3647,6 +3911,7 @@ class MediaSyncWindow(QMainWindow):
             or self._engine_client is None
             or not hasattr(self._engine_client, "get_plan_operations")
         ):
+            self._cancel_changes_page_prefetch()
             self._changes_page_state = empty_plan_operation_preview_state()
             self._apply_changes_page_state(self._changes_page_state)
             return
@@ -3738,7 +4003,7 @@ class MediaSyncWindow(QMainWindow):
         ):
             return
         self._set_changes_query_pending(False)
-        self._apply_changes_response(response)
+        self._apply_changes_response(response, schedule_prefetch=True)
 
     def _reject_background_changes_response(
         self,
@@ -3788,15 +4053,94 @@ class MediaSyncWindow(QMainWindow):
             and self._changes_risk_levels() == risk_levels
         )
 
-    def _apply_changes_response(self, response: IpcResponse) -> None:
-        self._changes_page_state = plan_operation_preview_from_response(response)
-        self._apply_changes_page_state(self._changes_page_state)
+    def _apply_changes_response(
+        self,
+        response: IpcResponse,
+        *,
+        schedule_prefetch: bool = False,
+    ) -> None:
+        self._install_changes_page_state(
+            plan_operation_preview_from_response(response),
+            schedule_prefetch=schedule_prefetch,
+        )
+
+    def _install_changes_page_state(
+        self,
+        state: PlanOperationPreviewState,
+        *,
+        schedule_prefetch: bool,
+    ) -> None:
+        self._changes_page_generation += 1
+        self._changes_page_state = state
+        self._apply_changes_page_state(state)
+        if schedule_prefetch:
+            self._schedule_changes_page_prefetch()
 
     def _cancel_background_changes_query(self) -> None:
         if self._background_queries is not None:
             self._background_queries.cancel("changes-page")
         self._ui_update_coalescer.cancel("changes-page")
+        self._cancel_changes_page_prefetch()
         self._set_changes_query_pending(False)
+
+    def _changes_next_page_context(self) -> _ChangesPageContext | None:
+        state = self._changes_page_state
+        plan_id = self._changes_plan_id
+        cursor = state.next_cursor
+        if not state.has_more_operations or plan_id is None or cursor is None:
+            return None
+        return _ChangesPageContext(
+            source_generation=self._changes_page_generation,
+            plan_id=plan_id,
+            page_index=self._changes_page_index + 1,
+            cursor=dict(cursor),
+            target_endpoint_id=self._changes_target_filter,
+            risk_levels=self._changes_risk_levels(),
+        )
+
+    def _schedule_changes_page_prefetch(self) -> None:
+        self._changes_page_prefetch.clear()
+        context = self._changes_next_page_context()
+        controller = self._page_prefetch_queries
+        if context is None or controller is None or not self._page_prefetch_lane_available():
+            return
+        page_limit = self._changes_page_limit
+
+        def query(client: object) -> object:
+            provider = cast(PlanOperationsProvider, client)
+            return provider.get_plan_operations(
+                plan_id=context.plan_id,
+                limit=page_limit,
+                after=context.cursor,
+                target_endpoint_id=context.target_endpoint_id,
+                risk_levels=context.risk_levels,
+            )
+
+        def accept(response: object) -> None:
+            if self._changes_next_page_context() != context:
+                return
+            state = plan_operation_preview_from_response(
+                cast(IpcResponse, response)
+            )
+            if (
+                not state.read_model_available
+                or state.plan_id != context.plan_id
+                or len(state.rows) > page_limit
+            ):
+                return
+            self._changes_page_prefetch.store(context=context, page=state)
+
+        controller.submit(
+            key="changes-page-prefetch",
+            operation=query,
+            on_result=accept,
+            on_error=lambda _error: None,
+        )
+
+    def _cancel_changes_page_prefetch(self) -> None:
+        self._changes_page_prefetch.clear()
+        if self._page_prefetch_queries is not None:
+            self._page_prefetch_queries.cancel("changes-page-prefetch")
 
     def _set_changes_query_pending(self, pending: bool) -> None:
         self._changes_query_pending = pending
@@ -3821,6 +4165,8 @@ class MediaSyncWindow(QMainWindow):
         self._apply_changes_page_state(self._changes_page_state)
 
     def _reset_changes_paging(self) -> None:
+        self._cancel_changes_page_prefetch()
+        self._changes_page_generation += 1
         self._changes_page_index = 0
         self._changes_page_cursors = [None]
         self._selected_changes_operation_id = None
@@ -3859,6 +4205,7 @@ class MediaSyncWindow(QMainWindow):
     def _show_previous_changes_page(self) -> None:
         if self._changes_query_pending or self._changes_page_index <= 0:
             return
+        self._cancel_changes_page_prefetch()
         self._changes_page_index -= 1
         self._selected_changes_operation_id = None
         self._refresh_changes_page()
@@ -3869,13 +4216,24 @@ class MediaSyncWindow(QMainWindow):
         cursor = self._changes_page_state.next_cursor
         if not self._changes_page_state.has_more_operations or cursor is None:
             return
+        context = self._changes_next_page_context()
+        if context is None:
+            return
+        prefetched_state = self._changes_page_prefetch.take(context=context)
         next_index = self._changes_page_index + 1
         if len(self._changes_page_cursors) <= next_index:
-            self._changes_page_cursors.append(cursor)
+            self._changes_page_cursors.append(dict(cursor))
         else:
-            self._changes_page_cursors[next_index] = cursor
+            self._changes_page_cursors[next_index] = dict(cursor)
         self._changes_page_index = next_index
         self._selected_changes_operation_id = None
+        if prefetched_state is not None:
+            self._install_changes_page_state(
+                prefetched_state,
+                schedule_prefetch=True,
+            )
+            return
+        self._cancel_changes_page_prefetch()
         self._refresh_changes_page()
 
     def _changes_page_text(self) -> str:
