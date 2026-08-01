@@ -209,6 +209,7 @@ def require_staging_object_manifest_binding(
     final_relative_path: str,
     operation_kind: RecoveryOperationKind,
     fingerprint_content_hash: str,
+    fingerprint_byte_count: int | None = None,
     operation_id: str | None = None,
 ) -> None:
     expected_final_path = _canonical_relative_path(final_relative_path)
@@ -222,6 +223,10 @@ def require_staging_object_manifest_binding(
         or manifest.final_relative_path != expected_final_path
         or manifest.operation_kind is not operation_kind
         or manifest.fingerprint_content_hash != fingerprint_content_hash
+        or (
+            fingerprint_byte_count is not None
+            and manifest.fingerprint_byte_count != fingerprint_byte_count
+        )
         or (operation_id is not None and manifest.operation_id != operation_id)
     ):
         raise StagingObjectManifestError(

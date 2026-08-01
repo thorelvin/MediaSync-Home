@@ -593,6 +593,91 @@ def test_local_resolving_final_commit_preserves_then_replaces(tmp_path: Path) ->
     ).read_bytes() == b"old-image"
 
 
+def test_local_resolving_cleanup_removes_staging_object_but_retains_old_version(
+    tmp_path: Path,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    final = fixture.target_root / "Photos" / "image.jpg"
+    final.write_bytes(b"old-image")
+    adapter = LocalResolvingFinalCommitAdapter(
+        root_resolver=_RootResolver(target_root=fixture.target_root),
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    artifact = fixture.stage(
+        object_id="operation-a",
+        relative_path="Photos/image.jpg",
+        payload=b"new-image",
+        write_manifest=True,
+    )
+    operation = _replace_operation(fixture, expected_target_payload=b"old-image")
+    preservation = adapter.preserve_old_target(permit, operation)
+    adapter.commit_verified_artifact(permit, artifact)
+    cataloged = replace(
+        operation,
+        phase=RecoveryOperationPhase.CATALOG_RECORDED,
+        version_object_id=preservation.version_object_id,
+        catalog_handoff_id="final-file:run-a:operation-a",
+        expected_final_fingerprint_json=operation.expected_staging_fingerprint_json,
+    )
+
+    first = adapter.cleanup_recovery_objects(permit, cataloged)
+    replay = adapter.cleanup_recovery_objects(permit, cataloged)
+
+    version_root = fixture.target_root / ".mediasync" / "objects" / "versions"
+    assert first == replay
+    assert first.cleaned_object_ids == ("operation-a",)
+    assert not (fixture.staging_root / "operation-a.payload").exists()
+    assert not (fixture.staging_root / "operation-a.manifest.json").exists()
+    assert final.read_bytes() == b"new-image"
+    assert (version_root / "operation-a.payload").read_bytes() == b"old-image"
+    assert (version_root / "operation-a.manifest.json").is_file()
+
+
+def test_local_resolving_cleanup_refuses_changed_staging_payload(
+    tmp_path: Path,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    final = fixture.target_root / "Photos" / "image.jpg"
+    final.write_bytes(b"old-image")
+    adapter = LocalResolvingFinalCommitAdapter(
+        root_resolver=_RootResolver(target_root=fixture.target_root),
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    artifact = fixture.stage(
+        object_id="operation-a",
+        relative_path="Photos/image.jpg",
+        payload=b"new-image",
+        write_manifest=True,
+    )
+    operation = _replace_operation(fixture, expected_target_payload=b"old-image")
+    preservation = adapter.preserve_old_target(permit, operation)
+    adapter.commit_verified_artifact(permit, artifact)
+    cataloged = replace(
+        operation,
+        phase=RecoveryOperationPhase.CATALOG_RECORDED,
+        version_object_id=preservation.version_object_id,
+        catalog_handoff_id="final-file:run-a:operation-a",
+        expected_final_fingerprint_json=operation.expected_staging_fingerprint_json,
+    )
+    staging_payload = fixture.staging_root / "operation-a.payload"
+    staging_payload.write_bytes(b"changed-after-commit")
+
+    with pytest.raises(FinalCommitAdapterError) as exc_info:
+        adapter.cleanup_recovery_objects(permit, cataloged)
+
+    assert exc_info.value.validation_code == "LOCAL_STAGING_CLEANUP_PAYLOAD_MISMATCH"
+    assert staging_payload.read_bytes() == b"changed-after-commit"
+    assert (fixture.staging_root / "operation-a.manifest.json").is_file()
+    assert final.read_bytes() == b"new-image"
+    assert (
+        fixture.target_root / ".mediasync" / "objects" / "versions" / "operation-a.payload"
+    ).read_bytes() == b"old-image"
+
+
 def test_local_resolving_final_commit_quarantines_empty_directory_then_inserts_file(
     tmp_path: Path,
 ) -> None:

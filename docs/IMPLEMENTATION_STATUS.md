@@ -1,5 +1,16 @@
 # Implementeringsstatus
 
+Update 2026-08-01: PATH-001 catalog-recorded cleanup now covers every managed
+staging object, not only created-directory markers and empty-directory
+quarantine. The executor keeps the live endpoint permit until cleanup validates
+the canonical manifest against the journal, verifies any remaining file hash or
+directory marker, removes the short staging payload and manifest, and journals
+`CLEANED`. Missing/tampered evidence fails closed; an already-removed pair is an
+idempotent retry. Version payloads and manifests remain intact for retention,
+while quarantine and created-directory recovery markers keep their existing
+post-catalog cleanup. Time-based version expiration and non-local endpoint
+evidence remain pending.
+
 Update 2026-08-01: PATH-001 production final publication now requires the
 canonical short-object staging manifest before any new file/directory publish
 or destructive old-target preservation. The resolver parses the exact canonical
@@ -8,8 +19,8 @@ revision and generation, logical final path, operation kind, and verified
 content hash to the live mutation permit. Missing, altered, or differently
 bound evidence fails closed before the final tree changes. Directory replay
 after a completed rename remains idempotent because its manifest is retained
-beside the consumed staging payload. Complete managed-object retention/cleanup
-and non-local endpoint evidence remain pending.
+beside the consumed staging payload. Catalog-recorded staging cleanup is covered
+by the newer update above.
 
 Oppdatering 2026-08-01: Etablerte backupjobber kan nå arkiveres og reaktiveres
 trygt fra **Jobber**. Arkivering krever eksplisitt bekreftelse, avvises under

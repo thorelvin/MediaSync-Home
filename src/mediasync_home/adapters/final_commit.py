@@ -5,7 +5,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import uuid4
 
 from mediasync_home.adapters.endpoint_leases import EndpointLeaseUnavailable, EndpointRootResolver
@@ -630,6 +630,7 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
             final_relative_path=operation.final_relative_path,
             operation_kind=operation.operation_kind,
             fingerprint_content_hash=str(staging_fingerprint["content_hash"]),
+            fingerprint_byte_count=cast(int, staging_fingerprint["byte_count"]),
             operation_id=operation.operation_id,
         )
         return self._replace_adapter(target_root).preserve_old_target(permit, operation)
@@ -656,13 +657,46 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
             endpoint_id=operation.target_endpoint_id,
             endpoint_revision_id=operation.target_endpoint_revision_id,
         )
+        self._permit_validator.assert_mutation_permit_current(permit)
+        _require_endpoint_marker(
+            target_root,
+            permit,
+            validation_code="LOCAL_STAGING_CLEANUP_ENDPOINT_MARKER_MISMATCH",
+            missing_code="LOCAL_STAGING_CLEANUP_ENDPOINT_MARKER_MISSING",
+        )
+        _validate_replace_operation_binding(operation=operation, permit=permit)
+        if operation.phase is not RecoveryOperationPhase.CATALOG_RECORDED:
+            raise FinalCommitAdapterError(
+                "LOCAL_STAGING_CLEANUP_REQUIRES_CATALOG_RECORDED",
+                "Clean staging objects only after catalog handoff is recorded.",
+            )
+        cleaned_object_ids: list[str] = []
+        if operation.staging_object_id is not None and operation.staging_object_id.strip():
+            cleaned_object_ids.append(
+                _cleanup_staging_object(
+                    staging_root=self._staging_root_for(target_root),
+                    permit=permit,
+                    operation=operation,
+                )
+            )
         if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
-            return self._cleanup_created_directory_marker(
+            final_receipt = self._cleanup_created_directory_marker(
                 permit=permit,
                 operation=operation,
                 target_root=target_root,
             )
-        return self._replace_adapter(target_root).cleanup_recovery_objects(permit, operation)
+            cleaned_object_ids.extend(final_receipt.cleaned_object_ids)
+        elif operation.target_precondition_kind is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY:
+            final_receipt = self._replace_adapter(target_root).cleanup_recovery_objects(
+                permit,
+                operation,
+            )
+            cleaned_object_ids.extend(final_receipt.cleaned_object_ids)
+        return RecoveryObjectCleanupReceipt(
+            operation_id=operation.operation_id,
+            final_relative_path=RelativePath(operation.final_relative_path),
+            cleaned_object_ids=tuple(dict.fromkeys(cleaned_object_ids)),
+        )
 
     def commit_verified_artifact(
         self,
@@ -916,6 +950,7 @@ def _require_staging_manifest_binding(
     final_relative_path: str,
     operation_kind: RecoveryOperationKind,
     fingerprint_content_hash: str,
+    fingerprint_byte_count: int | None = None,
     operation_id: str | None = None,
 ) -> None:
     if OBJECT_ID_PATTERN.fullmatch(staging_object_id) is None:
@@ -962,6 +997,7 @@ def _require_staging_manifest_binding(
             final_relative_path=final_relative_path,
             operation_kind=operation_kind,
             fingerprint_content_hash=fingerprint_content_hash,
+            fingerprint_byte_count=fingerprint_byte_count,
             operation_id=operation_id,
         )
     except StagingObjectManifestError as exc:
@@ -978,6 +1014,139 @@ def _required_staging_object_id(operation: RecoveryOperation) -> str:
             "Restage and verify the operation before preserving its target.",
         )
     return operation.staging_object_id
+
+
+def _cleanup_staging_object(
+    *,
+    staging_root: Path,
+    permit: MutationPermit,
+    operation: RecoveryOperation,
+) -> str:
+    staging_object_id = _required_staging_object_id(operation)
+    expected = _expected_fingerprint(
+        operation.expected_staging_fingerprint_json,
+        validation_code="LOCAL_STAGING_CLEANUP_FINGERPRINT_MISSING",
+        next_action="Reload the catalog-recorded operation before staging cleanup.",
+    )
+    root = _resolve_existing_root(
+        staging_root,
+        missing_code="LOCAL_STAGING_CLEANUP_ROOT_MISSING",
+        missing_next_action="Restore the managed staging root before cleanup.",
+        reparse_code="LOCAL_STAGING_CLEANUP_ROOT_REPARSE_UNSUPPORTED",
+        reparse_next_action="Revalidate the managed staging root before cleanup.",
+    )
+    payload_path = root / f"{staging_object_id}.payload"
+    manifest_path = root / f"{staging_object_id}.manifest.json"
+    payload_exists = payload_path.exists() or payload_path.is_symlink()
+    manifest_exists = manifest_path.exists() or manifest_path.is_symlink()
+    if not payload_exists and not manifest_exists:
+        return staging_object_id
+    if not manifest_exists:
+        raise FinalCommitAdapterError(
+            "LOCAL_STAGING_CLEANUP_MANIFEST_MISSING",
+            "Enter recovery because a staging payload exists without its manifest.",
+        )
+    _require_staging_manifest_binding(
+        staging_root=root,
+        permit=permit,
+        staging_object_id=staging_object_id,
+        final_relative_path=operation.final_relative_path,
+        operation_kind=operation.operation_kind,
+        fingerprint_content_hash=str(expected["content_hash"]),
+        fingerprint_byte_count=cast(int, expected["byte_count"]),
+        operation_id=operation.operation_id,
+    )
+    if payload_exists:
+        if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
+            _cleanup_staging_directory_payload(
+                payload_path=payload_path,
+                operation=operation,
+            )
+        else:
+            _cleanup_staging_file_payload(
+                payload_path=payload_path,
+                expected=expected,
+            )
+    try:
+        manifest_path.unlink()
+    except OSError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_STAGING_CLEANUP_MANIFEST_REMOVE_FAILED",
+            "Retry cleanup after the staging manifest becomes removable.",
+        ) from exc
+    return staging_object_id
+
+
+def _cleanup_staging_file_payload(
+    *,
+    payload_path: Path,
+    expected: dict[str, object],
+) -> None:
+    if payload_path.is_symlink() or not payload_path.is_file():
+        raise FinalCommitAdapterError(
+            "LOCAL_STAGING_CLEANUP_PAYLOAD_INVALID",
+            "Enter recovery because the staging payload is not a regular file.",
+        )
+    try:
+        observed = _fingerprint_file(payload_path)
+    except OSError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_STAGING_CLEANUP_PAYLOAD_READ_FAILED",
+            "Retry cleanup after the staging payload becomes readable.",
+        ) from exc
+    if observed != expected:
+        raise FinalCommitAdapterError(
+            "LOCAL_STAGING_CLEANUP_PAYLOAD_MISMATCH",
+            "Enter recovery because the staging payload changed after verification.",
+        )
+    try:
+        payload_path.unlink()
+    except OSError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_STAGING_CLEANUP_PAYLOAD_REMOVE_FAILED",
+            "Retry cleanup after the staging payload becomes removable.",
+        ) from exc
+
+
+def _cleanup_staging_directory_payload(
+    *,
+    payload_path: Path,
+    operation: RecoveryOperation,
+) -> None:
+    marker_matches = directory_artifact_matches(
+        payload_path,
+        run_id=operation.run_id,
+        run_target_id=operation.run_target_id,
+        operation_id=operation.operation_id,
+        final_relative_path=operation.final_relative_path,
+    )
+    if not marker_matches:
+        if payload_path.is_symlink() or not payload_path.is_dir():
+            raise FinalCommitAdapterError(
+                "LOCAL_STAGING_CLEANUP_DIRECTORY_PAYLOAD_MISMATCH",
+                "Enter recovery because the staged directory payload changed after verification.",
+            )
+        try:
+            entries = tuple(payload_path.iterdir())
+        except OSError as exc:
+            raise FinalCommitAdapterError(
+                "LOCAL_STAGING_CLEANUP_DIRECTORY_PAYLOAD_READ_FAILED",
+                "Retry cleanup after the staged directory payload becomes readable.",
+            ) from exc
+        if entries:
+            raise FinalCommitAdapterError(
+                "LOCAL_STAGING_CLEANUP_DIRECTORY_PAYLOAD_MISMATCH",
+                "Enter recovery because the staged directory marker changed after verification.",
+            )
+    try:
+        if marker_matches:
+            (payload_path / DIRECTORY_MARKER_NAME).unlink()
+        payload_path.rmdir()
+    except OSError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_STAGING_CLEANUP_DIRECTORY_PAYLOAD_REMOVE_FAILED",
+            "Retry cleanup after the staged directory marker becomes removable.",
+        ) from exc
 
 
 def _require_endpoint_marker(

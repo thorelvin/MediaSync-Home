@@ -152,6 +152,8 @@ def _next_cleanup_operation(
 
 
 def _requires_cleanup(operation: RecoveryOperation) -> bool:
+    if operation.staging_object_id is not None and operation.staging_object_id.strip():
+        return True
     if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
         return True
     return (
@@ -185,12 +187,21 @@ def _validate_cleanup_receipt(
         raise RuntimeError("RUN_TARGET_RECOVERY_OBJECT_CLEANUP_RECEIPT_OPERATION_MISMATCH")
     if _relative_path(receipt.final_relative_path.value) != _relative_path(operation.final_relative_path):
         raise RuntimeError("RUN_TARGET_RECOVERY_OBJECT_CLEANUP_RECEIPT_PATH_MISMATCH")
-    expected_object_id = (
-        operation.operation_id
-        if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY
-        else operation.quarantine_object_id
-    )
-    if expected_object_id not in receipt.cleaned_object_ids:
+    expected_object_ids = {
+        object_id
+        for object_id in (
+            operation.staging_object_id,
+            operation.operation_id
+            if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY
+            else None,
+            operation.quarantine_object_id
+            if operation.target_precondition_kind
+            is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY
+            else None,
+        )
+        if object_id is not None and object_id.strip()
+    }
+    if not expected_object_ids.issubset(receipt.cleaned_object_ids):
         raise RuntimeError("RUN_TARGET_RECOVERY_OBJECT_CLEANUP_RECEIPT_OBJECT_MISMATCH")
 
 

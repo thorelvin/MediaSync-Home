@@ -307,15 +307,16 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
             run_executor_staging_transfer_port=staging,
             run_executor_final_commit_port=final_commit,
             run_executor_old_target_preservation_port=final_commit,
+            run_executor_recovery_object_cleanup_port=final_commit,
             run_executor_process_instance_id="host-a",
         )
-        outcome = runtime.run_executor_cycle(max_steps=18)
+        outcome = runtime.run_executor_cycle(max_steps=19)
 
         loaded_run = runs.load_started_run("run-a")
         operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
         handoff = catalog_handoffs.load_final_file_handoff("final-file:run-a:op-a")
         assert outcome.stopped_reason is RunExecutorPumpStopReason.IDLE
-        assert outcome.steps_attempted == 18
+        assert outcome.steps_attempted == 19
         assert outcome.last_step is not None
         assert outcome.last_step.action is RunExecutorCycleAction.IDLE
         assert registry.retained_count == 0
@@ -326,7 +327,7 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
         assert loaded_run.targets[0].completed_operations == 1
         assert loaded_run.targets[0].completed_bytes == 128
         assert operation is not None
-        assert operation.phase is RecoveryOperationPhase.CATALOG_RECORDED
+        assert operation.phase is RecoveryOperationPhase.CLEANED
         assert operation.staging_object_id == "op-a"
         assert operation.intent_segment_id == "run-a-target-0000-intent-000000"
         assert operation.catalog_handoff_id == "final-file:run-a:op-a"
@@ -348,14 +349,22 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
         assert verified_event_payload["operation_audit"]["lease_id"] == "lease-a"
         assert verified_event_payload["operation_audit"]["fencing_token"] == 1
         assert (target_root / "Pictures" / "A.jpg").read_bytes() == payload
-        assert (staging_root / "op-a.payload").read_bytes() == payload
-        staging_manifest = json.loads(
-            (staging_root / "op-a.manifest.json").read_text(encoding="utf-8")
+        assert not (staging_root / "op-a.payload").exists()
+        assert not (staging_root / "op-a.manifest.json").exists()
+        cleaned_event_payload = json.loads(
+            str(
+                recovery_connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM recovery_events
+                    WHERE run_id = 'run-a'
+                        AND operation_id = 'op-a'
+                        AND to_phase = 'CLEANED'
+                    """
+                ).fetchone()[0]
+            )
         )
-        assert staging_manifest["object_role"] == "STAGING"
-        assert staging_manifest["operation_id"] == "op-a"
-        assert staging_manifest["source_relative_path"] == "Pictures/A.jpg"
-        assert staging_manifest["final_relative_path"] == "Pictures/A.jpg"
+        assert cleaned_event_payload["cleaned_object_ids"] == ["op-a"]
         assert handoff is not None
         assert handoff.content_hash == content_hash
         assert catalog_connection.execute(
@@ -756,9 +765,12 @@ def test_sqlite_run_executor_cycle_completes_bound_operations_for_two_targets(
             for operation in target_operations
             if operation is not None
         ] == [
-            RecoveryOperationPhase.CATALOG_RECORDED,
-            RecoveryOperationPhase.CATALOG_RECORDED,
+            RecoveryOperationPhase.CLEANED,
+            RecoveryOperationPhase.CLEANED,
         ]
+        for operation_id in ("op-target-a", "op-target-b"):
+            assert not (staging_root / f"{operation_id}.payload").exists()
+            assert not (staging_root / f"{operation_id}.manifest.json").exists()
         assert catalog_connection.execute(
             """
             SELECT outcomes.run_target_id,
@@ -858,9 +870,10 @@ def test_sqlite_run_executor_cycle_replaces_existing_target_from_match_fingerpri
             catalog_handoffs=catalog_handoffs,
             final_commit_port=final_commit,
             old_target_preservation_port=final_commit,
+            recovery_object_cleanup_port=final_commit,
             staging_transfer_port=staging,
             process_instance_id="host-a",
-            max_steps=15,
+            max_steps=16,
         )
 
         loaded_run = runs.load_started_run("run-a")
@@ -879,7 +892,7 @@ def test_sqlite_run_executor_cycle_replaces_existing_target_from_match_fingerpri
         assert loaded_run.targets[0].completed_operations == 1
         assert loaded_run.targets[0].completed_bytes == len(new_payload)
         assert operation is not None
-        assert operation.phase is RecoveryOperationPhase.CATALOG_RECORDED
+        assert operation.phase is RecoveryOperationPhase.CLEANED
         assert operation.target_precondition_kind is RecoveryTargetPreconditionKind.MATCH_FINGERPRINT
         assert operation.version_object_id == "op-a"
         assert operation.expected_target_fingerprint_json == json.dumps(
@@ -891,7 +904,8 @@ def test_sqlite_run_executor_cycle_replaces_existing_target_from_match_fingerpri
             separators=(",", ":"),
         )
         assert (target_root / "Pictures" / "A.jpg").read_bytes() == new_payload
-        assert (staging_root / "op-a.payload").read_bytes() == new_payload
+        assert not (staging_root / "op-a.payload").exists()
+        assert not (staging_root / "op-a.manifest.json").exists()
         assert version_payload.read_bytes() == old_payload
         assert json.loads(version_manifest.read_text(encoding="utf-8"))["object_role"] == "OLD_TARGET_VERSION"
         assert handoff is not None

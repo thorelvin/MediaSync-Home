@@ -45,7 +45,7 @@ def test_cleanup_next_run_target_recovery_object_records_cleaned_for_quarantine(
     )
 
 
-def test_cleanup_next_run_target_recovery_object_reports_idle_without_quarantine() -> None:
+def test_cleanup_next_run_target_recovery_object_records_staging_cleanup_without_quarantine() -> None:
     recovery_operations = _FakeRecoveryOperationStore(
         (
             replace(
@@ -64,9 +64,37 @@ def test_cleanup_next_run_target_recovery_object_reports_idle_without_quarantine
         process_instance_id="host-a",
     )
 
+    assert outcome.idle is False
+    assert outcome.cleaned is True
+    assert outcome.validation_codes == ()
+    assert cleanup_port.calls == (("lease-a", "op-a"),)
+    assert recovery_operations.transitions == (
+        ("op-a", RecoveryOperationPhase.CATALOG_RECORDED, RecoveryOperationPhase.CLEANED),
+    )
+
+
+def test_cleanup_next_run_target_recovery_object_reports_idle_for_legacy_copy_without_object() -> None:
+    recovery_operations = _FakeRecoveryOperationStore(
+        (
+            replace(
+                _operation(),
+                target_precondition_kind=RecoveryTargetPreconditionKind.ABSENT,
+                staging_object_id=None,
+                quarantine_object_id=None,
+            ),
+        )
+    )
+    cleanup_port = _FakeRecoveryObjectCleanupPort()
+
+    outcome = cleanup_next_run_target_recovery_object(
+        permit=_permit(),
+        recovery_operations=recovery_operations,
+        cleanup_port=cleanup_port,
+        process_instance_id="host-a",
+    )
+
     assert outcome.idle is True
     assert outcome.cleaned is False
-    assert outcome.validation_codes == ()
     assert cleanup_port.calls == ()
     assert recovery_operations.transitions == ()
 
@@ -248,7 +276,11 @@ class _FakeRecoveryObjectCleanupPort:
         return RecoveryObjectCleanupReceipt(
             operation_id=operation.operation_id,
             final_relative_path=RelativePath(operation.final_relative_path),
-            cleaned_object_ids=(operation.quarantine_object_id or "",),
+            cleaned_object_ids=(
+                operation.quarantine_object_id
+                or operation.staging_object_id
+                or operation.operation_id,
+            ),
         )
 
 

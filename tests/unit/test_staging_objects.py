@@ -33,6 +33,7 @@ def test_staging_object_manifest_round_trips_canonical_binding() -> None:
         final_relative_path=r"Photos\image.jpg",
         operation_kind=RecoveryOperationKind.COPY_NEW,
         fingerprint_content_hash="a" * 64,
+        fingerprint_byte_count=5,
         operation_id="operation-a",
     )
 
@@ -97,6 +98,7 @@ def test_staging_object_manifest_rejects_noncanonical_json() -> None:
         {"endpoint_generation": 2},
         {"final_relative_path": "Photos/other.jpg"},
         {"fingerprint_content_hash": "b" * 64},
+        {"fingerprint_byte_count": 6},
         {"target_endpoint_revision_id": "target-rev-b"},
     ],
 )
@@ -114,6 +116,7 @@ def test_staging_object_manifest_rejects_binding_mismatch(
         "final_relative_path": "Photos/image.jpg",
         "operation_kind": RecoveryOperationKind.COPY_NEW,
         "fingerprint_content_hash": "a" * 64,
+        "fingerprint_byte_count": 5,
         "operation_id": "operation-a",
     }
     binding.update(binding_override)
