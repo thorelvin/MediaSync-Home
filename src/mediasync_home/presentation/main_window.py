@@ -5798,7 +5798,9 @@ class MediaSyncWindow(QMainWindow):
                 label.clear()
                 continue
             target = self._setup_draft.targets[index]
-            label.setText(f"{target.name}: {target.path_label}")
+            label.setText(target.path_label)
+            target_description = f"{target.name}: {target.path_label}"
+            label.setAccessibleName(target_description)
             remove_tooltip = f"{self._texts().remove_target_tooltip}: {target.name}"
             button.setToolTip(remove_tooltip)
             button.setAccessibleName(remove_tooltip)
@@ -6289,6 +6291,9 @@ class MediaSyncWindow(QMainWindow):
 
     def _choose_directory(self, title: str) -> str | None:
         dialog = self._build_directory_picker(title)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         selected = dialog.selectedFiles()
@@ -8886,6 +8891,10 @@ class MediaSyncWindow(QMainWindow):
             QSizePolicy.Policy.Minimum,
         )
         layout = QGridLayout(panel)
+        layout.setSizeConstraints(
+            QLayout.SizeConstraint.SetNoConstraint,
+            QLayout.SizeConstraint.SetMinimumSize,
+        )
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setHorizontalSpacing(18)
         layout.setVerticalSpacing(10)
@@ -8961,6 +8970,10 @@ class MediaSyncWindow(QMainWindow):
             QSizePolicy.Policy.Minimum,
         )
         target_controls_layout = QVBoxLayout(target_controls)
+        target_controls_layout.setSizeConstraints(
+            QLayout.SizeConstraint.SetNoConstraint,
+            QLayout.SizeConstraint.SetMinimumSize,
+        )
         target_controls_layout.setContentsMargins(0, 0, 0, 0)
         target_controls_layout.setSpacing(6)
         for index in range(state.max_targets):

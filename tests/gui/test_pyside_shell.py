@@ -765,12 +765,23 @@ def test_directory_picker_returns_packaged_qt_acceptance_value(qapp) -> None:
     window = build_main_window(initial_state=_ready_state(), theme_mode=ThemeMode.LIGHT)
 
     class AcceptedDirectoryDialog:
+        def show(self) -> None:
+            calls.append("show")
+
+        def raise_(self) -> None:
+            calls.append("raise")
+
+        def activateWindow(self) -> None:
+            calls.append("activate")
+
         def exec(self) -> int:
+            calls.append("exec")
             return 1
 
         def selectedFiles(self) -> list[str]:
             return ["C:/Users/Ada/Pictures"]
 
+    calls: list[str] = []
     try:
         window._build_directory_picker = (  # type: ignore[method-assign]
             lambda title: AcceptedDirectoryDialog()
@@ -779,6 +790,7 @@ def test_directory_picker_returns_packaged_qt_acceptance_value(qapp) -> None:
         assert (
             window._choose_directory("Choose source folder") == "C:/Users/Ada/Pictures"
         )
+        assert calls == ["show", "raise", "activate", "exec"]
     finally:
         window.close()
         window.deleteLater()
@@ -823,6 +835,11 @@ def test_setup_target_controls_persist_multiple_reviewed_targets(qapp) -> None:
 
         assert add_target.isEnabled() is False
         assert [label.text() for label in target_paths] == [
+            "E:/MediaSyncBackup",
+            "F:/OffsiteBackup",
+            "G:/TemporaryBackup",
+        ]
+        assert [label.accessibleName() for label in target_paths] == [
             "MediaSyncBackup: E:/MediaSyncBackup",
             "OffsiteBackup: F:/OffsiteBackup",
             "TemporaryBackup: G:/TemporaryBackup",
@@ -833,8 +850,8 @@ def test_setup_target_controls_persist_multiple_reviewed_targets(qapp) -> None:
 
         assert add_target.isEnabled() is True
         assert [label.text() for label in target_paths[:2]] == [
-            "MediaSyncBackup: E:/MediaSyncBackup",
-            "TemporaryBackup: G:/TemporaryBackup",
+            "E:/MediaSyncBackup",
+            "G:/TemporaryBackup",
         ]
         QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
         qapp.processEvents()
