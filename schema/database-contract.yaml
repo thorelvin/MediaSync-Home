@@ -37,6 +37,17 @@ invariants:
     checksum_bound: true
     ctime_fallback_allowed: false
     immutable_after_seal: true
+  - id: META-002_NAMED_STREAM_FAIL_CLOSED
+    requirement_id: META-002
+    active_policy: BLOCK_IF_PRESENT_OR_UNCONFIRMED
+    enumeration_apis: [FindFirstStreamW, FindNextStreamW]
+    issue_table: snapshot_issues
+    present_issue_code: SNAPSHOT_NAMED_STREAM_PRESENT
+    unconfirmed_issue_code: SNAPSHOT_NAMED_STREAM_ENUMERATION_UNCONFIRMED
+    findings_checksum_bound: true
+    findings_block_snapshot_seal: true
+    primary_stream_only_can_claim_full_object: false
+    full_object_assurance_requires_named_stream_verification: true
   - id: END-001_ENDPOINT_CAPABILITY_EVIDENCE
     requirement_id: END-001
     profile_schema_version: 1

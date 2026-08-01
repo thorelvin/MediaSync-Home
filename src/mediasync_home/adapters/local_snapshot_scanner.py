@@ -13,6 +13,10 @@ from ctypes import wintypes
 
 from mediasync_home.adapters.file_identity import file_birthtime_ns, stable_file_identity_hash
 from mediasync_home.adapters.local_endpoint_classifier import CONTROL_DIRECTORY_NAME
+from mediasync_home.adapters.named_streams import (
+    NoNamedStreamProbe,
+    Win32NamedStreamProbe,
+)
 from mediasync_home.adapters.reparse_guard import (
     LocalFilesystemReparsePathProbe,
     ReparseGuardError,
@@ -23,6 +27,13 @@ from mediasync_home.application.snapshot_scanning import (
     DirectoryCaseContext,
     DirectoryCaseModeProbe,
     FilesystemSnapshotScan,
+)
+from mediasync_home.application.named_streams import (
+    DEFAULT_NAMED_STREAM_POLICY,
+    NamedStreamInspection,
+    NamedStreamPolicy,
+    NamedStreamProbe,
+    NamedStreamState,
 )
 from mediasync_home.application.snapshots import (
     SnapshotDirectoryCoverage,
@@ -123,6 +134,8 @@ class LocalFilesystemSnapshotScanner:
         *,
         path_probe: ReparsePathProbe | None = None,
         case_mode_probe: DirectoryCaseModeProbe | None = None,
+        named_stream_probe: NamedStreamProbe | None = None,
+        named_stream_policy: NamedStreamPolicy = DEFAULT_NAMED_STREAM_POLICY,
         max_entries: int = MAX_LOCAL_SNAPSHOT_ENTRIES,
         max_directories: int = MAX_LOCAL_SNAPSHOT_DIRECTORIES,
     ) -> None:
@@ -130,6 +143,10 @@ class LocalFilesystemSnapshotScanner:
             raise ValueError("snapshot scanner limits must be positive")
         self._path_probe = path_probe or LocalFilesystemReparsePathProbe()
         self._case_mode_probe = case_mode_probe or LocalDirectoryCaseModeProbe()
+        self._named_stream_probe = named_stream_probe or (
+            Win32NamedStreamProbe() if os.name == "nt" else NoNamedStreamProbe()
+        )
+        self._named_stream_policy = named_stream_policy
         self._max_entries = max_entries
         self._max_directories = max_directories
 
@@ -337,6 +354,12 @@ class LocalFilesystemSnapshotScanner:
                             "SNAPSHOT_BIRTHTIME_UNAVAILABLE",
                         )
                     )
+                if stat.S_ISDIR(child_stat.st_mode) or stat.S_ISREG(child_stat.st_mode):
+                    self._append_named_stream_issue(
+                        issues,
+                        path=queued.path / child.name,
+                        relative_path=relative_path,
+                    )
                 if stat.S_ISDIR(child_stat.st_mode):
                     entries.append(
                         _entry(
@@ -490,6 +513,24 @@ class LocalFilesystemSnapshotScanner:
         except ReparseGuardError:
             return None
 
+    def _append_named_stream_issue(
+        self,
+        issues: list[SnapshotIssue],
+        *,
+        path: Path,
+        relative_path: str,
+    ) -> None:
+        inspection = self._named_stream_probe.inspect_named_streams(path)
+        if inspection.state is NamedStreamState.NONE:
+            return
+        issues.append(
+            _named_stream_issue(
+                relative_path=relative_path,
+                inspection=inspection,
+                policy=self._named_stream_policy,
+            )
+        )
+
 
 class _FileCaseSensitiveInfo(ctypes.Structure):
     _fields_: ClassVar[list[tuple[str, Any]]] = [("flags", wintypes.ULONG)]
@@ -540,13 +581,47 @@ def _coverage(
     )
 
 
-def _issue(relative_path: str, issue_type: str, error_code: str) -> SnapshotIssue:
+def _issue(
+    relative_path: str,
+    issue_type: str,
+    error_code: str,
+    *,
+    sanitized_message: str = "The endpoint could not be completely and safely enumerated.",
+) -> SnapshotIssue:
     return SnapshotIssue(
         relative_path=relative_path,
         issue_type=issue_type,
         blocks_destructive_actions=True,
         error_code=error_code,
-        sanitized_message="The endpoint could not be completely and safely enumerated.",
+        sanitized_message=sanitized_message,
+    )
+
+
+def _named_stream_issue(
+    *,
+    relative_path: str,
+    inspection: NamedStreamInspection,
+    policy: NamedStreamPolicy,
+) -> SnapshotIssue:
+    if policy is not NamedStreamPolicy.BLOCK_IF_PRESENT_OR_UNCONFIRMED:
+        raise ValueError("NAMED_STREAM_POLICY_UNSUPPORTED")
+    if inspection.state is NamedStreamState.PRESENT:
+        return _issue(
+            relative_path,
+            "NAMED_STREAM_PRESENT",
+            "SNAPSHOT_NAMED_STREAM_PRESENT",
+            sanitized_message=(
+                "The item contains a Windows named stream, and full-object copying "
+                "is not enabled."
+            ),
+        )
+    return _issue(
+        relative_path,
+        "NAMED_STREAM_ENUMERATION_UNCONFIRMED",
+        inspection.error_code or "SNAPSHOT_NAMED_STREAM_ENUMERATION_UNCONFIRMED",
+        sanitized_message=(
+            "The item could not be checked completely for Windows named streams."
+        ),
     )
 
 

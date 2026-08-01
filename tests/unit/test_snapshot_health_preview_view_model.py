@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from mediasync_home.ipc.protocol import IpcResponse
+from mediasync_home.presentation.view_models.localization import (
+    LanguageCode,
+    localize_display_value,
+)
 from mediasync_home.presentation.view_models.snapshot_health import (
     empty_snapshot_health_preview_state,
     snapshot_health_preview_from_responses,
@@ -144,3 +148,46 @@ def test_snapshot_health_preview_handles_unavailable_read_model() -> None:
 
     assert state.summary_label == "Snapshot health read model is not available."
     assert state.rows == ()
+
+
+def test_snapshot_health_preview_names_named_stream_risk_in_both_languages() -> None:
+    state = snapshot_health_preview_from_responses(
+        snapshot_id="source-snapshot-a",
+        blocking_issues_response=IpcResponse.accepted(
+            {
+                "snapshot_issues": {
+                    "snapshot_id": "source-snapshot-a",
+                    "limit": 2,
+                    "has_more": False,
+                    "read_model_available": True,
+                    "issues": [
+                        {
+                            "relative_path": "Archive/document.txt",
+                            "issue_type": "NAMED_STREAM_PRESENT",
+                            "blocks_destructive_actions": True,
+                        }
+                    ],
+                }
+            }
+        ),
+        coverage_response=IpcResponse.accepted(
+            {
+                "snapshot_coverage": {
+                    "snapshot_id": "source-snapshot-a",
+                    "limit": 2,
+                    "has_more": False,
+                    "read_model_available": True,
+                    "coverage": [],
+                }
+            }
+        ),
+    )
+
+    english = state.rows[0].display_line
+    assert english == (
+        "Blocking issue: Archive/document.txt · Extra Windows file data found"
+    )
+    assert localize_display_value(LanguageCode.NORWEGIAN, english) == (
+        "Blokkerende problem: Archive/document.txt · "
+        "Ekstra Windows-fildata funnet"
+    )

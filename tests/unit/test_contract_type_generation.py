@@ -56,7 +56,10 @@ def test_runtime_command_and_recovery_types_are_generated_contract_types() -> No
 
 
 def test_generated_reason_code_inventory_has_typed_metadata() -> None:
-    assert len(contract_types.ReasonCode) == 21
+    assert len(contract_types.ReasonCode) == 23
     assert contract_types.REASON_CODE_METADATA[
         contract_types.ReasonCode.DATABASE_FULL
     ] == ("DATABASE", "BLOCKED")
+    assert contract_types.REASON_CODE_METADATA[
+        contract_types.ReasonCode.SNAPSHOT_NAMED_STREAM_PRESENT
+    ] == ("CAPABILITY", "BLOCKED")

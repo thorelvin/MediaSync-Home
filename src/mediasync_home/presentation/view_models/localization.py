@@ -1383,6 +1383,10 @@ _EN_TO_NB.update(
             "Engine Host godtok backupkontrollen uten en forespørselsidentitet."
         ),
         "Coverage warning": "Dekningsadvarsel",
+        "Extra Windows file data found": "Ekstra Windows-fildata funnet",
+        "Windows file data check incomplete": (
+            "Kontroll av Windows-fildata er ufullstendig"
+        ),
         "No cataloged files.": "Ingen katalogf\u00f8rte filer.",
         "No cataloged files to show.": "Ingen katalogf\u00f8rte filer \u00e5 vise.",
         "No sealed plan to show.": "Ingen forseglet plan å vise.",

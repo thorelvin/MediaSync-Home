@@ -16,6 +16,10 @@ from mediasync_home.adapters.reparse_guard import (
     ReparseInspection,
 )
 from mediasync_home.application.snapshot_scanning import DirectoryCaseContext
+from mediasync_home.application.named_streams import (
+    NamedStreamInspection,
+    NamedStreamState,
+)
 
 
 class _FixedCaseModeProbe:
@@ -47,6 +51,20 @@ class _NestedDirectoryReparseProbe:
                 final_path=str(path),
             )
         return self._delegate.inspect_path(path)
+
+
+class _FixedNamedStreamProbe:
+    def __init__(
+        self,
+        inspections: dict[str, NamedStreamInspection],
+    ) -> None:
+        self._inspections = inspections
+
+    def inspect_named_streams(self, path: Path) -> NamedStreamInspection:
+        return self._inspections.get(
+            path.name,
+            NamedStreamInspection(state=NamedStreamState.NONE),
+        )
 
 
 def test_birthtime_adapter_never_uses_ctime_as_creation_time() -> None:
@@ -260,3 +278,63 @@ def test_local_snapshot_scanner_revalidates_queued_directory_before_traversal(
         "REPARSE_BLOCKED",
     ]
     assert scan.issues[0].error_code == "SNAPSHOT_REPARSE_POINT_BLOCKED"
+
+
+def test_local_snapshot_scanner_blocks_detected_named_streams(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "document.txt").write_text("primary", encoding="utf-8")
+    scanner = LocalFilesystemSnapshotScanner(
+        case_mode_probe=_FixedCaseModeProbe(),
+        named_stream_probe=_FixedNamedStreamProbe(
+            {
+                "document.txt": NamedStreamInspection(
+                    state=NamedStreamState.PRESENT,
+                    observed_named_stream_count=1,
+                )
+            }
+        ),
+    )
+
+    scan = scanner.scan(
+        root,
+        snapshot_id="snapshot-named-stream",
+        exclude_control_area=False,
+    )
+
+    assert [entry.relative_path for entry in scan.entries] == ["document.txt"]
+    assert scan.complete is False
+    assert len(scan.issues) == 1
+    assert scan.issues[0].issue_type == "NAMED_STREAM_PRESENT"
+    assert scan.issues[0].error_code == "SNAPSHOT_NAMED_STREAM_PRESENT"
+    assert scan.issues[0].blocks_destructive_actions is True
+
+
+def test_local_snapshot_scanner_blocks_unconfirmed_named_stream_enumeration(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "document.txt").write_text("primary", encoding="utf-8")
+    scanner = LocalFilesystemSnapshotScanner(
+        case_mode_probe=_FixedCaseModeProbe(),
+        named_stream_probe=_FixedNamedStreamProbe(
+            {
+                "document.txt": NamedStreamInspection(
+                    state=NamedStreamState.UNKNOWN,
+                    error_code="WIN32_NAMED_STREAM_ENUMERATION_FAILED_5",
+                )
+            }
+        ),
+    )
+
+    scan = scanner.scan(
+        root,
+        snapshot_id="snapshot-named-stream-unknown",
+        exclude_control_area=False,
+    )
+
+    assert scan.complete is False
+    assert len(scan.issues) == 1
+    assert scan.issues[0].issue_type == "NAMED_STREAM_ENUMERATION_UNCONFIRMED"
+    assert scan.issues[0].error_code == "WIN32_NAMED_STREAM_ENUMERATION_FAILED_5"

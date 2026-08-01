@@ -170,6 +170,26 @@ def test_database_contract_rejects_ctime_birthtime_fallback() -> None:
         validate_contracts.validate_database_contract(document)
 
 
+def test_database_contract_rejects_named_stream_full_object_overclaim() -> None:
+    yaml = _yaml_loader()
+    document = validate_contracts.load_yaml(
+        validate_contracts.ROOT / "schema/database-contract.yaml",
+        yaml,
+    )
+    document = copy.deepcopy(document)
+    invariant = _database_invariant(
+        document,
+        "META-002_NAMED_STREAM_FAIL_CLOSED",
+    )
+    invariant["primary_stream_only_can_claim_full_object"] = True
+
+    with pytest.raises(
+        validate_contracts.ContractValidationError,
+        match="named-stream contract drifted",
+    ):
+        validate_contracts.validate_database_contract(document)
+
+
 def test_database_contract_rejects_merged_operation_result_axes() -> None:
     yaml = _yaml_loader()
     document = validate_contracts.load_yaml(

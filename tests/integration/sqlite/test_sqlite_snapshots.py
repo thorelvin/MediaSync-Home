@@ -459,6 +459,56 @@ def test_sqlite_snapshot_seal_rejects_blocking_issue(tmp_path: Path) -> None:
         assert _snapshot_seal_row(connection) == (0, 0, 0, 0, None, None, None)
 
 
+def test_sqlite_named_stream_finding_is_persisted_and_prevents_seal(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_snapshot_parent_rows(connection)
+        store = SqliteSnapshotEntryStore(connection)
+        store.commit_snapshot_entry_batch(
+            _case_collision_batch(
+                issues=(
+                    SnapshotIssue(
+                        relative_path="Readme.txt",
+                        issue_type="NAMED_STREAM_PRESENT",
+                        blocks_destructive_actions=True,
+                        error_code="SNAPSHOT_NAMED_STREAM_PRESENT",
+                        sanitized_message=(
+                            "The item contains a Windows named stream, and "
+                            "full-object copying is not enabled."
+                        ),
+                    ),
+                )
+            )
+        )
+
+        page = store.page_snapshot_issues(
+            SnapshotIssuePageQuery(
+                snapshot_id="snapshot-a",
+                limit=10,
+                blocking_only=True,
+            )
+        )
+
+        assert len(page.issues) == 1
+        assert page.issues[0].issue_type == "NAMED_STREAM_PRESENT"
+        assert page.issues[0].error_code == "SNAPSHOT_NAMED_STREAM_PRESENT"
+        with pytest.raises(
+            SqliteSnapshotEntryStoreError,
+            match="SNAPSHOT_SEAL_BLOCKING_ISSUES",
+        ):
+            store.seal_snapshot(
+                _seal_request(
+                    expected_issue_count=1,
+                    expected_blocking_issue_count=1,
+                )
+            )
+
+        assert store.load_sealed_snapshot("snapshot-a") is None
+
+
 def _prepare_catalog(connection: sqlite3.Connection, database: Path) -> None:
     apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
     apply_sqlite_migrations(connection, catalog_migration_plan())
@@ -562,7 +612,11 @@ def _alpha_batch():
     )
 
 
-def _seal_request(*, expected_issue_count: int = 0) -> SnapshotSealRequest:
+def _seal_request(
+    *,
+    expected_issue_count: int = 0,
+    expected_blocking_issue_count: int = 0,
+) -> SnapshotSealRequest:
     return SnapshotSealRequest(
         snapshot_id="snapshot-a",
         expected_entry_count=2,
@@ -570,6 +624,7 @@ def _seal_request(*, expected_issue_count: int = 0) -> SnapshotSealRequest:
         expected_batch_count=1,
         expected_directory_coverage_count=1,
         expected_issue_count=expected_issue_count,
+        expected_blocking_issue_count=expected_blocking_issue_count,
         expected_case_collision_group_count=1,
     )
 

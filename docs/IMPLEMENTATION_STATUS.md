@@ -493,7 +493,18 @@ Reparasjon av pre-migration-30 pending jobs er nå også levert gjennom den
 eksplisitte, revisjonsbundne **Registrer mål**-handlingen. Den senere
 oppdateringen øverst dekker også kontrollert lokal fremmed-overtakelse.
 
-Nyeste 0B-slice: `VER-001` har nå tre kanoniske og uavhengige resultatakser:
+Nyeste 0B-slice: `META-002` har nå en eksplisitt fail-closed policy for Windows
+named streams. Snapshotscanneren bruker bounded `FindFirstStreamW`/
+`FindNextStreamW`-enumerering for hver vanlig fil og katalog. Et funnet stream,
+en enumerering som ikke kan bekreftes, eller overskredet enumereringsgrense blir en
+checksumbundet, blokkerende snapshot-finding; snapshotet kan derfor ikke
+forsegles eller brukes til kopiering. GUI-et viser funnet som ekstra
+Windows-fildata eller ufullstendig kontroll på norsk og engelsk. Kontrakten
+forbyr samtidig at bare primærstreamen omtales som full object-ekvivalens.
+Kopiering, hashing, gjenoppretting og ende-til-ende-verifisering av selve named
+streams gjenstår, så `META-002` er fortsatt `in_progress`.
+
+Forrige 0B-slice: `VER-001` har nå tre kanoniske og uavhengige resultatakser:
 transfer, assurance og durability. Catalog migration 51 normaliserer eldre
 auditposter konservativt, beholder tvetydig `DURABLE` som `UNKNOWN`, og
 installerer insert-guards som avviser ukjente verdier og suksess uten

@@ -102,11 +102,17 @@ def _dict_items(page: dict[object, object], key: str) -> tuple[dict[object, obje
 def _issue_row(snapshot_id: str, payload: dict[object, object]) -> SnapshotHealthPreviewRow:
     relative_path = _required_text(payload.get("relative_path")) or "."
     issue_type = _required_text(payload.get("issue_type")) or "ISSUE"
+    issue_label = {
+        "NAMED_STREAM_PRESENT": "Extra Windows file data found",
+        "NAMED_STREAM_ENUMERATION_UNCONFIRMED": (
+            "Windows file data check incomplete"
+        ),
+    }.get(issue_type, issue_type)
     severity_label = "Blocking issue"
     return SnapshotHealthPreviewRow(
         snapshot_id=snapshot_id,
         severity_label=severity_label,
-        display_line=f"{severity_label}: {relative_path} · {issue_type}",
+        display_line=f"{severity_label}: {relative_path} · {issue_label}",
     )
 
 

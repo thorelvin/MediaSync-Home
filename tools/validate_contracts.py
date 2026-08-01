@@ -783,6 +783,34 @@ def _validate_windows_birthtime_invariant(invariant: dict[str, Any]) -> None:
         fail(f"META-001 Windows birthtime contract drifted: {drifted}")
 
 
+def _validate_named_stream_invariant(invariant: dict[str, Any]) -> None:
+    expected = {
+        "requirement_id": "META-002",
+        "active_policy": "BLOCK_IF_PRESENT_OR_UNCONFIRMED",
+        "issue_table": "snapshot_issues",
+        "present_issue_code": "SNAPSHOT_NAMED_STREAM_PRESENT",
+        "unconfirmed_issue_code": (
+            "SNAPSHOT_NAMED_STREAM_ENUMERATION_UNCONFIRMED"
+        ),
+        "findings_checksum_bound": True,
+        "findings_block_snapshot_seal": True,
+        "primary_stream_only_can_claim_full_object": False,
+        "full_object_assurance_requires_named_stream_verification": True,
+    }
+    drifted = sorted(
+        key
+        for key, expected_value in expected.items()
+        if invariant.get(key) != expected_value
+    )
+    if drifted:
+        fail(f"META-002 named-stream contract drifted: {drifted}")
+    if _column_tuple(
+        invariant.get("enumeration_apis"),
+        "META-002 enumeration APIs",
+    ) != ("FindFirstStreamW", "FindNextStreamW"):
+        fail("META-002 named-stream enumeration APIs drifted")
+
+
 def _validate_endpoint_capability_invariant(invariant: dict[str, Any]) -> None:
     expected = {
         "requirement_id": "END-001",
@@ -1089,6 +1117,7 @@ def validate_database_contract(document: dict[str, Any]) -> int:
         "END-001_ENDPOINT_CAPABILITY_EVIDENCE",
         "HASH-001_CURRENT_READ_HASH_EVIDENCE",
         "META-001_WINDOWS_BIRTHTIME",
+        "META-002_NAMED_STREAM_FAIL_CLOSED",
         "SRC-001_SOURCE_FILE_PRECONDITION",
         "SYNC-002_INITIAL_BACKUP_PLAN_MATERIALIZATION",
         "VER-001_OPERATION_RESULT_AXES",
@@ -1133,6 +1162,9 @@ def validate_database_contract(document: dict[str, Any]) -> int:
     )
     _validate_windows_birthtime_invariant(
         invariant_by_id["META-001_WINDOWS_BIRTHTIME"]
+    )
+    _validate_named_stream_invariant(
+        invariant_by_id["META-002_NAMED_STREAM_FAIL_CLOSED"]
     )
     _validate_endpoint_capability_invariant(
         invariant_by_id["END-001_ENDPOINT_CAPABILITY_EVIDENCE"]
