@@ -7735,6 +7735,10 @@ class MediaSyncWindow(QMainWindow):
             else:
                 row.setText("")
                 row.setVisible(False)
+        self._refresh_responsive_page_geometry(
+            self._activity_content,
+            self._activity_scroll_area,
+        )
 
     def _apply_cataloged_files_preview_state(
         self, state: CatalogedFilesPreviewState
@@ -7753,6 +7757,10 @@ class MediaSyncWindow(QMainWindow):
             else:
                 row.setText("")
                 row.setVisible(False)
+        self._refresh_responsive_page_geometry(
+            self._activity_content,
+            self._activity_scroll_area,
+        )
 
     def _build_layout(self) -> None:
         root = QWidget()

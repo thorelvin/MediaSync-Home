@@ -4383,6 +4383,17 @@ def test_activity_bar_wraps_exact_filter_decisions_without_clipping(qapp) -> Non
         assert "default-long-cache-rule" in row.text()
         assert row.width() <= activity_scroll.viewport().width()
         assert row.height() >= row.heightForWidth(row.width())
+        activity_content = activity_scroll.widget()
+        assert activity_content is not None
+        visible_responsive_labels = [
+            label
+            for label in activity_content.findChildren(QLabel)
+            if label.property("responsiveText") and not label.isHidden()
+        ]
+        assert visible_responsive_labels
+        for label in visible_responsive_labels:
+            assert label.width() <= activity_scroll.viewport().width()
+            assert label.height() >= label.heightForWidth(label.width())
 
         assert language.menu() is not None
         language.menu().actions()[1].trigger()
@@ -4397,6 +4408,9 @@ def test_activity_bar_wraps_exact_filter_decisions_without_clipping(qapp) -> Non
         assert "Matched exclusion rule" in row.text()
         assert row.width() <= activity_scroll.viewport().width()
         assert row.height() >= row.heightForWidth(row.width())
+        for label in visible_responsive_labels:
+            assert label.width() <= activity_scroll.viewport().width()
+            assert label.height() >= label.heightForWidth(label.width())
     finally:
         window.close()
         window.deleteLater()
