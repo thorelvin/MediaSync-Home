@@ -1,5 +1,22 @@
 # Kravsporbarhet
 
+Oppdatering 2026-07-31 for `UX-002`, `UX-004` og `PERF-001`: Interaktive
+filter- og sidequeryer i Jobber > Endringer kjører nå utenfor GUI-tråden når
+produktets Engine-client-factory er tilgjengelig. Kontrolleren har én aktiv
+worker, maksimalt fire ventende querynøkler, latest-wins-erstatning per nøkkel,
+eksplisitt overflowavvisning og logical cancellation ved plan-/vindusbytte.
+Stale resultater kan ikke overskrive nyere filterkontekst, sidepilene kan ikke
+dobbelklikkes mens en side er på vei, og en sen worker kan avslutte uten å
+oppdatere et lukket vindu. Den sentrale `UiUpdateCoalescer` har maksimalt 16
+rekonstruerbare kanaler og anvender bare siste verdi per kanal ved høyst 4 Hz.
+GUI-testen holder første query blokkert, navigerer med et reelt klikk, sender
+to nyere filtervalg og beviser én serialisert latest-query og bare siste side i
+900×560. Virtuelle tabeller og bredere initial-/oversiktsqueryer i bakgrunnen
+gjenstår. Bevis: `src/mediasync_home/presentation/background_queries.py`,
+`src/mediasync_home/presentation/main_window.py`,
+`src/mediasync_home/presentation/view_models/localization.py` og
+`tests/gui/test_pyside_shell.py`.
+
 Oppdatering 2026-07-31 for den resterende elementhalvdelen av `AC-UX-15`:
 Den paginerte filresultatvisningen i Historikk tilbyr nå et lokalisert retry
 for valgt operation når den varige auditen er `SKIPPED`, `CANCELLED` eller
@@ -54,8 +71,9 @@ plan. Planoperasjonsspørringen støtter validerte, parameteriserte mål- og
 risikofiltre, bounded keyset-sider og planens immutable risikotall/mål-ID-er.
 GUI-et holder høyst 25 rader, viser oppmerksomhetsoppsummering og eksakt
 årsakskode/precondition for valgt endring, og beholder filter/detalj ved
-språkbytte. 900×560-dekningen har null horisontal overflow. Virtuelle tabeller,
-cancellable bakgrunnsspørringer og `UiUpdateCoalescer` er fortsatt pending.
+språkbytte. 900×560-dekningen har null horisontal overflow. Interaktive
+filter-/sidequeryer og `UiUpdateCoalescer` er levert i oppdateringen over;
+virtuelle tabeller og bredere bakgrunnsqueryer gjenstår.
 Bevis: `src/mediasync_home/application/plans.py`,
 `src/mediasync_home/application/plan_read_models.py`,
 `src/mediasync_home/adapters/sqlite/plans.py`,

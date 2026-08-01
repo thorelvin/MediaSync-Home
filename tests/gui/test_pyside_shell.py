@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import replace
+from threading import Event, Lock
+from time import monotonic
 
 import pytest
 
@@ -41,6 +43,10 @@ from mediasync_home.application.user_preferences import (  # noqa: E402
 from mediasync_home.domain.process_roles import ProcessRole  # noqa: E402
 from mediasync_home.ipc.protocol import IpcResponse  # noqa: E402
 from mediasync_home.presentation.app import build_main_window, ensure_qapplication  # noqa: E402
+from mediasync_home.presentation.background_queries import (  # noqa: E402
+    BackgroundQueryController,
+    UiUpdateCoalescer,
+)
 from mediasync_home.presentation.theme.icon_registry import IconRegistry  # noqa: E402
 from mediasync_home.presentation.theme.theme_manager import ThemeManager, ThemeMode  # noqa: E402
 from mediasync_home.presentation.view_models.engine_status import (  # noqa: E402
@@ -1359,6 +1365,163 @@ def test_jobs_changes_workspace_filters_pages_and_localizes_without_clipping(
     finally:
         window.close()
         window.deleteLater()
+
+
+def test_changes_query_stall_does_not_block_navigation_and_keeps_latest_filter(
+    qapp,
+) -> None:
+    provider = _FakeChangesDashboardEngineClient()
+    worker_provider = _BlockingChangesDashboardEngineClient()
+    factory_calls: list[bool] = []
+
+    def worker_factory() -> _BlockingChangesDashboardEngineClient:
+        factory_calls.append(True)
+        return worker_provider
+
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=worker_factory,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window.refresh_engine_status()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+        nav = window.findChild(QListWidget, "navigationRail")
+        target_filter = window.findChild(QComboBox, "changesTargetFilter")
+        risk_filter = window.findChild(QComboBox, "changesRiskFilter")
+        changes_list = window.findChild(QListWidget, "changesList")
+        next_button = window.findChild(QToolButton, "changesNextButton")
+
+        assert nav is not None
+        assert target_filter is not None
+        assert risk_filter is not None
+        assert changes_list is not None
+        assert next_button is not None and next_button.isEnabled()
+        target_filter.setCurrentIndex(target_filter.findData("target-a"))
+        assert worker_provider.started.wait(timeout=1)
+        assert not worker_provider.release.is_set()
+        assert not next_button.isEnabled()
+
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(3)).center(),
+        )
+        qapp.processEvents()
+
+        assert nav.currentRow() == 3
+        assert not worker_provider.release.is_set()
+        target_filter.setCurrentIndex(target_filter.findData("target-b"))
+        risk_filter.setCurrentIndex(risk_filter.findData("ATTENTION"))
+        assert window._background_queries is not None
+        assert window._background_queries.pending_count == 1
+        worker_provider.release.set()
+
+        def query_settled() -> bool:
+            return (
+                len(worker_provider.changes_queries) == 2
+                and not window._background_queries.active
+                and window._ui_update_coalescer.pending_count == 0
+                and len(window._changes_page_state.rows) == 2
+                and all(
+                    row.target_endpoint_id == "target-b"
+                    for row in window._changes_page_state.rows
+                )
+            )
+
+        deadline = monotonic() + 3
+        while not query_settled() and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        assert query_settled()
+
+        assert worker_provider.max_active == 1
+        assert len(factory_calls) == 1
+        assert worker_provider.changes_queries[0][3:] == (
+            "target-a",
+            (),
+        )
+        assert worker_provider.changes_queries[1][3:] == (
+            "target-b",
+            ("MEDIUM", "HIGH", "BLOCKED"),
+        )
+        assert changes_list.count() == 2
+        assert not next_button.isEnabled()
+    finally:
+        worker_provider.release.set()
+        window.close()
+        window.deleteLater()
+
+
+def test_ui_update_coalescer_is_bounded_and_applies_only_latest_value(
+    qapp,
+) -> None:
+    coalescer = UiUpdateCoalescer(interval_ms=250, max_channels=2)
+    applied: list[int] = []
+
+    for value in range(100):
+        assert coalescer.submit(
+            channel="progress",
+            value=value,
+            apply=lambda item: applied.append(int(item)),
+        )
+    assert coalescer.submit(
+        channel="eta",
+        value=1,
+        apply=lambda item: None,
+    )
+    assert not coalescer.submit(
+        channel="third-channel",
+        value=1,
+        apply=lambda item: None,
+    )
+
+    qapp.processEvents()
+    QTest.qWait(10)
+    qapp.processEvents()
+
+    assert applied == [99]
+    assert coalescer.pending_count == 0
+    coalescer.deleteLater()
+
+
+def test_background_query_close_discards_late_worker_result(qapp) -> None:
+    started = Event()
+    release = Event()
+    applied: list[str] = []
+    controller = BackgroundQueryController(
+        client_factory=lambda: object(),
+        max_pending=1,
+    )
+
+    def blocked_query(client: object) -> object:
+        del client
+        started.set()
+        if not release.wait(timeout=2):
+            raise TimeoutError("test query release timed out")
+        return "late-result"
+
+    assert controller.submit(
+        key="changes-page",
+        operation=blocked_query,
+        on_result=lambda value: applied.append(str(value)),
+    )
+    assert started.wait(timeout=1)
+    controller.close()
+    release.set()
+    deadline = monotonic() + 2
+    while controller.active and monotonic() < deadline:
+        qapp.processEvents()
+        QTest.qWait(10)
+
+    assert not controller.active
+    assert applied == []
+    controller.deleteLater()
 
 
 def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) -> None:
@@ -2741,6 +2904,46 @@ class _FakeChangesDashboardEngineClient(_FakeDashboardEngineClient):
                 }
             }
         )
+
+
+class _BlockingChangesDashboardEngineClient(_FakeChangesDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+        self.release = Event()
+        self._worker_lock = Lock()
+        self._started_calls = 0
+        self._active_calls = 0
+        self.max_active = 0
+
+    def get_plan_operations(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        target_endpoint_id: str | None = None,
+        risk_levels: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        with self._worker_lock:
+            self._started_calls += 1
+            call_no = self._started_calls
+            self._active_calls += 1
+            self.max_active = max(self.max_active, self._active_calls)
+        self.started.set()
+        try:
+            if call_no == 1 and not self.release.wait(timeout=5):
+                raise TimeoutError("test query release timed out")
+            return super().get_plan_operations(
+                plan_id=plan_id,
+                limit=limit,
+                after=after,
+                target_endpoint_id=target_endpoint_id,
+                risk_levels=risk_levels,
+            )
+        finally:
+            with self._worker_lock:
+                self._active_calls -= 1
 
 
 class _FakeBackupStartDashboardEngineClient(_FakeDashboardEngineClient):

@@ -1,5 +1,20 @@
 # Implementeringsstatus
 
+Oppdatering 2026-07-31: Interaktive mål-/risikofiltre og sidebytte i
+**Jobber > Endringer** blokkerer ikke lenger GUI-tråden i produktkjøringen. En
+sentral, bounded bakgrunnskontroller kjører høyst én rekonstruerbar IPC-query om
+gangen, holder maksimalt fire ventende querynøkler, erstatter en eldre ventende
+query med nyeste valg og forkaster stale resultater etter filter-, plan- eller
+vindusbytte. Sidepilene låses mens en side er på vei, mens filtrene forblir
+responsive og latest-wins. `UiUpdateCoalescer` holder maksimalt 16 kanaler og
+anvender bare siste snapshot per kanal, høyst fire ganger per sekund. Et
+adversarial GUI-bevis blokkerer Engine-klienten med vilje, klikker reelt til
+Innstillinger mens queryen fortsatt venter, erstatter to filtervalg med én
+query og verifiserer at bare siste target/risk-side vises. Close-cancellation,
+bounded overflow og eksisterende norsk/engelsk 900×560-clippingbevis er dekket.
+Virtuelle millionradstabeller og bredere konvertering av initial-/oversiktsqueryer
+til bakgrunnsarbeid gjenstår.
+
 Oppdatering 2026-07-31: **Historikk** kan nå prøve én valgt uferdig fil på
 nytt fra den bounded, paginerte filresultatvisningen. Handlingen vises bare
 for varige `SKIPPED`, `CANCELLED` eller `RECOVERY_REQUIRED`-outcomes, kjører
@@ -34,8 +49,9 @@ og materialiserer høyst 25 rader i GUI-et. Valgt endring viser beslutning,
 operasjonstype, mål, sti, rå årsakskode, målprecondition og planlagte byte.
 Norsk/engelsk språkbytte bevarer filtre og valgt detalj; to sider, to mål,
 safe/review/high/blocked og 900×560 uten horisontal overflow er dekket.
-Virtuelle millionradstabeller, cancellable bakgrunnsspørringer og
-`UiUpdateCoalescer` gjenstår.
+Virtuelle millionradstabeller og bredere cancellable bakgrunnsspørringer
+gjenstår; interaktive filter-/sidequeryer og `UiUpdateCoalescer` er levert i
+oppdateringen over.
 
 Oppdatering 2026-07-31: Terminale resultater i **Jobber** viser nå et stabilt,
 lokalisert sammendrag av hvor mange mål som ble fullført, for eksempel

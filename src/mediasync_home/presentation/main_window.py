@@ -9,7 +9,15 @@ from typing import Protocol, cast
 from uuid import uuid4
 
 from PySide6.QtCore import QSize, QTimer, Qt
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap, QResizeEvent
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QColor,
+    QIcon,
+    QPainter,
+    QPixmap,
+    QResizeEvent,
+)
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
@@ -46,6 +54,10 @@ from mediasync_home.application.user_preferences import (
     UserLanguage,
     UserPreferences,
     UserPreferencesStore,
+)
+from mediasync_home.presentation.background_queries import (
+    BackgroundQueryController,
+    UiUpdateCoalescer,
 )
 from mediasync_home.presentation.theme.icon_registry import IconRegistry
 from mediasync_home.application.job_drafts import (
@@ -341,6 +353,20 @@ class MediaSyncWindow(QMainWindow):
         super().__init__()
         self._engine_client = engine_client
         self._engine_client_factory = engine_client_factory
+        self._background_queries = (
+            BackgroundQueryController(
+                client_factory=engine_client_factory,
+                max_pending=4,
+                parent=self,
+            )
+            if engine_client_factory is not None
+            else None
+        )
+        self._ui_update_coalescer = UiUpdateCoalescer(
+            interval_ms=250,
+            max_channels=16,
+            parent=self,
+        )
         self._user_preferences = user_preferences or UserPreferences()
         self._user_preferences_store = user_preferences_store
         self._apply_appearance = apply_appearance
@@ -502,6 +528,7 @@ class MediaSyncWindow(QMainWindow):
         self._changes_page_limit = 25
         self._changes_page_index = 0
         self._changes_page_cursors: list[dict[str, object] | None] = [None]
+        self._changes_query_pending = False
         self._changes_target_filter: str | None = None
         self._changes_risk_filter = "ALL"
         self._selected_changes_operation_id: str | None = None
@@ -617,6 +644,12 @@ class MediaSyncWindow(QMainWindow):
         super().resizeEvent(event)
         self._update_responsive_dashboard_layout()
         QTimer.singleShot(0, self._refresh_dashboard_geometry)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._background_queries is not None:
+            self._background_queries.close()
+        self._ui_update_coalescer.cancel_all()
+        super().closeEvent(event)
 
     def _texts(self) -> ShellText:
         return shell_text(self._selected_language_code)
@@ -2295,12 +2328,13 @@ class MediaSyncWindow(QMainWindow):
         self._refresh_snapshot_health_preview(endpoint_state.source_snapshot_id)
 
     def _refresh_plan_operation_preview(self, plan_id: str) -> None:
+        self._cancel_background_changes_query()
         if plan_id != self._changes_plan_id:
             self._changes_plan_id = plan_id
             self._changes_target_filter = None
             self._changes_risk_filter = "ALL"
             self._reset_changes_paging()
-        self._refresh_changes_page()
+        self._refresh_changes_page(background=False)
         self.apply_plan_operation_preview(
             replace(
                 self._changes_page_state,
@@ -2308,7 +2342,7 @@ class MediaSyncWindow(QMainWindow):
             )
         )
 
-    def _refresh_changes_page(self) -> None:
+    def _refresh_changes_page(self, *, background: bool = True) -> None:
         plan_id = self._changes_plan_id
         if (
             plan_id is None
@@ -2318,20 +2352,169 @@ class MediaSyncWindow(QMainWindow):
             self._changes_page_state = empty_plan_operation_preview_state()
             self._apply_changes_page_state(self._changes_page_state)
             return
+        page_index = self._changes_page_index
+        page_limit = self._changes_page_limit
+        raw_cursor = self._changes_page_cursors[page_index]
+        cursor = None if raw_cursor is None else dict(raw_cursor)
+        target_endpoint_id = self._changes_target_filter
+        risk_levels = self._changes_risk_levels()
+        if background and self._background_queries is not None:
+
+            def query(client: object) -> object:
+                provider = cast(PlanOperationsProvider, client)
+                return provider.get_plan_operations(
+                    plan_id=plan_id,
+                    limit=page_limit,
+                    after=cursor,
+                    target_endpoint_id=target_endpoint_id,
+                    risk_levels=risk_levels,
+                )
+
+            def accept(response: object) -> None:
+                def apply(value: object) -> None:
+                    self._accept_background_changes_response(
+                        response=cast(IpcResponse, value),
+                        plan_id=plan_id,
+                        page_index=page_index,
+                        cursor=cursor,
+                        target_endpoint_id=target_endpoint_id,
+                        risk_levels=risk_levels,
+                    )
+
+                if not self._ui_update_coalescer.submit(
+                    channel="changes-page",
+                    value=response,
+                    apply=apply,
+                ):
+                    apply(response)
+
+            def reject(error: Exception) -> None:
+                self._reject_background_changes_response(
+                    error=error,
+                    plan_id=plan_id,
+                    page_index=page_index,
+                    cursor=cursor,
+                    target_endpoint_id=target_endpoint_id,
+                    risk_levels=risk_levels,
+                )
+
+            submitted = self._background_queries.submit(
+                key="changes-page",
+                operation=query,
+                on_result=accept,
+                on_error=reject,
+            )
+            if submitted:
+                self._set_changes_query_pending(True)
+            else:
+                reject(RuntimeError("background changes query was not accepted"))
+            return
+
         provider = cast(PlanOperationsProvider, self._engine_client)
-        cursor = self._changes_page_cursors[self._changes_page_index]
-        self._changes_page_state = plan_operation_preview_from_response(
+        self._apply_changes_response(
             provider.get_plan_operations(
                 plan_id=plan_id,
-                limit=self._changes_page_limit,
+                limit=page_limit,
                 after=cursor,
-                target_endpoint_id=self._changes_target_filter,
-                risk_levels=self._changes_risk_levels(),
+                target_endpoint_id=target_endpoint_id,
+                risk_levels=risk_levels,
             )
         )
+
+    def _accept_background_changes_response(
+        self,
+        *,
+        response: IpcResponse,
+        plan_id: str,
+        page_index: int,
+        cursor: dict[str, object] | None,
+        target_endpoint_id: str | None,
+        risk_levels: tuple[str, ...],
+    ) -> None:
+        if not self._changes_query_context_matches(
+            plan_id=plan_id,
+            page_index=page_index,
+            cursor=cursor,
+            target_endpoint_id=target_endpoint_id,
+            risk_levels=risk_levels,
+        ):
+            return
+        self._set_changes_query_pending(False)
+        self._apply_changes_response(response)
+
+    def _reject_background_changes_response(
+        self,
+        *,
+        error: Exception,
+        plan_id: str,
+        page_index: int,
+        cursor: dict[str, object] | None,
+        target_endpoint_id: str | None,
+        risk_levels: tuple[str, ...],
+    ) -> None:
+        del error
+        if not self._changes_query_context_matches(
+            plan_id=plan_id,
+            page_index=page_index,
+            cursor=cursor,
+            target_endpoint_id=target_endpoint_id,
+            risk_levels=risk_levels,
+        ):
+            return
+        self._set_changes_query_pending(False)
+        self.apply_engine_status(
+            replace(
+                self._engine_status_state,
+                detail=self._texts().changes_query_failed,
+                status_kind="warning",
+            )
+        )
+
+    def _changes_query_context_matches(
+        self,
+        *,
+        plan_id: str,
+        page_index: int,
+        cursor: dict[str, object] | None,
+        target_endpoint_id: str | None,
+        risk_levels: tuple[str, ...],
+    ) -> bool:
+        if page_index >= len(self._changes_page_cursors):
+            return False
+        current_cursor = self._changes_page_cursors[page_index]
+        return (
+            self._changes_plan_id == plan_id
+            and self._changes_page_index == page_index
+            and current_cursor == cursor
+            and self._changes_target_filter == target_endpoint_id
+            and self._changes_risk_levels() == risk_levels
+        )
+
+    def _apply_changes_response(self, response: IpcResponse) -> None:
+        self._changes_page_state = plan_operation_preview_from_response(response)
         self._apply_changes_page_state(self._changes_page_state)
 
+    def _cancel_background_changes_query(self) -> None:
+        if self._background_queries is not None:
+            self._background_queries.cancel("changes-page")
+        self._ui_update_coalescer.cancel("changes-page")
+        self._set_changes_query_pending(False)
+
+    def _set_changes_query_pending(self, pending: bool) -> None:
+        self._changes_query_pending = pending
+        if self._changes_previous_button is not None:
+            self._changes_previous_button.setEnabled(
+                not pending and self._changes_page_index > 0
+            )
+        if self._changes_next_button is not None:
+            self._changes_next_button.setEnabled(
+                not pending
+                and self._changes_page_state.has_more_operations
+                and self._changes_page_state.next_cursor is not None
+            )
+
     def _clear_changes_plan(self) -> None:
+        self._cancel_background_changes_query()
         self._changes_plan_id = None
         self._changes_target_filter = None
         self._changes_risk_filter = "ALL"
@@ -2376,13 +2559,15 @@ class MediaSyncWindow(QMainWindow):
         self._refresh_changes_page()
 
     def _show_previous_changes_page(self) -> None:
-        if self._changes_page_index <= 0:
+        if self._changes_query_pending or self._changes_page_index <= 0:
             return
         self._changes_page_index -= 1
         self._selected_changes_operation_id = None
         self._refresh_changes_page()
 
     def _show_next_changes_page(self) -> None:
+        if self._changes_query_pending:
+            return
         cursor = self._changes_page_state.next_cursor
         if not self._changes_page_state.has_more_operations or cursor is None:
             return
@@ -2422,10 +2607,14 @@ class MediaSyncWindow(QMainWindow):
         if self._changes_page_label is not None:
             self._changes_page_label.setText(self._changes_page_text())
         if self._changes_previous_button is not None:
-            self._changes_previous_button.setEnabled(self._changes_page_index > 0)
+            self._changes_previous_button.setEnabled(
+                not self._changes_query_pending and self._changes_page_index > 0
+            )
         if self._changes_next_button is not None:
             self._changes_next_button.setEnabled(
-                state.has_more_operations and state.next_cursor is not None
+                not self._changes_query_pending
+                and state.has_more_operations
+                and state.next_cursor is not None
             )
         changes_list = self._changes_list
         if changes_list is None:

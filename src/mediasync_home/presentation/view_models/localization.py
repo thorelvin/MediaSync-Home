@@ -224,6 +224,12 @@ class ShellText:
         return "Ingen endringer samsvarer med filtrene."
 
     @property
+    def changes_query_failed(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "The changes could not be refreshed. Try again."
+        return "Endringene kunne ikke oppdateres. Prøv på nytt."
+
+    @property
     def decision(self) -> str:
         return "Decision" if self.language_tooltip_prefix == "Language" else "Beslutning"
 
