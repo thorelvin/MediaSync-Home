@@ -97,9 +97,10 @@ class SqliteWritableEndpointRegistrationStore:
                 "Refresh or recreate the backup job before registering targets.",
                 retryable=False,
             )
-        if all(str(row[6]) == "WRITABLE_READY" for row in rows):
-            return ()
+        candidates: list[WritableEndpointRegistrationCandidate] = []
         for row in rows:
+            if str(row[6]) == "WRITABLE_READY":
+                continue
             if (
                 str(row[6]) != "REGISTRATION_PENDING"
                 or str(row[8]) != "CLASSIFIED"
@@ -113,8 +114,8 @@ class SqliteWritableEndpointRegistrationStore:
                     ),
                     retryable=False,
                 )
-        return tuple(
-            WritableEndpointRegistrationCandidate(
+            candidates.append(
+                WritableEndpointRegistrationCandidate(
                 job_id=job_id,
                 job_revision_id=job_revision_id,
                 target_ordinal=int(row[0]),
@@ -124,8 +125,8 @@ class SqliteWritableEndpointRegistrationStore:
                 display_name=str(row[4]),
                 root_uri=str(row[5]),
             )
-            for row in rows
-        )
+            )
+        return tuple(candidates)
 
     def save_prepared_registration_intent(
         self,
@@ -662,7 +663,15 @@ class SqliteWritableEndpointRegistrationStore:
             """,
             (intent.job_id, intent.source_job_revision_id),
         ).fetchall()
-        if len(bindings) != len(replacements) + 1:
+        source_count = sum(str(row[0]) == "SOURCE" for row in bindings)
+        target_ordinals = {
+            int(row[1]) for row in bindings if str(row[0]) == "TARGET"
+        }
+        if (
+            source_count != 1
+            or not target_ordinals
+            or not set(replacements).issubset(target_ordinals)
+        ):
             raise _registration_error(
                 "WRITABLE_ENDPOINT_SOURCE_BINDINGS_INCOMPLETE",
                 "Refresh the backup job endpoint bindings before retrying registration.",
@@ -672,6 +681,12 @@ class SqliteWritableEndpointRegistrationStore:
             role = str(row[0])
             ordinal = int(row[1])
             replacement = replacements.get(ordinal) if role == "TARGET" else None
+            if role == "TARGET" and replacement is None and str(row[4]) != "WRITABLE_READY":
+                raise _registration_error(
+                    "WRITABLE_ENDPOINT_SOURCE_BINDINGS_INCOMPLETE",
+                    "Refresh the backup job endpoint bindings before retrying registration.",
+                    retryable=False,
+                )
             self._connection.execute(
                 """
                 INSERT INTO standard_backup_job_endpoint_bindings (

@@ -289,6 +289,9 @@ class UuidStandardBackupJobIdFactory:
             filter_set_id=f"filter-set-{token}",
         )
 
+    def new_standard_backup_job_revision_id(self) -> str:
+        return f"job-revision-{uuid4().hex}"
+
 
 class UuidEndpointIdFactory:
     def new_endpoint_ids(self) -> EndpointIds:
@@ -1603,6 +1606,7 @@ def build_engine_host_runtime(
         outbox = SqliteOutboxStore(catalog_connection)
         job_drafts = SqliteJobDraftStore(catalog_connection)
         standard_backup_jobs = SqliteStandardBackupJobCatalog(catalog_connection)
+        standard_backup_job_ids = UuidStandardBackupJobIdFactory()
         standard_backup_job_endpoints = SqliteStandardBackupJobEndpointRegistrar(
             catalog_connection,
             id_factory=UuidEndpointIdFactory(),
@@ -1765,6 +1769,7 @@ def build_engine_host_runtime(
             installation_id=installation_id,
             job_draft_store=job_drafts,
             standard_backup_job_catalog=standard_backup_jobs,
+            standard_backup_job_revision_catalog=standard_backup_jobs,
             standard_backup_job_read_store=standard_backup_jobs,
             standard_backup_job_detail_store=standard_backup_jobs,
             standard_backup_job_endpoint_registrar=standard_backup_job_endpoints,
@@ -1783,7 +1788,8 @@ def build_engine_host_runtime(
                     observed_utc=runtime_clock.utc_now(),
                 )
             ),
-            standard_backup_job_id_factory=UuidStandardBackupJobIdFactory(),
+            standard_backup_job_id_factory=standard_backup_job_ids,
+            standard_backup_job_revision_id_factory=standard_backup_job_ids,
             snapshot_entry_read_store=snapshots,
             snapshot_coverage_read_store=snapshots,
             snapshot_issue_read_store=snapshots,
@@ -1803,7 +1809,9 @@ def build_engine_host_runtime(
             cataloged_file_read_store=catalog_handoffs,
             backup_analysis_request_store=backup_analysis_requests,
             job_lifecycle_store=job_lifecycle,
+            job_schedule_invalidator=job_lifecycle,
             job_lifecycle_utc_now=runtime_clock.utc_now,
+            job_editing_utc_now=runtime_clock.utc_now,
             command_receipt_store=command_receipts,
             command_effect_transaction=SqliteImmediateTransactionRunner(
                 catalog_connection,

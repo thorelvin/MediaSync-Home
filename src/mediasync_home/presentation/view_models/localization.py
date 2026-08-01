@@ -240,6 +240,110 @@ class ShellText:
         return "The job could not be changed" if self.language_tooltip_prefix == "Language" else "Jobben kunne ikke endres"
 
     @property
+    def edit_job(self) -> str:
+        return "Edit job" if self.language_tooltip_prefix == "Language" else "Rediger jobb"
+
+    @property
+    def edit_job_tooltip(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Edit this backup job"
+        return "Rediger denne backupjobben"
+
+    @property
+    def edit_setup_title(self) -> str:
+        return "Edit backup job" if self.language_tooltip_prefix == "Language" else "Rediger backupjobb"
+
+    @property
+    def edit_setup_subtitle(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Changes stay local until you explicitly save them."
+        return "Endringene forblir lokale til du lagrer dem eksplisitt."
+
+    @property
+    def job_name(self) -> str:
+        return "Name" if self.language_tooltip_prefix == "Language" else "Navn"
+
+    @property
+    def change_source_tooltip(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Choose a different source folder"
+        return "Velg en annen kildemappe"
+
+    @property
+    def save_and_check(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Save and check changes"
+        return "Lagre og kontroller endringer"
+
+    @property
+    def save_without_check(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Save without checking"
+        return "Lagre uten kontroll"
+
+    @property
+    def save_changes(self) -> str:
+        return "Save changes" if self.language_tooltip_prefix == "Language" else "Lagre endringer"
+
+    @property
+    def discard_edit(self) -> str:
+        return "Discard" if self.language_tooltip_prefix == "Language" else "Forkast"
+
+    @property
+    def edit_full_check_consequence(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "A full check is required. Existing schedules will pause; prior runs and history stay unchanged."
+        return "En full kontroll kreves. Eksisterende tidsplaner pauses; tidligere kjøringer og historikk forblir uendret."
+
+    @property
+    def edit_name_only_consequence(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Only the name changes. The current checked plan remains valid."
+        return "Bare navnet endres. Gjeldende kontrollerte plan forblir gyldig."
+
+    @property
+    def edit_active_run_lock(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "A backup is running. You can rename the job, but source and targets are read-only until it finishes."
+        return "En backup kjører. Du kan endre navnet, men kilde og mål er skrivebeskyttet til kjøringen er ferdig."
+
+    @property
+    def unsaved_edit_title(self) -> str:
+        return "Unsaved job changes" if self.language_tooltip_prefix == "Language" else "Ulagrede jobbendringer"
+
+    @property
+    def unsaved_edit_message(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Save these changes before leaving the editor?"
+        return "Vil du lagre endringene før du forlater redigeringen?"
+
+    @property
+    def continue_editing(self) -> str:
+        return "Continue editing" if self.language_tooltip_prefix == "Language" else "Fortsett å redigere"
+
+    @property
+    def discard_changes(self) -> str:
+        return "Discard changes" if self.language_tooltip_prefix == "Language" else "Forkast endringer"
+
+    @property
+    def job_edit_saved(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Job changes saved"
+        return "Jobbendringene er lagret"
+
+    @property
+    def job_edit_saved_needs_check(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Job changes saved; a full check is still required"
+        return "Jobbendringene er lagret; en full kontroll kreves fortsatt"
+
+    @property
+    def job_edit_failed(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "The job changes could not be saved"
+        return "Jobbendringene kunne ikke lagres"
+
+    @property
     def pause_backup(self) -> str:
         return "Pause" if self.language_tooltip_prefix == "Language" else "Pause"
 

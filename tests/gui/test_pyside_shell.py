@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QFileDialog,
     QFrame,
     QLabel,
+    QLineEdit,
     QListWidget,
     QProgressBar,
     QPushButton,
@@ -1614,7 +1615,9 @@ def test_jobs_workspace_filters_archived_jobs_and_reactivates_without_clipping(
         assert jobs_scroll is not None
         assert jobs_scroll.horizontalScrollBar().maximum() == 0
         assert detail_panel is not None
-        assert lifecycle_button.geometry().right() <= detail_panel.contentsRect().right()
+        assert (
+            lifecycle_button.geometry().right() <= detail_panel.contentsRect().right()
+        )
     finally:
         window.close()
         window.deleteLater()
@@ -4260,6 +4263,211 @@ def test_jobs_page_wraps_file_retry_diagnostics_without_clipping(qapp) -> None:
         window.deleteLater()
 
 
+def _open_job_editor(qapp, provider: _FakeJobEditingDashboardEngineClient):
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+    window.resize(900, 560)
+    window.show()
+    window.refresh_engine_status()
+    qapp.processEvents()
+    navigation = window.findChild(QListWidget, "navigationRail")
+    edit_button = window.findChild(QPushButton, "jobsEditButton")
+    assert navigation is not None
+    assert edit_button is not None
+    navigation.setCurrentRow(1)
+    qapp.processEvents()
+    assert edit_button.isVisible()
+    assert edit_button.isEnabled()
+    QTest.mouseClick(edit_button, Qt.MouseButton.LeftButton)
+    qapp.processEvents()
+    assert navigation.currentRow() == 0
+    assert window._is_setup_editing()
+    return window
+
+
+def test_job_editor_saves_name_only_change_without_full_check(qapp) -> None:
+    provider = _FakeJobEditingDashboardEngineClient()
+    window = _open_job_editor(qapp, provider)
+
+    try:
+        name_input = window.findChild(QLineEdit, "setupJobNameInput")
+        primary = window.findChild(QPushButton, "createBackupButton")
+        save_without_check = window.findChild(
+            QPushButton,
+            "saveJobWithoutCheckButton",
+        )
+        assert name_input is not None
+        assert primary is not None
+        assert save_without_check is not None
+        assert name_input.text() == "Pictures"
+        assert window._setup_draft.source_path_label == "C:/Users/Ada/Pictures"
+        assert tuple(target.path_label for target in window._setup_draft.targets) == (
+            "E:/Backup",
+        )
+
+        name_input.selectAll()
+        QTest.keyClicks(name_input, "Pictures renamed")
+        for expected_step in ("targets", "defaults", "review"):
+            QTest.mouseClick(primary, Qt.MouseButton.LeftButton)
+            qapp.processEvents()
+            assert window._setup_state.current_step.value == expected_step
+
+        assert primary.text() == "Lagre endringer"
+        assert primary.isEnabled()
+        assert save_without_check.isHidden()
+        QTest.mouseClick(primary, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert len(provider.edit_calls) == 1
+        call = provider.edit_calls[0]
+        draft = call["draft"]
+        assert isinstance(draft, StandardBackupJobDraft)
+        assert draft.source_name == "Pictures renamed"
+        assert call["check_after_save"] is False
+        assert call["expected_job_revision_id"] == "job-rev-a"
+        assert call["expected_lifecycle_row_version"] == 1
+        assert not window._is_setup_editing()
+        navigation = window.findChild(QListWidget, "navigationRail")
+        assert navigation is not None and navigation.currentRow() == 1
+    finally:
+        window._setup_edit_original_draft = None
+        window.close()
+        window.deleteLater()
+
+
+def test_job_editor_target_change_stays_visible_and_can_save_without_check(
+    qapp,
+) -> None:
+    provider = _FakeJobEditingDashboardEngineClient()
+    window = _open_job_editor(qapp, provider)
+
+    try:
+        primary = window.findChild(QPushButton, "createBackupButton")
+        add_target = window.findChild(QToolButton, "addTargetButton")
+        save_without_check = window.findChild(
+            QPushButton,
+            "saveJobWithoutCheckButton",
+        )
+        controls = window.findChild(QWidget, "setupTargetControls")
+        scroll = window.findChild(QScrollArea, "dashboardScrollArea")
+        assert primary is not None
+        assert add_target is not None
+        assert save_without_check is not None
+        assert controls is not None
+        assert scroll is not None
+
+        QTest.mouseClick(primary, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        long_target = "F:/MediaSync/Second/" + "deep-folder/" * 10 + "backup"
+        window._choose_directory = lambda _title: long_target
+        QTest.mouseClick(add_target, Qt.MouseButton.LeftButton)
+        window._ensure_setup_action_visible()
+        qapp.processEvents()
+
+        target_rows = window.findChildren(QWidget, "setupTargetPathRow")
+        visible_rows = [row for row in target_rows if row.isVisible()]
+        assert len(visible_rows) == 2
+        assert visible_rows[1].property("fullText").endswith(long_target)
+        for row in window.findChildren(
+            QWidget, "setupTargetRow1"
+        ) + window.findChildren(
+            QWidget,
+            "setupTargetRow2",
+        ):
+            if row.isVisible():
+                assert row.geometry().right() <= controls.contentsRect().right()
+        primary_bottom = primary.mapTo(
+            scroll.viewport(),
+            primary.rect().bottomLeft(),
+        ).y()
+        assert 0 <= primary_bottom < scroll.viewport().height()
+        assert primary.isVisible() and primary.isEnabled()
+
+        QTest.mouseClick(primary, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(primary, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert window._setup_state.current_step.value == "review"
+        assert primary.text() == "Lagre og kontroller endringer"
+        assert save_without_check.isVisible()
+        assert save_without_check.isEnabled()
+        QTest.mouseClick(save_without_check, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert len(provider.edit_calls) == 1
+        call = provider.edit_calls[0]
+        draft = call["draft"]
+        assert isinstance(draft, StandardBackupJobDraft)
+        assert len(draft.targets) == 2
+        assert draft.targets[1].path_label == long_target
+        assert call["check_after_save"] is False
+        assert not window._is_setup_editing()
+    finally:
+        window._setup_edit_original_draft = None
+        window.close()
+        window.deleteLater()
+
+
+def test_job_editor_active_run_lock_and_unsaved_navigation_guard(qapp) -> None:
+    provider = _FakeJobEditingDashboardEngineClient()
+    window = _open_job_editor(qapp, provider)
+
+    try:
+        name_input = window.findChild(QLineEdit, "setupJobNameInput")
+        change_source = window.findChild(QToolButton, "changeSetupSourceButton")
+        primary = window.findChild(QPushButton, "createBackupButton")
+        navigation = window.findChild(QListWidget, "navigationRail")
+        add_target = window.findChild(QToolButton, "addTargetButton")
+        assert name_input is not None
+        assert change_source is not None
+        assert primary is not None
+        assert navigation is not None
+        assert add_target is not None
+        active = replace(
+            window._run_progress_state,
+            run_id="run-editing",
+            job_id="job-a",
+            state="EXECUTING",
+            run_found=True,
+            terminal=False,
+        )
+        window._run_progress_state = active
+        window._apply_run_progress_state(active)
+        qapp.processEvents()
+
+        assert name_input.isEnabled()
+        assert not change_source.isEnabled()
+        name_input.selectAll()
+        QTest.keyClicks(name_input, "Rename while running")
+        QTest.mouseClick(primary, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert not add_target.isEnabled()
+        assert all(
+            not button.isEnabled()
+            for button in window.findChildren(QToolButton, "removeTargetButton")
+            if button.isVisible()
+        )
+
+        window._confirm_unsaved_job_edit = lambda: "continue"
+        navigation.setCurrentRow(1)
+        qapp.processEvents()
+        assert navigation.currentRow() == 0
+        assert window._is_setup_editing()
+
+        window._confirm_unsaved_job_edit = lambda: "discard"
+        navigation.setCurrentRow(1)
+        qapp.processEvents()
+        assert navigation.currentRow() == 1
+        assert not window._is_setup_editing()
+        assert provider.edit_calls == []
+    finally:
+        window._setup_edit_original_draft = None
+        window.close()
+        window.deleteLater()
+
+
 def _ready_state() -> EngineStatusViewState:
     return engine_status_from_response(
         IpcResponse.accepted(
@@ -4766,6 +4974,67 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
         )
 
 
+class _FakeJobEditingDashboardEngineClient(_FakeDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.edit_calls: list[dict[str, object]] = []
+
+    def update_standard_backup_job(
+        self,
+        *,
+        job_id: str,
+        expected_job_revision_id: str,
+        expected_lifecycle_row_version: int,
+        draft: StandardBackupJobDraft,
+        check_after_save: bool,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        self.calls.append("update_standard_backup_job")
+        self.edit_calls.append(
+            {
+                "job_id": job_id,
+                "expected_job_revision_id": expected_job_revision_id,
+                "expected_lifecycle_row_version": expected_lifecycle_row_version,
+                "draft": draft,
+                "check_after_save": check_after_save,
+                "request_id": request_id,
+                "idempotency_key": idempotency_key,
+            }
+        )
+        requires_full_check = (
+            draft.source_path_label != "C:/Users/Ada/Pictures"
+            or tuple(target.path_label for target in draft.targets) != ("E:/Backup",)
+        )
+        changed_fields = []
+        if draft.source_name != "Pictures":
+            changed_fields.append("name")
+        if draft.source_path_label != "C:/Users/Ada/Pictures":
+            changed_fields.append("source")
+        if tuple(target.path_label for target in draft.targets) != ("E:/Backup",):
+            changed_fields.append("targets")
+        return IpcResponse.accepted(
+            {
+                "job_edit": {
+                    "saved": True,
+                    "requires_full_check": requires_full_check,
+                    "check_queued": requires_full_check and check_after_save,
+                    "changed_fields": changed_fields,
+                    "validation_code": (
+                        "STANDARD_BACKUP_JOB_UPDATED_NEEDS_CHECK"
+                        if requires_full_check and not check_after_save
+                        else "STANDARD_BACKUP_JOB_UPDATED"
+                    ),
+                },
+                "job": {
+                    "job_id": job_id,
+                    "job_revision_id": "job-rev-b",
+                    "filter_set_id": "filter-a",
+                },
+            }
+        )
+
+
 class _BlockingStatusDashboardEngineClient(_FakeDashboardEngineClient):
     def __init__(self) -> None:
         super().__init__()
@@ -4808,7 +5077,9 @@ class _FakeJobLifecycleDashboardEngineClient(_FakeDashboardEngineClient):
         jobs = [dict(job) for job in overview["jobs"]]
         for job in jobs:
             job["lifecycle_state"] = self.lifecycle_filter
-            job["lifecycle_row_version"] = 2 if self.lifecycle_filter == "ARCHIVED" else 1
+            job["lifecycle_row_version"] = (
+                2 if self.lifecycle_filter == "ARCHIVED" else 1
+            )
         overview["jobs"] = jobs
         payload["backup_overview"] = overview
         return IpcResponse.accepted(payload)

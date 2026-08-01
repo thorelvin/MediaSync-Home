@@ -70,6 +70,18 @@ from mediasync_home.application.job_creation import (
     parse_create_standard_backup_job_command,
 )
 from mediasync_home.application.job_drafts import JobDraftStore
+from mediasync_home.application.job_editing import (
+    JobEditingCommandName,
+    JobEditingOutcome,
+    JobEditingPayloadError,
+    JobScheduleInvalidationError,
+    JobScheduleInvalidator,
+    StandardBackupJobRevisionCatalog,
+    StandardBackupJobRevisionIdFactory,
+    UpdateStandardBackupJobCommand,
+    parse_update_standard_backup_job_command,
+    update_standard_backup_job_from_draft,
+)
 from mediasync_home.application.job_endpoints import (
     StandardBackupJobEndpointRegistrar,
     StandardBackupJobEndpointSet,
@@ -269,6 +281,9 @@ class EngineHostIpcService:
     )
     job_draft_store: JobDraftStore | None = None
     standard_backup_job_catalog: StandardBackupJobCatalog | None = None
+    standard_backup_job_revision_catalog: (
+        StandardBackupJobRevisionCatalog | None
+    ) = None
     standard_backup_job_read_store: StandardBackupJobReadModelStore | None = None
     standard_backup_job_detail_store: StandardBackupJobDetailReadModelStore | None = (
         None
@@ -305,6 +320,11 @@ class EngineHostIpcService:
     job_lifecycle_store: JobLifecycleStore | None = None
     job_lifecycle_utc_now: Callable[[], str] | None = None
     standard_backup_job_id_factory: StandardBackupJobIdFactory | None = None
+    standard_backup_job_revision_id_factory: (
+        StandardBackupJobRevisionIdFactory | None
+    ) = None
+    job_schedule_invalidator: JobScheduleInvalidator | None = None
+    job_editing_utc_now: Callable[[], str] | None = None
     plan_store: PlanStore | None = None
     run_store: RunStore | None = None
     run_control_store: RunControlStore | None = None
@@ -695,6 +715,11 @@ class EngineHostIpcService:
             == JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value
         ):
             return self._handle_create_standard_backup_job(command, identity)
+        if (
+            command.command_name
+            == JobEditingCommandName.UPDATE_STANDARD_BACKUP_JOB.value
+        ):
+            return self._handle_update_standard_backup_job(command, identity)
         if (
             command.command_name
             == WritableEndpointRegistrationCommandName.REGISTER_WRITABLE_TARGETS.value
@@ -1159,6 +1184,41 @@ class EngineHostIpcService:
         return IpcResponse.rejected(
             IpcReason.MUTATING_COMMANDS_DISABLED, response_payload
         )
+
+    def _handle_update_standard_backup_job(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+    ) -> IpcResponse:
+        try:
+            command = parse_update_standard_backup_job_command(
+                request_id=envelope.request_id,
+                idempotency_key=envelope.idempotency_key,
+                payload=envelope.payload,
+            )
+        except JobEditingPayloadError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        if self.status.mutations_enabled:
+            return self._dispatch_update_standard_backup_job(
+                envelope,
+                identity,
+                command,
+            )
+        receipt_response = self._record_terminal_rejected_receipt(
+            envelope,
+            identity,
+            rejection_reason=IpcReason.MUTATING_COMMANDS_DISABLED.value,
+        )
+        if receipt_response is not None:
+            return receipt_response
+        payload = _job_editing_response_payload(
+            envelope=envelope,
+            command=command,
+            mutations_enabled=False,
+            outcome=None,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, payload)
 
     def _handle_register_writable_targets(
         self,
@@ -2308,6 +2368,260 @@ class EngineHostIpcService:
             return IpcResponse.rejected(_receipt_rejection_reason(receipt), payload)
         return IpcResponse.accepted(payload)
 
+    def _dispatch_update_standard_backup_job(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: UpdateStandardBackupJobCommand,
+    ) -> IpcResponse:
+        try:
+            response = self._run_command_effect_transaction(
+                lambda: self._dispatch_update_standard_backup_job_in_transaction(
+                    envelope,
+                    identity,
+                    command,
+                )
+            )
+        except (JobScheduleInvalidationError, ValueError) as exc:
+            outcome = JobEditingOutcome(
+                saved=False,
+                validation_code=str(exc),
+                next_action="Refresh the job and retry saving the edit.",
+            )
+            return IpcResponse.rejected(
+                IpcReason.COMMAND_PRECONDITION_FAILED,
+                _job_editing_response_payload(
+                    envelope=envelope,
+                    command=command,
+                    mutations_enabled=True,
+                    outcome=outcome,
+                ),
+            )
+        response = self._refresh_endpoint_classification_after_job_command(response)
+        response = self._register_writable_targets_after_job_command(
+            response,
+            envelope=envelope,
+        )
+        response = self._refresh_endpoint_classification_after_job_command(response)
+        return self._enqueue_analysis_after_job_edit(
+            response,
+            envelope=envelope,
+            command=command,
+        )
+
+    def _dispatch_update_standard_backup_job_in_transaction(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: UpdateStandardBackupJobCommand,
+    ) -> IpcResponse:
+        if (
+            self.command_receipt_store is None
+            or self.job_draft_store is None
+            or self.standard_backup_job_revision_catalog is None
+            or self.standard_backup_job_revision_id_factory is None
+            or self.job_schedule_invalidator is None
+            or self.job_lifecycle_store is None
+            or self.run_store is None
+        ):
+            return self._reject_config_missing_job_editing(
+                envelope,
+                identity,
+                command,
+            )
+        receipt, conflict_response = self._record_received_receipt(envelope, identity)
+        if conflict_response is not None:
+            return conflict_response
+        if receipt is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+        if receipt.state is not CommandReceiptState.RECEIVED:
+            outcome = update_standard_backup_job_from_draft(
+                command=command,
+                catalog=self.standard_backup_job_revision_catalog,
+                runs=self.run_store,
+                id_factory=self.standard_backup_job_revision_id_factory,
+                schedules=self.job_schedule_invalidator,
+                lifecycle=self.job_lifecycle_store,
+            )
+            payload = _job_editing_response_payload(
+                envelope=envelope,
+                command=command,
+                mutations_enabled=True,
+                outcome=outcome,
+                endpoint_set=self._load_job_edit_endpoint_set(outcome),
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            if receipt.state is CommandReceiptState.REJECTED:
+                return IpcResponse.rejected(_receipt_rejection_reason(receipt), payload)
+            return IpcResponse.accepted(payload)
+
+        receipt = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        self.job_draft_store.save_standard_backup_draft(command.draft)
+        outcome = update_standard_backup_job_from_draft(
+            command=command,
+            catalog=self.standard_backup_job_revision_catalog,
+            runs=self.run_store,
+            id_factory=self.standard_backup_job_revision_id_factory,
+            schedules=self.job_schedule_invalidator,
+            lifecycle=self.job_lifecycle_store,
+        )
+        if not outcome.saved or outcome.job is None:
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.REJECTED,
+                rejection_reason=IpcReason.COMMAND_PRECONDITION_FAILED.value,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+            payload = _job_editing_response_payload(
+                envelope=envelope,
+                command=command,
+                mutations_enabled=True,
+                outcome=outcome,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(IpcReason.COMMAND_PRECONDITION_FAILED, payload)
+
+        endpoint_set = None
+        if self.standard_backup_job_endpoint_registrar is not None:
+            endpoint_set = self.standard_backup_job_endpoint_registrar.register_standard_backup_job_endpoints(
+                outcome.job
+            )
+        receipt = transition_command_receipt(
+            receipt,
+            CommandReceiptState.EFFECT_PREPARED,
+            result_entity_type="standard_backup_job_revision",
+            result_entity_id=outcome.job.job_revision_id,
+        )
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.ACCEPTED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.SUCCEEDED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        self._enqueue_command_effect_outbox(receipt)
+        payload = _job_editing_response_payload(
+            envelope=envelope,
+            command=command,
+            mutations_enabled=True,
+            outcome=outcome,
+            endpoint_set=endpoint_set,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.accepted(payload)
+
+    def _load_job_edit_endpoint_set(
+        self,
+        outcome: JobEditingOutcome,
+    ) -> StandardBackupJobEndpointSet | None:
+        if (
+            outcome.job is None
+            or self.standard_backup_job_endpoint_registrar is None
+        ):
+            return None
+        return self.standard_backup_job_endpoint_registrar.load_standard_backup_job_endpoint_set(
+            job_id=outcome.job.job_id,
+            job_revision_id=outcome.job.job_revision_id,
+        )
+
+    def _reject_config_missing_job_editing(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: UpdateStandardBackupJobCommand,
+    ) -> IpcResponse:
+        receipt_response = self._record_terminal_rejected_receipt(
+            envelope,
+            identity,
+            rejection_reason=IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED.value,
+        )
+        if receipt_response is not None:
+            return receipt_response
+        payload = _job_editing_response_payload(
+            envelope=envelope,
+            command=command,
+            mutations_enabled=True,
+            outcome=None,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.rejected(
+            IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED,
+            payload,
+        )
+
+    def _enqueue_analysis_after_job_edit(
+        self,
+        response: IpcResponse,
+        *,
+        envelope: IpcCommandEnvelope,
+        command: UpdateStandardBackupJobCommand,
+    ) -> IpcResponse:
+        if response.status is not IpcStatus.ACCEPTED:
+            return response
+        payload = dict(response.payload)
+        edit = payload.get("job_edit")
+        if not isinstance(edit, dict) or edit.get("requires_full_check") is not True:
+            return response
+        if not command.check_after_save:
+            edit["check_queued"] = False
+            edit["validation_code"] = "STANDARD_BACKUP_JOB_UPDATED_NEEDS_CHECK"
+            payload["job_edit"] = edit
+            return IpcResponse.accepted(payload)
+        registration = payload.get("writable_endpoint_registration")
+        if (
+            isinstance(registration, dict)
+            and registration.get("completed") is not True
+        ):
+            edit["check_queued"] = False
+            edit["validation_code"] = (
+                "STANDARD_BACKUP_JOB_UPDATED_REGISTRATION_INCOMPLETE"
+            )
+            payload["job_edit"] = edit
+            return IpcResponse.accepted(payload)
+        job = payload.get("job")
+        if not isinstance(job, dict) or self.backup_analysis_request_store is None:
+            edit["check_queued"] = False
+            edit["validation_code"] = "STANDARD_BACKUP_JOB_CHECK_QUEUE_UNAVAILABLE"
+            payload["job_edit"] = edit
+            return IpcResponse.accepted(payload)
+        job_id = job.get("job_id")
+        job_revision_id = job.get("job_revision_id")
+        if not isinstance(job_id, str) or not isinstance(job_revision_id, str):
+            return response
+        requested_utc = (
+            self.job_editing_utc_now()
+            if self.job_editing_utc_now is not None
+            else _system_utc_now()
+        )
+        request = BackupAnalysisRequest(
+            request_id=envelope.request_id,
+            command_idempotency_key=envelope.idempotency_key,
+            job_id=job_id,
+            job_revision_id=job_revision_id,
+            state=BackupAnalysisRequestState.QUEUED,
+            requested_utc=requested_utc,
+            start_when_safe=False,
+        )
+
+        def enqueue() -> BackupAnalysisRequest:
+            assert self.backup_analysis_request_store is not None
+            return self.backup_analysis_request_store.enqueue_backup_analysis(request)
+
+        try:
+            recorded = (
+                enqueue()
+                if self.command_effect_transaction is None
+                else self.command_effect_transaction.run(enqueue)
+            )
+        except (CommandEffectStorageFailure, RuntimeError, ValueError):
+            edit["check_queued"] = False
+            edit["validation_code"] = "STANDARD_BACKUP_JOB_CHECK_QUEUE_FAILED"
+            payload["job_edit"] = edit
+            return IpcResponse.accepted(payload)
+        edit["check_queued"] = True
+        payload["job_edit"] = edit
+        payload["analysis_request"] = recorded.to_dict()
+        return IpcResponse.accepted(payload)
+
     def _dispatch_create_standard_backup_job(
         self,
         envelope: IpcCommandEnvelope,
@@ -2778,6 +3092,37 @@ def _create_standard_backup_job_response_payload(
         result["created"] = outcome.created
         result["idempotent_replay"] = outcome.idempotent_replay
         result["readiness"] = outcome.readiness.to_dict()
+        job = outcome.job
+    if job is not None:
+        result["job"] = {
+            "job_id": job.job_id,
+            "job_revision_id": job.job_revision_id,
+            "filter_set_id": job.filter_set_id,
+        }
+    if endpoint_set is not None:
+        result["endpoint_bindings"] = endpoint_set.to_dict()
+    return result
+
+
+def _job_editing_response_payload(
+    *,
+    envelope: IpcCommandEnvelope,
+    command: UpdateStandardBackupJobCommand,
+    mutations_enabled: bool,
+    outcome: JobEditingOutcome | None,
+    endpoint_set: StandardBackupJobEndpointSet | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "command_name": envelope.command_name,
+        "job_id": command.job_id,
+        "requested_job_revision_id": command.expected_job_revision_id,
+        "recognized": True,
+        "mutations_enabled": mutations_enabled,
+        "check_after_save": command.check_after_save,
+    }
+    job = None
+    if outcome is not None:
+        result["job_edit"] = outcome.to_dict()
         job = outcome.job
     if job is not None:
         result["job"] = {

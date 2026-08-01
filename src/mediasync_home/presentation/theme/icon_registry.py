@@ -12,6 +12,8 @@ ICON_COLORS = {
     "archive": "#64748b",
     "back": "#94a3b8",
     "dashboard": "#0f766e",
+    "edit": "#2563eb",
+    "folder": "#14b8a6",
     "history": "#9a6a12",
     "next": "#94a3b8",
     "refresh": "#475569",
@@ -76,6 +78,17 @@ class IconRegistry:
             painter.drawRect(5, 8, 14, 11)
             painter.drawRect(4, 5, 16, 4)
             painter.drawLine(9, 12, 15, 12)
+        elif name == "edit":
+            painter.drawLine(6, 18, 9, 17)
+            painter.drawLine(9, 17, 19, 7)
+            painter.drawLine(17, 5, 19, 7)
+            painter.drawLine(6, 18, 7, 14)
+            painter.drawLine(7, 14, 17, 5)
+        elif name == "folder":
+            painter.drawLine(4, 8, 9, 8)
+            painter.drawLine(9, 8, 11, 10)
+            painter.drawLine(11, 10, 20, 10)
+            painter.drawRect(4, 8, 16, 11)
         elif name == "remove-target":
             painter.drawLine(7, 8, 17, 8)
             painter.drawLine(10, 5, 14, 5)

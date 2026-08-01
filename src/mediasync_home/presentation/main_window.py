@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLayout,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -358,6 +359,20 @@ class BackupJobCreationProvider(Protocol):
     ) -> IpcResponse: ...
 
 
+class BackupJobEditingProvider(Protocol):
+    def update_standard_backup_job(
+        self,
+        *,
+        job_id: str,
+        expected_job_revision_id: str,
+        expected_lifecycle_row_version: int,
+        draft: StandardBackupJobDraft,
+        check_after_save: bool,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse: ...
+
+
 class WritableTargetRegistrationProvider(Protocol):
     def register_writable_targets(
         self,
@@ -507,6 +522,18 @@ class MediaSyncWindow(QMainWindow):
         self._setup_request_id: str | None = None
         self._setup_idempotency_key: str | None = None
         self._setup_command_pending = False
+        self._setup_edit_original_draft: BackupSetupDraft | None = None
+        self._setup_edit_previous_draft: BackupSetupDraft | None = None
+        self._setup_edit_previous_state: StandardBackupSetupViewState | None = None
+        self._setup_edit_job_id: str | None = None
+        self._setup_edit_job_revision_id: str | None = None
+        self._setup_edit_lifecycle_row_version: int | None = None
+        self._setup_edit_draft_id: str | None = None
+        self._setup_edit_request_id: str | None = None
+        self._setup_edit_idempotency_key: str | None = None
+        self._setup_edit_command_pending = False
+        self._setup_edit_navigation_after_save: int | None = None
+        self._setup_edit_close_after_save = False
         self._setup_registration_retry_required = False
         self._registration_request_id: str | None = None
         self._registration_idempotency_key: str | None = None
@@ -574,6 +601,7 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_lifecycle_filter_combo: QComboBox | None = None
         self._jobs_lifecycle_filter = "ACTIVE"
         self._jobs_lifecycle_button: QPushButton | None = None
+        self._jobs_edit_button: QPushButton | None = None
         self._job_lifecycle_command_pending = False
         self._job_lifecycle_request_id: str | None = None
         self._job_lifecycle_idempotency_key: str | None = None
@@ -649,6 +677,8 @@ class MediaSyncWindow(QMainWindow):
         self._stacked_dashboard_details: bool | None = None
         self._setup_title_label: QLabel | None = None
         self._setup_subtitle_label: QLabel | None = None
+        self._setup_name_label: QLabel | None = None
+        self._setup_name_input: QLineEdit | None = None
         self._setup_source_label: QLabel | None = None
         self._setup_target_label: QLabel | None = None
         self._setup_defaults_label: QLabel | None = None
@@ -663,8 +693,13 @@ class MediaSyncWindow(QMainWindow):
         self._setup_target_path_labels: list[QLabel] = []
         self._setup_remove_target_buttons: list[QToolButton] = []
         self._setup_add_target_button: QToolButton | None = None
+        self._setup_change_source_button: QToolButton | None = None
         self._setup_back_button: QToolButton | None = None
         self._setup_primary_button: QPushButton | None = None
+        self._setup_save_without_check_button: QPushButton | None = None
+        self._setup_discard_edit_button: QPushButton | None = None
+        self._setup_consequence_label: QLabel | None = None
+        self._setup_actions_layout: QGridLayout | None = None
         self._job_detail_title: QLabel | None = None
         self._job_detail_source_label: QLabel | None = None
         self._job_detail_targets_label: QLabel | None = None
@@ -834,6 +869,24 @@ class MediaSyncWindow(QMainWindow):
         QTimer.singleShot(0, self._refresh_dashboard_geometry)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._is_setup_editing():
+            if self._setup_edit_command_pending:
+                event.ignore()
+                return
+            if self._setup_edit_dirty():
+                decision = self._confirm_unsaved_job_edit()
+                if decision == "continue":
+                    event.ignore()
+                    return
+                if decision == "save":
+                    self._setup_edit_close_after_save = True
+                    if not self._save_edited_job(
+                        check_after_save=self._setup_edit_requires_full_check()
+                    ):
+                        self._setup_edit_close_after_save = False
+                    event.ignore()
+                    return
+            self._discard_job_edit(target_row=self._selected_navigation_index)
         if self._background_queries is not None:
             self._background_queries.close()
         if self._page_prefetch_queries is not None:
@@ -1029,9 +1082,10 @@ class MediaSyncWindow(QMainWindow):
 
     def apply_backup_overview(self, state: BackupOverviewViewState) -> None:
         self._backup_overview_state = state
-        self._setup_state = state.setup
         self._job_status_state = state.job_status
-        self._apply_backup_setup_state(state.setup)
+        if not self._is_setup_editing():
+            self._setup_state = state.setup
+            self._apply_backup_setup_state(state.setup)
         self._apply_job_status_state(state.job_status)
         self._apply_jobs_overview_state(state)
 
@@ -3378,6 +3432,8 @@ class MediaSyncWindow(QMainWindow):
         return state
 
     def _apply_run_progress_state(self, state: RunProgressViewState) -> None:
+        if self._is_setup_editing():
+            self._apply_backup_setup_state(self._setup_state)
         visible = (
             state.run_found
             and state.job_id is not None
@@ -4657,10 +4713,20 @@ class MediaSyncWindow(QMainWindow):
         )
 
     def _apply_backup_setup_state(self, state: StandardBackupSetupViewState) -> None:
+        editing = self._is_setup_editing()
+        texts = self._texts()
+        if self._setup_title_label is not None:
+            self._setup_title_label.setText(
+                texts.edit_setup_title if editing else texts.setup_title
+            )
+        if self._setup_subtitle_label is not None:
+            self._setup_subtitle_label.setText(
+                texts.edit_setup_subtitle if editing else texts.setup_subtitle
+            )
         for label, step, title in zip(
             self._setup_step_labels,
             state.steps,
-            self._texts().setup_steps,
+            texts.setup_steps,
             strict=False,
         ):
             label.setText(f"{step.number}. {title}")
@@ -4687,16 +4753,47 @@ class MediaSyncWindow(QMainWindow):
             self._setup_retention_value.setText(
                 self._display(state.defaults.retention_label)
             )
+        if self._setup_name_label is not None:
+            self._setup_name_label.setText(texts.job_name)
+        if self._setup_name_input is not None:
+            name = self._setup_draft.source_name or ""
+            if self._setup_name_input.text() != name:
+                self._setup_name_input.blockSignals(True)
+                self._setup_name_input.setText(name)
+                self._setup_name_input.blockSignals(False)
+            self._setup_name_input.setEnabled(
+                editing
+                and not self._setup_edit_command_pending
+                and not self._command_worker_active()
+            )
+        if self._setup_change_source_button is not None:
+            button = self._setup_change_source_button
+            button.setToolTip(texts.change_source_tooltip)
+            button.setAccessibleName(texts.change_source_tooltip)
+            button.setEnabled(
+                editing
+                and not self._setup_edit_safety_locked()
+                and not self._setup_edit_command_pending
+                and not self._command_worker_active()
+            )
         self._apply_setup_field_visibility(state)
         self._apply_setup_target_controls(state)
         if self._setup_back_button is not None:
             can_go_back = self._setup_can_go_back(state)
             self._setup_back_button.setVisible(can_go_back)
             self._setup_back_button.setEnabled(can_go_back)
-            self._setup_back_button.setToolTip(self._texts().back_tooltip)
-            self._setup_back_button.setAccessibleName(self._texts().back_tooltip)
+            self._setup_back_button.setToolTip(texts.back_tooltip)
+            self._setup_back_button.setAccessibleName(texts.back_tooltip)
         if self._setup_primary_button is not None:
-            if state.current_step is BackupSetupStep.SOURCE:
+            if editing and state.current_step is BackupSetupStep.REVIEW:
+                action_label = (
+                    texts.save_and_check
+                    if self._setup_edit_requires_full_check()
+                    else texts.save_changes
+                )
+            elif editing:
+                action_label = "Fortsett"
+            elif state.current_step is BackupSetupStep.SOURCE:
                 action_label = "Choose source folder"
             elif self._setup_registration_retry_required:
                 action_label = "Prøv målregistrering igjen"
@@ -4705,6 +4802,38 @@ class MediaSyncWindow(QMainWindow):
             self._setup_primary_button.setText(self._display(action_label))
             self._setup_primary_button.setEnabled(self._setup_primary_enabled(state))
             self._setup_primary_button.setToolTip(self._setup_primary_tooltip(state))
+        if self._setup_save_without_check_button is not None:
+            save_button = self._setup_save_without_check_button
+            save_button.setText(texts.save_without_check)
+            save_button.setVisible(
+                editing
+                and state.current_step is BackupSetupStep.REVIEW
+                and self._setup_edit_requires_full_check()
+            )
+            save_button.setEnabled(self._setup_edit_can_save())
+        if self._setup_discard_edit_button is not None:
+            discard_button = self._setup_discard_edit_button
+            discard_button.setText(texts.discard_edit)
+            discard_button.setVisible(editing)
+            discard_button.setEnabled(
+                not self._setup_edit_command_pending
+                and not self._command_worker_active()
+            )
+        if self._setup_consequence_label is not None:
+            locked = self._setup_edit_safety_locked()
+            dirty = self._setup_edit_dirty()
+            self._setup_consequence_label.setText(
+                texts.edit_active_run_lock
+                if locked
+                else texts.edit_full_check_consequence
+                if self._setup_edit_requires_full_check()
+                else texts.edit_name_only_consequence
+            )
+            self._setup_consequence_label.setVisible(
+                editing
+                and (locked or (state.current_step is BackupSetupStep.REVIEW and dirty))
+            )
+        self._lay_out_setup_actions(compact=self.width() < 1040)
         self._refresh_dashboard_geometry()
         QTimer.singleShot(0, self._refresh_dashboard_geometry)
 
@@ -4712,10 +4841,17 @@ class MediaSyncWindow(QMainWindow):
         self,
         state: StandardBackupSetupViewState,
     ) -> None:
+        editing = self._is_setup_editing()
         if self._setup_subtitle_label is not None:
             self._setup_subtitle_label.setVisible(
                 state.current_step is BackupSetupStep.SOURCE
             )
+        show_name = editing and state.current_step is BackupSetupStep.SOURCE
+        for widget in (self._setup_name_label, self._setup_name_input):
+            if widget is not None:
+                widget.setVisible(show_name)
+        if self._setup_change_source_button is not None:
+            self._setup_change_source_button.setVisible(show_name)
         show_defaults = state.current_step is not BackupSetupStep.TARGETS
         for widget in (
             self._setup_defaults_label,
@@ -4727,13 +4863,30 @@ class MediaSyncWindow(QMainWindow):
                 widget.setVisible(show_defaults)
 
     def _setup_primary_enabled(self, state: StandardBackupSetupViewState) -> bool:
-        if self._setup_command_pending or self._command_worker_active():
+        if (
+            self._setup_command_pending
+            or self._setup_edit_command_pending
+            or self._command_worker_active()
+        ):
             return False
+        if self._is_setup_editing():
+            if state.current_step is BackupSetupStep.SOURCE:
+                return bool(
+                    (self._setup_draft.source_name or "").strip()
+                    and self._setup_draft.source_path_label
+                )
+            if state.current_step is BackupSetupStep.REVIEW:
+                return self._setup_edit_can_save()
         if state.current_step is BackupSetupStep.SOURCE:
             return True
         return state.can_continue
 
     def _setup_can_go_back(self, state: StandardBackupSetupViewState) -> bool:
+        if self._is_setup_editing():
+            return (
+                state.current_step is not BackupSetupStep.SOURCE
+                and not self._setup_edit_command_pending
+            )
         return (
             state.current_step is not BackupSetupStep.SOURCE
             and not self._setup_command_pending
@@ -4743,6 +4896,15 @@ class MediaSyncWindow(QMainWindow):
         )
 
     def _setup_primary_tooltip(self, state: StandardBackupSetupViewState) -> str:
+        if self._is_setup_editing():
+            if state.current_step is BackupSetupStep.REVIEW:
+                return (
+                    self._texts().save_and_check
+                    if self._setup_edit_requires_full_check()
+                    else self._texts().save_changes
+                )
+            if state.current_step is BackupSetupStep.SOURCE:
+                return self._display("Continue with this name and source folder.")
         if state.current_step is BackupSetupStep.SOURCE:
             return self._display("Choose a source folder.")
         if state.current_step is BackupSetupStep.TARGETS:
@@ -4754,6 +4916,15 @@ class MediaSyncWindow(QMainWindow):
     def _handle_setup_primary_action(self) -> None:
         step = self._setup_state.current_step
         if step is BackupSetupStep.SOURCE:
+            if self._is_setup_editing():
+                if not self._setup_primary_enabled(self._setup_state):
+                    return
+                self._apply_local_setup_draft(
+                    BackupSetupStep.TARGETS,
+                    reveal_action=False,
+                )
+                self._apply_local_preview_job_detail()
+                return
             selected = self._choose_directory(self._display("Choose source folder"))
             if selected is None:
                 return
@@ -4777,6 +4948,11 @@ class MediaSyncWindow(QMainWindow):
         if step is BackupSetupStep.DEFAULTS:
             self._apply_local_setup_draft(BackupSetupStep.REVIEW)
             self._apply_local_preview_job_detail()
+            return
+        if self._is_setup_editing():
+            self._save_edited_job(
+                check_after_save=self._setup_edit_requires_full_check()
+            )
             return
         if self._setup_state.can_create:
             if self._engine_client is None:
@@ -4802,6 +4978,8 @@ class MediaSyncWindow(QMainWindow):
         if (
             self._setup_state.current_step is not BackupSetupStep.TARGETS
             or len(self._setup_draft.targets) >= self._setup_state.max_targets
+            or self._setup_edit_safety_locked()
+            or self._setup_edit_command_pending
         ):
             return
         selected = self._choose_directory(self._display("Choose target folder"))
@@ -4824,6 +5002,7 @@ class MediaSyncWindow(QMainWindow):
                 ),
             ),
         )
+        self._reset_setup_edit_command_identity()
         self._apply_local_setup_draft(
             BackupSetupStep.TARGETS,
             reveal_action=False,
@@ -4834,6 +5013,8 @@ class MediaSyncWindow(QMainWindow):
         if (
             self._setup_state.current_step is not BackupSetupStep.TARGETS
             or not 0 <= index < len(self._setup_draft.targets)
+            or self._setup_edit_safety_locked()
+            or self._setup_edit_command_pending
         ):
             return
         self._setup_draft = BackupSetupDraft(
@@ -4844,6 +5025,7 @@ class MediaSyncWindow(QMainWindow):
                 *self._setup_draft.targets[index + 1 :],
             ),
         )
+        self._reset_setup_edit_command_identity()
         self._apply_local_setup_draft(
             BackupSetupStep.TARGETS,
             reveal_action=False,
@@ -4851,7 +5033,7 @@ class MediaSyncWindow(QMainWindow):
         self._apply_local_preview_job_detail()
 
     def _handle_setup_back_action(self) -> None:
-        if self._setup_request_id is not None:
+        if self._setup_request_id is not None or self._setup_edit_command_pending:
             return
         previous_step = {
             BackupSetupStep.TARGETS: BackupSetupStep.SOURCE,
@@ -4871,11 +5053,14 @@ class MediaSyncWindow(QMainWindow):
         if controls is None or add_button is None:
             return
         editing_targets = state.current_step is BackupSetupStep.TARGETS
+        targets_locked = self._setup_edit_safety_locked()
         controls.setVisible(editing_targets)
         add_button.setVisible(editing_targets)
         add_button.setEnabled(
             editing_targets
             and state.configured_targets < state.max_targets
+            and not targets_locked
+            and not self._setup_edit_command_pending
             and not self._command_worker_active()
         )
         add_button.setToolTip(self._texts().add_target_tooltip)
@@ -4898,6 +5083,11 @@ class MediaSyncWindow(QMainWindow):
             remove_tooltip = f"{self._texts().remove_target_tooltip}: {target.name}"
             button.setToolTip(remove_tooltip)
             button.setAccessibleName(remove_tooltip)
+            button.setEnabled(
+                not targets_locked
+                and not self._setup_edit_command_pending
+                and not self._command_worker_active()
+            )
         controls_layout = controls.layout()
         if controls_layout is not None:
             controls_layout.invalidate()
@@ -4906,6 +5096,323 @@ class MediaSyncWindow(QMainWindow):
                 controls_layout.minimumSize().height() if editing_targets else 0
             )
         controls.updateGeometry()
+
+    def _is_setup_editing(self) -> bool:
+        return self._setup_edit_original_draft is not None
+
+    def _setup_edit_dirty(self) -> bool:
+        original = self._setup_edit_original_draft
+        return original is not None and self._setup_draft != original
+
+    def _setup_edit_requires_full_check(self) -> bool:
+        original = self._setup_edit_original_draft
+        if original is None:
+            return False
+        return (
+            self._setup_draft.source_path_label != original.source_path_label
+            or self._setup_draft.targets != original.targets
+        )
+
+    def _setup_edit_safety_locked(self) -> bool:
+        return (
+            self._is_setup_editing()
+            and self._run_progress_state.active
+            and self._run_progress_state.job_id == self._setup_edit_job_id
+        )
+
+    def _setup_edit_can_save(self) -> bool:
+        if (
+            not self._is_setup_editing()
+            or not self._setup_edit_dirty()
+            or self._setup_edit_command_pending
+            or self._command_worker_active()
+            or not (self._setup_draft.source_name or "").strip()
+            or not self._setup_draft.source_path_label
+            or not 1 <= len(self._setup_draft.targets) <= 3
+        ):
+            return False
+        return not (
+            self._setup_edit_safety_locked() and self._setup_edit_requires_full_check()
+        )
+
+    def _reset_setup_edit_command_identity(self) -> None:
+        if not self._is_setup_editing() or self._setup_edit_command_pending:
+            return
+        self._setup_edit_draft_id = None
+        self._setup_edit_request_id = None
+        self._setup_edit_idempotency_key = None
+
+    def _begin_selected_job_edit(self) -> None:
+        state = self._job_detail_state
+        if (
+            self._is_setup_editing()
+            or self._engine_client is None
+            or not hasattr(self._engine_client, "update_standard_backup_job")
+            or not state.found
+            or state.lifecycle_state != "ACTIVE"
+            or state.job_id is None
+            or state.job_revision_id is None
+            or not state.target_details
+            or self._job_detail_query_pending
+            or self._command_worker_active()
+        ):
+            return
+        draft = BackupSetupDraft(
+            source_name=state.title,
+            source_path_label=state.source_label,
+            targets=tuple(
+                BackupTargetDraft(
+                    name=target.name,
+                    path_label=target.path_label,
+                    independent_device_id=target.independent_device_id,
+                )
+                for target in state.target_details
+            ),
+        )
+        self._setup_edit_previous_draft = self._setup_draft
+        self._setup_edit_previous_state = self._setup_state
+        self._setup_edit_original_draft = draft
+        self._setup_edit_job_id = state.job_id
+        self._setup_edit_job_revision_id = state.job_revision_id
+        self._setup_edit_lifecycle_row_version = state.lifecycle_row_version
+        self._setup_edit_draft_id = None
+        self._setup_edit_request_id = None
+        self._setup_edit_idempotency_key = None
+        self._setup_edit_navigation_after_save = None
+        self._setup_draft = draft
+        self._force_navigation_row(0)
+        self._apply_local_setup_draft(
+            BackupSetupStep.SOURCE,
+            reveal_action=False,
+        )
+        self._apply_local_preview_job_detail()
+
+    def _change_setup_job_name(self, name: str) -> None:
+        if not self._is_setup_editing() or self._setup_edit_command_pending:
+            return
+        self._setup_draft = replace(self._setup_draft, source_name=name)
+        self._reset_setup_edit_command_identity()
+        self._setup_state = build_standard_backup_setup_state(
+            self._setup_draft,
+            current_step=self._setup_state.current_step,
+        )
+        self._apply_backup_setup_state(self._setup_state)
+        self._apply_local_preview_job_detail()
+
+    def _change_setup_source(self) -> None:
+        if (
+            not self._is_setup_editing()
+            or self._setup_edit_safety_locked()
+            or self._setup_edit_command_pending
+        ):
+            return
+        selected = self._choose_directory(self._texts().change_source_tooltip)
+        if selected is None:
+            return
+        self._setup_draft = replace(
+            self._setup_draft,
+            source_path_label=selected,
+        )
+        self._reset_setup_edit_command_identity()
+        self._apply_local_setup_draft(
+            self._setup_state.current_step,
+            reveal_action=False,
+        )
+        self._apply_local_preview_job_detail()
+
+    def _save_edited_job(self, *, check_after_save: bool) -> bool:
+        job_id = self._setup_edit_job_id
+        revision_id = self._setup_edit_job_revision_id
+        lifecycle_version = self._setup_edit_lifecycle_row_version
+        source_name = (self._setup_draft.source_name or "").strip()
+        source_path = self._setup_draft.source_path_label
+        if (
+            self._engine_client is None
+            or not hasattr(self._engine_client, "update_standard_backup_job")
+            or job_id is None
+            or revision_id is None
+            or lifecycle_version is None
+            or not source_name
+            or source_path is None
+            or not self._setup_edit_can_save()
+        ):
+            return False
+        if source_name != self._setup_draft.source_name:
+            self._setup_draft = replace(self._setup_draft, source_name=source_name)
+            self._reset_setup_edit_command_identity()
+        self._setup_edit_draft_id = self._setup_edit_draft_id or str(uuid4())
+        self._setup_edit_request_id = self._setup_edit_request_id or str(uuid4())
+        self._setup_edit_idempotency_key = self._setup_edit_idempotency_key or str(
+            uuid4()
+        )
+        request_id = self._setup_edit_request_id
+        idempotency_key = self._setup_edit_idempotency_key
+        draft = StandardBackupJobDraft(
+            draft_id=self._setup_edit_draft_id,
+            source_name=source_name,
+            source_path_label=source_path,
+            targets=tuple(
+                DraftTarget(
+                    name=target.name,
+                    path_label=target.path_label,
+                    independent_device_id=target.independent_device_id,
+                )
+                for target in self._setup_draft.targets
+            ),
+        )
+        needs_connect = not self._connected
+        self._setup_edit_command_pending = True
+        self._apply_backup_setup_state(self._setup_state)
+
+        def command(client: object) -> object:
+            if needs_connect:
+                handshake = cast(EngineStatusProvider, client).connect()
+                if handshake.reason is not None:
+                    return _CommandConnectResult(
+                        response=handshake,
+                        connected=False,
+                        command_submitted=False,
+                    )
+            response = cast(
+                BackupJobEditingProvider,
+                client,
+            ).update_standard_backup_job(
+                job_id=job_id,
+                expected_job_revision_id=revision_id,
+                expected_lifecycle_row_version=lifecycle_version,
+                draft=draft,
+                check_after_save=check_after_save,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+            )
+            return _CommandConnectResult(
+                response=response,
+                connected=True,
+                command_submitted=True,
+            )
+
+        def accept(value: object) -> None:
+            self._setup_edit_command_pending = False
+            result = cast(_CommandConnectResult, value)
+            self._connected = result.connected
+            if not result.command_submitted:
+                self.apply_engine_status(engine_status_from_response(result.response))
+                self._apply_backup_setup_state(self._setup_state)
+                return
+            self._apply_job_edit_response(
+                result.response,
+                check_after_save=check_after_save,
+            )
+
+        def reject(_error: Exception) -> None:
+            self._setup_edit_command_pending = False
+            self._apply_command_transport_failure(
+                "Job changes could not be submitted. Retry to reuse the same request."
+            )
+            self._apply_backup_setup_state(self._setup_state)
+
+        submitted = self._submit_engine_command(
+            name="update-backup-job",
+            operation=command,
+            on_result=accept,
+            on_error=reject,
+        )
+        if not submitted:
+            self._setup_edit_command_pending = False
+            self._apply_backup_setup_state(self._setup_state)
+        return submitted
+
+    def _apply_job_edit_response(
+        self,
+        response: IpcResponse,
+        *,
+        check_after_save: bool,
+    ) -> None:
+        edit = response.payload.get("job_edit")
+        if response.status is IpcStatus.REJECTED or not isinstance(edit, dict):
+            validation_code = (
+                edit.get("validation_code") if isinstance(edit, dict) else None
+            )
+            reason = (
+                str(validation_code)
+                if isinstance(validation_code, str)
+                else response.reason.value
+                if response.reason is not None
+                else "UNKNOWN"
+            )
+            self._reset_setup_edit_command_identity()
+            self.apply_engine_status(
+                replace(
+                    self._engine_status_state,
+                    detail=f"{self._texts().job_edit_failed}: {reason}",
+                    status_kind="warning",
+                )
+            )
+            self._apply_backup_setup_state(self._setup_state)
+            return
+        saved = edit.get("saved") is True
+        if not saved:
+            self._reset_setup_edit_command_identity()
+            self.apply_engine_status(
+                replace(
+                    self._engine_status_state,
+                    detail=self._texts().job_edit_failed,
+                    status_kind="warning",
+                )
+            )
+            self._apply_backup_setup_state(self._setup_state)
+            return
+        requires_check = edit.get("requires_full_check") is True
+        check_queued = edit.get("check_queued") is True
+        needs_check = requires_check and (not check_after_save or not check_queued)
+        self.apply_engine_status(
+            replace(
+                self._engine_status_state,
+                detail=(
+                    self._texts().job_edit_saved_needs_check
+                    if needs_check
+                    else self._texts().job_edit_saved
+                ),
+                status_kind="warning" if needs_check else "ready",
+            )
+        )
+        target_row = self._setup_edit_navigation_after_save
+        self._finish_job_edit(target_row=1 if target_row is None else target_row)
+
+    def _finish_job_edit(self, *, target_row: int) -> None:
+        selected_job_id = self._setup_edit_job_id
+        close_after_save = self._setup_edit_close_after_save
+        previous_draft = self._setup_edit_previous_draft or BackupSetupDraft.empty()
+        previous_state = self._setup_edit_previous_state or (
+            build_standard_backup_setup_state(previous_draft)
+        )
+        self._setup_edit_original_draft = None
+        self._setup_edit_previous_draft = None
+        self._setup_edit_previous_state = None
+        self._setup_edit_job_id = None
+        self._setup_edit_job_revision_id = None
+        self._setup_edit_lifecycle_row_version = None
+        self._setup_edit_draft_id = None
+        self._setup_edit_request_id = None
+        self._setup_edit_idempotency_key = None
+        self._setup_edit_command_pending = False
+        self._setup_edit_navigation_after_save = None
+        self._setup_edit_close_after_save = False
+        self._setup_draft = previous_draft
+        self._setup_state = previous_state
+        self._selected_job_id = selected_job_id
+        self._apply_backup_setup_state(self._setup_state)
+        if close_after_save:
+            QTimer.singleShot(0, self.close)
+            return
+        self._force_navigation_row(target_row)
+        self._refresh_activity_overview()
+
+    def _discard_job_edit(self, *, target_row: int = 1) -> bool:
+        if not self._is_setup_editing() or self._setup_edit_command_pending:
+            return False
+        self._finish_job_edit(target_row=target_row)
+        return True
 
     def _create_standard_backup_job(self) -> None:
         if (
@@ -5318,6 +5825,20 @@ class MediaSyncWindow(QMainWindow):
                 and not self._job_lifecycle_command_pending
                 and not self._command_worker_active()
                 and not active_for_job
+            )
+        if self._jobs_edit_button is not None:
+            button = self._jobs_edit_button
+            button.setText(self._texts().edit_job)
+            button.setToolTip(self._texts().edit_job_tooltip)
+            button.setVisible(state.found and lifecycle_active)
+            button.setEnabled(
+                state.found
+                and lifecycle_active
+                and not self._job_detail_query_pending
+                and not self._setup_edit_command_pending
+                and not self._command_worker_active()
+                and self._engine_client is not None
+                and hasattr(self._engine_client, "update_standard_backup_job")
             )
         self._apply_run_progress_state(self._run_progress_state)
         self._refresh_dashboard_geometry()
@@ -6541,7 +7062,37 @@ class MediaSyncWindow(QMainWindow):
     def _select_navigation_row(self, row: int) -> None:
         if row < 0:
             return
+        if self._is_setup_editing() and row != 0:
+            if self._setup_edit_command_pending:
+                self._force_navigation_row(0)
+                return
+            if not self._setup_edit_dirty():
+                self._discard_job_edit(target_row=row)
+                return
+            decision = self._confirm_unsaved_job_edit()
+            if decision == "discard":
+                self._discard_job_edit(target_row=row)
+                return
+            if decision == "save":
+                self._setup_edit_navigation_after_save = min(row, 3)
+                self._force_navigation_row(0)
+                if not self._save_edited_job(
+                    check_after_save=self._setup_edit_requires_full_check()
+                ):
+                    self._setup_edit_navigation_after_save = None
+                return
+            self._force_navigation_row(0)
+            return
+        self._force_navigation_row(row)
+
+    def _force_navigation_row(self, row: int) -> None:
+        if row < 0:
+            return
         self._selected_navigation_index = min(row, 3)
+        if self._navigation is not None:
+            self._navigation.blockSignals(True)
+            self._navigation.setCurrentRow(self._selected_navigation_index)
+            self._navigation.blockSignals(False)
         if self._workspace_stack is not None:
             self._workspace_stack.setCurrentIndex(self._selected_navigation_index)
         if self._workspace_heading is not None:
@@ -6552,6 +7103,37 @@ class MediaSyncWindow(QMainWindow):
             self._refresh_history_timeline()
         if self._selected_navigation_index == 3:
             self._apply_settings_storage_state()
+
+    def _confirm_unsaved_job_edit(self) -> str:
+        texts = self._texts()
+        message = QMessageBox(self)
+        message.setWindowTitle(texts.unsaved_edit_title)
+        message.setText(texts.unsaved_edit_message)
+        message.setIcon(QMessageBox.Icon.Question)
+        continue_button = message.addButton(
+            texts.continue_editing,
+            QMessageBox.ButtonRole.RejectRole,
+        )
+        discard_button = message.addButton(
+            texts.discard_changes,
+            QMessageBox.ButtonRole.DestructiveRole,
+        )
+        save_button = None
+        if self._setup_edit_can_save():
+            save_button = message.addButton(
+                texts.save_and_check
+                if self._setup_edit_requires_full_check()
+                else texts.save_changes,
+                QMessageBox.ButtonRole.AcceptRole,
+            )
+        message.setDefaultButton(continue_button)
+        message.exec()
+        clicked = message.clickedButton()
+        if save_button is not None and clicked is save_button:
+            return "save"
+        if clicked is discard_button:
+            return "discard"
+        return "continue"
 
     def _current_navigation_label(self) -> str:
         labels = (
@@ -6624,9 +7206,7 @@ class MediaSyncWindow(QMainWindow):
         lifecycle_filter.setObjectName("jobsLifecycleFilter")
         lifecycle_filter.addItem(texts.active_jobs, "ACTIVE")
         lifecycle_filter.addItem(texts.archived_jobs, "ARCHIVED")
-        lifecycle_filter.currentIndexChanged.connect(
-            self._change_jobs_lifecycle_filter
-        )
+        lifecycle_filter.currentIndexChanged.connect(self._change_jobs_lifecycle_filter)
         self._jobs_lifecycle_filter_combo = lifecycle_filter
         header_layout.addWidget(lifecycle_filter)
         header_layout.addWidget(previous)
@@ -6841,13 +7421,29 @@ class MediaSyncWindow(QMainWindow):
         start_backup.setVisible(False)
         start_backup.clicked.connect(self._invoke_primary_backup_action)
         self._jobs_start_backup_button = start_backup
-        layout.addWidget(start_backup, 17, 2)
 
         lifecycle_button = QPushButton()
         lifecycle_button.setObjectName("jobsLifecycleButton")
         lifecycle_button.clicked.connect(self._confirm_selected_job_lifecycle_change)
         self._jobs_lifecycle_button = lifecycle_button
-        layout.addWidget(lifecycle_button, 17, 0, 1, 2)
+
+        edit_button = QPushButton(texts.edit_job)
+        edit_button.setObjectName("jobsEditButton")
+        edit_button.setIcon(self._icons.icon("edit"))
+        edit_button.setToolTip(texts.edit_job_tooltip)
+        edit_button.clicked.connect(self._begin_selected_job_edit)
+        self._jobs_edit_button = edit_button
+
+        actions = QWidget()
+        actions.setObjectName("jobsDetailActions")
+        actions_layout = QHBoxLayout(actions)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setSpacing(8)
+        actions_layout.addWidget(edit_button)
+        actions_layout.addWidget(lifecycle_button)
+        actions_layout.addStretch(1)
+        actions_layout.addWidget(start_backup)
+        layout.addWidget(actions, 17, 0, 1, 3)
         layout.setColumnStretch(1, 1)
         return panel
 
@@ -7552,19 +8148,41 @@ class MediaSyncWindow(QMainWindow):
         self._setup_stepper_layout = stepper_layout
         layout.addWidget(stepper, 2, 0, 1, 3)
 
+        name_label = QLabel(texts.job_name)
+        name_label.setObjectName("mutedLabel")
+        name_label.setVisible(False)
+        self._setup_name_label = name_label
+        name_input = QLineEdit()
+        name_input.setObjectName("setupJobNameInput")
+        name_input.setVisible(False)
+        name_input.textEdited.connect(self._change_setup_job_name)
+        self._setup_name_input = name_input
+        layout.addWidget(name_label, 3, 0)
+        layout.addWidget(name_input, 3, 1, 1, 2)
+
         self._setup_source_label, self._setup_source_value = (
             _add_labeled_eliding_path_value(
                 layout,
-                3,
+                4,
                 texts.source,
                 self._display(state.source_label),
             )
         )
         self._setup_source_value.setObjectName("setupSourceValue")
+        layout.removeWidget(self._setup_source_value)
+        layout.addWidget(self._setup_source_value, 4, 1)
+        change_source = QToolButton()
+        change_source.setObjectName("changeSetupSourceButton")
+        change_source.setIcon(self._icons.icon("folder"))
+        change_source.setIconSize(QSize(20, 20))
+        change_source.setVisible(False)
+        change_source.clicked.connect(self._change_setup_source)
+        self._setup_change_source_button = change_source
+        layout.addWidget(change_source, 4, 2)
         self._setup_target_label, self._setup_target_value = (
             _add_labeled_eliding_path_value(
                 layout,
-                4,
+                5,
                 texts.target,
                 self._display(state.target_label),
             )
@@ -7620,11 +8238,11 @@ class MediaSyncWindow(QMainWindow):
         )
         self._setup_target_controls = target_controls
         self._setup_add_target_button = add_target
-        layout.addWidget(target_controls, 5, 1, 1, 2)
+        layout.addWidget(target_controls, 6, 1, 1, 2)
         self._setup_defaults_label, self._setup_defaults_value = (
             _add_labeled_text_value(
                 layout,
-                6,
+                7,
                 texts.defaults,
                 " · ".join(
                     self._display(label) for label in state.defaults.summary()[:3]
@@ -7635,12 +8253,19 @@ class MediaSyncWindow(QMainWindow):
         self._setup_retention_label, self._setup_retention_value = (
             _add_labeled_text_value(
                 layout,
-                7,
+                8,
                 texts.retention,
                 self._display(state.defaults.retention_label),
             )
         )
         self._setup_retention_value.setObjectName("setupRetentionValue")
+
+        consequence = QLabel()
+        consequence.setObjectName("setupEditConsequence")
+        consequence.setVisible(False)
+        _configure_responsive_label(consequence)
+        self._setup_consequence_label = consequence
+        layout.addWidget(consequence, 9, 0, 1, 3)
 
         back = QToolButton()
         back.setObjectName("setupBackButton")
@@ -7658,15 +8283,26 @@ class MediaSyncWindow(QMainWindow):
         primary.setToolTip(self._setup_primary_tooltip(state))
         primary.clicked.connect(self._handle_setup_primary_action)
         self._setup_primary_button = primary
+        save_without_check = QPushButton(texts.save_without_check)
+        save_without_check.setObjectName("saveJobWithoutCheckButton")
+        save_without_check.setVisible(False)
+        save_without_check.clicked.connect(
+            lambda: self._save_edited_job(check_after_save=False)
+        )
+        self._setup_save_without_check_button = save_without_check
+        discard = QPushButton(texts.discard_edit)
+        discard.setObjectName("discardJobEditButton")
+        discard.setVisible(False)
+        discard.clicked.connect(lambda: self._discard_job_edit(target_row=1))
+        self._setup_discard_edit_button = discard
         actions = QWidget()
         actions.setObjectName("setupActions")
-        actions_layout = QHBoxLayout(actions)
+        actions_layout = QGridLayout(actions)
         actions_layout.setContentsMargins(0, 0, 0, 0)
         actions_layout.setSpacing(8)
-        actions_layout.addStretch(1)
-        actions_layout.addWidget(back)
-        actions_layout.addWidget(primary)
-        layout.addWidget(actions, 8, 0, 1, 3)
+        self._setup_actions_layout = actions_layout
+        self._lay_out_setup_actions(compact=self.width() < 1040)
+        layout.addWidget(actions, 10, 0, 1, 3)
         layout.setColumnStretch(1, 1)
         self._apply_setup_target_controls(state)
         return panel
@@ -8195,6 +8831,7 @@ class MediaSyncWindow(QMainWindow):
             return
         self._compact_dashboard_layout = compact_steps
         self._stacked_dashboard_details = stacked_details
+        self._lay_out_setup_actions(compact=compact_steps)
         if self._dashboard_detail_layout is not None:
             self._dashboard_detail_layout.setDirection(
                 QBoxLayout.Direction.TopToBottom
@@ -8216,6 +8853,45 @@ class MediaSyncWindow(QMainWindow):
                     1 if column < columns else 0,
                 )
         self._refresh_dashboard_geometry()
+
+    def _lay_out_setup_actions(self, *, compact: bool) -> None:
+        layout = self._setup_actions_layout
+        discard = self._setup_discard_edit_button
+        back = self._setup_back_button
+        save_without_check = self._setup_save_without_check_button
+        primary = self._setup_primary_button
+        if (
+            layout is None
+            or discard is None
+            or back is None
+            or save_without_check is None
+            or primary is None
+        ):
+            return
+        for button in (discard, back, save_without_check, primary):
+            layout.removeWidget(button)
+        for column in range(5):
+            layout.setColumnStretch(column, 0)
+        if compact and self._is_setup_editing() and save_without_check.isVisible():
+            layout.addWidget(discard, 0, 0)
+            layout.addWidget(back, 0, 1, alignment=Qt.AlignmentFlag.AlignRight)
+            layout.addWidget(save_without_check, 1, 0)
+            layout.addWidget(primary, 1, 1)
+            layout.setColumnStretch(0, 1)
+            layout.setColumnStretch(1, 1)
+            return
+        if compact:
+            layout.addWidget(discard, 0, 0)
+            layout.addWidget(back, 0, 1)
+            layout.setColumnStretch(2, 1)
+            layout.addWidget(primary, 0, 3)
+            layout.addWidget(save_without_check, 1, 0)
+            return
+        layout.addWidget(discard, 0, 0)
+        layout.setColumnStretch(1, 1)
+        layout.addWidget(back, 0, 2)
+        layout.addWidget(save_without_check, 0, 3)
+        layout.addWidget(primary, 0, 4)
 
     def _update_responsive_settings_layout(self) -> None:
         direction = (

@@ -63,6 +63,12 @@ NEW_TARGET_REVISION_ID = "66666666-6666-4666-8666-666666666666"
 CONTROL_AREA_ID = "77777777-7777-4777-8777-777777777777"
 INTENT_ID = "88888888-8888-4888-8888-888888888888"
 NEW_JOB_REVISION_ID = "99999999-9999-4999-8999-999999999999"
+SECOND_TARGET_ENDPOINT_ID = "44444444-2222-4222-8222-444444444444"
+SECOND_TARGET_REVISION_ID = "55555555-2222-4222-8222-555555555555"
+SECOND_NEW_TARGET_REVISION_ID = "66666666-2222-4222-8222-666666666666"
+SECOND_CONTROL_AREA_ID = "77777777-2222-4222-8222-777777777777"
+SECOND_INTENT_ID = "88888888-2222-4222-8222-888888888888"
+SECOND_NEW_JOB_REVISION_ID = "99999999-2222-4222-8222-999999999999"
 
 
 def test_registration_coordinator_appends_revisions_and_stays_writable(
@@ -99,12 +105,24 @@ def test_registration_coordinator_appends_revisions_and_stays_writable(
             command_idempotency_key="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
             observed_utc="2026-07-31T11:02:00Z",
         )
+        not_required = coordinator.register_job_targets(
+            job_id=JOB_ID,
+            job_revision_id=NEW_JOB_REVISION_ID,
+            command_request_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            command_idempotency_key="dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            observed_utc="2026-07-31T11:02:30Z",
+        )
 
         assert report.completed is True
         assert report.active_job_revision_id == NEW_JOB_REVISION_ID
         assert report.registered_target_count == 1
         assert replay.completed is True
         assert replay.idempotent_replay is True
+        assert not_required.completed is True
+        assert not_required.validation_codes == (
+            "WRITABLE_ENDPOINT_REGISTRATION_NOT_REQUIRED",
+        )
+        assert not_required.next_action == "No target registration is required."
         assert connection.execute(
             "SELECT active_revision_id FROM job_heads WHERE job_id = ?",
             (JOB_ID,),
@@ -147,6 +165,85 @@ def test_registration_coordinator_appends_revisions_and_stays_writable(
             "WRITABLE_READY",
             "ENDPOINT_TARGET_WRITABLE_PROBE_VERIFIED",
         )
+
+
+def test_registration_preserves_ready_binding_while_registering_new_target(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    second_target = tmp_path / "target-two"
+    source.mkdir()
+    target.mkdir()
+    second_target.mkdir()
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database, source=source, target=target)
+        refresher = _refresher(connection)
+        refresher.refresh_endpoint_classifications(
+            observed_utc="2026-07-31T11:00:00Z"
+        )
+        first = WritableEndpointRegistrationCoordinator(
+            store=SqliteWritableEndpointRegistrationStore(connection),
+            provisioner=LocalWritableEndpointControlAreaProvisioner(),
+            id_factory=_FixedIds(),
+            owner_installation_id=INSTALLATION_ID,
+        ).register_job_targets(
+            job_id=JOB_ID,
+            job_revision_id=JOB_REVISION_ID,
+            command_request_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            command_idempotency_key="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            observed_utc="2026-07-31T11:01:00Z",
+        )
+        assert first.completed is True
+        _insert_endpoint(
+            connection,
+            endpoint_id=SECOND_TARGET_ENDPOINT_ID,
+            endpoint_revision_id=SECOND_TARGET_REVISION_ID,
+            root=second_target,
+            role="TARGET",
+            ordinal=2,
+            job_revision_id=NEW_JOB_REVISION_ID,
+        )
+        connection.commit()
+        refresher.refresh_endpoint_classifications(
+            observed_utc="2026-07-31T11:02:00Z"
+        )
+        store = SqliteWritableEndpointRegistrationStore(connection)
+
+        candidates = store.load_registration_candidates(
+            job_id=JOB_ID,
+            job_revision_id=NEW_JOB_REVISION_ID,
+        )
+
+        assert tuple(candidate.target_ordinal for candidate in candidates) == (2,)
+        report = WritableEndpointRegistrationCoordinator(
+            store=store,
+            provisioner=LocalWritableEndpointControlAreaProvisioner(),
+            id_factory=_SecondFixedIds(),
+            owner_installation_id=INSTALLATION_ID,
+        ).register_job_targets(
+            job_id=JOB_ID,
+            job_revision_id=NEW_JOB_REVISION_ID,
+            command_request_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            command_idempotency_key="dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            observed_utc="2026-07-31T11:03:00Z",
+        )
+
+        assert report.completed is True
+        assert report.registered_target_count == 1
+        assert report.active_job_revision_id == SECOND_NEW_JOB_REVISION_ID
+        assert connection.execute(
+            """
+            SELECT ordinal, registration_state
+            FROM standard_backup_job_endpoint_bindings
+            WHERE job_id = ?
+                AND job_revision_id = ?
+                AND role = 'TARGET'
+            ORDER BY ordinal
+            """,
+            (JOB_ID, SECOND_NEW_JOB_REVISION_ID),
+        ).fetchall() == [(1, "WRITABLE_READY"), (2, "WRITABLE_READY")]
         assert connection.execute(
             """
             SELECT endpoint_generation, intent_id, probe_completed_utc
@@ -410,6 +507,25 @@ class _FixedIds:
         )
 
 
+class _SecondFixedIds:
+    def new_registration_ids(
+        self,
+        candidates: tuple[WritableEndpointRegistrationCandidate, ...],
+    ) -> WritableEndpointRegistrationIds:
+        assert tuple(candidate.target_ordinal for candidate in candidates) == (2,)
+        return WritableEndpointRegistrationIds(
+            intent_id=SECOND_INTENT_ID,
+            resulting_job_revision_id=SECOND_NEW_JOB_REVISION_ID,
+            targets=(
+                WritableEndpointTargetIds(
+                    target_ordinal=2,
+                    endpoint_revision_id=SECOND_NEW_TARGET_REVISION_ID,
+                    control_area_id=SECOND_CONTROL_AREA_ID,
+                ),
+            ),
+        )
+
+
 def _intent(
     prepared: PreparedWritableEndpoint,
     *,
@@ -550,6 +666,7 @@ def _insert_endpoint(
     root: Path,
     role: str,
     ordinal: int,
+    job_revision_id: str = JOB_REVISION_ID,
 ) -> None:
     connection.execute("INSERT INTO endpoints (id) VALUES (?)", (endpoint_id,))
     connection.execute(
@@ -585,7 +702,7 @@ def _insert_endpoint(
         """,
         (
             JOB_ID,
-            JOB_REVISION_ID,
+            job_revision_id,
             role,
             ordinal,
             endpoint_id,

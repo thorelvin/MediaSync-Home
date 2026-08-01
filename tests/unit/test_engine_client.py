@@ -7,6 +7,7 @@ from mediasync_home.application.command_payloads import canonical_command_payloa
 from mediasync_home.application.endpoint_takeover import EndpointTakeoverCommandName
 from mediasync_home.application.job_creation import JobCreationCommandName
 from mediasync_home.application.job_drafts import DraftTarget, StandardBackupJobDraft
+from mediasync_home.application.job_editing import JobEditingCommandName
 from mediasync_home.application.runs import RunCommandName
 from mediasync_home.application.writable_endpoint_registration import (
     WritableEndpointRegistrationCommandName,
@@ -51,6 +52,61 @@ def test_engine_client_submits_reviewed_standard_backup_draft() -> None:
     assert ipc_client.idempotency_key == "66666666-6666-4666-8666-666666666666"
     assert ipc_client.payload is not None
     assert ipc_client.payload["draft_id"] == draft.draft_id
+    assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
+
+
+def test_engine_client_submits_revision_bound_standard_backup_edit() -> None:
+    ipc_client = _RecordingIpcClient()
+    client = EngineClient(ipc_client)  # type: ignore[arg-type]
+    draft = StandardBackupJobDraft(
+        draft_id="77777777-7777-4777-8777-777777777777",
+        source_name="Pictures renamed",
+        source_path_label="C:/Users/Ada/Pictures",
+        targets=(DraftTarget(name="USB 1", path_label="E:/Backup"),),
+    )
+
+    response = client.update_standard_backup_job(
+        job_id="job-a",
+        expected_job_revision_id="job-revision-a",
+        expected_lifecycle_row_version=3,
+        draft=draft,
+        check_after_save=False,
+        request_id="44444444-4444-4444-8444-444444444444",
+        idempotency_key="66666666-6666-4666-8666-666666666666",
+    )
+
+    assert response.reason is None
+    assert (
+        ipc_client.command_name
+        == JobEditingCommandName.UPDATE_STANDARD_BACKUP_JOB.value
+    )
+    assert ipc_client.payload is not None
+    assert ipc_client.payload["job_id"] == "job-a"
+    assert ipc_client.payload["expected_job_revision_id"] == "job-revision-a"
+    assert ipc_client.payload["expected_lifecycle_row_version"] == 3
+    assert ipc_client.payload["check_after_save"] is False
+    assert ipc_client.payload["explicit_save"] is True
+    assert ipc_client.payload["draft"] == {
+        "draft_id": draft.draft_id,
+        "schema_version": 1,
+        "source_name": "Pictures renamed",
+        "source_path_label": "C:/Users/Ada/Pictures",
+        "targets": [
+            {
+                "name": "USB 1",
+                "path_label": "E:/Backup",
+                "independent_device_id": None,
+            }
+        ],
+        "defaults": {
+            "behavior": "UPDATE_BACKUP",
+            "file_selection": "ALL_USER_FILES",
+            "verification": "STANDARD",
+            "retention": "THIRTY_DAYS",
+            "extra_files": "KEEP_ON_TARGET",
+            "performance": "AUTO",
+        },
+    }
     assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
 
 

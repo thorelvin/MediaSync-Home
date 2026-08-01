@@ -326,6 +326,98 @@ def test_sqlite_catalog_loads_active_standard_backup_job_detail(tmp_path: Path) 
         assert missing is None
 
 
+def test_sqlite_catalog_appends_immutable_standard_backup_job_revision(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        drafts = SqliteJobDraftStore(connection)
+        catalog = SqliteStandardBackupJobCatalog(connection)
+        drafts.save_standard_backup_draft(_complete_draft())
+        created = create_standard_backup_job_from_draft(
+            command=_create_command(),
+            drafts=drafts,
+            catalog=catalog,
+            id_factory=FixedStandardBackupJobIdFactory(),
+        )
+        assert created.job is not None
+        edit_draft = replace(
+            _complete_draft(),
+            draft_id="draft-edit-a",
+            source_name="Pictures renamed",
+        )
+        drafts.save_standard_backup_draft(edit_draft)
+        edited = replace(
+            created.job,
+            job_revision_id="job-rev-b",
+            draft_id=edit_draft.draft_id,
+            command_request_id="request-b",
+            idempotency_key="idempotency-b",
+            source_name="Pictures renamed",
+        )
+
+        catalog.append_standard_backup_job_revision(
+            edited,
+            expected_active_revision_id="job-rev-a",
+        )
+
+        assert catalog.load_standard_backup_job("job-a") == edited
+        assert catalog.load_standard_backup_job_revision(
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+        ) == created.job
+        assert catalog.load_standard_backup_job_revision(
+            job_id="job-a",
+            job_revision_id="job-rev-b",
+        ) == edited
+        assert _row_count(connection, "job_revisions") == 2
+        assert _row_count(connection, "standard_backup_job_revision_details") == 2
+        assert _row_count(connection, "filter_set_versions") == 1
+        assert _scalar(
+            connection,
+            "SELECT active_revision_id FROM job_heads WHERE job_id = 'job-a'",
+        ) == "job-rev-b"
+
+
+def test_sqlite_catalog_revision_append_rejects_stale_active_head(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        drafts = SqliteJobDraftStore(connection)
+        catalog = SqliteStandardBackupJobCatalog(connection)
+        drafts.save_standard_backup_draft(_complete_draft())
+        created = create_standard_backup_job_from_draft(
+            command=_create_command(),
+            drafts=drafts,
+            catalog=catalog,
+            id_factory=FixedStandardBackupJobIdFactory(),
+        )
+        assert created.job is not None
+        edit_draft = replace(_complete_draft(), draft_id="draft-edit-a")
+        drafts.save_standard_backup_draft(edit_draft)
+
+        with pytest.raises(
+            SqliteJobCatalogError,
+            match="STANDARD_BACKUP_JOB_REVISION_STALE",
+        ):
+            catalog.append_standard_backup_job_revision(
+                replace(
+                    created.job,
+                    job_revision_id="job-rev-b",
+                    draft_id=edit_draft.draft_id,
+                    command_request_id="request-b",
+                    idempotency_key="idempotency-b",
+                ),
+                expected_active_revision_id="job-rev-stale",
+            )
+
+        assert _row_count(connection, "job_revisions") == 1
+        assert _row_count(connection, "standard_backup_job_revision_details") == 1
+
+
 def test_sqlite_catalog_direct_save_rejects_cross_job_root_overlap(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:

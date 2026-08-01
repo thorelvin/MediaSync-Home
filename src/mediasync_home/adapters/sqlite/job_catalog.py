@@ -173,6 +173,152 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
             (job_id,),
         )
 
+    def load_standard_backup_job_revision(
+        self,
+        *,
+        job_id: str,
+        job_revision_id: str,
+    ) -> SealedStandardBackupJob | None:
+        return self._load_one(
+            """
+            SELECT
+                details.job_id,
+                details.job_revision_id,
+                revisions.filter_set_id,
+                details.draft_id,
+                details.command_request_id,
+                details.idempotency_key,
+                details.source_name,
+                details.source_path_label,
+                details.defaults_json,
+                details.targets_json,
+                revisions.filter_set_version
+            FROM standard_backup_job_revision_details AS details
+            INNER JOIN job_revisions AS revisions
+                ON revisions.job_id = details.job_id
+                AND revisions.id = details.job_revision_id
+            WHERE details.job_id = ?
+                AND details.job_revision_id = ?
+            """,
+            (job_id, job_revision_id),
+        )
+
+    def append_standard_backup_job_revision(
+        self,
+        job: SealedStandardBackupJob,
+        *,
+        expected_active_revision_id: str,
+    ) -> None:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            active_row = self._connection.execute(
+                """
+                SELECT
+                    heads.active_revision_id,
+                    jobs.lifecycle_state,
+                    revisions.filter_set_id,
+                    revisions.filter_set_version
+                FROM job_heads AS heads
+                INNER JOIN jobs ON jobs.id = heads.job_id
+                INNER JOIN job_revisions AS revisions
+                    ON revisions.job_id = heads.job_id
+                    AND revisions.id = heads.active_revision_id
+                WHERE heads.job_id = ?
+                """,
+                (job.job_id,),
+            ).fetchone()
+            if active_row is None:
+                raise SqliteJobCatalogError("STANDARD_BACKUP_JOB_NOT_FOUND")
+            if str(active_row[1]) != JobLifecycleState.ACTIVE.value:
+                raise SqliteJobCatalogError("STANDARD_BACKUP_JOB_NOT_ACTIVE")
+            active_revision_id = str(active_row[0])
+            if active_revision_id != expected_active_revision_id:
+                raise SqliteJobCatalogError("STANDARD_BACKUP_JOB_REVISION_STALE")
+            if job.filter_set_id != str(active_row[2]):
+                raise SqliteJobCatalogError("STANDARD_BACKUP_JOB_FILTER_SET_CHANGED")
+            active_filter_version = _required_int(active_row[3])
+            self._persist_edited_filter_version(
+                job,
+                active_filter_version=active_filter_version,
+            )
+            self._reject_active_standard_backup_root_overlap(
+                job,
+                exclude_job_id=job.job_id,
+            )
+            self._connection.execute(
+                """
+                INSERT INTO job_revisions (
+                    job_id,
+                    id,
+                    filter_set_id,
+                    filter_set_version
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    job.job_id,
+                    job.job_revision_id,
+                    job.filter_set_id,
+                    job.filter_set_version,
+                ),
+            )
+            self._connection.execute(
+                """
+                INSERT INTO standard_backup_job_revision_details (
+                    job_id,
+                    job_revision_id,
+                    draft_id,
+                    command_request_id,
+                    idempotency_key,
+                    source_name,
+                    source_path_label,
+                    defaults_json,
+                    targets_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job.job_id,
+                    job.job_revision_id,
+                    job.draft_id,
+                    job.command_request_id,
+                    job.idempotency_key,
+                    job.source_name,
+                    job.source_path_label,
+                    _serialize_defaults(job.defaults),
+                    _serialize_targets(job.targets),
+                ),
+            )
+            cursor = self._connection.execute(
+                """
+                UPDATE job_heads
+                SET active_revision_id = ?
+                WHERE job_id = ?
+                    AND active_revision_id = ?
+                """,
+                (
+                    job.job_revision_id,
+                    job.job_id,
+                    expected_active_revision_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise SqliteJobCatalogError("STANDARD_BACKUP_JOB_REVISION_STALE")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+        except SqliteJobCatalogError:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        except sqlite3.Error as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise SqliteJobCatalogError(
+                "STANDARD_BACKUP_JOB_REVISION_APPEND_FAILED"
+            ) from exc
+
     def list_active_standard_backup_jobs(self) -> tuple[SealedStandardBackupJob, ...]:
         return self._load_many(
             """
@@ -463,16 +609,68 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
         return _job_from_row(row)
 
     def _reject_active_standard_backup_root_overlap(
-        self, job: SealedStandardBackupJob
+        self,
+        job: SealedStandardBackupJob,
+        *,
+        exclude_job_id: str | None = None,
     ) -> None:
         new_roots = _job_roots(job)
         for existing_job in self.list_active_standard_backup_jobs():
+            if existing_job.job_id == exclude_job_id:
+                continue
             for new_root in new_roots:
                 for existing_root in _job_roots(existing_job):
                     if not new_root[1] and not existing_root[1]:
                         continue
                     if draft_path_labels_overlap(new_root[0], existing_root[0]):
                         raise SqliteJobCatalogError("STANDARD_BACKUP_JOB_ROOT_OVERLAP")
+
+    def _persist_edited_filter_version(
+        self,
+        job: SealedStandardBackupJob,
+        *,
+        active_filter_version: int,
+    ) -> None:
+        filter_rules_json = _serialize_filter_rules(job.defaults)
+        if job.filter_set_version == active_filter_version:
+            row = self._connection.execute(
+                """
+                SELECT rules_json
+                FROM filter_set_versions
+                WHERE job_id = ?
+                    AND filter_set_id = ?
+                    AND version = ?
+                """,
+                (job.job_id, job.filter_set_id, active_filter_version),
+            ).fetchone()
+            if row is None or str(row[0]) != filter_rules_json:
+                raise SqliteJobCatalogError(
+                    "STANDARD_BACKUP_JOB_FILTER_VERSION_REUSE_INVALID"
+                )
+            return
+        if job.filter_set_version != active_filter_version + 1:
+            raise SqliteJobCatalogError(
+                "STANDARD_BACKUP_JOB_FILTER_VERSION_SEQUENCE_INVALID"
+            )
+        self._connection.execute(
+            """
+            INSERT INTO filter_set_versions (
+                job_id,
+                filter_set_id,
+                version,
+                rules_hash,
+                rules_json
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                job.job_id,
+                job.filter_set_id,
+                job.filter_set_version,
+                hashlib.sha256(filter_rules_json.encode("utf-8")).hexdigest(),
+                filter_rules_json,
+            ),
+        )
 
 
 def _job_from_row(row: sqlite3.Row | tuple[object, ...]) -> SealedStandardBackupJob:

@@ -120,7 +120,10 @@ def parse_create_standard_backup_job_command(
     draft_id = payload.get("draft_id")
     if not isinstance(draft_id, str) or not draft_id.strip():
         raise JobCreationPayloadError("CREATE_STANDARD_BACKUP_JOB_REQUIRES_DRAFT_ID")
-    inline_draft = _parse_inline_standard_backup_draft(payload.get("draft"), draft_id=draft_id)
+    inline_draft = parse_inline_standard_backup_draft(
+        payload.get("draft"),
+        draft_id=draft_id,
+    )
     return CreateStandardBackupJobCommand(
         request_id=request_id,
         idempotency_key=idempotency_key,
@@ -129,7 +132,7 @@ def parse_create_standard_backup_job_command(
     )
 
 
-def _parse_inline_standard_backup_draft(
+def parse_inline_standard_backup_draft(
     payload: object,
     *,
     draft_id: str,

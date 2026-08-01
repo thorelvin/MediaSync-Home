@@ -11,6 +11,7 @@ from mediasync_home.application.job_lifecycle import (
     JobLifecycleStore,
     JobLifecycleTransitionOutcome,
 )
+from mediasync_home.application.job_editing import JobScheduleInvalidationError
 from mediasync_home.application.schedules import ScheduleDefinition
 from mediasync_home.application.task_scheduler import (
     bind_same_user_task_scheduler_definition_hash,
@@ -18,7 +19,7 @@ from mediasync_home.application.task_scheduler import (
 from mediasync_home.application.trigger_occurrences import TriggerKind
 
 
-class SqliteJobLifecycleError(RuntimeError):
+class SqliteJobLifecycleError(JobScheduleInvalidationError):
     pass
 
 
@@ -105,7 +106,7 @@ class SqliteJobLifecycleStore(JobLifecycleStore):
                 record=current,
             )
         try:
-            disabled_count = self._disable_enabled_schedules(command.job_id)
+            disabled_count = self.disable_enabled_schedules(command.job_id)
         except SqliteJobLifecycleError as exc:
             return JobLifecycleTransitionOutcome(
                 applied=False,
@@ -239,7 +240,7 @@ class SqliteJobLifecycleStore(JobLifecycleStore):
         ).fetchone()
         return row is not None
 
-    def _disable_enabled_schedules(self, job_id: str) -> int:
+    def disable_enabled_schedules(self, job_id: str) -> int:
         rows = self._connection.execute(
             f"""
             SELECT {_SCHEDULE_COLUMNS}

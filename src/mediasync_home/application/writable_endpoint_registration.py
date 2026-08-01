@@ -120,7 +120,11 @@ class WritableEndpointRegistrationReport:
 
     @property
     def completed(self) -> bool:
-        return self.state is WritableEndpointRegistrationState.COMMITTED
+        return (
+            self.state is WritableEndpointRegistrationState.COMMITTED
+            or "WRITABLE_ENDPOINT_REGISTRATION_NOT_REQUIRED"
+            in self.validation_codes
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -260,7 +264,7 @@ class WritableEndpointRegistrationCoordinator:
                 registered_target_count=0,
                 idempotent_replay=False,
                 validation_codes=("WRITABLE_ENDPOINT_REGISTRATION_NOT_REQUIRED",),
-                next_action="Refresh the active backup job before registering targets.",
+                next_action="No target registration is required.",
             )
 
         ids = self._id_factory.new_registration_ids(candidates)

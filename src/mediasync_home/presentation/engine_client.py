@@ -9,6 +9,7 @@ from mediasync_home.application.backup_analysis import BackupAnalysisCommandName
 from mediasync_home.application.endpoint_takeover import EndpointTakeoverCommandName
 from mediasync_home.application.job_creation import JobCreationCommandName
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
+from mediasync_home.application.job_editing import JobEditingCommandName
 from mediasync_home.application.job_lifecycle import JobLifecycleCommandName
 from mediasync_home.application.runs import RunCommandName
 from mediasync_home.application.writable_endpoint_registration import (
@@ -363,6 +364,35 @@ class EngineClient:
             )
         )
 
+    def update_standard_backup_job(
+        self,
+        *,
+        job_id: str,
+        expected_job_revision_id: str,
+        expected_lifecycle_row_version: int,
+        draft: StandardBackupJobDraft,
+        check_after_save: bool,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        payload: dict[str, object] = {
+            "job_id": job_id,
+            "expected_job_revision_id": expected_job_revision_id,
+            "expected_lifecycle_row_version": expected_lifecycle_row_version,
+            "draft": _standard_backup_draft_payload(draft),
+            "explicit_save": True,
+            "check_after_save": check_after_save,
+        }
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.submit_command(
+                JobEditingCommandName.UPDATE_STANDARD_BACKUP_JOB.value,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                payload_hash=canonical_command_payload_hash(payload),
+            )
+        )
+
     def register_writable_targets(
         self,
         *,
@@ -612,26 +642,32 @@ def _create_standard_backup_job_payload(
 ) -> dict[str, object]:
     return {
         "draft_id": draft.draft_id,
-        "draft": {
-            "draft_id": draft.draft_id,
-            "schema_version": draft.schema_version,
-            "source_name": draft.source_name,
-            "source_path_label": draft.source_path_label,
-            "targets": [
-                {
-                    "name": target.name,
-                    "path_label": target.path_label,
-                    "independent_device_id": target.independent_device_id,
-                }
-                for target in draft.targets
-            ],
-            "defaults": {
-                "behavior": draft.defaults.behavior.value,
-                "file_selection": draft.defaults.file_selection.value,
-                "verification": draft.defaults.verification.value,
-                "retention": draft.defaults.retention.value,
-                "extra_files": draft.defaults.extra_files.value,
-                "performance": draft.defaults.performance.value,
-            },
+        "draft": _standard_backup_draft_payload(draft),
+    }
+
+
+def _standard_backup_draft_payload(
+    draft: StandardBackupJobDraft,
+) -> dict[str, object]:
+    return {
+        "draft_id": draft.draft_id,
+        "schema_version": draft.schema_version,
+        "source_name": draft.source_name,
+        "source_path_label": draft.source_path_label,
+        "targets": [
+            {
+                "name": target.name,
+                "path_label": target.path_label,
+                "independent_device_id": target.independent_device_id,
+            }
+            for target in draft.targets
+        ],
+        "defaults": {
+            "behavior": draft.defaults.behavior.value,
+            "file_selection": draft.defaults.file_selection.value,
+            "verification": draft.defaults.verification.value,
+            "retention": draft.defaults.retention.value,
+            "extra_files": draft.defaults.extra_files.value,
+            "performance": draft.defaults.performance.value,
         },
     }
