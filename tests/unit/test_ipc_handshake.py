@@ -114,12 +114,17 @@ from mediasync_home.application.snapshots import (
     SnapshotEntryPageQuery,
     SnapshotEntryReadModel,
     SnapshotEntryReadModelStore,
+    SnapshotFilterDecisionCursor,
+    SnapshotFilterDecisionPage,
+    SnapshotFilterDecisionPageQuery,
+    SnapshotFilterDecisionReadModel,
     SnapshotIssueCursor,
     SnapshotIssuePage,
     SnapshotIssuePageQuery,
     SnapshotIssueReadModel,
     validate_snapshot_coverage_page_query,
     validate_snapshot_entry_page_query,
+    validate_snapshot_filter_decision_page_query,
     validate_snapshot_issue_page_query,
 )
 from mediasync_home.application.state_maintenance import StateMaintenanceCommandName
@@ -619,10 +624,12 @@ class _InMemorySnapshotEntryStore(SnapshotEntryReadModelStore):
         entries: tuple[SnapshotEntryReadModel, ...] = (),
         coverage: tuple[SnapshotCoverageReadModel, ...] = (),
         issues: tuple[SnapshotIssueReadModel, ...] = (),
+        filter_decisions: tuple[SnapshotFilterDecisionReadModel, ...] = (),
     ) -> None:
         self.entries = entries
         self.coverage = coverage
         self.issues = issues
+        self.filter_decisions = filter_decisions
 
     def page_snapshot_entries(self, query: SnapshotEntryPageQuery) -> SnapshotEntryPage:
         validate_snapshot_entry_page_query(query)
@@ -699,6 +706,48 @@ class _InMemorySnapshotEntryStore(SnapshotEntryReadModelStore):
             snapshot_id=query.snapshot_id,
             issues=page_issues,
             next_cursor=_snapshot_issue_cursor(page_issues[-1]) if has_more and page_issues else None,
+            has_more=has_more,
+        )
+
+    def page_snapshot_filter_decisions(
+        self,
+        query: SnapshotFilterDecisionPageQuery,
+    ) -> SnapshotFilterDecisionPage:
+        validate_snapshot_filter_decision_page_query(query)
+        decisions = tuple(
+            sorted(
+                (
+                    decision
+                    for decision in self.filter_decisions
+                    if not query.decision_states
+                    or decision.decision_state in query.decision_states
+                ),
+                key=lambda decision: (
+                    decision.relative_path,
+                    decision.decision_id,
+                ),
+            )
+        )
+        if query.after is not None:
+            decisions = tuple(
+                decision
+                for decision in decisions
+                if (decision.relative_path, decision.decision_id)
+                > (query.after.relative_path, query.after.decision_id)
+            )
+        page_decisions = decisions[: query.limit]
+        has_more = len(decisions) > query.limit
+        return SnapshotFilterDecisionPage(
+            snapshot_id=query.snapshot_id,
+            decisions=page_decisions,
+            next_cursor=(
+                SnapshotFilterDecisionCursor(
+                    relative_path=page_decisions[-1].relative_path,
+                    decision_id=page_decisions[-1].decision_id,
+                )
+                if has_more and page_decisions
+                else None
+            ),
             has_more=has_more,
         )
 
@@ -1614,6 +1663,33 @@ def test_snapshot_issues_query_returns_bounded_blocking_issue_page() -> None:
     assert second_page["has_more"] is False
     assert second_page["next_cursor"] is None
     assert [issue["relative_path"] for issue in second_page["issues"]] == ["Videos"]
+
+
+def test_snapshot_filter_decisions_query_returns_exact_bounded_page() -> None:
+    store = _InMemorySnapshotEntryStore(
+        filter_decisions=(
+            _snapshot_filter_decision(2, "Thumbs.db"),
+            _snapshot_filter_decision(1, "$RECYCLE.BIN"),
+        )
+    )
+    service = _service()
+    service.snapshot_filter_decision_read_store = store
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.query_snapshot_filter_decisions(
+        snapshot_id="snapshot-a",
+        limit=1,
+        decision_states=("EXCLUDED",),
+    )
+    page = response.payload["snapshot_filter_decisions"]
+
+    assert response.status is IpcStatus.ACCEPTED
+    assert page["read_model_available"] is True
+    assert page["has_more"] is True
+    assert page["decision_states"] == ["EXCLUDED"]
+    assert page["decisions"][0]["relative_path"] == "$RECYCLE.BIN"
+    assert page["decisions"][0]["matched_rule_id"] == "default-safe-rule"
 
 
 def test_handshake_uses_verified_identity_not_payload_claim() -> None:
@@ -3544,6 +3620,21 @@ def _snapshot_issue_cursor(issue: SnapshotIssueReadModel) -> SnapshotIssueCursor
         relative_path=issue.relative_path,
         issue_type=issue.issue_type,
         issue_id=issue.issue_id,
+    )
+
+
+def _snapshot_filter_decision(
+    decision_id: int,
+    relative_path: str,
+) -> SnapshotFilterDecisionReadModel:
+    return SnapshotFilterDecisionReadModel(
+        decision_id=decision_id,
+        relative_path=relative_path,
+        object_type="file",
+        decision_state="EXCLUDED",
+        reason_code="FILTER_RULE_EXCLUDED",
+        matched_rule_id="default-safe-rule",
+        evaluation_stage="PRE_METADATA",
     )
 
 

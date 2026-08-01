@@ -9,6 +9,7 @@ from mediasync_home.application.snapshots import (
     SNAPSHOT_COMPLETE_COVERAGE_STATE,
     SnapshotDirectoryCoverage,
     SnapshotFileEntry,
+    SnapshotFilterDecision,
     SnapshotIssue,
 )
 
@@ -28,6 +29,7 @@ class FilesystemSnapshotScan:
     coverage: tuple[SnapshotDirectoryCoverage, ...]
     issues: tuple[SnapshotIssue, ...]
     control_area_excluded: bool
+    filter_decisions: tuple[SnapshotFilterDecision, ...] = ()
 
     @property
     def complete(self) -> bool:

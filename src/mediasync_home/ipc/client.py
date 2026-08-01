@@ -245,6 +245,24 @@ class InProcessIpcClient:
             )
         )
 
+    def query_snapshot_filter_decisions(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        decision_states: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        return self._correlated_response(
+            self.service.query_snapshot_filter_decisions(
+                self.client_instance_id,
+                snapshot_id=snapshot_id,
+                limit=limit,
+                after=after,
+                decision_states=decision_states,
+            )
+        )
+
     def query_cataloged_files(
         self,
         *,

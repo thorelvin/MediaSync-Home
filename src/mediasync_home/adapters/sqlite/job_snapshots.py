@@ -518,15 +518,29 @@ class SqliteJobSnapshotMaterializer:
         entry_chunks = tuple(
             scan.entries[index : index + MAX_SNAPSHOT_BATCH_ENTRIES]
             for index in range(0, len(scan.entries), MAX_SNAPSHOT_BATCH_ENTRIES)
-        ) or ((),)
-        for sequence_no, entries in enumerate(entry_chunks):
+        )
+        decision_chunks = tuple(
+            scan.filter_decisions[index : index + MAX_SNAPSHOT_BATCH_ENTRIES]
+            for index in range(0, len(scan.filter_decisions), MAX_SNAPSHOT_BATCH_ENTRIES)
+        )
+        batch_count = max(1, len(entry_chunks), len(decision_chunks))
+        for sequence_no in range(batch_count):
             self._entry_store.commit_snapshot_entry_batch(
                 snapshot_entry_batch(
                     snapshot_id=scan.snapshot_id,
                     sequence_no=sequence_no,
-                    entries=entries,
+                    entries=(
+                        entry_chunks[sequence_no]
+                        if sequence_no < len(entry_chunks)
+                        else ()
+                    ),
                     coverage_updates=scan.coverage if sequence_no == 0 else (),
                     issues=scan.issues if sequence_no == 0 else (),
+                    filter_decisions=(
+                        decision_chunks[sequence_no]
+                        if sequence_no < len(decision_chunks)
+                        else ()
+                    ),
                 )
             )
 
@@ -540,12 +554,8 @@ class SqliteJobSnapshotMaterializer:
                 ),
                 expected_batch_count=max(
                     1,
-                    (
-                        len(scan.entries)
-                        + MAX_SNAPSHOT_BATCH_ENTRIES
-                        - 1
-                    )
-                    // MAX_SNAPSHOT_BATCH_ENTRIES,
+                    _bounded_batch_count(len(scan.entries)),
+                    _bounded_batch_count(len(scan.filter_decisions)),
                 ),
                 expected_directory_coverage_count=len(scan.coverage),
                 expected_issue_count=len(scan.issues),
@@ -555,6 +565,7 @@ class SqliteJobSnapshotMaterializer:
                 expected_case_collision_group_count=_case_collision_group_count(
                     scan
                 ),
+                expected_filter_decision_count=len(scan.filter_decisions),
             )
         )
 
@@ -758,6 +769,12 @@ def _case_collision_group_count(scan: FilesystemSnapshotScan) -> int:
     for entry in scan.entries:
         counts[entry.comparison_key] = counts.get(entry.comparison_key, 0) + 1
     return sum(count > 1 for count in counts.values())
+
+
+def _bounded_batch_count(item_count: int) -> int:
+    return (
+        item_count + MAX_SNAPSHOT_BATCH_ENTRIES - 1
+    ) // MAX_SNAPSHOT_BATCH_ENTRIES
 
 
 def _result(

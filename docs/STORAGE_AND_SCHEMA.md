@@ -504,6 +504,7 @@ Muterbar read model per jobb/mål, adskilt fra konfigurasjonsrevisjon.
 - `total_bytes INTEGER NOT NULL DEFAULT 0`
 - `scan_error_count INTEGER NOT NULL DEFAULT 0`
 - `volatile_directory_count INTEGER NOT NULL DEFAULT 0`
+- `filter_decision_count INTEGER NOT NULL DEFAULT 0`
 - `scan_generation INTEGER NOT NULL`
 - `scan_duration_ms INTEGER`
 - `metadata_cache_hits INTEGER NOT NULL DEFAULT 0`
@@ -518,7 +519,7 @@ Muterbar read model per jobb/mål, adskilt fra konfigurasjonsrevisjon.
 - sammensatt FK `(analysis_id, endpoint_id) REFERENCES analysis_targets(analysis_id, endpoint_id)`
 - sammensatt FK `(endpoint_id, endpoint_revision_id) REFERENCES endpoint_revisions(endpoint_id, id)`
 
-Et snapshot blir immutable i én kritisk sealtransaksjon etter at alle batchreceipts, entries, coverage, issues, tellinger og checksum er validert. Etter `immutable=1` kan ingen `file_entries`, `directory_coverage`, `snapshot_issues`, kollisjonsrader eller summer oppdateres. Sen hash/metadata lagres i cache eller en eksplisitt avledet artefakt.
+Et snapshot blir immutable i én kritisk sealtransaksjon etter at alle batchreceipts, entries, coverage, issues, filteravgjørelser, tellinger og checksum er validert. Etter `immutable=1` kan ingen `file_entries`, `directory_coverage`, `snapshot_issues`, `snapshot_filter_decisions`, kollisjonsrader eller summer oppdateres. Sen hash/metadata lagres i cache eller en eksplisitt avledet artefakt.
 
 #### `snapshot_batches`
 
@@ -530,12 +531,28 @@ Idempotent inbox for strømmet skanneinnlasting.
 - `entry_count INTEGER NOT NULL`
 - `coverage_update_count INTEGER NOT NULL`
 - `issue_count INTEGER NOT NULL`
+- `filter_decision_count INTEGER NOT NULL`
 - `approximate_bytes INTEGER NOT NULL`
 - `state TEXT NOT NULL` — received, committed
 - `committed_utc TEXT`
 - primærnøkkel `(snapshot_id, sequence_no)`
 
-Writeren setter batchreceipt og batchens entries/coverage/issues i samme katalogtransaksjon. Identisk retry returnerer eksisterende commit; samme `sequence_no` med annen hash er `SNAPSHOT_BATCH_CONFLICT` og blokkerer snapshotseal.
+Writeren setter batchreceipt og batchens entries/coverage/issues/filteravgjørelser i samme katalogtransaksjon. Identisk retry returnerer eksisterende commit; samme `sequence_no` med annen hash er `SNAPSHOT_BATCH_CONFLICT` og blokkerer snapshotseal.
+
+#### `snapshot_filter_decisions`
+
+Checksum-bundet forklaring av de meningsfulle avgjørelsene som faktisk ble brukt under skann. Vanlige filer som ble inkludert uten en samsvarende regel kan utledes fra `file_entries`; samsvarende include/exclude-regler, include-only-miss, evalueringsfeil og bevist kontrollområde lagres eksplisitt.
+
+- `id INTEGER PRIMARY KEY`
+- `snapshot_id TEXT NOT NULL REFERENCES snapshots(id) ON DELETE RESTRICT`
+- `relative_path TEXT NOT NULL`
+- `object_type TEXT NOT NULL`
+- `decision_state TEXT NOT NULL` — INCLUDED, EXCLUDED, ERROR
+- `reason_code TEXT NOT NULL`
+- `matched_rule_id TEXT`
+- `evaluation_stage TEXT NOT NULL` — CONTROL_AREA, PRE_METADATA, METADATA, EMPTY_DIRECTORY
+- unik `(snapshot_id, relative_path)`
+- keyset-indekser `(snapshot_id, relative_path, id)` og `(snapshot_id, decision_state, relative_path, id)`
 
 #### `snapshot_issues`
 

@@ -3718,10 +3718,15 @@ def test_stalled_start_result_does_not_replace_newly_selected_job(qapp) -> None:
         qapp.processEvents()
         assert not start.isEnabled()
         QTest.mouseClick(start, Qt.MouseButton.LeftButton)
+        jobs.scrollToItem(jobs.item(1))
+        qapp.processEvents()
+        next_job = jobs.item(1)
+        next_job_rect = jobs.visualItemRect(next_job)
+        assert jobs.viewport().rect().contains(next_job_rect.center())
         QTest.mouseClick(
             jobs.viewport(),
             Qt.MouseButton.LeftButton,
-            pos=jobs.visualItemRect(jobs.item(1)).center(),
+            pos=next_job_rect.center(),
         )
         deadline = monotonic() + 3
         while window._job_detail_state.job_id != "job-b" and monotonic() < deadline:
@@ -4337,6 +4342,61 @@ def test_activity_bar_wraps_exact_freshness_for_three_targets(qapp) -> None:
         assert "target-b: Check the target and retry." in actions.text()
         assert "target-c: Review the target error." in actions.text()
         assert actions.height() >= actions.heightForWidth(actions.width())
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_activity_bar_wraps_exact_filter_decisions_without_clipping(qapp) -> None:
+    provider = _FakeFilterDecisionDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window.refresh_engine_status()
+        qapp.processEvents()
+        activity_scroll = window.findChild(QScrollArea, "activityScrollArea")
+        title = window.findChild(QLabel, "filterDecisionTitle")
+        summary = window.findChild(QLabel, "filterDecisionSummary")
+        rows = window.findChildren(QLabel, "filterDecisionRow")
+        row = next(candidate for candidate in rows if candidate.isVisible())
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert activity_scroll is not None
+        assert title is not None
+        assert summary is not None
+        assert language is not None
+        assert activity_scroll.horizontalScrollBar().maximum() == 0
+        assert title.text() == "Filvalg"
+        assert summary.text() == (
+            "Nøyaktige, samsvarende filvalg for dette snapshotet."
+        )
+        assert row.wordWrap()
+        assert row.minimumWidth() == 0
+        assert row.sizePolicy().horizontalPolicy() is QSizePolicy.Policy.Ignored
+        assert "Ekskludert:" in row.text()
+        assert "default-long-cache-rule" in row.text()
+        assert row.width() <= activity_scroll.viewport().width()
+        assert row.height() >= row.heightForWidth(row.width())
+
+        assert language.menu() is not None
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+
+        assert activity_scroll.horizontalScrollBar().maximum() == 0
+        assert title.text() == "File selection"
+        assert summary.text() == (
+            "Exact matched file-selection decisions for this snapshot."
+        )
+        assert "Excluded:" in row.text()
+        assert "Matched exclusion rule" in row.text()
+        assert row.width() <= activity_scroll.viewport().width()
+        assert row.height() >= row.heightForWidth(row.width())
     finally:
         window.close()
         window.deleteLater()
@@ -5106,6 +5166,44 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                             "fencing_token": 1,
                             "effect_kind": "COPY_NEW_FINAL_FILE",
                             "recorded_utc": "2026-07-20T12:00:00.000Z",
+                        }
+                    ],
+                }
+            }
+        )
+
+
+class _FakeFilterDecisionDashboardEngineClient(_FakeDashboardEngineClient):
+    def get_snapshot_filter_decisions(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        decision_states: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        del after, decision_states
+        self.calls.append("get_snapshot_filter_decisions")
+        assert snapshot_id == "source-snapshot-a"
+        assert limit == 5
+        long_segment = "ApplicationCacheFolderWithoutAnyNaturalBreakPoint" * 3
+        return IpcResponse.accepted(
+            {
+                "snapshot_filter_decisions": {
+                    "snapshot_id": snapshot_id,
+                    "limit": 5,
+                    "has_more": False,
+                    "read_model_available": True,
+                    "decision_states": [],
+                    "next_cursor": None,
+                    "decisions": [
+                        {
+                            "decision_id": 1,
+                            "relative_path": f"AppData/{long_segment}/cache.tmp",
+                            "decision_state": "EXCLUDED",
+                            "reason_code": "FILTER_RULE_EXCLUDED",
+                            "matched_rule_id": "default-long-cache-rule",
+                            "evaluation_stage": "PRE_METADATA",
                         }
                     ],
                 }

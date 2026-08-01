@@ -23,6 +23,8 @@ from mediasync_home.application.snapshots import (
     SnapshotBatchSummary,
     SnapshotDirectoryCoverage,
     SnapshotFileEntry,
+    SnapshotFilterDecision,
+    SnapshotFilterDecisionPageQuery,
     SnapshotEntryPageQuery,
     SnapshotIssuePageQuery,
     SnapshotIssue,
@@ -238,6 +240,66 @@ def test_sqlite_snapshot_issue_read_model_pages_and_filters_blocking_issues(tmp_
         )
         assert [issue.relative_path for issue in blocking_second.issues] == ["Videos"]
         assert blocking_second.has_more is False
+
+
+def test_sqlite_snapshot_filter_decisions_are_paged_sealed_and_immutable(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    decisions = (
+        SnapshotFilterDecision(
+            relative_path="$RECYCLE.BIN",
+            object_type="directory",
+            decision_state="EXCLUDED",
+            reason_code="FILTER_RULE_EXCLUDED",
+            matched_rule_id="default-recycle-bin",
+            evaluation_stage="PRE_METADATA",
+        ),
+        SnapshotFilterDecision(
+            relative_path="Readme.txt",
+            object_type="file",
+            decision_state="INCLUDED",
+            reason_code="FILTER_RULE_INCLUDED",
+            matched_rule_id="include-readme",
+            evaluation_stage="PRE_METADATA",
+        ),
+    )
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_snapshot_parent_rows(connection)
+        store = SqliteSnapshotEntryStore(connection)
+        receipt = store.commit_snapshot_entry_batch(
+            _case_collision_batch(filter_decisions=decisions)
+        )
+
+        assert receipt.filter_decision_count == 2
+        assert store.load_snapshot_filter_decisions("snapshot-a") == decisions
+        excluded = store.page_snapshot_filter_decisions(
+            SnapshotFilterDecisionPageQuery(
+                snapshot_id="snapshot-a",
+                limit=1,
+                decision_states=("EXCLUDED",),
+            )
+        )
+        assert [item.relative_path for item in excluded.decisions] == [
+            "$RECYCLE.BIN"
+        ]
+        assert excluded.has_more is False
+
+        sealed = store.seal_snapshot(
+            _seal_request(expected_filter_decision_count=2)
+        )
+
+        assert sealed.filter_decision_count == 2
+        assert store.load_sealed_snapshot("snapshot-a") == sealed
+        with pytest.raises(sqlite3.IntegrityError, match="SNAPSHOT_IMMUTABLE"):
+            connection.execute(
+                """
+                UPDATE snapshot_filter_decisions
+                SET reason_code = 'CHANGED'
+                WHERE snapshot_id = 'snapshot-a'
+                """
+            )
 
 
 def test_sqlite_snapshot_entry_batch_rejects_sequence_hash_conflict(tmp_path: Path) -> None:
@@ -567,6 +629,7 @@ def _case_collision_batch(
     *,
     coverage_state: str = "COMPLETE",
     issues: tuple[SnapshotIssue, ...] = (),
+    filter_decisions: tuple[SnapshotFilterDecision, ...] = (),
 ):
     return snapshot_entry_batch(
         snapshot_id="snapshot-a",
@@ -593,6 +656,7 @@ def _case_collision_batch(
         ),
         coverage_updates=_complete_root_coverage(coverage_state),
         issues=issues,
+        filter_decisions=filter_decisions,
     )
 
 
@@ -618,6 +682,7 @@ def _seal_request(
     *,
     expected_issue_count: int = 0,
     expected_blocking_issue_count: int = 0,
+    expected_filter_decision_count: int = 0,
 ) -> SnapshotSealRequest:
     return SnapshotSealRequest(
         snapshot_id="snapshot-a",
@@ -628,6 +693,7 @@ def _seal_request(
         expected_issue_count=expected_issue_count,
         expected_blocking_issue_count=expected_blocking_issue_count,
         expected_case_collision_group_count=1,
+        expected_filter_decision_count=expected_filter_decision_count,
     )
 
 
@@ -639,6 +705,7 @@ def _summary(batch) -> SnapshotBatchSummary:
         coverage_update_count=len(batch.coverage_updates),
         issue_count=len(batch.issues),
         approximate_bytes=batch.approximate_bytes,
+        filter_decision_count=len(batch.filter_decisions),
     )
 
 

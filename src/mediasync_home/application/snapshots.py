@@ -9,15 +9,17 @@ from typing import Protocol
 
 HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
-SNAPSHOT_SCHEMA_VERSION = 3
+SNAPSHOT_SCHEMA_VERSION = 4
 SNAPSHOT_CHECKSUM_ALGORITHM = "SHA-256"
-SNAPSHOT_SERIALIZER_VERSION = "0B-SNAPSHOT-CANONICAL-JSON-V3"
+SNAPSHOT_SERIALIZER_VERSION = "0B-SNAPSHOT-CANONICAL-JSON-V4"
+LEGACY_SNAPSHOT_SERIALIZER_VERSION_V3 = "0B-SNAPSHOT-CANONICAL-JSON-V3"
 LEGACY_SNAPSHOT_SERIALIZER_VERSION_V2 = "0B-SNAPSHOT-CANONICAL-JSON-V2"
 LEGACY_SNAPSHOT_SERIALIZER_VERSION_V1 = "0B-SNAPSHOT-CANONICAL-JSON-V1"
 SNAPSHOT_COMPLETE_COVERAGE_STATE = "COMPLETE"
 MAX_SNAPSHOT_ENTRY_PAGE_LIMIT = 1000
 MAX_SNAPSHOT_COVERAGE_PAGE_LIMIT = 1000
 MAX_SNAPSHOT_ISSUE_PAGE_LIMIT = 1000
+MAX_SNAPSHOT_FILTER_DECISION_PAGE_LIMIT = 1000
 SNAPSHOT_COVERAGE_STATES = frozenset(
     {
         "COMPLETE",
@@ -31,6 +33,10 @@ SNAPSHOT_COVERAGE_STATES = frozenset(
     }
 )
 SNAPSHOT_CASE_MODES = frozenset({"CASE_SENSITIVE", "CASE_INSENSITIVE", "UNKNOWN"})
+SNAPSHOT_FILTER_DECISION_STATES = frozenset({"INCLUDED", "EXCLUDED", "ERROR"})
+SNAPSHOT_FILTER_EVALUATION_STAGES = frozenset(
+    {"CONTROL_AREA", "PRE_METADATA", "METADATA", "EMPTY_DIRECTORY"}
+)
 
 
 class SnapshotMaterializationError(ValueError):
@@ -66,6 +72,16 @@ class SnapshotIssue:
     blocks_destructive_actions: bool
     error_code: str | None = None
     sanitized_message: str | None = None
+
+
+@dataclass(frozen=True)
+class SnapshotFilterDecision:
+    relative_path: str
+    object_type: str
+    decision_state: str
+    reason_code: str
+    matched_rule_id: str | None
+    evaluation_stage: str
 
 
 @dataclass(frozen=True)
@@ -109,6 +125,20 @@ class SnapshotIssuePageQuery:
     limit: int
     after: SnapshotIssueCursor | None = None
     blocking_only: bool = False
+
+
+@dataclass(frozen=True)
+class SnapshotFilterDecisionCursor:
+    relative_path: str
+    decision_id: int
+
+
+@dataclass(frozen=True)
+class SnapshotFilterDecisionPageQuery:
+    snapshot_id: str
+    limit: int
+    after: SnapshotFilterDecisionCursor | None = None
+    decision_states: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -168,6 +198,25 @@ class SnapshotIssuePage:
 
 
 @dataclass(frozen=True)
+class SnapshotFilterDecisionReadModel:
+    decision_id: int
+    relative_path: str
+    object_type: str
+    decision_state: str
+    reason_code: str
+    matched_rule_id: str | None
+    evaluation_stage: str
+
+
+@dataclass(frozen=True)
+class SnapshotFilterDecisionPage:
+    snapshot_id: str
+    decisions: tuple[SnapshotFilterDecisionReadModel, ...]
+    next_cursor: SnapshotFilterDecisionCursor | None
+    has_more: bool
+
+
+@dataclass(frozen=True)
 class SnapshotEntryBatch:
     snapshot_id: str
     sequence_no: int
@@ -176,6 +225,7 @@ class SnapshotEntryBatch:
     coverage_updates: tuple[SnapshotDirectoryCoverage, ...]
     issues: tuple[SnapshotIssue, ...]
     approximate_bytes: int
+    filter_decisions: tuple[SnapshotFilterDecision, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -188,6 +238,7 @@ class SnapshotBatchCommitReceipt:
     issue_count: int
     approximate_bytes: int
     idempotent_replay: bool
+    filter_decision_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -198,6 +249,7 @@ class SnapshotBatchSummary:
     coverage_update_count: int
     issue_count: int
     approximate_bytes: int
+    filter_decision_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -210,6 +262,7 @@ class SnapshotSealRequest:
     expected_issue_count: int = 0
     expected_blocking_issue_count: int = 0
     expected_case_collision_group_count: int = 0
+    expected_filter_decision_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -226,6 +279,7 @@ class SealedSnapshot:
     issue_count: int
     blocking_issue_count: int
     case_collision_group_count: int
+    filter_decision_count: int = 0
     complete: bool = True
     immutable: bool = True
 
@@ -238,6 +292,10 @@ class SnapshotEntryMaterializationStore(Protocol):
     def load_directory_coverage(self, snapshot_id: str) -> tuple[SnapshotDirectoryCoverage, ...]: ...
 
     def load_snapshot_issues(self, snapshot_id: str) -> tuple[SnapshotIssue, ...]: ...
+
+    def load_snapshot_filter_decisions(
+        self, snapshot_id: str
+    ) -> tuple[SnapshotFilterDecision, ...]: ...
 
 
 class SnapshotSealStore(Protocol):
@@ -258,6 +316,12 @@ class SnapshotIssueReadModelStore(Protocol):
     def page_snapshot_issues(self, query: SnapshotIssuePageQuery) -> SnapshotIssuePage: ...
 
 
+class SnapshotFilterDecisionReadModelStore(Protocol):
+    def page_snapshot_filter_decisions(
+        self, query: SnapshotFilterDecisionPageQuery
+    ) -> SnapshotFilterDecisionPage: ...
+
+
 def snapshot_entry_batch(
     *,
     snapshot_id: str,
@@ -265,6 +329,7 @@ def snapshot_entry_batch(
     entries: tuple[SnapshotFileEntry, ...],
     coverage_updates: tuple[SnapshotDirectoryCoverage, ...] = (),
     issues: tuple[SnapshotIssue, ...] = (),
+    filter_decisions: tuple[SnapshotFilterDecision, ...] = (),
     approximate_bytes: int | None = None,
     payload_hash: str | None = None,
 ) -> SnapshotEntryBatch:
@@ -279,12 +344,14 @@ def snapshot_entry_batch(
             entries=entries,
             coverage_updates=coverage_updates,
             issues=issues,
+            filter_decisions=filter_decisions,
             approximate_bytes=measured_bytes if approximate_bytes is None else approximate_bytes,
         ),
         entries=entries,
         coverage_updates=coverage_updates,
         issues=issues,
         approximate_bytes=measured_bytes if approximate_bytes is None else approximate_bytes,
+        filter_decisions=filter_decisions,
     )
     validate_snapshot_entry_batch(batch)
     return batch
@@ -296,6 +363,7 @@ def snapshot_seal(
     entries: tuple[SnapshotFileEntry, ...],
     coverage: tuple[SnapshotDirectoryCoverage, ...],
     issues: tuple[SnapshotIssue, ...],
+    filter_decisions: tuple[SnapshotFilterDecision, ...] = (),
     batches: tuple[SnapshotBatchSummary, ...],
     case_collision_group_count: int,
     snapshot_schema_version: int = SNAPSHOT_SCHEMA_VERSION,
@@ -303,12 +371,16 @@ def snapshot_seal(
     ordered_entries = tuple(sorted(entries, key=lambda entry: (entry.relative_path, entry.entry_id)))
     ordered_coverage = tuple(sorted(coverage, key=lambda item: item.relative_path))
     ordered_issues = tuple(sorted(issues, key=_snapshot_issue_sort_key))
+    ordered_filter_decisions = tuple(
+        sorted(filter_decisions, key=_snapshot_filter_decision_sort_key)
+    )
     ordered_batches = tuple(sorted(batches, key=lambda batch: batch.sequence_no))
     _validate_snapshot_seal_inputs(
         snapshot_id=snapshot_id,
         entries=ordered_entries,
         coverage=ordered_coverage,
         issues=ordered_issues,
+        filter_decisions=ordered_filter_decisions,
         batches=ordered_batches,
         case_collision_group_count=case_collision_group_count,
         snapshot_schema_version=snapshot_schema_version,
@@ -320,6 +392,7 @@ def snapshot_seal(
         entries=ordered_entries,
         coverage=ordered_coverage,
         issues=ordered_issues,
+        filter_decisions=ordered_filter_decisions,
         batches=ordered_batches,
         entry_count=entry_count,
         total_bytes=total_bytes,
@@ -340,6 +413,7 @@ def snapshot_seal(
         issue_count=len(ordered_issues),
         blocking_issue_count=sum(1 for issue in ordered_issues if issue.blocks_destructive_actions),
         case_collision_group_count=case_collision_group_count,
+        filter_decision_count=len(ordered_filter_decisions),
     )
     validate_sealed_snapshot(sealed)
     return sealed
@@ -352,6 +426,7 @@ def verify_snapshot_checksum(
     coverage: tuple[SnapshotDirectoryCoverage, ...],
     issues: tuple[SnapshotIssue, ...],
     batches: tuple[SnapshotBatchSummary, ...],
+    filter_decisions: tuple[SnapshotFilterDecision, ...] = (),
 ) -> bool:
     if not snapshot.complete or not snapshot.immutable:
         return False
@@ -361,6 +436,7 @@ def verify_snapshot_checksum(
             entries=entries,
             coverage=coverage,
             issues=issues,
+            filter_decisions=filter_decisions,
             batches=batches,
             case_collision_group_count=snapshot.case_collision_group_count,
             snapshot_schema_version=snapshot.snapshot_schema_version,
@@ -378,6 +454,7 @@ def verify_snapshot_checksum(
         and snapshot.directory_coverage_count == expected.directory_coverage_count
         and snapshot.issue_count == expected.issue_count
         and snapshot.blocking_issue_count == expected.blocking_issue_count
+        and snapshot.filter_decision_count == expected.filter_decision_count
     )
 
 
@@ -398,6 +475,8 @@ def validate_snapshot_seal_request(request: SnapshotSealRequest) -> None:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_BLOCKING_COUNT_MUST_BE_NON_NEGATIVE")
     if request.expected_case_collision_group_count < 0:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_CASE_GROUP_COUNT_MUST_BE_NON_NEGATIVE")
+    if request.expected_filter_decision_count < 0:
+        raise SnapshotMaterializationError("SNAPSHOT_SEAL_FILTER_COUNT_MUST_BE_NON_NEGATIVE")
 
 
 def validate_snapshot_entry_page_query(query: SnapshotEntryPageQuery) -> None:
@@ -456,6 +535,30 @@ def validate_snapshot_issue_page_query(query: SnapshotIssuePageQuery) -> None:
         raise SnapshotMaterializationError("SNAPSHOT_ISSUE_READ_CURSOR_REQUIRES_POSITIVE_ID")
 
 
+def validate_snapshot_filter_decision_page_query(
+    query: SnapshotFilterDecisionPageQuery,
+) -> None:
+    if not query.snapshot_id.strip():
+        raise SnapshotMaterializationError("SNAPSHOT_FILTER_READ_REQUIRES_SNAPSHOT_ID")
+    if query.limit <= 0:
+        raise SnapshotMaterializationError("SNAPSHOT_FILTER_READ_LIMIT_MUST_BE_POSITIVE")
+    if query.limit > MAX_SNAPSHOT_FILTER_DECISION_PAGE_LIMIT:
+        raise SnapshotMaterializationError("SNAPSHOT_FILTER_READ_LIMIT_TOO_LARGE")
+    if len(query.decision_states) != len(set(query.decision_states)):
+        raise SnapshotMaterializationError("SNAPSHOT_FILTER_READ_STATES_MUST_BE_UNIQUE")
+    if any(
+        state not in SNAPSHOT_FILTER_DECISION_STATES
+        for state in query.decision_states
+    ):
+        raise SnapshotMaterializationError("SNAPSHOT_FILTER_READ_STATE_UNKNOWN")
+    if query.after is None:
+        return
+    if not _valid_relative_path(query.after.relative_path):
+        raise SnapshotMaterializationError("SNAPSHOT_FILTER_READ_CURSOR_REQUIRES_PATH")
+    if query.after.decision_id <= 0:
+        raise SnapshotMaterializationError("SNAPSHOT_FILTER_READ_CURSOR_REQUIRES_POSITIVE_ID")
+
+
 def validate_sealed_snapshot(snapshot: SealedSnapshot) -> None:
     if not snapshot.snapshot_id.strip():
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_REQUIRES_SNAPSHOT_ID")
@@ -483,6 +586,8 @@ def validate_sealed_snapshot(snapshot: SealedSnapshot) -> None:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_BLOCKING_COUNT_MISMATCH")
     if snapshot.case_collision_group_count < 0:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_CASE_GROUP_COUNT_MUST_BE_NON_NEGATIVE")
+    if snapshot.filter_decision_count < 0:
+        raise SnapshotMaterializationError("SNAPSHOT_SEAL_FILTER_COUNT_MUST_BE_NON_NEGATIVE")
     if not snapshot.complete or not snapshot.immutable:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_MUST_BE_COMPLETE_AND_IMMUTABLE")
 
@@ -527,6 +632,7 @@ def validate_snapshot_entry_batch(batch: SnapshotEntryBatch) -> None:
             raise SnapshotMaterializationError("SNAPSHOT_ENTRY_IDENTITY_FINGERPRINT_INVALID")
     _validate_directory_coverage(batch.coverage_updates)
     _validate_snapshot_issues(batch.issues)
+    _validate_snapshot_filter_decisions(batch.filter_decisions)
 
 
 def _payload_hash(
@@ -536,6 +642,7 @@ def _payload_hash(
     entries: tuple[SnapshotFileEntry, ...],
     coverage_updates: tuple[SnapshotDirectoryCoverage, ...],
     issues: tuple[SnapshotIssue, ...],
+    filter_decisions: tuple[SnapshotFilterDecision, ...],
     approximate_bytes: int,
 ) -> str:
     payload = {
@@ -556,6 +663,12 @@ def _payload_hash(
             }
             for entry in sorted(entries, key=lambda item: (item.entry_id, item.relative_path))
         ],
+        "filter_decisions": [
+            _snapshot_filter_decision_payload(decision)
+            for decision in sorted(
+                filter_decisions, key=_snapshot_filter_decision_sort_key
+            )
+        ],
         "issues": [_snapshot_issue_payload(issue) for issue in sorted(issues, key=_snapshot_issue_sort_key)],
         "sequence_no": sequence_no,
         "snapshot_id": snapshot_id,
@@ -571,6 +684,7 @@ def _snapshot_checksum(
     entries: tuple[SnapshotFileEntry, ...],
     coverage: tuple[SnapshotDirectoryCoverage, ...],
     issues: tuple[SnapshotIssue, ...],
+    filter_decisions: tuple[SnapshotFilterDecision, ...],
     batches: tuple[SnapshotBatchSummary, ...],
     entry_count: int,
     total_bytes: int,
@@ -578,19 +692,21 @@ def _snapshot_checksum(
     snapshot_schema_version: int,
 ) -> str:
     serializer_version = _serializer_version(snapshot_schema_version)
+    batch_payloads: list[dict[str, object]] = [
+        {
+            "approximate_bytes": batch.approximate_bytes,
+            "coverage_update_count": batch.coverage_update_count,
+            "entry_count": batch.entry_count,
+            "issue_count": batch.issue_count,
+            "filter_decision_count": batch.filter_decision_count,
+            "payload_hash": batch.payload_hash,
+            "sequence_no": batch.sequence_no,
+        }
+        for batch in batches
+    ]
     payload = {
         "batch_count": len(batches),
-        "batches": [
-            {
-                "approximate_bytes": batch.approximate_bytes,
-                "coverage_update_count": batch.coverage_update_count,
-                "entry_count": batch.entry_count,
-                "issue_count": batch.issue_count,
-                "payload_hash": batch.payload_hash,
-                "sequence_no": batch.sequence_no,
-            }
-            for batch in batches
-        ],
+        "batches": batch_payloads,
         "case_collision_group_count": case_collision_group_count,
         "checksum_algorithm": SNAPSHOT_CHECKSUM_ALGORITHM,
         "complete": True,
@@ -614,6 +730,15 @@ def _snapshot_checksum(
         "snapshot_schema_version": snapshot_schema_version,
         "total_bytes": total_bytes,
     }
+    if snapshot_schema_version >= 4:
+        payload["filter_decision_count"] = len(filter_decisions)
+        payload["filter_decisions"] = [
+            _snapshot_filter_decision_payload(decision)
+            for decision in filter_decisions
+        ]
+    else:
+        for batch_payload in batch_payloads:
+            batch_payload.pop("filter_decision_count", None)
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -625,6 +750,7 @@ def _validate_snapshot_seal_inputs(
     entries: tuple[SnapshotFileEntry, ...],
     coverage: tuple[SnapshotDirectoryCoverage, ...],
     issues: tuple[SnapshotIssue, ...],
+    filter_decisions: tuple[SnapshotFilterDecision, ...],
     batches: tuple[SnapshotBatchSummary, ...],
     case_collision_group_count: int,
     snapshot_schema_version: int,
@@ -656,6 +782,7 @@ def _validate_snapshot_seal_inputs(
             coverage_updates=coverage,
             issues=issues,
             approximate_bytes=sum(entry.size_bytes or 0 for entry in entries),
+            filter_decisions=filter_decisions,
         )
     )
     _validate_snapshot_batch_summaries(batches)
@@ -665,6 +792,8 @@ def _validate_snapshot_seal_inputs(
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_COVERAGE_COUNT_MISMATCH")
     if sum(batch.issue_count for batch in batches) != len(issues):
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_ISSUE_COUNT_MISMATCH")
+    if sum(batch.filter_decision_count for batch in batches) != len(filter_decisions):
+        raise SnapshotMaterializationError("SNAPSHOT_SEAL_FILTER_COUNT_MISMATCH")
     if not coverage:
         raise SnapshotMaterializationError("SNAPSHOT_SEAL_REQUIRES_COVERAGE")
     if any(item.coverage_state != SNAPSHOT_COMPLETE_COVERAGE_STATE for item in coverage):
@@ -686,6 +815,8 @@ def _validate_snapshot_batch_summaries(batches: tuple[SnapshotBatchSummary, ...]
             raise SnapshotMaterializationError("SNAPSHOT_SEAL_BATCH_COVERAGE_COUNT_MUST_BE_NON_NEGATIVE")
         if batch.issue_count < 0:
             raise SnapshotMaterializationError("SNAPSHOT_SEAL_BATCH_ISSUE_COUNT_MUST_BE_NON_NEGATIVE")
+        if batch.filter_decision_count < 0:
+            raise SnapshotMaterializationError("SNAPSHOT_SEAL_BATCH_FILTER_COUNT_MUST_BE_NON_NEGATIVE")
         if batch.approximate_bytes < 0:
             raise SnapshotMaterializationError("SNAPSHOT_SEAL_BATCH_BYTES_MUST_BE_NON_NEGATIVE")
 
@@ -695,6 +826,8 @@ def _serializer_version(snapshot_schema_version: int) -> str:
         return LEGACY_SNAPSHOT_SERIALIZER_VERSION_V1
     if snapshot_schema_version == 2:
         return LEGACY_SNAPSHOT_SERIALIZER_VERSION_V2
+    if snapshot_schema_version == 3:
+        return LEGACY_SNAPSHOT_SERIALIZER_VERSION_V3
     if snapshot_schema_version == SNAPSHOT_SCHEMA_VERSION:
         return SNAPSHOT_SERIALIZER_VERSION
     raise SnapshotMaterializationError("SNAPSHOT_SEAL_SCHEMA_VERSION_UNSUPPORTED")
@@ -746,6 +879,53 @@ def _validate_snapshot_issues(issues: tuple[SnapshotIssue, ...]) -> None:
             raise SnapshotMaterializationError("SNAPSHOT_ISSUE_REQUIRES_RELATIVE_PATH")
         if not issue.issue_type.strip():
             raise SnapshotMaterializationError("SNAPSHOT_ISSUE_REQUIRES_TYPE")
+
+
+def _validate_snapshot_filter_decisions(
+    decisions: tuple[SnapshotFilterDecision, ...],
+) -> None:
+    relative_paths: set[str] = set()
+    for decision in decisions:
+        if not _valid_relative_path(decision.relative_path):
+            raise SnapshotMaterializationError("SNAPSHOT_FILTER_REQUIRES_RELATIVE_PATH")
+        if decision.relative_path in relative_paths:
+            raise SnapshotMaterializationError("SNAPSHOT_FILTER_PATHS_MUST_BE_UNIQUE_IN_BATCH")
+        relative_paths.add(decision.relative_path)
+        if decision.object_type not in {"file", "directory", "reparse", "other"}:
+            raise SnapshotMaterializationError("SNAPSHOT_FILTER_OBJECT_TYPE_UNKNOWN")
+        if decision.decision_state not in SNAPSHOT_FILTER_DECISION_STATES:
+            raise SnapshotMaterializationError("SNAPSHOT_FILTER_DECISION_STATE_UNKNOWN")
+        if not decision.reason_code.strip():
+            raise SnapshotMaterializationError("SNAPSHOT_FILTER_REQUIRES_REASON_CODE")
+        if decision.matched_rule_id is not None and not decision.matched_rule_id.strip():
+            raise SnapshotMaterializationError("SNAPSHOT_FILTER_RULE_ID_INVALID")
+        if decision.evaluation_stage not in SNAPSHOT_FILTER_EVALUATION_STAGES:
+            raise SnapshotMaterializationError("SNAPSHOT_FILTER_EVALUATION_STAGE_UNKNOWN")
+
+
+def _snapshot_filter_decision_payload(
+    decision: SnapshotFilterDecision,
+) -> dict[str, str | None]:
+    return {
+        "decision_state": decision.decision_state,
+        "evaluation_stage": decision.evaluation_stage,
+        "matched_rule_id": decision.matched_rule_id,
+        "object_type": decision.object_type,
+        "reason_code": decision.reason_code,
+        "relative_path": decision.relative_path,
+    }
+
+
+def _snapshot_filter_decision_sort_key(
+    decision: SnapshotFilterDecision,
+) -> tuple[str, str, str, str, str]:
+    return (
+        decision.relative_path,
+        decision.decision_state,
+        decision.reason_code,
+        decision.matched_rule_id or "",
+        decision.evaluation_stage,
+    )
 
 
 def _directory_coverage_payload(coverage: SnapshotDirectoryCoverage) -> dict[str, str | None]:

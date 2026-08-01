@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+import random
 
 import pytest
 
@@ -292,6 +293,38 @@ def test_regex_input_limit_blocks_instead_of_becoming_a_silent_nonmatch() -> Non
 
     assert decision.error_code == "FILTER_REGEX_BUDGET_EXCEEDED"
     assert decision.included is False
+
+
+def test_unicode_and_pathological_glob_corpus_is_deterministic_and_total() -> None:
+    policy = _policy(
+        FileFilterRule(
+            "unicode-temp",
+            FilterAction.EXCLUDE,
+            FilterRuleKind.RELATIVE_PATH_GLOB,
+            "m\u00e5l/**/*.tmp",
+        ),
+        FileFilterRule(
+            "many-stars",
+            FilterAction.EXCLUDE,
+            FilterRuleKind.FILE_NAME_GLOB,
+            "*a*a*a*a*a*a*a*a*a*a*",
+        ),
+    )
+    first = FileFilterSession(policy)
+    second = FileFilterSession(policy)
+    generator = random.Random(0xF17E)
+    alphabet = "abcXYZ012_- \u00e5\u00e9\u03bb\u4e2d\U0001f4c1"
+
+    for index in range(4_096):
+        segment = "".join(generator.choice(alphabet) for _ in range(24)).strip()
+        segment = segment.replace("/", "_") or f"item-{index}"
+        relative_path = f"m\u00e5l/{segment}/file-{index}.tmp"
+        subject = FileFilterSubject(
+            relative_path=relative_path,
+            object_type="file",
+        )
+
+        assert first.evaluate(subject) == second.evaluate(subject)
 
 
 def test_rule_limits_and_advanced_mode_are_enforced_at_construction() -> None:

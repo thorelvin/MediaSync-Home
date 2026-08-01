@@ -903,6 +903,16 @@ class Win32NamedPipeServer:
                 after=_optional_query_object(request.get("after")),
                 blocking_only=_optional_query_bool(request.get("blocking_only")),
             )
+        if message_type == "QUERY_SNAPSHOT_FILTER_DECISIONS":
+            return self.service.query_snapshot_filter_decisions(
+                str(request["client_instance_id"]),
+                snapshot_id=str(request["snapshot_id"]),
+                limit=_optional_query_int(request.get("limit")),
+                after=_optional_query_object(request.get("after")),
+                decision_states=_optional_query_str_tuple(
+                    request.get("decision_states")
+                ),
+            )
         if message_type == "QUERY_CATALOGED_FILES":
             return self.service.query_cataloged_files(
                 str(request["client_instance_id"]),
@@ -1183,6 +1193,27 @@ class Win32NamedPipeClient:
             request["after"] = after
         if blocking_only:
             request["blocking_only"] = True
+        return self._roundtrip(request)
+
+    def query_snapshot_filter_decisions(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        decision_states: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        request: dict[str, Any] = {
+            "message_type": "QUERY_SNAPSHOT_FILTER_DECISIONS",
+            "client_instance_id": self.client_instance_id,
+            "snapshot_id": snapshot_id,
+        }
+        if limit is not None:
+            request["limit"] = limit
+        if after is not None:
+            request["after"] = after
+        if decision_states:
+            request["decision_states"] = list(decision_states)
         return self._roundtrip(request)
 
     def query_cataloged_files(

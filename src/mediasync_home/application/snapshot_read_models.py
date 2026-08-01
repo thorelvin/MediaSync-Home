@@ -12,6 +12,10 @@ from mediasync_home.application.snapshots import (
     SnapshotEntryPageQuery,
     SnapshotEntryReadModel,
     SnapshotEntryReadModelStore,
+    SnapshotFilterDecisionCursor,
+    SnapshotFilterDecisionPageQuery,
+    SnapshotFilterDecisionReadModel,
+    SnapshotFilterDecisionReadModelStore,
     SnapshotIssueCursor,
     SnapshotIssuePageQuery,
     SnapshotIssueReadModel,
@@ -19,6 +23,7 @@ from mediasync_home.application.snapshots import (
     SnapshotMaterializationError,
     validate_snapshot_coverage_page_query,
     validate_snapshot_entry_page_query,
+    validate_snapshot_filter_decision_page_query,
     validate_snapshot_issue_page_query,
 )
 
@@ -26,6 +31,7 @@ from mediasync_home.application.snapshots import (
 DEFAULT_SNAPSHOT_ENTRY_PAGE_LIMIT = 100
 DEFAULT_SNAPSHOT_COVERAGE_PAGE_LIMIT = 100
 DEFAULT_SNAPSHOT_ISSUE_PAGE_LIMIT = 100
+DEFAULT_SNAPSHOT_FILTER_DECISION_PAGE_LIMIT = 100
 
 
 class SnapshotEntriesQueryError(ValueError):
@@ -37,6 +43,10 @@ class SnapshotCoverageQueryError(ValueError):
 
 
 class SnapshotIssuesQueryError(ValueError):
+    pass
+
+
+class SnapshotFilterDecisionsQueryError(ValueError):
     pass
 
 
@@ -133,6 +143,44 @@ class SnapshotIssuesReadPage:
         }
 
 
+@dataclass(frozen=True)
+class SnapshotFilterDecisionsReadPage:
+    snapshot_id: str
+    limit: int
+    has_more: bool
+    read_model_available: bool
+    decision_states: tuple[str, ...] = ()
+    decisions: tuple[SnapshotFilterDecisionReadModel, ...] = ()
+    next_cursor: SnapshotFilterDecisionCursor | None = None
+
+    @classmethod
+    def unavailable(
+        cls,
+        *,
+        query: SnapshotFilterDecisionPageQuery,
+    ) -> "SnapshotFilterDecisionsReadPage":
+        return cls(
+            snapshot_id=query.snapshot_id,
+            limit=query.limit,
+            has_more=False,
+            read_model_available=False,
+            decision_states=query.decision_states,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "snapshot_id": self.snapshot_id,
+            "limit": self.limit,
+            "has_more": self.has_more,
+            "read_model_available": self.read_model_available,
+            "decision_states": list(self.decision_states),
+            "next_cursor": _filter_decision_cursor_to_dict(self.next_cursor),
+            "decisions": [
+                _filter_decision_to_dict(decision) for decision in self.decisions
+            ],
+        }
+
+
 def query_snapshot_entries(
     *,
     snapshot_read_store: SnapshotEntryReadModelStore | None,
@@ -226,6 +274,38 @@ def query_snapshot_issues(
     )
 
 
+def query_snapshot_filter_decisions(
+    *,
+    snapshot_filter_decision_store: SnapshotFilterDecisionReadModelStore | None,
+    snapshot_id: str,
+    limit: int | None = None,
+    after: SnapshotFilterDecisionCursor | Mapping[str, object] | None = None,
+    decision_states: tuple[str, ...] = (),
+) -> SnapshotFilterDecisionsReadPage:
+    query = normalize_snapshot_filter_decision_page_query(
+        snapshot_id=snapshot_id,
+        limit=limit,
+        after=after,
+        decision_states=decision_states,
+    )
+    if snapshot_filter_decision_store is None:
+        return SnapshotFilterDecisionsReadPage.unavailable(query=query)
+
+    try:
+        page = snapshot_filter_decision_store.page_snapshot_filter_decisions(query)
+    except SnapshotMaterializationError as exc:
+        raise SnapshotFilterDecisionsQueryError(str(exc)) from exc
+    return SnapshotFilterDecisionsReadPage(
+        snapshot_id=page.snapshot_id,
+        limit=query.limit,
+        has_more=page.has_more,
+        read_model_available=True,
+        decision_states=query.decision_states,
+        decisions=page.decisions,
+        next_cursor=page.next_cursor,
+    )
+
+
 def normalize_snapshot_entry_page_query(
     *,
     snapshot_id: str,
@@ -284,6 +364,32 @@ def normalize_snapshot_issue_page_query(
     return query
 
 
+def normalize_snapshot_filter_decision_page_query(
+    *,
+    snapshot_id: str,
+    limit: int | None,
+    after: SnapshotFilterDecisionCursor | Mapping[str, object] | None,
+    decision_states: tuple[str, ...] = (),
+) -> SnapshotFilterDecisionPageQuery:
+    try:
+        query = SnapshotFilterDecisionPageQuery(
+            snapshot_id=str(snapshot_id).strip(),
+            limit=(
+                DEFAULT_SNAPSHOT_FILTER_DECISION_PAGE_LIMIT
+                if limit is None
+                else int(limit)
+            ),
+            after=_normalize_filter_decision_cursor(after),
+            decision_states=tuple(str(state).strip() for state in decision_states),
+        )
+        validate_snapshot_filter_decision_page_query(query)
+    except (KeyError, TypeError, ValueError, SnapshotMaterializationError) as exc:
+        raise SnapshotFilterDecisionsQueryError(
+            "SNAPSHOT_FILTER_DECISIONS_QUERY_INVALID"
+        ) from exc
+    return query
+
+
 def _normalize_entry_cursor(
     value: SnapshotEntryCursor | Mapping[str, object] | None,
 ) -> SnapshotEntryCursor | None:
@@ -316,6 +422,17 @@ def _normalize_issue_cursor(
         relative_path=str(value["relative_path"]),
         issue_type=str(value["issue_type"]),
         issue_id=_cursor_int(value["issue_id"]),
+    )
+
+
+def _normalize_filter_decision_cursor(
+    value: SnapshotFilterDecisionCursor | Mapping[str, object] | None,
+) -> SnapshotFilterDecisionCursor | None:
+    if value is None or isinstance(value, SnapshotFilterDecisionCursor):
+        return value
+    return SnapshotFilterDecisionCursor(
+        relative_path=str(value["relative_path"]),
+        decision_id=_cursor_int(value["decision_id"]),
     )
 
 
@@ -364,6 +481,20 @@ def _issue_to_dict(issue: SnapshotIssueReadModel) -> dict[str, object]:
     }
 
 
+def _filter_decision_to_dict(
+    decision: SnapshotFilterDecisionReadModel,
+) -> dict[str, object]:
+    return {
+        "decision_id": decision.decision_id,
+        "relative_path": decision.relative_path,
+        "object_type": decision.object_type,
+        "decision_state": decision.decision_state,
+        "reason_code": decision.reason_code,
+        "matched_rule_id": decision.matched_rule_id,
+        "evaluation_stage": decision.evaluation_stage,
+    }
+
+
 def _entry_cursor_to_dict(cursor: SnapshotEntryCursor | None) -> dict[str, object] | None:
     if cursor is None:
         return None
@@ -390,4 +521,15 @@ def _issue_cursor_to_dict(cursor: SnapshotIssueCursor | None) -> dict[str, objec
         "relative_path": cursor.relative_path,
         "issue_type": cursor.issue_type,
         "issue_id": cursor.issue_id,
+    }
+
+
+def _filter_decision_cursor_to_dict(
+    cursor: SnapshotFilterDecisionCursor | None,
+) -> dict[str, object] | None:
+    if cursor is None:
+        return None
+    return {
+        "relative_path": cursor.relative_path,
+        "decision_id": cursor.decision_id,
     }

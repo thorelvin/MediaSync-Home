@@ -170,9 +170,11 @@ from mediasync_home.application.runs import (
 from mediasync_home.application.snapshot_read_models import (
     SnapshotCoverageQueryError,
     SnapshotEntriesQueryError,
+    SnapshotFilterDecisionsQueryError,
     SnapshotIssuesQueryError,
     query_snapshot_coverage,
     query_snapshot_entries,
+    query_snapshot_filter_decisions,
     query_snapshot_issues,
 )
 from mediasync_home.application.snapshot_scanning import (
@@ -181,6 +183,7 @@ from mediasync_home.application.snapshot_scanning import (
 from mediasync_home.application.snapshots import (
     SnapshotCoverageReadModelStore,
     SnapshotEntryReadModelStore,
+    SnapshotFilterDecisionReadModelStore,
     SnapshotIssueReadModelStore,
 )
 from mediasync_home.application.state_maintenance import (
@@ -338,6 +341,7 @@ class EngineHostIpcService:
     snapshot_entry_read_store: SnapshotEntryReadModelStore | None = None
     snapshot_coverage_read_store: SnapshotCoverageReadModelStore | None = None
     snapshot_issue_read_store: SnapshotIssueReadModelStore | None = None
+    snapshot_filter_decision_read_store: SnapshotFilterDecisionReadModelStore | None = None
     cataloged_file_read_store: CatalogedFileReadModelStore | None = None
     backup_analysis_request_store: BackupAnalysisRequestStore | None = None
     job_lifecycle_store: JobLifecycleStore | None = None
@@ -696,6 +700,34 @@ class EngineHostIpcService:
         except SnapshotIssuesQueryError:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         return IpcResponse.accepted({"snapshot_issues": page.to_dict()})
+
+    def query_snapshot_filter_decisions(
+        self,
+        client_instance_id: str,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        decision_states: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
+        try:
+            page = query_snapshot_filter_decisions(
+                snapshot_filter_decision_store=(
+                    self.snapshot_filter_decision_read_store
+                ),
+                snapshot_id=snapshot_id,
+                limit=limit,
+                after=after,
+                decision_states=decision_states,
+            )
+        except SnapshotFilterDecisionsQueryError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        return IpcResponse.accepted(
+            {"snapshot_filter_decisions": page.to_dict()}
+        )
 
     def query_cataloged_files(
         self,

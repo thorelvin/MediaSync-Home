@@ -115,6 +115,15 @@ class GuiIpcClient(Protocol):
         blocking_only: bool = False,
     ) -> IpcResponse: ...
 
+    def query_snapshot_filter_decisions(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        decision_states: tuple[str, ...] = (),
+    ) -> IpcResponse: ...
+
     def query_cataloged_files(
         self,
         *,

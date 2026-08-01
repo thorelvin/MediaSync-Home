@@ -1,0 +1,15 @@
+{
+  "benchmark": "bounded-file-filter-evaluation-v1",
+  "benchmark_regex_total_budget_seconds": 30.0,
+  "bounded_regex_match_timeout_ms": 5,
+  "budget_error_count": 10,
+  "elapsed_seconds": 33.227895,
+  "excluded_count": 99990,
+  "included_count": 900000,
+  "path_count": 1000000,
+  "paths_per_second": 30095.2,
+  "platform": "Windows-10-10.0.26200-SP0",
+  "production_default_regex_total_budget_seconds": 2,
+  "python": "3.10.6",
+  "tracemalloc_peak_bytes": 15446
+}

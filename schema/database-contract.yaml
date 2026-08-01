@@ -119,6 +119,20 @@ invariants:
       reason_code: FILTER_REGEX_BUDGET_EXCEEDED
       coverage_state: FILTER_INCOMPLETE
       blocks_snapshot_seal: true
+    decision_evidence:
+      snapshot_schema_version: 4
+      table: snapshot_filter_decisions
+      checksum_bound: true
+      immutable_after_seal: true
+      fields:
+        - relative_path
+        - object_type
+        - decision_state
+        - reason_code
+        - matched_rule_id
+        - evaluation_stage
+      max_query_page: 1000
+      gui_preview_limit: 5
   - id: END-001_ENDPOINT_CAPABILITY_EVIDENCE
     requirement_id: END-001
     profile_schema_version: 1

@@ -22,6 +22,12 @@ from mediasync_home.application.snapshots import (
     SnapshotEntryReadModel,
     SnapshotEntryReadModelStore,
     SnapshotFileEntry,
+    SnapshotFilterDecision,
+    SnapshotFilterDecisionCursor,
+    SnapshotFilterDecisionPage,
+    SnapshotFilterDecisionPageQuery,
+    SnapshotFilterDecisionReadModel,
+    SnapshotFilterDecisionReadModelStore,
     SnapshotIssueCursor,
     SnapshotIssuePage,
     SnapshotIssuePageQuery,
@@ -31,6 +37,7 @@ from mediasync_home.application.snapshots import (
     SnapshotSealRequest,
     SnapshotSealStore,
     validate_snapshot_coverage_page_query,
+    validate_snapshot_filter_decision_page_query,
     snapshot_seal,
     validate_snapshot_issue_page_query,
     validate_snapshot_entry_page_query,
@@ -49,6 +56,7 @@ class SqliteSnapshotEntryStore(
     SnapshotEntryReadModelStore,
     SnapshotCoverageReadModelStore,
     SnapshotIssueReadModelStore,
+    SnapshotFilterDecisionReadModelStore,
 ):
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
@@ -67,6 +75,7 @@ class SqliteSnapshotEntryStore(
                     or existing.entry_count != len(batch.entries)
                     or existing.coverage_update_count != len(batch.coverage_updates)
                     or existing.issue_count != len(batch.issues)
+                    or existing.filter_decision_count != len(batch.filter_decisions)
                     or existing.approximate_bytes != batch.approximate_bytes
                 ):
                     raise SqliteSnapshotEntryStoreError("SNAPSHOT_BATCH_CONFLICT")
@@ -81,6 +90,7 @@ class SqliteSnapshotEntryStore(
                     issue_count=existing.issue_count,
                     approximate_bytes=existing.approximate_bytes,
                     idempotent_replay=True,
+                    filter_decision_count=existing.filter_decision_count,
                 )
 
             endpoint_id = self._load_mutable_snapshot_endpoint(batch.snapshot_id)
@@ -93,10 +103,11 @@ class SqliteSnapshotEntryStore(
                     entry_count,
                     coverage_update_count,
                     issue_count,
+                    filter_decision_count,
                     approximate_bytes,
                     state
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'COMMITTED')
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'COMMITTED')
                 """,
                 (
                     batch.snapshot_id,
@@ -105,6 +116,7 @@ class SqliteSnapshotEntryStore(
                     len(batch.entries),
                     len(batch.coverage_updates),
                     len(batch.issues),
+                    len(batch.filter_decisions),
                     batch.approximate_bytes,
                 ),
             )
@@ -184,19 +196,45 @@ class SqliteSnapshotEntryStore(
                         1 if issue.blocks_destructive_actions else 0,
                     ),
                 )
+            for decision in batch.filter_decisions:
+                self._connection.execute(
+                    """
+                    INSERT INTO snapshot_filter_decisions (
+                        snapshot_id,
+                        relative_path,
+                        object_type,
+                        decision_state,
+                        reason_code,
+                        matched_rule_id,
+                        evaluation_stage
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        batch.snapshot_id,
+                        decision.relative_path,
+                        decision.object_type,
+                        decision.decision_state,
+                        decision.reason_code,
+                        decision.matched_rule_id,
+                        decision.evaluation_stage,
+                    ),
+                )
             self._materialize_case_collisions(batch.snapshot_id)
             self._connection.execute(
                 """
                 UPDATE snapshots
                 SET
                     entry_count = entry_count + ?,
-                    total_bytes = total_bytes + ?
+                    total_bytes = total_bytes + ?,
+                    filter_decision_count = filter_decision_count + ?
                 WHERE id = ?
                     AND immutable = 0
                 """,
                 (
                     len(batch.entries),
                     sum(entry.size_bytes or 0 for entry in batch.entries),
+                    len(batch.filter_decisions),
                     batch.snapshot_id,
                 ),
             )
@@ -211,6 +249,7 @@ class SqliteSnapshotEntryStore(
                 issue_count=len(batch.issues),
                 approximate_bytes=batch.approximate_bytes,
                 idempotent_replay=False,
+                filter_decision_count=len(batch.filter_decisions),
             )
         except SqliteSnapshotEntryStoreError:
             if not outer_transaction and self._connection.in_transaction:
@@ -311,6 +350,37 @@ class SqliteSnapshotEntryStore(
             for row in rows
         )
 
+    def load_snapshot_filter_decisions(
+        self,
+        snapshot_id: str,
+    ) -> tuple[SnapshotFilterDecision, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT
+                relative_path,
+                object_type,
+                decision_state,
+                reason_code,
+                matched_rule_id,
+                evaluation_stage
+            FROM snapshot_filter_decisions
+            WHERE snapshot_id = ?
+            ORDER BY relative_path, id
+            """,
+            (snapshot_id,),
+        ).fetchall()
+        return tuple(
+            SnapshotFilterDecision(
+                relative_path=str(row[0]),
+                object_type=str(row[1]),
+                decision_state=str(row[2]),
+                reason_code=str(row[3]),
+                matched_rule_id=None if row[4] is None else str(row[4]),
+                evaluation_stage=str(row[5]),
+            )
+            for row in rows
+        )
+
     def page_snapshot_entries(self, query: SnapshotEntryPageQuery) -> SnapshotEntryPage:
         validate_snapshot_entry_page_query(query)
         rows = self._connection.execute(
@@ -395,6 +465,40 @@ class SqliteSnapshotEntryStore(
             has_more=has_more,
         )
 
+    def page_snapshot_filter_decisions(
+        self,
+        query: SnapshotFilterDecisionPageQuery,
+    ) -> SnapshotFilterDecisionPage:
+        validate_snapshot_filter_decision_page_query(query)
+        rows = self._connection.execute(
+            _snapshot_filter_decision_page_sql(query),
+            (*_snapshot_filter_decision_page_parameters(query), query.limit + 1),
+        ).fetchall()
+        page_rows = rows[: query.limit]
+        decisions = tuple(
+            SnapshotFilterDecisionReadModel(
+                decision_id=int(row[0]),
+                relative_path=str(row[1]),
+                object_type=str(row[2]),
+                decision_state=str(row[3]),
+                reason_code=str(row[4]),
+                matched_rule_id=None if row[5] is None else str(row[5]),
+                evaluation_stage=str(row[6]),
+            )
+            for row in page_rows
+        )
+        has_more = len(rows) > query.limit
+        return SnapshotFilterDecisionPage(
+            snapshot_id=query.snapshot_id,
+            decisions=decisions,
+            next_cursor=(
+                _snapshot_filter_decision_cursor(decisions[-1])
+                if has_more and decisions
+                else None
+            ),
+            has_more=has_more,
+        )
+
     def seal_snapshot(self, request: SnapshotSealRequest) -> SealedSnapshot:
         validate_snapshot_seal_request(request)
         outer_transaction = self._connection.in_transaction
@@ -414,15 +518,18 @@ class SqliteSnapshotEntryStore(
             entries = self.load_snapshot_entries(request.snapshot_id)
             coverage = self.load_directory_coverage(request.snapshot_id)
             issues = self.load_snapshot_issues(request.snapshot_id)
+            filter_decisions = self.load_snapshot_filter_decisions(request.snapshot_id)
             actual_case_groups = self._expected_case_collision_group_count(request.snapshot_id)
             self._validate_snapshot_ready_for_seal(
                 request=request,
                 snapshot_entry_count=snapshot_counts[0],
                 snapshot_total_bytes=snapshot_counts[1],
+                snapshot_filter_decision_count=snapshot_counts[2],
                 batches=batches,
                 entries=entries,
                 coverage=coverage,
                 issues=issues,
+                filter_decisions=filter_decisions,
                 actual_case_groups=actual_case_groups,
             )
             sealed = snapshot_seal(
@@ -430,6 +537,7 @@ class SqliteSnapshotEntryStore(
                 entries=entries,
                 coverage=coverage,
                 issues=issues,
+                filter_decisions=filter_decisions,
                 batches=batches,
                 case_collision_group_count=actual_case_groups,
             )
@@ -489,6 +597,7 @@ class SqliteSnapshotEntryStore(
                 total_bytes,
                 scan_error_count,
                 volatile_directory_count,
+                filter_decision_count,
                 complete,
                 immutable
             FROM snapshots
@@ -513,8 +622,9 @@ class SqliteSnapshotEntryStore(
             issue_count=int(row[6]),
             blocking_issue_count=self._blocking_issue_count(snapshot_id),
             case_collision_group_count=self._expected_case_collision_group_count(snapshot_id),
-            complete=bool(row[8]),
-            immutable=bool(row[9]),
+            filter_decision_count=int(row[8]),
+            complete=bool(row[9]),
+            immutable=bool(row[10]),
         )
 
     def _load_batch_receipt(
@@ -524,7 +634,13 @@ class SqliteSnapshotEntryStore(
     ) -> SnapshotBatchCommitReceipt | None:
         row = self._connection.execute(
             """
-            SELECT payload_hash, entry_count, coverage_update_count, issue_count, approximate_bytes
+            SELECT
+                payload_hash,
+                entry_count,
+                coverage_update_count,
+                issue_count,
+                approximate_bytes,
+                filter_decision_count
             FROM snapshot_batches
             WHERE snapshot_id = ?
                 AND sequence_no = ?
@@ -542,6 +658,7 @@ class SqliteSnapshotEntryStore(
             issue_count=int(row[3]),
             approximate_bytes=int(row[4]),
             idempotent_replay=False,
+            filter_decision_count=int(row[5]),
         )
 
     def _load_mutable_snapshot_endpoint(self, snapshot_id: str) -> str:
@@ -616,10 +733,10 @@ class SqliteSnapshotEntryStore(
         digest = hashlib.sha256(f"{snapshot_id}\0{comparison_key}".encode("utf-8")).hexdigest()
         return f"case:{digest[:32]}"
 
-    def _load_snapshot_counts_for_seal(self, snapshot_id: str) -> tuple[int, int]:
+    def _load_snapshot_counts_for_seal(self, snapshot_id: str) -> tuple[int, int, int]:
         row = self._connection.execute(
             """
-            SELECT entry_count, total_bytes, immutable
+            SELECT entry_count, total_bytes, filter_decision_count, immutable
             FROM snapshots
             WHERE id = ?
             """,
@@ -627,9 +744,9 @@ class SqliteSnapshotEntryStore(
         ).fetchone()
         if row is None:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_SNAPSHOT_NOT_FOUND")
-        if int(row[2]) != 0:
+        if int(row[3]) != 0:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_INCOMPLETE")
-        return (int(row[0]), int(row[1]))
+        return (int(row[0]), int(row[1]), int(row[2]))
 
     def _load_batch_summaries(self, snapshot_id: str) -> tuple[SnapshotBatchSummary, ...]:
         rows = self._connection.execute(
@@ -640,7 +757,8 @@ class SqliteSnapshotEntryStore(
                 entry_count,
                 coverage_update_count,
                 issue_count,
-                approximate_bytes
+                approximate_bytes,
+                filter_decision_count
             FROM snapshot_batches
             WHERE snapshot_id = ?
             ORDER BY sequence_no
@@ -655,6 +773,7 @@ class SqliteSnapshotEntryStore(
                 coverage_update_count=int(row[3]),
                 issue_count=int(row[4]),
                 approximate_bytes=int(row[5]),
+                filter_decision_count=int(row[6]),
             )
             for row in rows
         )
@@ -665,10 +784,12 @@ class SqliteSnapshotEntryStore(
         request: SnapshotSealRequest,
         snapshot_entry_count: int,
         snapshot_total_bytes: int,
+        snapshot_filter_decision_count: int,
         batches: tuple[SnapshotBatchSummary, ...],
         entries: tuple[SnapshotFileEntry, ...],
         coverage: tuple[SnapshotDirectoryCoverage, ...],
         issues: tuple[SnapshotIssue, ...],
+        filter_decisions: tuple[SnapshotFilterDecision, ...],
         actual_case_groups: int,
     ) -> None:
         if snapshot_entry_count != request.expected_entry_count or len(entries) != request.expected_entry_count:
@@ -689,6 +810,12 @@ class SqliteSnapshotEntryStore(
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_ISSUE_COUNT_MISMATCH")
         if sum(batch.issue_count for batch in batches) != request.expected_issue_count:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_BATCH_ISSUE_COUNT_MISMATCH")
+        if snapshot_filter_decision_count != request.expected_filter_decision_count:
+            raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_FILTER_COUNT_MISMATCH")
+        if len(filter_decisions) != request.expected_filter_decision_count:
+            raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_FILTER_COUNT_MISMATCH")
+        if sum(batch.filter_decision_count for batch in batches) != request.expected_filter_decision_count:
+            raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_BATCH_FILTER_COUNT_MISMATCH")
         if sum(1 for issue in issues if issue.blocks_destructive_actions) != request.expected_blocking_issue_count:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_BLOCKING_COUNT_MISMATCH")
         if any(item.coverage_state != SNAPSHOT_COMPLETE_COVERAGE_STATE for item in coverage):
@@ -713,6 +840,7 @@ class SqliteSnapshotEntryStore(
             or existing.issue_count != request.expected_issue_count
             or existing.blocking_issue_count != request.expected_blocking_issue_count
             or existing.case_collision_group_count != request.expected_case_collision_group_count
+            or existing.filter_decision_count != request.expected_filter_decision_count
         ):
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_CONFLICT")
 
@@ -957,4 +1085,65 @@ def _snapshot_issue_cursor(issue: SnapshotIssueReadModel) -> SnapshotIssueCursor
         relative_path=issue.relative_path,
         issue_type=issue.issue_type,
         issue_id=issue.issue_id,
+    )
+
+
+def _snapshot_filter_decision_page_sql(
+    query: SnapshotFilterDecisionPageQuery,
+) -> str:
+    state_clause = ""
+    if query.decision_states:
+        placeholders = ", ".join("?" for _state in query.decision_states)
+        state_clause = f"AND decision.decision_state IN ({placeholders})"
+    cursor_clause = ""
+    if query.after is not None:
+        cursor_clause = """
+                AND (
+                    decision.relative_path > ?
+                    OR (
+                        decision.relative_path = ?
+                        AND decision.id > ?
+                    )
+                )
+        """
+    return f"""
+            SELECT
+                decision.id,
+                decision.relative_path,
+                decision.object_type,
+                decision.decision_state,
+                decision.reason_code,
+                decision.matched_rule_id,
+                decision.evaluation_stage
+            FROM snapshot_filter_decisions AS decision
+            WHERE decision.snapshot_id = ?
+                {state_clause}
+                {cursor_clause}
+            ORDER BY decision.relative_path, decision.id
+            LIMIT ?
+            """
+
+
+def _snapshot_filter_decision_page_parameters(
+    query: SnapshotFilterDecisionPageQuery,
+) -> tuple[object, ...]:
+    parameters: list[object] = [query.snapshot_id]
+    parameters.extend(query.decision_states)
+    if query.after is not None:
+        parameters.extend(
+            (
+                query.after.relative_path,
+                query.after.relative_path,
+                query.after.decision_id,
+            )
+        )
+    return tuple(parameters)
+
+
+def _snapshot_filter_decision_cursor(
+    decision: SnapshotFilterDecisionReadModel,
+) -> SnapshotFilterDecisionCursor:
+    return SnapshotFilterDecisionCursor(
+        relative_path=decision.relative_path,
+        decision_id=decision.decision_id,
     )

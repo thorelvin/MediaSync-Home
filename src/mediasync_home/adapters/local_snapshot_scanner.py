@@ -46,6 +46,7 @@ from mediasync_home.application.named_streams import (
 from mediasync_home.application.snapshots import (
     SnapshotDirectoryCoverage,
     SnapshotFileEntry,
+    SnapshotFilterDecision,
     SnapshotIssue,
 )
 
@@ -178,6 +179,7 @@ class LocalFilesystemSnapshotScanner:
         entries: list[SnapshotFileEntry] = []
         coverage: list[SnapshotDirectoryCoverage] = []
         issues: list[SnapshotIssue] = []
+        filter_decisions: list[SnapshotFilterDecision] = []
         directory_filter_subjects: dict[str, FileFilterSubject] = {}
         reported_filter_errors: set[tuple[str | None, str]] = set()
         queue = deque((_QueuedDirectory(root, ".", "."),))
@@ -301,6 +303,16 @@ class LocalFilesystemSnapshotScanner:
                     and exclude_control_area
                 ):
                     control_area_excluded = True
+                    filter_decisions.append(
+                        SnapshotFilterDecision(
+                            relative_path=CONTROL_DIRECTORY_NAME,
+                            object_type="directory",
+                            decision_state="EXCLUDED",
+                            reason_code="FILTER_CONTROL_AREA_EXCLUDED",
+                            matched_rule_id=None,
+                            evaluation_stage="CONTROL_AREA",
+                        )
+                    )
                     continue
                 if examined_entries >= self._max_entries:
                     _append_limit_block(
@@ -335,6 +347,13 @@ class LocalFilesystemSnapshotScanner:
                             relative_path=relative_path,
                             object_type=pre_stat_object_type,
                         )
+                    )
+                    _append_filter_decision(
+                        filter_decisions,
+                        relative_path=relative_path,
+                        object_type=pre_stat_object_type,
+                        decision=pre_stat_decision,
+                        evaluation_stage="PRE_METADATA",
                     )
                     if pre_stat_decision.error_code is not None:
                         directory_filter_incomplete = True
@@ -392,6 +411,17 @@ class LocalFilesystemSnapshotScanner:
                 )
                 if not filter_session.can_evaluate_before_metadata:
                     decision = filter_session.evaluate(filter_subject)
+                    if not (
+                        object_type == "directory"
+                        and filter_session.has_empty_directory_rules
+                    ):
+                        _append_filter_decision(
+                            filter_decisions,
+                            relative_path=relative_path,
+                            object_type=object_type,
+                            decision=decision,
+                            evaluation_stage="METADATA",
+                        )
                     if decision.error_code is not None:
                         directory_filter_incomplete = True
                         _append_filter_error(
@@ -568,13 +598,14 @@ class LocalFilesystemSnapshotScanner:
             )
 
         if filter_session.has_empty_directory_rules:
-            entries, coverage, issues = _apply_empty_directory_filters(
+            entries, coverage, issues, filter_decisions = _apply_empty_directory_filters(
                 entries=entries,
                 coverage=coverage,
                 issues=issues,
                 directory_subjects=directory_filter_subjects,
                 session=filter_session,
                 reported_errors=reported_filter_errors,
+                filter_decisions=filter_decisions,
             )
 
         return FilesystemSnapshotScan(
@@ -584,6 +615,7 @@ class LocalFilesystemSnapshotScanner:
             coverage=tuple(coverage),
             issues=tuple(issues),
             control_area_excluded=control_area_excluded,
+            filter_decisions=tuple(filter_decisions),
         )
 
     def _validate_root(self, root: Path) -> None:
@@ -694,6 +726,38 @@ def _append_filter_error(
     )
 
 
+def _append_filter_decision(
+    decisions: list[SnapshotFilterDecision],
+    *,
+    relative_path: str,
+    object_type: str,
+    decision: FileFilterDecision,
+    evaluation_stage: str,
+) -> None:
+    if (
+        decision.matched_rule_id is None
+        and decision.included
+        and decision.error_code is None
+    ):
+        return
+    decisions.append(
+        SnapshotFilterDecision(
+            relative_path=relative_path,
+            object_type=object_type,
+            decision_state=(
+                "ERROR"
+                if decision.error_code is not None
+                else "INCLUDED"
+                if decision.included
+                else "EXCLUDED"
+            ),
+            reason_code=decision.reason_code,
+            matched_rule_id=decision.matched_rule_id,
+            evaluation_stage=evaluation_stage,
+        )
+    )
+
+
 def _apply_empty_directory_filters(
     *,
     entries: list[SnapshotFileEntry],
@@ -702,10 +766,12 @@ def _apply_empty_directory_filters(
     directory_subjects: dict[str, FileFilterSubject],
     session: FileFilterSession,
     reported_errors: set[tuple[str | None, str]],
+    filter_decisions: list[SnapshotFilterDecision],
 ) -> tuple[
     list[SnapshotFileEntry],
     list[SnapshotDirectoryCoverage],
     list[SnapshotIssue],
+    list[SnapshotFilterDecision],
 ]:
     child_counts: dict[str, int] = {}
     for entry in entries:
@@ -732,6 +798,13 @@ def _apply_empty_directory_filters(
                 directory_subjects[relative_path],
                 is_empty_directory=child_counts.get(relative_path, 0) == 0,
             )
+        )
+        _append_filter_decision(
+            filter_decisions,
+            relative_path=relative_path,
+            object_type="directory",
+            decision=decision,
+            evaluation_stage="EMPTY_DIRECTORY",
         )
         if decision.error_code is not None:
             filter_errors[relative_path] = decision.error_code
@@ -784,7 +857,7 @@ def _apply_empty_directory_filters(
         else item
         for item in coverage
     ]
-    return entries, coverage, issues
+    return entries, coverage, issues, filter_decisions
 
 
 def _parent_relative_path(relative_path: str) -> str:

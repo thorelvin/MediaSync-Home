@@ -98,6 +98,20 @@ def test_default_filter_exclusions_are_applied_before_cataloging(tmp_path: Path)
         ".mediasync/ordinary.txt",
     ]
     assert [item.relative_path for item in scan.coverage] == [".", ".mediasync"]
+    assert {decision.relative_path for decision in scan.filter_decisions} == {
+        "$RECYCLE.BIN",
+        "System Volume Information",
+        "Thumbs.DB",
+        "desktop.ini",
+        "scratch.TMP",
+        "~$document.docx",
+    }
+    assert all(
+        decision.decision_state == "EXCLUDED"
+        and decision.reason_code == "FILTER_RULE_EXCLUDED"
+        and decision.evaluation_stage == "PRE_METADATA"
+        for decision in scan.filter_decisions
+    )
     assert scan.complete is True
 
 
@@ -118,6 +132,8 @@ def test_later_explicit_include_overrides_a_default_exclusion(tmp_path: Path) ->
     scan = _scan(root, policy)
 
     assert [entry.relative_path for entry in scan.entries] == ["Thumbs.db"]
+    assert scan.filter_decisions[0].decision_state == "INCLUDED"
+    assert scan.filter_decisions[0].matched_rule_id == "include-thumbs"
     assert scan.complete is True
 
 
@@ -161,6 +177,14 @@ def test_empty_directory_exclusion_is_resolved_deepest_first(tmp_path: Path) -> 
         "nonempty/keep.txt",
     ]
     assert [item.relative_path for item in scan.coverage] == [".", "nonempty"]
+    assert {
+        decision.relative_path: decision.decision_state
+        for decision in scan.filter_decisions
+    } == {"empty/nested": "EXCLUDED", "empty": "EXCLUDED"}
+    assert all(
+        decision.evaluation_stage == "EMPTY_DIRECTORY"
+        for decision in scan.filter_decisions
+    )
 
 
 def test_explicit_reparse_exclusion_avoids_the_blocking_reparse_issue(
@@ -253,3 +277,5 @@ def test_regex_budget_failure_marks_relevant_coverage_incomplete(
     assert scan.coverage[0].coverage_state == "FILTER_INCOMPLETE"
     assert scan.issues[0].issue_type == "FILTER_EVALUATION_INCOMPLETE"
     assert scan.issues[0].error_code == "FILTER_REGEX_BUDGET_EXCEEDED"
+    assert scan.filter_decisions[0].decision_state == "ERROR"
+    assert scan.filter_decisions[0].reason_code == "FILTER_REGEX_BUDGET_EXCEEDED"

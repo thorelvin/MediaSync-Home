@@ -16,6 +16,7 @@ from mediasync_home.adapters.reparse_guard import (
     ReparseInspection,
 )
 from mediasync_home.application.snapshot_scanning import DirectoryCaseContext
+from mediasync_home.application.snapshots import SnapshotFilterDecision
 from mediasync_home.application.named_streams import (
     NamedStreamInspection,
     NamedStreamRecord,
@@ -178,6 +179,16 @@ def test_local_snapshot_scanner_excludes_only_validated_control_area(
     assert [entry.relative_path for entry in excluded.entries] == ["keep.txt"]
     assert included.control_area_excluded is False
     assert excluded.control_area_excluded is True
+    assert excluded.filter_decisions == (
+        SnapshotFilterDecision(
+            relative_path=".mediasync",
+            object_type="directory",
+            decision_state="EXCLUDED",
+            reason_code="FILTER_CONTROL_AREA_EXCLUDED",
+            matched_rule_id=None,
+            evaluation_stage="CONTROL_AREA",
+        ),
+    )
     assert included.complete is True
     assert excluded.complete is True
 

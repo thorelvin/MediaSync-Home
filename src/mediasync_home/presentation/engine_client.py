@@ -134,6 +134,16 @@ class StatusIpcClient(Protocol):
     ) -> IpcResponse:
         pass
 
+    def query_snapshot_filter_decisions(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        decision_states: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        pass
+
     def query_cataloged_files(
         self,
         *,
@@ -350,6 +360,23 @@ class EngineClient:
                 limit=limit,
                 after=after,
                 blocking_only=blocking_only,
+            )
+        )
+
+    def get_snapshot_filter_decisions(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        decision_states: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_snapshot_filter_decisions(
+                snapshot_id=snapshot_id,
+                limit=limit,
+                after=after,
+                decision_states=decision_states,
             )
         )
 

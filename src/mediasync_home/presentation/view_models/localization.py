@@ -1207,9 +1207,27 @@ _NB_TO_EN = {
     "Ingen endepunkter.": "No endpoint rows.",
     "Ingen planrader.": "No plan operations.",
     "Ingen snapshothelserader.": "No snapshot health rows.",
+    "Ingen filvalgsrader.": "No file-selection rows.",
     "Inaktiv": "Inactive",
     "Ikke konfigurert": "Not configured",
     "Innstillinger": "Settings",
+    "Inkludert": "Included",
+    "Ekskludert": "Excluded",
+    "Regelfeil": "Rule error",
+    "Regel": "Rule",
+    "Filvalg": "File selection",
+    "Filvalgsdetaljer er ikke tilgjengelige.": (
+        "File-selection details are not available."
+    ),
+    "Nøyaktige, samsvarende filvalg for dette snapshotet.": (
+        "Exact matched file-selection decisions for this snapshot."
+    ),
+    "Flere filvalgsrader finnes.": "More file-selection rows exist.",
+    "Beskyttede MediaSync-kontrolldata": "Protected MediaSync control data",
+    "Samsvarte med ekskluderingsregel": "Matched exclusion rule",
+    "Samsvarte med inkluderingsregel": "Matched inclusion rule",
+    "Ingen inkluderingsregel samsvarte": "No inclusion rule matched",
+    "Grensen for regelvurdering ble nådd": "Rule evaluation limit reached",
     "Jobben finnes ikke": "Job not found",
     "Jobber": "Jobs",
     "Kilde": "Source",

@@ -1916,6 +1916,7 @@ def build_engine_host_runtime(
             snapshot_entry_read_store=snapshots,
             snapshot_coverage_read_store=snapshots,
             snapshot_issue_read_store=snapshots,
+            snapshot_filter_decision_read_store=snapshots,
             plan_store=plans,
             plan_operation_read_store=plans,
             plan_endpoint_read_store=plans,

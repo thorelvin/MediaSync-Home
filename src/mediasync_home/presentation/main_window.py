@@ -143,6 +143,11 @@ from mediasync_home.presentation.view_models.snapshot_health import (
     empty_snapshot_health_preview_state,
     snapshot_health_preview_from_responses,
 )
+from mediasync_home.presentation.view_models.filter_decisions import (
+    FilterDecisionPreviewState,
+    empty_filter_decision_preview_state,
+    filter_decision_preview_from_response,
+)
 from mediasync_home.presentation.view_models.run_progress import (
     RunProgressViewState,
     empty_run_progress_state,
@@ -230,6 +235,7 @@ class _PlanPreviewResponses:
     endpoints: IpcResponse | None
     blocking_issues: IpcResponse | None
     coverage: IpcResponse | None
+    filter_decisions: IpcResponse | None
     snapshot_id: str | None
 
 
@@ -385,6 +391,15 @@ class SnapshotHealthProvider(Protocol):
         limit: int | None = None,
         after: dict[str, object] | None = None,
         blocking_only: bool = False,
+    ) -> IpcResponse: ...
+
+    def get_snapshot_filter_decisions(
+        self,
+        *,
+        snapshot_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        decision_states: tuple[str, ...] = (),
     ) -> IpcResponse: ...
 
 
@@ -627,6 +642,7 @@ class MediaSyncWindow(QMainWindow):
         self._plan_preview_state = empty_plan_operation_preview_state()
         self._plan_endpoint_preview_state = empty_plan_endpoint_preview_state()
         self._snapshot_health_preview_state = empty_snapshot_health_preview_state()
+        self._filter_decision_preview_state = empty_filter_decision_preview_state()
         self._cataloged_files_preview_state = empty_cataloged_files_preview_state()
         self._history_timeline_state = empty_history_timeline_state()
         self._retained_version_state = empty_retained_version_page_state()
@@ -857,6 +873,9 @@ class MediaSyncWindow(QMainWindow):
         self._snapshot_health_title: QLabel | None = None
         self._snapshot_health_summary: QLabel | None = None
         self._snapshot_health_rows: list[QLabel] = []
+        self._filter_decision_title: QLabel | None = None
+        self._filter_decision_summary: QLabel | None = None
+        self._filter_decision_rows: list[QLabel] = []
         self._cataloged_files_title: QLabel | None = None
         self._cataloged_files_summary: QLabel | None = None
         self._cataloged_files_rows: list[QLabel] = []
@@ -1179,6 +1198,10 @@ class MediaSyncWindow(QMainWindow):
     def apply_snapshot_health_preview(self, state: SnapshotHealthPreviewState) -> None:
         self._snapshot_health_preview_state = state
         self._apply_snapshot_health_preview_state(state)
+
+    def apply_filter_decision_preview(self, state: FilterDecisionPreviewState) -> None:
+        self._filter_decision_preview_state = state
+        self._apply_filter_decision_preview_state(state)
 
     def apply_cataloged_files_preview(self, state: CatalogedFilesPreviewState) -> None:
         self._cataloged_files_preview_state = state
@@ -1570,6 +1593,7 @@ class MediaSyncWindow(QMainWindow):
             self._clear_changes_plan()
             self.apply_plan_endpoint_preview(empty_plan_endpoint_preview_state())
             self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
+            self.apply_filter_decision_preview(empty_filter_decision_preview_state())
             return
         self._refresh_plan_previews(state.plan_id)
 
@@ -4637,6 +4661,7 @@ class MediaSyncWindow(QMainWindow):
                 endpoints: IpcResponse | None = None
                 blocking_issues: IpcResponse | None = None
                 coverage: IpcResponse | None = None
+                filter_decisions: IpcResponse | None = None
                 snapshot_id: str | None = None
                 if hasattr(client, "get_plan_operations"):
                     operations = cast(
@@ -4669,12 +4694,20 @@ class MediaSyncWindow(QMainWindow):
                         limit=2,
                         coverage_states=SNAPSHOT_HEALTH_COVERAGE_STATES,
                     )
+                    if hasattr(client, "get_snapshot_filter_decisions"):
+                        filter_decisions = (
+                            snapshot_provider.get_snapshot_filter_decisions(
+                                snapshot_id=snapshot_id,
+                                limit=5,
+                            )
+                        )
                 return _PlanPreviewResponses(
                     plan_id=plan_id,
                     operations=operations,
                     endpoints=endpoints,
                     blocking_issues=blocking_issues,
                     coverage=coverage,
+                    filter_decisions=filter_decisions,
                     snapshot_id=snapshot_id,
                 )
 
@@ -4709,6 +4742,7 @@ class MediaSyncWindow(QMainWindow):
         endpoint_state = self._refresh_plan_endpoint_preview(plan_id)
         if endpoint_state.source_snapshot_id is None:
             self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
+            self.apply_filter_decision_preview(empty_filter_decision_preview_state())
             return
         self._refresh_snapshot_health_preview(endpoint_state.source_snapshot_id)
 
@@ -4737,12 +4771,19 @@ class MediaSyncWindow(QMainWindow):
             or result.coverage is None
         ):
             self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
+            self.apply_filter_decision_preview(empty_filter_decision_preview_state())
             return
         self.apply_snapshot_health_preview(
             snapshot_health_preview_from_responses(
                 snapshot_id=result.snapshot_id,
                 blocking_issues_response=result.blocking_issues,
                 coverage_response=result.coverage,
+            )
+        )
+        self.apply_filter_decision_preview(
+            filter_decision_preview_from_response(
+                snapshot_id=result.snapshot_id,
+                response=result.filter_decisions,
             )
         )
 
@@ -4768,6 +4809,7 @@ class MediaSyncWindow(QMainWindow):
         self._clear_changes_plan()
         self.apply_plan_endpoint_preview(empty_plan_endpoint_preview_state())
         self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
+        self.apply_filter_decision_preview(empty_filter_decision_preview_state())
 
     def _refresh_plan_operation_preview(self, plan_id: str) -> None:
         self._cancel_background_changes_query()
@@ -5342,6 +5384,7 @@ class MediaSyncWindow(QMainWindow):
             or not hasattr(self._engine_client, "get_snapshot_coverage")
         ):
             self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
+            self.apply_filter_decision_preview(empty_filter_decision_preview_state())
             return
         provider = cast(SnapshotHealthProvider, self._engine_client)
         self.apply_snapshot_health_preview(
@@ -5356,6 +5399,22 @@ class MediaSyncWindow(QMainWindow):
                     snapshot_id=snapshot_id,
                     limit=2,
                     coverage_states=SNAPSHOT_HEALTH_COVERAGE_STATES,
+                ),
+            )
+        )
+        self.apply_filter_decision_preview(
+            filter_decision_preview_from_response(
+                snapshot_id=snapshot_id,
+                response=(
+                    provider.get_snapshot_filter_decisions(
+                        snapshot_id=snapshot_id,
+                        limit=5,
+                    )
+                    if hasattr(
+                        self._engine_client,
+                        "get_snapshot_filter_decisions",
+                    )
+                    else None
                 ),
             )
         )
@@ -7656,6 +7715,27 @@ class MediaSyncWindow(QMainWindow):
                 row.setText("")
                 row.setVisible(False)
 
+    def _apply_filter_decision_preview_state(
+        self,
+        state: FilterDecisionPreviewState,
+    ) -> None:
+        if self._filter_decision_title is not None:
+            self._filter_decision_title.setText(self._display(state.title))
+        if self._filter_decision_summary is not None:
+            self._filter_decision_summary.setText(
+                self._display(state.summary_label)
+            )
+        lines = tuple(row.display_line for row in state.rows) or (
+            "No file-selection rows.",
+        )
+        for index, row in enumerate(self._filter_decision_rows):
+            if index < len(lines):
+                row.setText(self._display(lines[index]))
+                row.setVisible(True)
+            else:
+                row.setText("")
+                row.setVisible(False)
+
     def _apply_cataloged_files_preview_state(
         self, state: CatalogedFilesPreviewState
     ) -> None:
@@ -9248,6 +9328,8 @@ class MediaSyncWindow(QMainWindow):
         layout.addSpacing(8)
         self._add_snapshot_health_preview(layout, self._snapshot_health_preview_state)
         layout.addSpacing(8)
+        self._add_filter_decision_preview(layout, self._filter_decision_preview_state)
+        layout.addSpacing(8)
         self._add_cataloged_files_preview(layout, self._cataloged_files_preview_state)
         if self._show_component_gallery:
             layout.addWidget(self._build_component_gallery())
@@ -9367,6 +9449,36 @@ class MediaSyncWindow(QMainWindow):
             _configure_responsive_label(row)
             row.setVisible(index < len(lines))
             self._snapshot_health_rows.append(row)
+            layout.addWidget(row)
+
+    def _add_filter_decision_preview(
+        self,
+        layout: QVBoxLayout,
+        state: FilterDecisionPreviewState,
+    ) -> None:
+        title = QLabel(self._display(state.title))
+        title.setObjectName("filterDecisionTitle")
+        _configure_responsive_label(title)
+        self._filter_decision_title = title
+        summary = QLabel(self._display(state.summary_label))
+        summary.setObjectName("filterDecisionSummary")
+        _configure_responsive_label(summary)
+        self._filter_decision_summary = summary
+        layout.addWidget(title)
+        layout.addWidget(summary)
+        self._filter_decision_rows = []
+        lines = tuple(row.display_line for row in state.rows) or (
+            "No file-selection rows.",
+        )
+        for index in range(5):
+            row = QLabel(self._display(lines[index]) if index < len(lines) else "")
+            row.setObjectName("filterDecisionRow")
+            _configure_responsive_label(row)
+            row.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            row.setVisible(index < len(lines))
+            self._filter_decision_rows.append(row)
             layout.addWidget(row)
 
     def _add_cataloged_files_preview(
@@ -9913,6 +10025,7 @@ class MediaSyncWindow(QMainWindow):
         self._apply_changes_page_state(self._changes_page_state)
         self._apply_plan_endpoint_preview_state(self._plan_endpoint_preview_state)
         self._apply_snapshot_health_preview_state(self._snapshot_health_preview_state)
+        self._apply_filter_decision_preview_state(self._filter_decision_preview_state)
         self._apply_cataloged_files_preview_state(self._cataloged_files_preview_state)
         self._apply_settings_localized_text()
         self._apply_settings_storage_state()

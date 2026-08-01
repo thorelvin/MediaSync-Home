@@ -6,9 +6,11 @@ from mediasync_home.application.snapshot_read_models import (
     DEFAULT_SNAPSHOT_COVERAGE_PAGE_LIMIT,
     DEFAULT_SNAPSHOT_ENTRY_PAGE_LIMIT,
     DEFAULT_SNAPSHOT_ISSUE_PAGE_LIMIT,
+    DEFAULT_SNAPSHOT_FILTER_DECISION_PAGE_LIMIT,
     SnapshotCoverageQueryError,
     SnapshotEntriesQueryError,
     SnapshotIssuesQueryError,
+    query_snapshot_filter_decisions,
     query_snapshot_coverage,
     query_snapshot_entries,
     query_snapshot_issues,
@@ -26,6 +28,10 @@ from mediasync_home.application.snapshots import (
     SnapshotIssuePage,
     SnapshotIssuePageQuery,
     SnapshotIssueReadModel,
+    SnapshotFilterDecisionCursor,
+    SnapshotFilterDecisionPage,
+    SnapshotFilterDecisionPageQuery,
+    SnapshotFilterDecisionReadModel,
 )
 
 
@@ -40,6 +46,48 @@ def test_snapshot_entry_query_reports_unavailable_store_with_normalized_bounds()
         "next_cursor": None,
         "entries": [],
     }
+
+
+def test_snapshot_filter_decision_query_returns_bounded_serializable_page() -> None:
+    store = _FakeSnapshotFilterDecisionStore(
+        (_filter_decision(1, "$RECYCLE.BIN"), _filter_decision(2, "Thumbs.db"))
+    )
+
+    page = query_snapshot_filter_decisions(
+        snapshot_filter_decision_store=store,
+        snapshot_id=" snapshot-a ",
+        limit=1,
+        decision_states=("EXCLUDED",),
+    )
+
+    assert page.limit == 1
+    assert page.has_more is True
+    assert page.to_dict()["decisions"] == [
+        {
+            "decision_id": 1,
+            "relative_path": "$RECYCLE.BIN",
+            "object_type": "directory",
+            "decision_state": "EXCLUDED",
+            "reason_code": "FILTER_RULE_EXCLUDED",
+            "matched_rule_id": "default-recycle-bin",
+            "evaluation_stage": "PRE_METADATA",
+        }
+    ]
+    assert page.to_dict()["next_cursor"] == {
+        "relative_path": "$RECYCLE.BIN",
+        "decision_id": 1,
+    }
+    assert store.queries[0].decision_states == ("EXCLUDED",)
+
+
+def test_snapshot_filter_decision_query_reports_unavailable_store() -> None:
+    page = query_snapshot_filter_decisions(
+        snapshot_filter_decision_store=None,
+        snapshot_id="snapshot-a",
+    )
+
+    assert page.limit == DEFAULT_SNAPSHOT_FILTER_DECISION_PAGE_LIMIT
+    assert page.read_model_available is False
 
 
 def test_snapshot_entry_query_returns_bounded_serializable_page() -> None:
@@ -367,6 +415,36 @@ class _FakeSnapshotIssueStore:
         )
 
 
+class _FakeSnapshotFilterDecisionStore:
+    def __init__(
+        self,
+        decisions: tuple[SnapshotFilterDecisionReadModel, ...],
+    ) -> None:
+        self._decisions = decisions
+        self.queries: tuple[SnapshotFilterDecisionPageQuery, ...] = ()
+
+    def page_snapshot_filter_decisions(
+        self,
+        query: SnapshotFilterDecisionPageQuery,
+    ) -> SnapshotFilterDecisionPage:
+        self.queries = (*self.queries, query)
+        decisions = self._decisions[: query.limit]
+        has_more = len(self._decisions) > query.limit
+        return SnapshotFilterDecisionPage(
+            snapshot_id=query.snapshot_id,
+            decisions=decisions,
+            has_more=has_more,
+            next_cursor=(
+                SnapshotFilterDecisionCursor(
+                    relative_path=decisions[-1].relative_path,
+                    decision_id=decisions[-1].decision_id,
+                )
+                if has_more
+                else None
+            ),
+        )
+
+
 def _entry(entry_id: str) -> SnapshotEntryReadModel:
     return SnapshotEntryReadModel(
         entry_id=entry_id,
@@ -424,4 +502,19 @@ def _issue_cursor(issue: SnapshotIssueReadModel) -> SnapshotIssueCursor:
         relative_path=issue.relative_path,
         issue_type=issue.issue_type,
         issue_id=issue.issue_id,
+    )
+
+
+def _filter_decision(
+    decision_id: int,
+    relative_path: str,
+) -> SnapshotFilterDecisionReadModel:
+    return SnapshotFilterDecisionReadModel(
+        decision_id=decision_id,
+        relative_path=relative_path,
+        object_type="directory",
+        decision_state="EXCLUDED",
+        reason_code="FILTER_RULE_EXCLUDED",
+        matched_rule_id="default-recycle-bin",
+        evaluation_stage="PRE_METADATA",
     )

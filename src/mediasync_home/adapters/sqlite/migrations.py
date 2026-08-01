@@ -293,6 +293,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_operation_verification_axes",
                 statements=CATALOG_OPERATION_VERIFICATION_AXES,
             ),
+            SqliteMigration(
+                version=52,
+                name="catalog_snapshot_filter_decisions",
+                statements=CATALOG_SNAPSHOT_FILTER_DECISIONS,
+            ),
         ),
     )
 
@@ -3501,6 +3506,85 @@ CATALOG_OPERATION_VERIFICATION_AXES = (
     BEFORE DELETE ON operation_attempts
     BEGIN
         SELECT RAISE(ABORT, 'OPERATION_ATTEMPT_IMMUTABLE');
+    END
+    """,
+)
+
+
+CATALOG_SNAPSHOT_FILTER_DECISIONS = (
+    """
+    ALTER TABLE snapshots
+        ADD COLUMN filter_decision_count INTEGER NOT NULL DEFAULT 0
+            CHECK (filter_decision_count >= 0)
+    """,
+    """
+    ALTER TABLE snapshot_batches
+        ADD COLUMN filter_decision_count INTEGER NOT NULL DEFAULT 0
+            CHECK (filter_decision_count >= 0)
+    """,
+    """
+    CREATE TABLE snapshot_filter_decisions (
+        id INTEGER PRIMARY KEY,
+        snapshot_id TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        object_type TEXT NOT NULL CHECK (
+            object_type IN ('file', 'directory', 'reparse', 'other')
+        ),
+        decision_state TEXT NOT NULL CHECK (
+            decision_state IN ('INCLUDED', 'EXCLUDED', 'ERROR')
+        ),
+        reason_code TEXT NOT NULL,
+        matched_rule_id TEXT,
+        evaluation_stage TEXT NOT NULL CHECK (
+            evaluation_stage IN (
+                'CONTROL_AREA', 'PRE_METADATA', 'METADATA', 'EMPTY_DIRECTORY'
+            )
+        ),
+        UNIQUE (snapshot_id, relative_path),
+        FOREIGN KEY (snapshot_id) REFERENCES snapshots (id) ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_snapshot_filter_decisions_snapshot_state_path_id
+        ON snapshot_filter_decisions (
+            snapshot_id, decision_state, relative_path, id
+        )
+    """,
+    """
+    CREATE INDEX idx_snapshot_filter_decisions_snapshot_path_id
+        ON snapshot_filter_decisions (snapshot_id, relative_path, id)
+    """,
+    """
+    CREATE TRIGGER trg_snapshot_filter_decisions_no_insert_after_immutable
+    BEFORE INSERT ON snapshot_filter_decisions
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = NEW.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_snapshot_filter_decisions_no_update_after_immutable
+    BEFORE UPDATE ON snapshot_filter_decisions
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = OLD.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_snapshot_filter_decisions_no_delete_after_immutable
+    BEFORE DELETE ON snapshot_filter_decisions
+    WHEN EXISTS (
+        SELECT 1 FROM snapshots
+        WHERE id = OLD.snapshot_id AND immutable = 1
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_IMMUTABLE');
     END
     """,
 )
