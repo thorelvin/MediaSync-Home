@@ -31,6 +31,11 @@ from mediasync_home.application.recovery_operations import (
     RecoveryTargetPreconditionKind,
 )
 from mediasync_home.application.safe_paths import SafePathViolation, parse_endpoint_relative_path
+from mediasync_home.application.staging_objects import (
+    StagingObjectManifestError,
+    parse_staging_object_manifest,
+    require_staging_object_manifest_binding,
+)
 from mediasync_home.domain.capabilities import MutationPermit
 
 
@@ -613,6 +618,20 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
             endpoint_id=operation.target_endpoint_id,
             endpoint_revision_id=operation.target_endpoint_revision_id,
         )
+        staging_fingerprint = _expected_fingerprint(
+            operation.expected_staging_fingerprint_json,
+            validation_code="LOCAL_FINAL_COMMIT_STAGING_FINGERPRINT_MISSING",
+            next_action="Restage and verify the operation before preserving its target.",
+        )
+        _require_staging_manifest_binding(
+            staging_root=self._staging_root_for(target_root),
+            permit=permit,
+            staging_object_id=_required_staging_object_id(operation),
+            final_relative_path=operation.final_relative_path,
+            operation_kind=operation.operation_kind,
+            fingerprint_content_hash=str(staging_fingerprint["content_hash"]),
+            operation_id=operation.operation_id,
+        )
         return self._replace_adapter(target_root).preserve_old_target(permit, operation)
 
     def restore_old_target(
@@ -656,12 +675,21 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
             endpoint_id=permit.endpoint_id,
             endpoint_revision_id=permit.endpoint_revision_id,
         )
+        staging_root = self._staging_root_for(target_root)
+        _require_staging_manifest_binding(
+            staging_root=staging_root,
+            permit=permit,
+            staging_object_id=artifact.object_id,
+            final_relative_path=artifact.relative_path.value,
+            operation_kind=artifact.operation_kind,
+            fingerprint_content_hash=artifact.content_hash,
+        )
         if artifact.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
             return self._commit_new_directory(
                 permit=permit,
                 artifact=artifact,
                 target_root=target_root,
-                staging_root=self._staging_root_for(target_root),
+                staging_root=staging_root,
             )
         if _version_manifest_exists(target_root=target_root, object_id=artifact.object_id):
             return self._replace_adapter(target_root).commit_verified_artifact(permit, artifact)
@@ -669,7 +697,7 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
             permit=permit,
             artifact=artifact,
             target_root=target_root,
-            staging_root=self._staging_root_for(target_root),
+            staging_root=staging_root,
         )
 
     def _commit_new_file(
@@ -878,6 +906,78 @@ def _require_lab_marker(target_root: Path, run_id: str) -> None:
             "LAB_FINAL_COMMIT_TEST_ROOT_RUN_MISMATCH",
             "Use a lab target marker bound to the current run before mutating final paths.",
         )
+
+
+def _require_staging_manifest_binding(
+    *,
+    staging_root: Path,
+    permit: MutationPermit,
+    staging_object_id: str,
+    final_relative_path: str,
+    operation_kind: RecoveryOperationKind,
+    fingerprint_content_hash: str,
+    operation_id: str | None = None,
+) -> None:
+    if OBJECT_ID_PATTERN.fullmatch(staging_object_id) is None:
+        raise FinalCommitAdapterError(
+            "LOCAL_FINAL_COMMIT_STAGING_MANIFEST_OBJECT_ID_INVALID",
+            "Restage the operation with a bounded opaque staging object id.",
+        )
+    root = _resolve_existing_root(
+        staging_root,
+        missing_code="LOCAL_FINAL_COMMIT_STAGING_ROOT_MISSING",
+        missing_next_action="Restore the verified staging object before final commit.",
+        reparse_code="LOCAL_FINAL_COMMIT_STAGING_ROOT_REPARSE_UNSUPPORTED",
+        reparse_next_action="Revalidate the staging object root before final commit.",
+    )
+    manifest_path = root / f"{staging_object_id}.manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise FinalCommitAdapterError(
+            "LOCAL_FINAL_COMMIT_STAGING_MANIFEST_MISSING",
+            "Restage and verify the operation before final commit.",
+        )
+    try:
+        manifest_raw = manifest_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_FINAL_COMMIT_STAGING_MANIFEST_UNREADABLE",
+            "Retry after the staging manifest becomes readable.",
+        ) from exc
+    try:
+        manifest = parse_staging_object_manifest(manifest_raw)
+    except StagingObjectManifestError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_FINAL_COMMIT_STAGING_MANIFEST_INVALID",
+            "Enter recovery because the staging manifest failed canonical validation.",
+        ) from exc
+    try:
+        require_staging_object_manifest_binding(
+            manifest,
+            staging_object_id=staging_object_id,
+            run_id=permit.run_id,
+            run_target_id=permit.run_target_id,
+            target_endpoint_id=permit.endpoint_id,
+            target_endpoint_revision_id=permit.endpoint_revision_id,
+            endpoint_generation=permit.endpoint_generation,
+            final_relative_path=final_relative_path,
+            operation_kind=operation_kind,
+            fingerprint_content_hash=fingerprint_content_hash,
+            operation_id=operation_id,
+        )
+    except StagingObjectManifestError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_FINAL_COMMIT_STAGING_MANIFEST_MISMATCH",
+            "Enter recovery because the staging manifest is bound to different operation evidence.",
+        ) from exc
+
+
+def _required_staging_object_id(operation: RecoveryOperation) -> str:
+    if operation.staging_object_id is None or not operation.staging_object_id.strip():
+        raise FinalCommitAdapterError(
+            "LOCAL_FINAL_COMMIT_STAGING_OBJECT_ID_MISSING",
+            "Restage and verify the operation before preserving its target.",
+        )
+    return operation.staging_object_id
 
 
 def _require_endpoint_marker(

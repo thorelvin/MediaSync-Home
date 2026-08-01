@@ -48,13 +48,14 @@ from mediasync_home.application.source_preconditions import (
     SourceFilePrecondition,
     SourceFilePreconditionError,
 )
+from mediasync_home.application.staging_objects import (
+    StagingObjectManifestError,
+    staging_object_manifest_from_operation,
+)
 from mediasync_home.domain.capabilities import MutationPermit
 
 
 OBJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-STAGING_OBJECT_MANIFEST_SCHEMA_VERSION = 1
-STAGING_OBJECT_MANIFEST_HASH_ALGORITHM = "SHA-256"
-STAGING_OBJECT_MANIFEST_CANONICALIZATION = "JSON_SORT_KEYS_COMPACT_UTF8_V1"
 NETWORK_INTERRUPTED_NEXT_ACTION = (
     "Reconnect the unavailable endpoint; MediaSync will retry this target "
     "after fresh preflight."
@@ -652,7 +653,13 @@ class LocalFileStagingTransferAdapter:
 
     def _ensure_staging_manifest(self, operation: RecoveryOperation) -> None:
         manifest_path = self._staging_manifest_path(operation)
-        expected = _canonical_json(_staging_manifest(operation))
+        try:
+            expected = staging_object_manifest_from_operation(operation).canonical_json
+        except StagingObjectManifestError as exc:
+            raise LocalFileStagingError(
+                exc.validation_code,
+                "Reload the journaled staging operation before publishing its manifest.",
+            ) from exc
         try:
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -895,51 +902,6 @@ def _expected_fingerprint(raw_payload: str | None) -> dict[str, object]:
             "Refresh source validation before transfer.",
         )
     return {"byte_count": byte_count, "content_hash": content_hash}
-
-
-def _staging_manifest(operation: RecoveryOperation) -> dict[str, object]:
-    staging_object_id = operation.staging_object_id
-    if (
-        staging_object_id is None
-        or OBJECT_ID_PATTERN.fullmatch(staging_object_id) is None
-    ):
-        raise LocalFileStagingError(
-            "LOCAL_STAGING_OBJECT_NOT_ALLOCATED",
-            "Allocate an opaque staging object before publishing its manifest.",
-        )
-    source_relative_path = (
-        None
-        if operation.source_relative_path is None
-        else "/".join(_relative_parts(operation.source_relative_path))
-    )
-    manifest: dict[str, object] = {
-        "schema_version": STAGING_OBJECT_MANIFEST_SCHEMA_VERSION,
-        "object_role": "STAGING",
-        "staging_object_id": staging_object_id,
-        "operation_id": operation.operation_id,
-        "operation_kind": operation.operation_kind.value,
-        "run_id": operation.run_id,
-        "run_target_id": operation.run_target_id,
-        "target_endpoint_id": operation.target_endpoint_id,
-        "target_endpoint_revision_id": operation.target_endpoint_revision_id,
-        "endpoint_generation": operation.endpoint_generation,
-        "source_endpoint_id": operation.source_endpoint_id,
-        "source_endpoint_revision_id": operation.source_endpoint_revision_id,
-        "source_relative_path": source_relative_path,
-        "final_relative_path": "/".join(
-            _relative_parts(operation.final_relative_path)
-        ),
-        "payload_name": f"{staging_object_id}.payload",
-        "fingerprint": _expected_fingerprint(
-            operation.expected_source_fingerprint_json
-        ),
-        "manifest_hash_algorithm": STAGING_OBJECT_MANIFEST_HASH_ALGORITHM,
-        "canonicalization": STAGING_OBJECT_MANIFEST_CANONICALIZATION,
-    }
-    manifest_hash = hashlib.sha256(
-        _canonical_json(manifest).encode("utf-8")
-    ).hexdigest()
-    return {**manifest, "manifest_hash": manifest_hash}
 
 
 def _expected_content_hash(raw_payload: str | None, *, validation_code: str) -> str:

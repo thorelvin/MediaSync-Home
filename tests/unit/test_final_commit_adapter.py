@@ -36,6 +36,7 @@ from mediasync_home.application.recovery_operations import (
     planned_recovery_operation,
 )
 from mediasync_home.application.runs import EndpointLeaseRequest
+from mediasync_home.application.staging_objects import create_staging_object_manifest
 
 
 def test_lab_final_commit_inserts_verified_staging_payload_without_overwrite(tmp_path: Path) -> None:
@@ -396,13 +397,124 @@ def test_local_resolving_final_commit_inserts_without_lab_marker(tmp_path: Path)
         permit_validator=fixture.lease,
     )
     permit = fixture.lease.issue_mutation_permit()
-    artifact = fixture.stage(object_id="operation-a", relative_path="Photos/image.jpg", payload=b"image")
+    artifact = fixture.stage(
+        object_id="operation-a",
+        relative_path="Photos/image.jpg",
+        payload=b"image",
+        write_manifest=True,
+    )
 
     receipt = adapter.commit_verified_artifact(permit, artifact)
 
     assert receipt.operation_id == "operation-a"
     assert receipt.final_relative_path == artifact.relative_path
     assert (fixture.target_root / "Photos" / "image.jpg").read_bytes() == b"image"
+
+
+def test_local_resolving_final_commit_requires_staging_manifest(tmp_path: Path) -> None:
+    fixture = _commit_fixture(tmp_path)
+    adapter = LocalResolvingFinalCommitAdapter(
+        root_resolver=_RootResolver(target_root=fixture.target_root),
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    artifact = fixture.stage(
+        object_id="operation-a",
+        relative_path="Photos/image.jpg",
+        payload=b"image",
+    )
+
+    with pytest.raises(FinalCommitAdapterError) as exc_info:
+        adapter.commit_verified_artifact(permit, artifact)
+
+    assert exc_info.value.validation_code == "LOCAL_FINAL_COMMIT_STAGING_MANIFEST_MISSING"
+    assert not (fixture.target_root / "Photos" / "image.jpg").exists()
+
+
+def test_local_resolving_final_commit_rejects_tampered_manifest(tmp_path: Path) -> None:
+    fixture = _commit_fixture(tmp_path)
+    adapter = LocalResolvingFinalCommitAdapter(
+        root_resolver=_RootResolver(target_root=fixture.target_root),
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    artifact = fixture.stage(
+        object_id="operation-a",
+        relative_path="Photos/image.jpg",
+        payload=b"image",
+        write_manifest=True,
+    )
+    manifest_path = fixture.staging_root / "operation-a.manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["endpoint_generation"] = 2
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FinalCommitAdapterError) as exc_info:
+        adapter.commit_verified_artifact(permit, artifact)
+
+    assert exc_info.value.validation_code == "LOCAL_FINAL_COMMIT_STAGING_MANIFEST_INVALID"
+    assert not (fixture.target_root / "Photos" / "image.jpg").exists()
+
+
+def test_local_resolving_final_commit_rejects_manifest_for_other_path(
+    tmp_path: Path,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    adapter = LocalResolvingFinalCommitAdapter(
+        root_resolver=_RootResolver(target_root=fixture.target_root),
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    artifact = fixture.stage(
+        object_id="operation-a",
+        relative_path="Photos/image.jpg",
+        payload=b"image",
+    )
+    fixture.write_manifest(
+        object_id="operation-a",
+        relative_path="Photos/other.jpg",
+        fingerprint={"byte_count": len(b"image"), "content_hash": _sha256(b"image")},
+    )
+
+    with pytest.raises(FinalCommitAdapterError) as exc_info:
+        adapter.commit_verified_artifact(permit, artifact)
+
+    assert exc_info.value.validation_code == "LOCAL_FINAL_COMMIT_STAGING_MANIFEST_MISMATCH"
+    assert not (fixture.target_root / "Photos" / "image.jpg").exists()
+
+
+def test_local_resolving_preservation_requires_manifest_before_moving_target(
+    tmp_path: Path,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    final = fixture.target_root / "Photos" / "image.jpg"
+    final.write_bytes(b"old-image")
+    adapter = LocalResolvingFinalCommitAdapter(
+        root_resolver=_RootResolver(target_root=fixture.target_root),
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    operation = _replace_operation(fixture, expected_target_payload=b"old-image")
+
+    with pytest.raises(FinalCommitAdapterError) as exc_info:
+        adapter.preserve_old_target(permit, operation)
+
+    assert exc_info.value.validation_code == "LOCAL_FINAL_COMMIT_STAGING_MANIFEST_MISSING"
+    assert final.read_bytes() == b"old-image"
+    assert not (
+        fixture.target_root
+        / ".mediasync"
+        / "objects"
+        / "versions"
+        / "operation-a.payload"
+    ).exists()
 
 
 def test_local_resolving_directory_commit_recognizes_retry_after_rename(
@@ -437,6 +549,12 @@ def test_local_resolving_directory_commit_recognizes_retry_after_rename(
         content_hash=str(fingerprint["content_hash"]),
         operation_kind=RecoveryOperationKind.CREATE_DIRECTORY,
     )
+    fixture.write_manifest(
+        object_id="operation-a",
+        relative_path=relative_path,
+        fingerprint=fingerprint,
+        operation_kind=RecoveryOperationKind.CREATE_DIRECTORY,
+    )
 
     first = adapter.commit_verified_artifact(permit, artifact)
     replay = adapter.commit_verified_artifact(permit, artifact)
@@ -456,7 +574,12 @@ def test_local_resolving_final_commit_preserves_then_replaces(tmp_path: Path) ->
         permit_validator=fixture.lease,
     )
     permit = fixture.lease.issue_mutation_permit()
-    artifact = fixture.stage(object_id="operation-a", relative_path="Photos/image.jpg", payload=b"new-image")
+    artifact = fixture.stage(
+        object_id="operation-a",
+        relative_path="Photos/image.jpg",
+        payload=b"new-image",
+        write_manifest=True,
+    )
     operation = _replace_operation(fixture, expected_target_payload=b"old-image")
 
     preservation = adapter.preserve_old_target(permit, operation)
@@ -482,7 +605,12 @@ def test_local_resolving_final_commit_quarantines_empty_directory_then_inserts_f
         permit_validator=fixture.lease,
     )
     permit = fixture.lease.issue_mutation_permit()
-    artifact = fixture.stage(object_id="operation-a", relative_path="Photos/image.jpg", payload=b"image")
+    artifact = fixture.stage(
+        object_id="operation-a",
+        relative_path="Photos/image.jpg",
+        payload=b"image",
+        write_manifest=True,
+    )
     operation = _directory_empty_operation(fixture)
 
     preservation = adapter.preserve_old_target(permit, operation)
@@ -623,12 +751,51 @@ class _CommitFixture:
         object_id: str,
         relative_path: str,
         payload: bytes,
+        write_manifest: bool = False,
     ) -> VerifiedStagingArtifact:
         (self.staging_root / f"{object_id}.payload").write_bytes(payload)
+        fingerprint = {
+            "byte_count": len(payload),
+            "content_hash": _sha256(payload),
+        }
+        if write_manifest:
+            self.write_manifest(
+                object_id=object_id,
+                relative_path=relative_path,
+                fingerprint=fingerprint,
+            )
         return VerifiedStagingArtifact(
             object_id=object_id,
             relative_path=RelativePath(relative_path),
-            content_hash=_sha256(payload),
+            content_hash=str(fingerprint["content_hash"]),
+        )
+
+    def write_manifest(
+        self,
+        *,
+        object_id: str,
+        relative_path: str,
+        fingerprint: dict[str, object],
+        operation_kind: RecoveryOperationKind = RecoveryOperationKind.COPY_NEW,
+    ) -> None:
+        manifest = create_staging_object_manifest(
+            staging_object_id=object_id,
+            operation_id=object_id,
+            operation_kind=operation_kind,
+            run_id=self.lease.run_id,
+            run_target_id=self.lease.run_target_id,
+            target_endpoint_id=self.lease.endpoint_id,
+            target_endpoint_revision_id=self.lease.endpoint_revision_id,
+            endpoint_generation=self.lease.endpoint_generation,
+            source_endpoint_id=None,
+            source_endpoint_revision_id=None,
+            source_relative_path=None,
+            final_relative_path=relative_path,
+            fingerprint=fingerprint,
+        )
+        (self.staging_root / f"{object_id}.manifest.json").write_text(
+            manifest.canonical_json,
+            encoding="utf-8",
         )
 
 
@@ -718,6 +885,14 @@ def _replace_operation(
             sort_keys=True,
             separators=(",", ":"),
         ),
+        expected_staging_fingerprint_json=json.dumps(
+            {
+                "byte_count": len(b"new-image"),
+                "content_hash": _sha256(b"new-image"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
     )
 
 
@@ -746,6 +921,14 @@ def _directory_empty_operation(fixture: _CommitFixture) -> RecoveryOperation:
             {
                 "entry_count": 0,
                 "kind": "DIRECTORY_EMPTY",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        expected_staging_fingerprint_json=json.dumps(
+            {
+                "byte_count": len(b"image"),
+                "content_hash": _sha256(b"image"),
             },
             sort_keys=True,
             separators=(",", ":"),

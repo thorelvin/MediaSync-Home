@@ -1,5 +1,16 @@
 # Implementeringsstatus
 
+Update 2026-08-01: PATH-001 production final publication now requires the
+canonical short-object staging manifest before any new file/directory publish
+or destructive old-target preservation. The resolver parses the exact canonical
+JSON, verifies its SHA-256 self-hash, and binds object/run/target, endpoint
+revision and generation, logical final path, operation kind, and verified
+content hash to the live mutation permit. Missing, altered, or differently
+bound evidence fails closed before the final tree changes. Directory replay
+after a completed rename remains idempotent because its manifest is retained
+beside the consumed staging payload. Complete managed-object retention/cleanup
+and non-local endpoint evidence remain pending.
+
 Oppdatering 2026-08-01: Etablerte backupjobber kan nå arkiveres og reaktiveres
 trygt fra **Jobber**. Arkivering krever eksplisitt bekreftelse, avvises under
 aktiv kjøring eller uavklart recovery, deaktiverer alle triggere, skjuler jobben
