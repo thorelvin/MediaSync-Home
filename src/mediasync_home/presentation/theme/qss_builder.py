@@ -91,10 +91,10 @@ QListWidget#navigationRail::item:selected {{
 }}
 
 QListWidget#jobsList,
-QListWidget#changesList,
-QListWidget#historyList,
-QListWidget#historyOperationList,
-QListWidget#historyAttemptList {{
+QListWidget#historyAttemptList,
+QTableView#changesList,
+QTableView#historyList,
+QTableView#historyOperationList {{
     background: {tokens.surface};
     border: {tokens.border_hairline}px solid {tokens.border};
     border-radius: {tokens.radius_sm}px;
@@ -102,21 +102,40 @@ QListWidget#historyAttemptList {{
 }}
 
 QListWidget#jobsList::item,
-QListWidget#changesList::item,
-QListWidget#historyList::item,
-QListWidget#historyOperationList::item,
 QListWidget#historyAttemptList::item {{
     min-height: {list_height}px;
     padding: {tokens.space_2}px {tokens.space_3}px;
     border-bottom: {tokens.border_hairline}px solid {tokens.border};
 }}
 
-QListWidget#jobsList::item:selected,
-QListWidget#changesList::item:selected,
-QListWidget#historyList::item:selected,
-QListWidget#historyOperationList::item:selected {{
+QListWidget#jobsList::item:selected {{
     background: {tokens.selection};
     color: {tokens.text};
+}}
+
+QTableView#changesList::item,
+QTableView#historyList::item,
+QTableView#historyOperationList::item {{
+    padding: {tokens.space_2}px {tokens.space_3}px;
+    border-bottom: {tokens.border_hairline}px solid {tokens.border};
+}}
+
+QTableView#changesList::item:selected,
+QTableView#historyList::item:selected,
+QTableView#historyOperationList::item:selected {{
+    background: {tokens.selection};
+    color: {tokens.text};
+}}
+
+QTableView#changesList QHeaderView::section,
+QTableView#historyList QHeaderView::section,
+QTableView#historyOperationList QHeaderView::section {{
+    background: {tokens.surface_alt};
+    color: {tokens.text_muted};
+    padding: {tokens.space_2}px {tokens.space_3}px;
+    border: 0;
+    border-right: {tokens.border_hairline}px solid {tokens.border};
+    border-bottom: {tokens.border_hairline}px solid {tokens.border};
 }}
 
 QFrame#workspace,

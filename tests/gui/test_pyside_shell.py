@@ -50,10 +50,41 @@ from mediasync_home.presentation.background_queries import (  # noqa: E402
 )
 from mediasync_home.presentation.theme.icon_registry import IconRegistry  # noqa: E402
 from mediasync_home.presentation.theme.theme_manager import ThemeManager, ThemeMode  # noqa: E402
+from mediasync_home.presentation.virtual_tables import (  # noqa: E402
+    BoundedVirtualTableView,
+)
 from mediasync_home.presentation.view_models.engine_status import (  # noqa: E402
     EngineStatusViewState,
     engine_status_from_response,
 )
+
+
+def _virtual_row_count(table: BoundedVirtualTableView) -> int:
+    return table.bounded_model.cached_row_count
+
+
+def _virtual_row_text(table: BoundedVirtualTableView, row: int) -> str:
+    return " · ".join(
+        str(table.bounded_model.index(row, column).data())
+        for column in range(table.bounded_model.columnCount())
+    )
+
+
+def _virtual_row_id(table: BoundedVirtualTableView, row: int) -> object:
+    return table.bounded_model.index(row, 0).data(Qt.ItemDataRole.UserRole)
+
+
+def _select_virtual_row(table: BoundedVirtualTableView, row: int) -> None:
+    table.setCurrentIndex(table.bounded_model.index(row, 0))
+    table.selectRow(row)
+
+
+def _click_virtual_row(table: BoundedVirtualTableView, row: int) -> None:
+    QTest.mouseClick(
+        table.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=table.visualRect(table.bounded_model.index(row, 0)).center(),
+    )
 
 
 @pytest.fixture
@@ -1538,7 +1569,7 @@ def test_jobs_changes_workspace_filters_pages_and_localizes_without_clipping(
         banner = window.findChild(QLabel, "changesAttentionBanner")
         target_filter = window.findChild(QComboBox, "changesTargetFilter")
         risk_filter = window.findChild(QComboBox, "changesRiskFilter")
-        changes_list = window.findChild(QListWidget, "changesList")
+        changes_list = window.findChild(BoundedVirtualTableView, "changesList")
         next_button = window.findChild(QToolButton, "changesNextButton")
         detail_reason = window.findChild(QLabel, "changesDetailReasonValue")
         detail_precondition = window.findChild(
@@ -1568,11 +1599,17 @@ def test_jobs_changes_workspace_filters_pages_and_localizes_without_clipping(
             "Krever oppmerksomhet",
             "Trygge endringer",
         ]
-        assert changes_list is not None and changes_list.count() == 2
-        assert changes_list.item(0).text().startswith("Trygg · Kopier ny")
-        assert changes_list.item(1).text().startswith("Vurder · Kopier ny")
+        assert changes_list is not None and _virtual_row_count(changes_list) == 2
+        assert changes_list.bounded_model.max_cached_rows == 200
+        assert jobs_scroll is not None
+        jobs_scroll.ensureWidgetVisible(changes_list)
+        qapp.processEvents()
+        assert changes_list.horizontalScrollBar().maximum() == 0
+        assert changes_list.isColumnHidden(3)
+        assert _virtual_row_text(changes_list, 0).startswith("Trygg · Kopier ny")
+        assert _virtual_row_text(changes_list, 1).startswith("Vurder · Kopier ny")
 
-        changes_list.setCurrentRow(1)
+        _select_virtual_row(changes_list, 1)
         qapp.processEvents()
         assert detail_reason is not None
         assert detail_reason.text() == "TARGET_CONTENT_DIFFERS"
@@ -1586,17 +1623,17 @@ def test_jobs_changes_workspace_filters_pages_and_localizes_without_clipping(
         assert window._changes_page_index == 1
         assert window._changes_page_label is not None
         assert window._changes_page_label.text() == "Side 2"
-        assert changes_list.count() == 2
-        assert changes_list.item(0).text().startswith("Høy risiko · Utsatt")
-        assert changes_list.item(1).text().startswith("Blokkert · Blokkert")
+        assert _virtual_row_count(changes_list) == 2
+        assert _virtual_row_text(changes_list, 0).startswith("Høy risiko · Utsatt")
+        assert _virtual_row_text(changes_list, 1).startswith("Blokkert · Blokkert")
 
         risk_filter.setCurrentIndex(risk_filter.findData("ATTENTION"))
         qapp.processEvents()
         assert window._changes_page_index == 0
         target_filter.setCurrentIndex(target_filter.findData("target-b"))
         qapp.processEvents()
-        assert changes_list.count() == 2
-        assert all("target-b" in changes_list.item(index).text() for index in range(2))
+        assert _virtual_row_count(changes_list) == 2
+        assert all("target-b" in _virtual_row_text(changes_list, index) for index in range(2))
         assert provider.changes_queries[-1][3:] == (
             "target-b",
             ("MEDIUM", "HIGH", "BLOCKED"),
@@ -1608,7 +1645,7 @@ def test_jobs_changes_workspace_filters_pages_and_localizes_without_clipping(
         assert title.text() == "Changes"
         assert banner.text() == "Needs attention: 1 blocked, 3 require review."
         assert risk_filter.itemText(1) == "Needs attention"
-        assert changes_list.item(0).text().startswith("Review · Copy new")
+        assert _virtual_row_text(changes_list, 0).startswith("Review · Copy new")
         assert jobs_scroll is not None
         assert jobs_scroll.horizontalScrollBar().maximum() == 0
         assert changes_panel is not None
@@ -1649,7 +1686,7 @@ def test_changes_query_stall_does_not_block_navigation_and_keeps_latest_filter(
         nav = window.findChild(QListWidget, "navigationRail")
         target_filter = window.findChild(QComboBox, "changesTargetFilter")
         risk_filter = window.findChild(QComboBox, "changesRiskFilter")
-        changes_list = window.findChild(QListWidget, "changesList")
+        changes_list = window.findChild(BoundedVirtualTableView, "changesList")
         next_button = window.findChild(QToolButton, "changesNextButton")
 
         assert nav is not None
@@ -1705,7 +1742,7 @@ def test_changes_query_stall_does_not_block_navigation_and_keeps_latest_filter(
             "target-b",
             ("MEDIUM", "HIGH", "BLOCKED"),
         )
-        assert changes_list.count() == 2
+        assert _virtual_row_count(changes_list) == 2
         assert not next_button.isEnabled()
     finally:
         worker_provider.release.set()
@@ -1963,14 +2000,17 @@ def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) 
         window.refresh_engine_status()
         qapp.processEvents()
         nav = window.findChild(QListWidget, "navigationRail")
-        history_list = window.findChild(QListWidget, "historyList")
+        history_list = window.findChild(BoundedVirtualTableView, "historyList")
         history_scroll = window.findChild(QScrollArea, "historyScrollArea")
         detail_title = window.findChild(QLabel, "historyDetailTitle")
         detail_status = window.findChild(QLabel, "historyDetailStatusValue")
         detail_operations = window.findChild(QLabel, "historyDetailOperationsValue")
         detail_transferred = window.findChild(QLabel, "historyDetailTransferredValue")
         detail_speed = window.findChild(QLabel, "historyDetailAverageSpeedValue")
-        operation_list = window.findChild(QListWidget, "historyOperationList")
+        operation_list = window.findChild(
+            BoundedVirtualTableView,
+            "historyOperationList",
+        )
         operation_title = window.findChild(QLabel, "historyOperationDetailTitle")
         operation_result = window.findChild(
             QLabel,
@@ -1993,6 +2033,7 @@ def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) 
 
         assert nav is not None
         assert history_list is not None
+        assert history_list.bounded_model.max_cached_rows == 25
         assert history_scroll is not None
         assert detail_title is not None
         assert detail_status is not None
@@ -2000,6 +2041,7 @@ def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) 
         assert detail_transferred is not None
         assert detail_speed is not None
         assert operation_list is not None
+        assert operation_list.bounded_model.max_cached_rows == 200
         assert operation_title is not None
         assert operation_result is not None
         assert operation_attempts is not None
@@ -2015,22 +2057,32 @@ def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) 
         )
         qapp.processEvents()
 
-        assert history_list.count() == 2
+        assert _virtual_row_count(history_list) == 2
+        assert history_list.horizontalScrollBar().maximum() == 0
+        assert operation_list.horizontalScrollBar().maximum() == 0
+        assert history_list.isColumnHidden(3)
+        assert history_list.isColumnHidden(4)
+        assert operation_list.isColumnHidden(3)
+        window.resize(1200, 760)
+        qapp.processEvents()
+        assert not history_list.isColumnHidden(3)
+        assert not history_list.isColumnHidden(4)
+        assert not operation_list.isColumnHidden(3)
+        assert history_list.horizontalScrollBar().maximum() == 0
+        assert operation_list.horizontalScrollBar().maximum() == 0
+        window.resize(900, 560)
+        qapp.processEvents()
         assert detail_title.text() == "Backup · Pictures"
         assert detail_status.text() == "Fullført"
         assert detail_operations.text() == "2 / 2"
         assert detail_transferred.text() == "1.0 KiB / 1.0 KiB"
         assert detail_speed.text() == "11 B/s"
-        assert operation_list.count() == 2
+        assert _virtual_row_count(operation_list) == 2
         assert operation_title.text() == "Photos"
         assert operation_result.text() == "Fullført"
         assert operation_attempts.text() == "1"
 
-        QTest.mouseClick(
-            operation_list.viewport(),
-            Qt.MouseButton.LeftButton,
-            pos=operation_list.visualItemRect(operation_list.item(1)).center(),
-        )
+        _click_virtual_row(operation_list, 1)
         qapp.processEvents()
 
         assert provider.operation_audit_queries[-1][:2] == ("run-a", "op-b")
@@ -2040,18 +2092,10 @@ def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) 
         assert operation_last_error.text() == "LOCAL_IO_TRANSIENT"
         assert attempt_list.count() == 2
 
-        QTest.mouseClick(
-            history_list.viewport(),
-            Qt.MouseButton.LeftButton,
-            pos=history_list.visualItemRect(history_list.item(1)).center(),
-        )
+        _click_virtual_row(history_list, 1)
         qapp.processEvents()
 
-        assert history_list.currentItem() is not None
-        assert (
-            history_list.currentItem().data(Qt.ItemDataRole.UserRole)
-            == "CONTROL:analysis-a"
-        )
+        assert history_list.selected_row_id() == "CONTROL:analysis-a"
         assert detail_title.text() == "Kontroll · Pictures"
         assert detail_status.text() == "Ingen endringer"
         assert detail_operations.text() == "0 planlagte endringer"
@@ -2061,11 +2105,7 @@ def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) 
 
         window.refresh_engine_status()
         qapp.processEvents()
-        assert history_list.currentItem() is not None
-        assert (
-            history_list.currentItem().data(Qt.ItemDataRole.UserRole)
-            == "CONTROL:analysis-a"
-        )
+        assert history_list.selected_row_id() == "CONTROL:analysis-a"
 
         QTest.mouseClick(
             filter_buttons["CONTROLS"],
@@ -2074,7 +2114,7 @@ def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) 
         qapp.processEvents()
 
         assert provider.history_queries[-1][:2] == ("CONTROLS", None)
-        assert history_list.count() == 1
+        assert _virtual_row_count(history_list) == 1
         job_filter.setCurrentIndex(1)
         qapp.processEvents()
         assert provider.history_queries[-1][:2] == ("CONTROLS", "job-a")
@@ -2114,18 +2154,17 @@ def test_history_rechecks_then_retries_only_selected_unfinished_file(qapp) -> No
         window.refresh_engine_status()
         window._select_navigation_row(2)
         qapp.processEvents()
-        operation_list = window.findChild(QListWidget, "historyOperationList")
+        operation_list = window.findChild(
+            BoundedVirtualTableView,
+            "historyOperationList",
+        )
         retry = window.findChild(QPushButton, "historyRetryOperationButton")
         history_scroll = window.findChild(QScrollArea, "historyScrollArea")
         language = window.findChild(QToolButton, "languageSelectorButton")
 
-        assert operation_list is not None and operation_list.count() == 2
+        assert operation_list is not None and _virtual_row_count(operation_list) == 2
         assert retry is not None and retry.isHidden()
-        QTest.mouseClick(
-            operation_list.viewport(),
-            Qt.MouseButton.LeftButton,
-            pos=operation_list.visualItemRect(operation_list.item(1)).center(),
-        )
+        _click_virtual_row(operation_list, 1)
         qapp.processEvents()
 
         assert retry.isVisible() and retry.isEnabled()
@@ -2169,7 +2208,7 @@ def test_history_workspace_pages_with_bounded_offsets(qapp) -> None:
         window.refresh_engine_status()
         qapp.processEvents()
         nav = window.findChild(QListWidget, "navigationRail")
-        history_list = window.findChild(QListWidget, "historyList")
+        history_list = window.findChild(BoundedVirtualTableView, "historyList")
         previous = window.findChild(QToolButton, "historyPreviousButton")
         next_button = window.findChild(QToolButton, "historyNextButton")
 
@@ -2189,11 +2228,8 @@ def test_history_workspace_pages_with_bounded_offsets(qapp) -> None:
         qapp.processEvents()
 
         assert provider.history_queries[-1][3] == 25
-        assert history_list.count() == 1
-        assert (
-            history_list.item(0).data(Qt.ItemDataRole.UserRole)
-            == "BACKUP:run-z"
-        )
+        assert _virtual_row_count(history_list) == 1
+        assert _virtual_row_id(history_list, 0) == "BACKUP:run-z"
         assert previous.isEnabled() is True
         assert next_button.isEnabled() is False
 
@@ -2229,7 +2265,7 @@ def test_history_query_stall_keeps_navigation_and_latest_filter_responsive(
         window._refresh_history_timeline(background=False)
         qapp.processEvents()
         nav = window.findChild(QListWidget, "navigationRail")
-        history_list = window.findChild(QListWidget, "historyList")
+        history_list = window.findChild(BoundedVirtualTableView, "historyList")
         history_scroll = window.findChild(QScrollArea, "historyScrollArea")
         previous = window.findChild(QToolButton, "historyPreviousButton")
         next_button = window.findChild(QToolButton, "historyNextButton")
@@ -2317,8 +2353,8 @@ def test_history_query_stall_keeps_navigation_and_latest_filter_responsive(
             ("ALL", None, 25, 25),
             ("BACKUPS", None, 25, 0),
         ]
-        assert history_list.count() == 1
-        assert history_list.item(0).data(Qt.ItemDataRole.UserRole) == "BACKUP:run-a"
+        assert _virtual_row_count(history_list) == 1
+        assert _virtual_row_id(history_list, 0) == "BACKUP:run-a"
         assert history_list.isEnabled()
         assert not previous.isEnabled()
         assert next_button.isEnabled()
@@ -2350,7 +2386,10 @@ def test_history_audit_stall_keeps_latest_file_and_navigation_responsive(
         window.resize(900, 560)
         window.show()
         nav = window.findChild(QListWidget, "navigationRail")
-        operation_list = window.findChild(QListWidget, "historyOperationList")
+        operation_list = window.findChild(
+            BoundedVirtualTableView,
+            "historyOperationList",
+        )
         retry = window.findChild(QPushButton, "historyRetryOperationButton")
         language = window.findChild(QToolButton, "languageSelectorButton")
 
@@ -2370,7 +2409,7 @@ def test_history_audit_stall_keeps_latest_file_and_navigation_responsive(
                 not window._background_queries.active
                 and window._background_queries.pending_count == 0
                 and window._ui_update_coalescer.pending_count == 0
-                and operation_list.count() == 2
+                and _virtual_row_count(operation_list) == 2
                 and window._history_operation_audit_state.operation_id == "op-a"
             )
 
@@ -2380,22 +2419,14 @@ def test_history_audit_stall_keeps_latest_file_and_navigation_responsive(
             QTest.qWait(10)
         assert initial_audit_settled()
 
-        QTest.mouseClick(
-            operation_list.viewport(),
-            Qt.MouseButton.LeftButton,
-            pos=operation_list.visualItemRect(operation_list.item(1)).center(),
-        )
+        _click_virtual_row(operation_list, 1)
         assert worker_provider.started.wait(timeout=1)
         qapp.processEvents()
         assert worker_provider.attempted_operation_ids[-1] == "op-b"
         assert operation_list.isEnabled()
         assert not retry.isEnabled()
 
-        QTest.mouseClick(
-            operation_list.viewport(),
-            Qt.MouseButton.LeftButton,
-            pos=operation_list.visualItemRect(operation_list.item(0)).center(),
-        )
+        _click_virtual_row(operation_list, 0)
         QTest.mouseClick(
             nav.viewport(),
             Qt.MouseButton.LeftButton,
@@ -2424,10 +2455,7 @@ def test_history_audit_stall_keeps_latest_file_and_navigation_responsive(
         assert len(factory_calls) == 1
         assert worker_provider.max_active == 1
         assert worker_provider.attempted_operation_ids == ["op-a", "op-b", "op-a"]
-        assert operation_list.currentItem() is not None
-        assert (
-            operation_list.currentItem().data(Qt.ItemDataRole.UserRole) == "op-a"
-        )
+        assert operation_list.selected_row_id() == "op-a"
         assert nav.currentRow() == 3
     finally:
         worker_provider.release.set()
@@ -2449,7 +2477,10 @@ def test_history_file_results_page_with_bounded_plan_cursors(qapp) -> None:
         window.refresh_engine_status()
         qapp.processEvents()
         nav = window.findChild(QListWidget, "navigationRail")
-        operation_list = window.findChild(QListWidget, "historyOperationList")
+        operation_list = window.findChild(
+            BoundedVirtualTableView,
+            "historyOperationList",
+        )
         previous = window.findChild(QToolButton, "historyOperationPreviousButton")
         next_button = window.findChild(QToolButton, "historyOperationNextButton")
 
@@ -2464,9 +2495,9 @@ def test_history_file_results_page_with_bounded_plan_cursors(qapp) -> None:
         )
         qapp.processEvents()
 
-        assert provider.operation_page_queries[-1] == ("plan-a", 25, None)
-        assert operation_list.count() == 1
-        assert operation_list.item(0).data(Qt.ItemDataRole.UserRole) == "op-a"
+        assert provider.operation_page_queries[-1] == ("plan-a", 200, None)
+        assert _virtual_row_count(operation_list) == 1
+        assert _virtual_row_id(operation_list, 0) == "op-a"
         assert previous.isEnabled() is False
         assert next_button.isEnabled() is True
 
@@ -2478,15 +2509,15 @@ def test_history_file_results_page_with_bounded_plan_cursors(qapp) -> None:
             "stable_order_key": "photos/a.jpg",
             "operation_id": "op-a",
         }
-        assert operation_list.item(0).data(Qt.ItemDataRole.UserRole) == "op-z"
+        assert _virtual_row_id(operation_list, 0) == "op-z"
         assert previous.isEnabled() is True
         assert next_button.isEnabled() is False
 
         QTest.mouseClick(previous, Qt.MouseButton.LeftButton)
         qapp.processEvents()
 
-        assert provider.operation_page_queries[-1] == ("plan-a", 25, None)
-        assert operation_list.item(0).data(Qt.ItemDataRole.UserRole) == "op-a"
+        assert provider.operation_page_queries[-1] == ("plan-a", 200, None)
+        assert _virtual_row_id(operation_list, 0) == "op-a"
     finally:
         window.close()
         window.deleteLater()

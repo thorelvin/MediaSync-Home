@@ -61,6 +61,10 @@ from mediasync_home.presentation.background_queries import (
     UiUpdateCoalescer,
 )
 from mediasync_home.presentation.theme.icon_registry import IconRegistry
+from mediasync_home.presentation.virtual_tables import (
+    BoundedVirtualTableView,
+    VirtualTableRow,
+)
 from mediasync_home.application.job_drafts import (
     DraftTarget,
     StandardBackupJobDraft,
@@ -478,7 +482,7 @@ class MediaSyncWindow(QMainWindow):
         self._history_page: QWidget | None = None
         self._history_scroll_area: QScrollArea | None = None
         self._history_title_label: QLabel | None = None
-        self._history_list: QListWidget | None = None
+        self._history_list: BoundedVirtualTableView | None = None
         self._history_empty_label: QLabel | None = None
         self._history_filter_group: QButtonGroup | None = None
         self._history_filter_buttons: dict[str, QPushButton] = {}
@@ -500,14 +504,14 @@ class MediaSyncWindow(QMainWindow):
         self._history_operation_activity_key: str | None = None
         self._history_operation_run_id: str | None = None
         self._history_operation_plan_id: str | None = None
-        self._history_operation_list: QListWidget | None = None
+        self._history_operation_list: BoundedVirtualTableView | None = None
         self._history_operation_empty_label: QLabel | None = None
         self._history_operation_heading: QLabel | None = None
         self._history_operation_header: QWidget | None = None
         self._history_operation_page_label: QLabel | None = None
         self._history_operation_previous_button: QToolButton | None = None
         self._history_operation_next_button: QToolButton | None = None
-        self._history_operation_page_limit = 25
+        self._history_operation_page_limit = 200
         self._history_operation_page_index = 0
         self._history_operation_query_pending = False
         self._history_operation_page_cursors: list[dict[str, object] | None] = [None]
@@ -582,7 +586,7 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_retry_target_button: QPushButton | None = None
         self._changes_plan_id: str | None = None
         self._changes_page_state = empty_plan_operation_preview_state()
-        self._changes_page_limit = 25
+        self._changes_page_limit = 200
         self._changes_page_index = 0
         self._changes_page_cursors: list[dict[str, object] | None] = [None]
         self._changes_query_pending = False
@@ -593,7 +597,7 @@ class MediaSyncWindow(QMainWindow):
         self._changes_attention_banner: QLabel | None = None
         self._changes_target_combo: QComboBox | None = None
         self._changes_risk_combo: QComboBox | None = None
-        self._changes_list: QListWidget | None = None
+        self._changes_list: BoundedVirtualTableView | None = None
         self._changes_empty_label: QLabel | None = None
         self._changes_page_label: QLabel | None = None
         self._changes_previous_button: QToolButton | None = None
@@ -1434,32 +1438,33 @@ class MediaSyncWindow(QMainWindow):
         history_list = self._history_list
         if history_list is None:
             return
-        history_list.blockSignals(True)
-        history_list.clear()
-        selected_row = -1
-        for index, activity in enumerate(state.activities):
-            kind = self._history_kind_label(activity.activity_kind)
-            status = self._history_state_label(activity.state)
-            started = self._format_history_timestamp(activity.started_utc)
-            target_count = len(activity.targets)
-            target_label = (
-                f"{target_count} {self._texts().target.lower()}"
-                if target_count == 1
-                else f"{target_count} {self._texts().activity_targets.lower()}"
+        history_list.replace_headers(
+            (
+                self._texts().activity_type,
+                self._texts().jobs,
+                self._texts().status,
+                self._texts().started,
+                self._texts().activity_targets,
             )
-            item = QListWidgetItem(
-                f"{kind} · {activity.job_title}\n"
-                f"{status} · {started} · {target_label}"
+        )
+        table_rows = tuple(
+            VirtualTableRow(
+                row_id=activity.selection_key,
+                cells=(
+                    self._history_kind_label(activity.activity_kind),
+                    activity.job_title,
+                    self._history_state_label(activity.state),
+                    self._format_history_timestamp(activity.started_utc),
+                    str(len(activity.targets)),
+                ),
+                tooltip=activity.job_id,
             )
-            item.setData(Qt.ItemDataRole.UserRole, activity.selection_key)
-            item.setToolTip(activity.job_id)
-            item.setSizeHint(QSize(0, 58))
-            history_list.addItem(item)
-            if activity.selection_key == self._selected_history_activity_id:
-                selected_row = index
-        if selected_row >= 0:
-            history_list.setCurrentRow(selected_row)
-        history_list.blockSignals(False)
+            for activity in state.activities
+        )
+        self._selected_history_activity_id = history_list.replace_rows(
+            table_rows,
+            selected_row_id=self._selected_history_activity_id,
+        )
 
         has_activities = bool(state.activities)
         history_list.setVisible(state.read_model_available and has_activities)
@@ -1510,14 +1515,9 @@ class MediaSyncWindow(QMainWindow):
 
     def _select_history_item(
         self,
-        current: QListWidgetItem | None,
-        previous: QListWidgetItem | None,
+        selection_key: str,
     ) -> None:
-        del previous
-        if current is None:
-            return
-        selection_key = current.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(selection_key, str) or not selection_key:
+        if not selection_key:
             return
         self._selected_history_activity_id = selection_key
         activity = next(
@@ -1888,33 +1888,31 @@ class MediaSyncWindow(QMainWindow):
         operation_list = self._history_operation_list
         if operation_list is None:
             return
-        operation_list.blockSignals(True)
-        operation_list.clear()
-        selected_row = -1
-        for index, row in enumerate(state.rows):
-            path = row.target_relative_path or row.operation_id
-            operation_type = self._history_operation_type_label(row.operation_type)
-            target = row.target_endpoint_id or self._texts().target
-            item = QListWidgetItem(
-                f"{operation_type} · {path}\n"
-                f"{target} · {_format_bytes(row.planned_bytes)}"
+        operation_list.replace_headers(
+            (
+                self._texts().change_type,
+                self._texts().path,
+                self._texts().target,
+                self._texts().planned_size,
             )
-            item.setData(Qt.ItemDataRole.UserRole, row.operation_id)
-            item.setToolTip(path)
-            item.setSizeHint(QSize(0, 58))
-            operation_list.addItem(item)
-            if row.operation_id == self._selected_history_operation_id:
-                selected_row = index
-
-        operation_ids = {row.operation_id for row in state.rows}
-        if self._selected_history_operation_id not in operation_ids:
-            self._selected_history_operation_id = (
-                state.rows[0].operation_id if state.rows else None
+        )
+        table_rows = tuple(
+            VirtualTableRow(
+                row_id=row.operation_id,
+                cells=(
+                    self._history_operation_type_label(row.operation_type),
+                    row.target_relative_path or row.operation_id,
+                    row.target_endpoint_id or self._texts().target,
+                    _format_bytes(row.planned_bytes),
+                ),
+                tooltip=row.target_relative_path or row.operation_id,
             )
-            selected_row = 0 if state.rows else -1
-        if selected_row >= 0:
-            operation_list.setCurrentRow(selected_row)
-        operation_list.blockSignals(False)
+            for row in state.rows
+        )
+        self._selected_history_operation_id = operation_list.replace_rows(
+            table_rows,
+            selected_row_id=self._selected_history_operation_id,
+        )
 
         has_rows = bool(state.rows)
         operation_list.setVisible(state.read_model_available and has_rows)
@@ -2018,14 +2016,9 @@ class MediaSyncWindow(QMainWindow):
 
     def _select_history_operation(
         self,
-        current: QListWidgetItem | None,
-        previous: QListWidgetItem | None,
+        operation_id: str,
     ) -> None:
-        del previous
-        if current is None:
-            return
-        operation_id = current.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(operation_id, str) or not operation_id:
+        if not operation_id:
             return
         if operation_id == self._selected_history_operation_id:
             return
@@ -3871,32 +3864,31 @@ class MediaSyncWindow(QMainWindow):
         changes_list = self._changes_list
         if changes_list is None:
             return
-        changes_list.blockSignals(True)
-        changes_list.clear()
-        selected_row = -1
-        for index, row in enumerate(state.rows):
-            path = row.target_relative_path or row.operation_id
-            target = row.target_endpoint_id or self._texts().target
-            item = QListWidgetItem(
-                f"{self._changes_risk_label(row.risk_level)} · "
-                f"{self._history_operation_type_label(row.operation_type)}\n"
-                f"{path} · {target}"
+        changes_list.replace_headers(
+            (
+                self._texts().decision,
+                self._texts().change_type,
+                self._texts().path,
+                self._texts().target,
             )
-            item.setData(Qt.ItemDataRole.UserRole, row.operation_id)
-            item.setToolTip(row.reason_code or path)
-            item.setSizeHint(QSize(0, 60))
-            changes_list.addItem(item)
-            if row.operation_id == self._selected_changes_operation_id:
-                selected_row = index
-        operation_ids = {row.operation_id for row in state.rows}
-        if self._selected_changes_operation_id not in operation_ids:
-            self._selected_changes_operation_id = (
-                state.rows[0].operation_id if state.rows else None
+        )
+        table_rows = tuple(
+            VirtualTableRow(
+                row_id=row.operation_id,
+                cells=(
+                    self._changes_risk_label(row.risk_level),
+                    self._history_operation_type_label(row.operation_type),
+                    row.target_relative_path or row.operation_id,
+                    row.target_endpoint_id or self._texts().target,
+                ),
+                tooltip=row.reason_code or row.target_relative_path,
             )
-            selected_row = 0 if state.rows else -1
-        if selected_row >= 0:
-            changes_list.setCurrentRow(selected_row)
-        changes_list.blockSignals(False)
+            for row in state.rows
+        )
+        self._selected_changes_operation_id = changes_list.replace_rows(
+            table_rows,
+            selected_row_id=self._selected_changes_operation_id,
+        )
         has_rows = bool(state.rows)
         changes_list.setVisible(state.read_model_available and has_rows)
         if self._changes_empty_label is not None:
@@ -3930,14 +3922,9 @@ class MediaSyncWindow(QMainWindow):
 
     def _select_changes_operation(
         self,
-        current: QListWidgetItem | None,
-        previous: QListWidgetItem | None,
+        operation_id: str,
     ) -> None:
-        del previous
-        if current is None:
-            return
-        operation_id = current.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(operation_id, str) or not operation_id:
+        if not operation_id:
             return
         self._selected_changes_operation_id = operation_id
         self._apply_changes_detail(self._changes_page_state)
@@ -5780,17 +5767,23 @@ class MediaSyncWindow(QMainWindow):
         layout.addWidget(target_filter, 2, 0)
         layout.addWidget(risk_filter, 2, 1)
 
-        changes_list = QListWidget()
+        changes_list = BoundedVirtualTableView(
+            headers=(
+                texts.decision,
+                texts.change_type,
+                texts.path,
+                texts.target,
+            ),
+            max_cached_rows=self._changes_page_limit,
+            column_weights=(11, 13, 25, 12),
+            compact_hidden_columns=(3,),
+            compact_width_threshold=500,
+        )
         changes_list.setObjectName("changesList")
         changes_list.setAccessibleName(texts.changes)
-        changes_list.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        changes_list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
-        changes_list.setWordWrap(True)
         changes_list.setMinimumHeight(150)
         changes_list.setMaximumHeight(260)
-        changes_list.currentItemChanged.connect(self._select_changes_operation)
+        changes_list.rowSelected.connect(self._select_changes_operation)
         self._changes_list = changes_list
         layout.addWidget(changes_list, 3, 0, 1, 2)
 
@@ -5918,17 +5911,24 @@ class MediaSyncWindow(QMainWindow):
         filter_layout.addWidget(job_filter, 1, 0, 1, 3)
         layout.addWidget(filters)
 
-        history_list = QListWidget()
+        history_list = BoundedVirtualTableView(
+            headers=(
+                texts.activity_type,
+                texts.jobs,
+                texts.status,
+                texts.started,
+                texts.activity_targets,
+            ),
+            max_cached_rows=self._history_page_limit,
+            column_weights=(9, 15, 11, 14, 10),
+            compact_hidden_columns=(3, 4),
+            compact_width_threshold=620,
+        )
         history_list.setObjectName("historyList")
         history_list.setAccessibleName(texts.history_activities)
-        history_list.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        history_list.setTextElideMode(Qt.TextElideMode.ElideRight)
-        history_list.setWordWrap(True)
         history_list.setMinimumHeight(148)
         history_list.setMaximumHeight(232)
-        history_list.currentItemChanged.connect(self._select_history_item)
+        history_list.rowSelected.connect(self._select_history_item)
         self._history_list = history_list
         layout.addWidget(history_list)
 
@@ -6030,19 +6030,23 @@ class MediaSyncWindow(QMainWindow):
         self._history_operation_next_button = operation_next
         layout.addWidget(operation_header, 16, 0, 1, 3)
 
-        operation_list = QListWidget()
+        operation_list = BoundedVirtualTableView(
+            headers=(
+                texts.change_type,
+                texts.path,
+                texts.target,
+                texts.planned_size,
+            ),
+            max_cached_rows=self._history_operation_page_limit,
+            column_weights=(13, 28, 12, 10),
+            compact_hidden_columns=(3,),
+            compact_width_threshold=500,
+        )
         operation_list.setObjectName("historyOperationList")
         operation_list.setAccessibleName(texts.file_results)
-        operation_list.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        operation_list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
-        operation_list.setWordWrap(True)
         operation_list.setMinimumHeight(132)
         operation_list.setMaximumHeight(220)
-        operation_list.currentItemChanged.connect(
-            self._select_history_operation
-        )
+        operation_list.rowSelected.connect(self._select_history_operation)
         self._history_operation_list = operation_list
         layout.addWidget(operation_list, 17, 0, 1, 3)
 
