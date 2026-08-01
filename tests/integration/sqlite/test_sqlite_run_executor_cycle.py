@@ -349,6 +349,13 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
         assert verified_event_payload["operation_audit"]["fencing_token"] == 1
         assert (target_root / "Pictures" / "A.jpg").read_bytes() == payload
         assert (staging_root / "op-a.payload").read_bytes() == payload
+        staging_manifest = json.loads(
+            (staging_root / "op-a.manifest.json").read_text(encoding="utf-8")
+        )
+        assert staging_manifest["object_role"] == "STAGING"
+        assert staging_manifest["operation_id"] == "op-a"
+        assert staging_manifest["source_relative_path"] == "Pictures/A.jpg"
+        assert staging_manifest["final_relative_path"] == "Pictures/A.jpg"
         assert handoff is not None
         assert handoff.content_hash == content_hash
         assert catalog_connection.execute(

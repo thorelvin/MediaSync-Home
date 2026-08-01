@@ -36,9 +36,11 @@ from mediasync_home.application.process_supervision import (
 )
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationKind,
     RecoveryTargetPreconditionKind,
     planned_recovery_operation,
 )
+from mediasync_home.application.directory_artifacts import DIRECTORY_MARKER_NAME
 from mediasync_home.application.source_preconditions import SourceFilePrecondition
 from mediasync_home.application.run_staging import RunTargetEndpointWaitRequired
 
@@ -512,6 +514,13 @@ def test_robocopy_staging_transfer_starts_contained_process_and_publishes_payloa
 
     assert evidence.transfer_state == "ROBOCOPY_EXIT_1_COPIED_TRANSFERRED_TO_STAGING"
     assert (staging_root / "object-a.payload").read_bytes() == b"image-bytes"
+    object_manifest = json.loads(
+        (staging_root / "object-a.manifest.json").read_text(encoding="utf-8")
+    )
+    assert object_manifest["object_role"] == "STAGING"
+    assert object_manifest["source_relative_path"] == "Pictures/A.jpg"
+    assert object_manifest["final_relative_path"] == "Pictures/A.jpg"
+    assert object_manifest["payload_name"] == "object-a.payload"
     manifest_payload = json.loads(
         (work_root / "manifests" / "object-a.manifest.json").read_text(encoding="utf-8")
     )
@@ -524,6 +533,50 @@ def test_robocopy_staging_transfer_starts_contained_process_and_publishes_payloa
     assert "Pictures/A.jpg" not in " ".join(supervisor.launch_plans[0].arguments)
     assert supervisor.process is not None
     assert supervisor.process.closed is True
+
+
+def test_robocopy_staging_routes_directory_marker_without_child_process(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_file = source_root / "Pictures" / "A.jpg"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"image-bytes")
+    target_root.mkdir()
+    staging_root = tmp_path / "staging"
+    supervisor = _FakeRobocopySupervisor(exit_code=1)
+    adapter = RobocopyStagingTransferAdapter(
+        root_resolver=_RootResolver(source_root=source_root, target_root=target_root),
+        staging_root=staging_root,
+        robocopy_work_root=tmp_path / "work",
+        process_supervisor=supervisor,
+        executable_resolver=_FakeExecutableResolver(_resolved_executable(tmp_path)),
+        profile=RobocopyTransferProfile(timeout_seconds=5.0),
+    )
+    operation = replace(
+        _operation(source_file),
+        operation_kind=RecoveryOperationKind.CREATE_DIRECTORY,
+        final_relative_path="Albums",
+        staging_object_id="directory-a",
+    )
+    validation = adapter.validate_source_file(operation)
+    operation = replace(
+        operation,
+        expected_source_fingerprint_json=validation.fingerprint_json,
+    )
+
+    evidence = adapter.transfer_to_staging(operation)
+
+    payload = staging_root / "directory-a.payload"
+    assert evidence.transfer_state == "DIRECTORY_TRANSFERRED_TO_STAGING"
+    assert (payload / DIRECTORY_MARKER_NAME).is_file()
+    assert supervisor.launch_plans == []
+    manifest = json.loads(
+        (staging_root / "directory-a.manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["operation_kind"] == "CREATE_DIRECTORY"
+    assert manifest["final_relative_path"] == "Albums"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")

@@ -52,6 +52,9 @@ from mediasync_home.domain.capabilities import MutationPermit
 
 
 OBJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+STAGING_OBJECT_MANIFEST_SCHEMA_VERSION = 1
+STAGING_OBJECT_MANIFEST_HASH_ALGORITHM = "SHA-256"
+STAGING_OBJECT_MANIFEST_CANONICALIZATION = "JSON_SORT_KEYS_COMPACT_UTF8_V1"
 NETWORK_INTERRUPTED_NEXT_ACTION = (
     "Reconnect the unavailable endpoint; MediaSync will retry this target "
     "after fresh preflight."
@@ -323,6 +326,7 @@ class LocalFileStagingTransferAdapter:
             return self._transfer_directory_to_staging(operation)
         expected = _expected_fingerprint(operation.expected_source_fingerprint_json)
         payload_path = self._staging_payload_path(operation)
+        self._ensure_staging_manifest(operation)
         if payload_path.exists():
             try:
                 existing = _fingerprint_file(payload_path)
@@ -375,6 +379,7 @@ class LocalFileStagingTransferAdapter:
     def ensure_staging_durable(
         self, operation: RecoveryOperation
     ) -> StagingDurabilityEvidence:
+        self._ensure_staging_manifest(operation)
         payload_path = self._staging_payload_path(operation)
         try:
             if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
@@ -411,6 +416,7 @@ class LocalFileStagingTransferAdapter:
     def verify_staging_artifact(
         self, operation: RecoveryOperation
     ) -> StagingVerificationEvidence:
+        self._ensure_staging_manifest(operation)
         if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
             return self._verify_staging_directory(operation)
         expected = _expected_fingerprint(operation.expected_source_fingerprint_json)
@@ -463,6 +469,7 @@ class LocalFileStagingTransferAdapter:
                 "Reload the planned directory operation before staging it.",
             )
         payload_path = self._staging_payload_path(operation)
+        self._ensure_staging_manifest(operation)
         if payload_path.exists() or payload_path.is_symlink():
             if _directory_payload_matches(payload_path, operation):
                 return StagingTransferEvidence(
@@ -628,6 +635,71 @@ class LocalFileStagingTransferAdapter:
         return (
             self._staging_root_for(operation) / f"{operation.staging_object_id}.payload"
         )
+
+    def _staging_manifest_path(self, operation: RecoveryOperation) -> Path:
+        if (
+            operation.staging_object_id is None
+            or OBJECT_ID_PATTERN.fullmatch(operation.staging_object_id) is None
+        ):
+            raise LocalFileStagingError(
+                "LOCAL_STAGING_OBJECT_NOT_ALLOCATED",
+                "Allocate an opaque staging object before publishing its manifest.",
+            )
+        return (
+            self._staging_root_for(operation)
+            / f"{operation.staging_object_id}.manifest.json"
+        )
+
+    def _ensure_staging_manifest(self, operation: RecoveryOperation) -> None:
+        manifest_path = self._staging_manifest_path(operation)
+        expected = _canonical_json(_staging_manifest(operation))
+        try:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self._raise_endpoint_wait_if_unavailable(operation, error=exc)
+            raise LocalFileStagingError(
+                "LOCAL_STAGING_MANIFEST_WRITE_FAILED",
+                "Retry after the staging manifest store becomes writable.",
+            ) from exc
+        if manifest_path.exists() or manifest_path.is_symlink():
+            if manifest_path.is_symlink() or not manifest_path.is_file():
+                raise LocalFileStagingError(
+                    "LOCAL_STAGING_MANIFEST_INVALID",
+                    "Enter recovery because the staging manifest path is not a regular file.",
+                )
+            try:
+                existing = manifest_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                self._raise_endpoint_wait_if_unavailable(operation, error=exc)
+                raise LocalFileStagingError(
+                    "LOCAL_STAGING_MANIFEST_INVALID",
+                    "Enter recovery because the staging manifest cannot be read.",
+                ) from exc
+            if existing != expected:
+                raise LocalFileStagingError(
+                    "LOCAL_STAGING_MANIFEST_CONFLICT",
+                    "Enter recovery because the staging object belongs to different operation evidence.",
+                )
+            return
+
+        temp_path = manifest_path.with_name(
+            f".{manifest_path.name}.{uuid4().hex}.tmp"
+        )
+        try:
+            try:
+                with temp_path.open("x", encoding="utf-8") as handle:
+                    handle.write(expected)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp_path, manifest_path)
+            finally:
+                temp_path.unlink(missing_ok=True)
+        except OSError as exc:
+            self._raise_endpoint_wait_if_unavailable(operation, error=exc)
+            raise LocalFileStagingError(
+                "LOCAL_STAGING_MANIFEST_WRITE_FAILED",
+                "Retry after the staging manifest store becomes writable.",
+            ) from exc
 
     def _staging_root_for(self, operation: RecoveryOperation) -> Path:
         if self._staging_root is not None:
@@ -823,6 +895,51 @@ def _expected_fingerprint(raw_payload: str | None) -> dict[str, object]:
             "Refresh source validation before transfer.",
         )
     return {"byte_count": byte_count, "content_hash": content_hash}
+
+
+def _staging_manifest(operation: RecoveryOperation) -> dict[str, object]:
+    staging_object_id = operation.staging_object_id
+    if (
+        staging_object_id is None
+        or OBJECT_ID_PATTERN.fullmatch(staging_object_id) is None
+    ):
+        raise LocalFileStagingError(
+            "LOCAL_STAGING_OBJECT_NOT_ALLOCATED",
+            "Allocate an opaque staging object before publishing its manifest.",
+        )
+    source_relative_path = (
+        None
+        if operation.source_relative_path is None
+        else "/".join(_relative_parts(operation.source_relative_path))
+    )
+    manifest: dict[str, object] = {
+        "schema_version": STAGING_OBJECT_MANIFEST_SCHEMA_VERSION,
+        "object_role": "STAGING",
+        "staging_object_id": staging_object_id,
+        "operation_id": operation.operation_id,
+        "operation_kind": operation.operation_kind.value,
+        "run_id": operation.run_id,
+        "run_target_id": operation.run_target_id,
+        "target_endpoint_id": operation.target_endpoint_id,
+        "target_endpoint_revision_id": operation.target_endpoint_revision_id,
+        "endpoint_generation": operation.endpoint_generation,
+        "source_endpoint_id": operation.source_endpoint_id,
+        "source_endpoint_revision_id": operation.source_endpoint_revision_id,
+        "source_relative_path": source_relative_path,
+        "final_relative_path": "/".join(
+            _relative_parts(operation.final_relative_path)
+        ),
+        "payload_name": f"{staging_object_id}.payload",
+        "fingerprint": _expected_fingerprint(
+            operation.expected_source_fingerprint_json
+        ),
+        "manifest_hash_algorithm": STAGING_OBJECT_MANIFEST_HASH_ALGORITHM,
+        "canonicalization": STAGING_OBJECT_MANIFEST_CANONICALIZATION,
+    }
+    manifest_hash = hashlib.sha256(
+        _canonical_json(manifest).encode("utf-8")
+    ).hexdigest()
+    return {**manifest, "manifest_hash": manifest_hash}
 
 
 def _expected_content_hash(raw_payload: str | None, *, validation_code: str) -> str:

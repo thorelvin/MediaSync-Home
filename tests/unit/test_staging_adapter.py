@@ -159,8 +159,14 @@ def test_local_staging_materializes_verified_directory_marker(tmp_path: Path) ->
     verification = adapter.verify_staging_artifact(operation)
 
     payload = staging_root / "op-a.payload"
+    manifest_path = staging_root / "op-a.manifest.json"
     assert payload.is_dir()
     assert tuple(path.name for path in payload.iterdir()) == (DIRECTORY_MARKER_NAME,)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["object_role"] == "STAGING"
+    assert manifest["operation_kind"] == "CREATE_DIRECTORY"
+    assert manifest["payload_name"] == "op-a.payload"
+    assert manifest["final_relative_path"] == "Pictures"
     assert verification.fingerprint_json == source.fingerprint_json
 
 
@@ -195,7 +201,52 @@ def test_local_staging_copies_only_plan_bound_source_identity(tmp_path: Path) ->
     assert stability.guard_kind == "PLAN_IDENTITY_AND_OPEN_READ_FSTAT_V1"
     assert stability.guard_evidence_hash == stable_file_identity_hash(source_file.stat())
     assert (staging_root / f"{allocation.staging_object_id}.payload").read_bytes() == b"image-bytes"
+    manifest_path = staging_root / f"{allocation.staging_object_id}.manifest.json"
+    manifest_text = manifest_path.read_text(encoding="utf-8")
+    manifest = json.loads(manifest_text)
+    manifest_hash = manifest.pop("manifest_hash")
+    canonical_without_hash = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    assert manifest_hash == hashlib.sha256(
+        canonical_without_hash.encode("utf-8")
+    ).hexdigest()
+    assert manifest["object_role"] == "STAGING"
+    assert manifest["staging_object_id"] == allocation.staging_object_id
+    assert manifest["source_relative_path"] == "Pictures/A.jpg"
+    assert manifest["final_relative_path"] == "Pictures/A.jpg"
+    assert manifest["payload_name"] == f"{allocation.staging_object_id}.payload"
+    assert str(source_file) not in manifest_text
     assert verification.fingerprint_json == validation.fingerprint_json
+
+
+def test_local_staging_rejects_conflicting_immutable_manifest(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    staging_root = tmp_path / "staging"
+    source_file = source_root / "Pictures" / "A.jpg"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"image-bytes")
+    target_root.mkdir()
+    adapter = LocalFileStagingTransferAdapter(
+        root_resolver=_SourceAndTargetRootResolver(
+            source_root=source_root,
+            target_root=target_root,
+        ),
+        staging_root=staging_root,
+    )
+    operation = _source_operation(source_file)
+    validation = adapter.validate_source_file(operation)
+    operation = replace(
+        operation,
+        expected_source_fingerprint_json=validation.fingerprint_json,
+        staging_object_id=operation.operation_id,
+    )
+    adapter.transfer_to_staging(operation)
+    (staging_root / "op-a.manifest.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(LocalFileStagingError) as exc_info:
+        adapter.ensure_staging_durable(operation)
+
+    assert exc_info.value.validation_code == "LOCAL_STAGING_MANIFEST_CONFLICT"
 
 
 def test_local_staging_rejects_source_changed_after_sealed_analysis(tmp_path: Path) -> None:

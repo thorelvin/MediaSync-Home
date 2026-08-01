@@ -29,7 +29,10 @@ from mediasync_home.application.process_supervision import (
     ProcessLaunchViolation,
     build_transfer_child_launch_plan,
 )
-from mediasync_home.application.recovery_operations import RecoveryOperation
+from mediasync_home.application.recovery_operations import (
+    RecoveryOperation,
+    RecoveryOperationKind,
+)
 from mediasync_home.application.run_staging import (
     RunTargetEndpointWaitRequired,
     StagingTransferEvidence,
@@ -227,8 +230,11 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
         self._profile = profile
 
     def transfer_to_staging(self, operation: RecoveryOperation) -> StagingTransferEvidence:
+        if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
+            return super().transfer_to_staging(operation)
         expected = _expected_fingerprint(operation.expected_source_fingerprint_json)
         payload_path = self._staging_payload_path(operation)
+        self._ensure_staging_manifest(operation)
         if payload_path.exists():
             existing = _fingerprint_file(payload_path)
             if existing == expected:
