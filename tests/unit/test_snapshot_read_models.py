@@ -84,6 +84,7 @@ def test_snapshot_entry_query_returns_bounded_serializable_page() -> None:
                 "comparison_key": "010:Pictures/file-a.jpg",
                 "object_type": "file",
                 "size_bytes": 128,
+                "birthtime_ns": 1_000,
                 "case_collision_group_id": "case-group-a",
             }
         ],
@@ -373,6 +374,7 @@ def _entry(entry_id: str) -> SnapshotEntryReadModel:
         comparison_key=f"010:Pictures/{entry_id}.jpg",
         object_type="file",
         size_bytes=128,
+        birthtime_ns=1_000,
         case_collision_group_id="case-group-a",
     )
 

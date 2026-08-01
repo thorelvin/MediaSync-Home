@@ -1,5 +1,16 @@
 # Implementeringsstatus
 
+Update 2026-08-01: `META-001` now has executable Windows creation-time
+evidence. The local scanner reads `FILETIME` creation time through
+`GetFileInformationByHandle`; it never substitutes `st_ctime` and leaves the
+scan unsealed when creation time is unavailable. Snapshot schema 3 binds
+`birthtime_ns` into canonical checksums while preserving schema 1/2
+verification. Catalog migration 49 persists the non-negative value on
+`file_entries` and rejects sealing schema-3 file/directory evidence with a
+missing value. Bounded snapshot reads and initial-plan loading round-trip the
+same field. Native scanner, legacy checksum, SQLite migration/seal, backup,
+IPC, contract and negative-fallback tests cover the boundary.
+
 Update 2026-08-01: empty-directory quarantine is now a retained, user-visible
 recovery object instead of short-lived cleanup data. Catalog migration 48 adds
 the immutable `EMPTY_DIRECTORY_QUARANTINE` role beside

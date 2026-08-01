@@ -9,10 +9,11 @@ from typing import Protocol
 
 HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
-SNAPSHOT_SCHEMA_VERSION = 2
+SNAPSHOT_SCHEMA_VERSION = 3
 SNAPSHOT_CHECKSUM_ALGORITHM = "SHA-256"
-SNAPSHOT_SERIALIZER_VERSION = "0B-SNAPSHOT-CANONICAL-JSON-V2"
-LEGACY_SNAPSHOT_SERIALIZER_VERSION = "0B-SNAPSHOT-CANONICAL-JSON-V1"
+SNAPSHOT_SERIALIZER_VERSION = "0B-SNAPSHOT-CANONICAL-JSON-V3"
+LEGACY_SNAPSHOT_SERIALIZER_VERSION_V2 = "0B-SNAPSHOT-CANONICAL-JSON-V2"
+LEGACY_SNAPSHOT_SERIALIZER_VERSION_V1 = "0B-SNAPSHOT-CANONICAL-JSON-V1"
 SNAPSHOT_COMPLETE_COVERAGE_STATE = "COMPLETE"
 MAX_SNAPSHOT_ENTRY_PAGE_LIMIT = 1000
 MAX_SNAPSHOT_COVERAGE_PAGE_LIMIT = 1000
@@ -42,6 +43,7 @@ class SnapshotFileEntry:
     comparison_key: str
     object_type: str
     size_bytes: int | None = None
+    birthtime_ns: int | None = None
     identity_fingerprint_hash: str | None = None
 
 
@@ -115,6 +117,7 @@ class SnapshotEntryReadModel:
     comparison_key: str
     object_type: str
     size_bytes: int | None
+    birthtime_ns: int | None = None
     case_collision_group_id: str | None = None
 
 
@@ -512,6 +515,10 @@ def validate_snapshot_entry_batch(batch: SnapshotEntryBatch) -> None:
             raise SnapshotMaterializationError("SNAPSHOT_ENTRY_REQUIRES_OBJECT_TYPE")
         if entry.size_bytes is not None and entry.size_bytes < 0:
             raise SnapshotMaterializationError("SNAPSHOT_ENTRY_SIZE_MUST_BE_NON_NEGATIVE")
+        if entry.birthtime_ns is not None and (
+            isinstance(entry.birthtime_ns, bool) or entry.birthtime_ns < 0
+        ):
+            raise SnapshotMaterializationError("SNAPSHOT_ENTRY_BIRTHTIME_MUST_BE_NON_NEGATIVE")
         if (
             entry.identity_fingerprint_hash is not None
             and HASH_PATTERN.fullmatch(entry.identity_fingerprint_hash) is None
@@ -539,6 +546,7 @@ def _payload_hash(
         "entries": [
             {
                 "comparison_key": entry.comparison_key,
+                "birthtime_ns": entry.birthtime_ns,
                 "entry_id": entry.entry_id,
                 "identity_fingerprint_hash": entry.identity_fingerprint_hash,
                 "object_type": entry.object_type,
@@ -591,6 +599,7 @@ def _snapshot_checksum(
             _snapshot_entry_payload(
                 entry,
                 include_identity=snapshot_schema_version >= 2,
+                include_birthtime=snapshot_schema_version >= 3,
             )
             for entry in entries
         ],
@@ -632,6 +641,11 @@ def _validate_snapshot_seal_inputs(
         raise SnapshotMaterializationError(
             "SNAPSHOT_SEAL_REQUIRES_FILE_IDENTITY_FINGERPRINT"
         )
+    if snapshot_schema_version >= 3 and any(
+        entry.object_type in {"file", "directory"} and entry.birthtime_ns is None
+        for entry in entries
+    ):
+        raise SnapshotMaterializationError("SNAPSHOT_SEAL_REQUIRES_BIRTHTIME")
     validate_snapshot_entry_batch(
         SnapshotEntryBatch(
             snapshot_id=snapshot_id,
@@ -677,7 +691,9 @@ def _validate_snapshot_batch_summaries(batches: tuple[SnapshotBatchSummary, ...]
 
 def _serializer_version(snapshot_schema_version: int) -> str:
     if snapshot_schema_version == 1:
-        return LEGACY_SNAPSHOT_SERIALIZER_VERSION
+        return LEGACY_SNAPSHOT_SERIALIZER_VERSION_V1
+    if snapshot_schema_version == 2:
+        return LEGACY_SNAPSHOT_SERIALIZER_VERSION_V2
     if snapshot_schema_version == SNAPSHOT_SCHEMA_VERSION:
         return SNAPSHOT_SERIALIZER_VERSION
     raise SnapshotMaterializationError("SNAPSHOT_SEAL_SCHEMA_VERSION_UNSUPPORTED")
@@ -687,6 +703,7 @@ def _snapshot_entry_payload(
     entry: SnapshotFileEntry,
     *,
     include_identity: bool,
+    include_birthtime: bool,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "comparison_key": entry.comparison_key,
@@ -697,6 +714,8 @@ def _snapshot_entry_payload(
     }
     if include_identity:
         payload["identity_fingerprint_hash"] = entry.identity_fingerprint_hash
+    if include_birthtime:
+        payload["birthtime_ns"] = entry.birthtime_ns
     return payload
 
 

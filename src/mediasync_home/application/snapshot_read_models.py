@@ -336,6 +336,7 @@ def _entry_to_dict(entry: SnapshotEntryReadModel) -> dict[str, object]:
         "comparison_key": entry.comparison_key,
         "object_type": entry.object_type,
         "size_bytes": entry.size_bytes,
+        "birthtime_ns": entry.birthtime_ns,
         "case_collision_group_id": entry.case_collision_group_id,
     }
 

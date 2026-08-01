@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import inspect
 from pathlib import Path
 
 import pytest
 
-from mediasync_home.adapters.file_identity import stable_file_identity_hash
+from mediasync_home.adapters.file_identity import file_birthtime_ns, stable_file_identity_hash
+from mediasync_home.adapters import file_identity
 from mediasync_home.adapters.local_snapshot_scanner import (
     LocalFilesystemSnapshotScanner,
 )
@@ -45,6 +47,10 @@ class _NestedDirectoryReparseProbe:
                 final_path=str(path),
             )
         return self._delegate.inspect_path(path)
+
+
+def test_birthtime_adapter_never_uses_ctime_as_creation_time() -> None:
+    assert "st_ctime" not in inspect.getsource(file_identity)
 
 
 def test_local_snapshot_scanner_enumerates_nested_tree_deterministically(
@@ -88,6 +94,19 @@ def test_local_snapshot_scanner_enumerates_nested_tree_deterministically(
         for entry in first.entries
         if entry.object_type != "file"
     )
+    assert all(
+        entry.birthtime_ns is not None and entry.birthtime_ns > 0
+        for entry in first.entries
+        if entry.object_type in {"file", "directory"}
+    )
+    assert {
+        entry.relative_path: entry.birthtime_ns
+        for entry in first.entries
+        if entry.object_type == "file"
+    } == {
+        "Readme.txt": file_birthtime_ns(root / "Readme.txt"),
+        "Photos/Image.jpg": file_birthtime_ns(root / "Photos" / "Image.jpg"),
+    }
     identities = {
         entry.relative_path: entry.identity_fingerprint_hash
         for entry in first.entries

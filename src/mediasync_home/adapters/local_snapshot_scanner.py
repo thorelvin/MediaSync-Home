@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, ClassVar, SupportsInt, cast
 from ctypes import wintypes
 
-from mediasync_home.adapters.file_identity import stable_file_identity_hash
+from mediasync_home.adapters.file_identity import file_birthtime_ns, stable_file_identity_hash
 from mediasync_home.adapters.local_endpoint_classifier import CONTROL_DIRECTORY_NAME
 from mediasync_home.adapters.reparse_guard import (
     LocalFilesystemReparsePathProbe,
@@ -325,6 +325,18 @@ class LocalFilesystemSnapshotScanner:
                             )
                         )
                     continue
+                birthtime_ns = file_birthtime_ns(
+                    queued.path / child.name,
+                    stat_result=child_stat,
+                )
+                if birthtime_ns is None:
+                    issues.append(
+                        _issue(
+                            relative_path,
+                            "BIRTHTIME_UNAVAILABLE",
+                            "SNAPSHOT_BIRTHTIME_UNAVAILABLE",
+                        )
+                    )
                 if stat.S_ISDIR(child_stat.st_mode):
                     entries.append(
                         _entry(
@@ -332,6 +344,7 @@ class LocalFilesystemSnapshotScanner:
                             relative_path,
                             comparison_key,
                             object_type="directory",
+                            birthtime_ns=birthtime_ns,
                         )
                     )
                     queue.append(
@@ -350,6 +363,7 @@ class LocalFilesystemSnapshotScanner:
                             comparison_key,
                             object_type="file",
                             size_bytes=int(child_stat.st_size),
+                            birthtime_ns=birthtime_ns,
                             identity_fingerprint_hash=stable_file_identity_hash(child_stat),
                         )
                     )
@@ -488,6 +502,7 @@ def _entry(
     *,
     object_type: str,
     size_bytes: int | None = None,
+    birthtime_ns: int | None = None,
     identity_fingerprint_hash: str | None = None,
 ) -> SnapshotFileEntry:
     digest = hashlib.sha256(
@@ -499,6 +514,7 @@ def _entry(
         comparison_key=comparison_key,
         object_type=object_type,
         size_bytes=size_bytes,
+        birthtime_ns=birthtime_ns,
         identity_fingerprint_hash=identity_fingerprint_hash,
     )
 

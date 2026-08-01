@@ -278,6 +278,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_retained_recovery_object_roles",
                 statements=CATALOG_RETAINED_RECOVERY_OBJECT_ROLES,
             ),
+            SqliteMigration(
+                version=49,
+                name="catalog_snapshot_birthtime_evidence",
+                statements=CATALOG_SNAPSHOT_BIRTHTIME_EVIDENCE,
+            ),
         ),
     )
 
@@ -3185,6 +3190,30 @@ CATALOG_RETAINED_RECOVERY_OBJECT_ROLES = (
     WHEN NEW.object_role IS NOT OLD.object_role
     BEGIN
         SELECT RAISE(ABORT, 'RETAINED_RECOVERY_OBJECT_ROLE_IMMUTABLE');
+    END
+    """,
+)
+
+CATALOG_SNAPSHOT_BIRTHTIME_EVIDENCE = (
+    """
+    ALTER TABLE file_entries
+        ADD COLUMN birthtime_ns INTEGER
+        CHECK (birthtime_ns IS NULL OR birthtime_ns >= 0)
+    """,
+    """
+    CREATE TRIGGER trg_snapshot_v3_requires_birthtime
+    BEFORE UPDATE OF immutable, snapshot_schema_version ON snapshots
+    WHEN NEW.immutable = 1
+        AND NEW.snapshot_schema_version >= 3
+        AND EXISTS (
+            SELECT 1
+            FROM file_entries
+            WHERE snapshot_id = NEW.id
+                AND object_type IN ('file', 'directory')
+                AND birthtime_ns IS NULL
+        )
+    BEGIN
+        SELECT RAISE(ABORT, 'SNAPSHOT_V3_REQUIRES_BIRTHTIME');
     END
     """,
 )

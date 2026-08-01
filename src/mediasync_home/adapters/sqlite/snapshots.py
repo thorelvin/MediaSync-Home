@@ -119,9 +119,10 @@ class SqliteSnapshotEntryStore(
                         comparison_key,
                         object_type,
                         size_bytes,
+                        birthtime_ns,
                         identity_fingerprint_hash
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         batch.snapshot_id,
@@ -131,6 +132,7 @@ class SqliteSnapshotEntryStore(
                         entry.comparison_key,
                         entry.object_type,
                         entry.size_bytes,
+                        entry.birthtime_ns,
                         entry.identity_fingerprint_hash,
                     ),
                 )
@@ -232,6 +234,7 @@ class SqliteSnapshotEntryStore(
                 comparison_key,
                 object_type,
                 size_bytes,
+                birthtime_ns,
                 identity_fingerprint_hash
             FROM file_entries
             WHERE snapshot_id = ?
@@ -246,7 +249,8 @@ class SqliteSnapshotEntryStore(
                 comparison_key=str(row[2]),
                 object_type=str(row[3]),
                 size_bytes=None if row[4] is None else int(row[4]),
-                identity_fingerprint_hash=None if row[5] is None else str(row[5]),
+                birthtime_ns=None if row[5] is None else int(row[5]),
+                identity_fingerprint_hash=None if row[6] is None else str(row[6]),
             )
             for row in rows
         )
@@ -321,7 +325,8 @@ class SqliteSnapshotEntryStore(
                 comparison_key=str(row[2]),
                 object_type=str(row[3]),
                 size_bytes=None if row[4] is None else int(row[4]),
-                case_collision_group_id=None if row[5] is None else str(row[5]),
+                birthtime_ns=None if row[5] is None else int(row[5]),
+                case_collision_group_id=None if row[6] is None else str(row[6]),
             )
             for row in page_rows
         )
@@ -804,6 +809,7 @@ def _snapshot_entry_page_sql(after: SnapshotEntryCursor | None) -> str:
                 entry.comparison_key,
                 entry.object_type,
                 entry.size_bytes,
+                entry.birthtime_ns,
                 member.group_id
             FROM file_entries AS entry
             LEFT JOIN case_collision_members AS member

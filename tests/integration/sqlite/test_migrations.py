@@ -38,7 +38,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 48
+        assert current_schema_version(connection, plan.store) == 49
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -94,7 +94,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 48
+        assert _row_count(connection, "schema_migrations") == 49
         assert {
             "idx_initial_backup_materializations_history",
             "idx_initial_backup_materializations_job_history",
@@ -108,6 +108,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
         }
         assert _column_names(connection, "endpoint_revisions") >= {"generation"}
         assert _column_names(connection, "snapshots") >= {"endpoint_generation"}
+        assert _column_names(connection, "file_entries") >= {"birthtime_ns"}
         assert _column_names(connection, "plan_endpoints") >= {"endpoint_generation"}
         assert _column_names(connection, "plan_operation_seal_details") >= {
             "target_endpoint_id"
@@ -504,6 +505,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "trg_plan_endpoints_no_update_after_seal",
             "trg_plan_seal_details_no_update",
             "trg_file_entries_no_insert_after_snapshot_immutable",
+            "trg_snapshot_v3_requires_birthtime",
             "trg_snapshot_batches_no_insert_after_snapshot_immutable",
             "trg_directory_coverage_no_insert_after_snapshot_immutable",
             "trg_snapshot_issues_no_insert_after_snapshot_immutable",
@@ -924,6 +926,55 @@ def test_catalog_migration_rejects_malformed_snapshot_seal_checksum(
             )
 
 
+def test_catalog_migration_rejects_v3_seal_without_birthtime(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        apply_sqlite_connection_policy(
+            connection, catalog_critical_writer_policy(database)
+        )
+        apply_sqlite_migrations(connection, catalog_migration_plan())
+        _insert_catalog_parent_rows(connection)
+        connection.execute(
+            """
+            INSERT INTO file_entries (
+                snapshot_id,
+                endpoint_id,
+                id,
+                relative_path,
+                comparison_key,
+                object_type,
+                identity_fingerprint_hash
+            )
+            VALUES (
+                'snapshot-a',
+                'endpoint-a',
+                'file-a',
+                'Readme.txt',
+                'readme.txt',
+                'file',
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+            )
+            """
+        )
+
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="SNAPSHOT_V3_REQUIRES_BIRTHTIME",
+        ):
+            connection.execute(
+                """
+                UPDATE snapshots
+                SET complete = 1,
+                    immutable = 1,
+                    snapshot_schema_version = 3,
+                    checksum_algorithm = 'SHA-256',
+                    serializer_version = '0B-SNAPSHOT-CANONICAL-JSON-V3',
+                    snapshot_checksum = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+                WHERE id = 'snapshot-a'
+                """
+            )
+
+
 def test_catalog_migration_enforces_composite_head_foreign_key(tmp_path: Path) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
@@ -1058,7 +1109,7 @@ def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> N
                 name,
                 migration_checksum
             )
-                    VALUES ('catalog', 49, 'future_migration', ?)
+                    VALUES ('catalog', 50, 'future_migration', ?)
             """,
             ("f" * 64,),
         )
@@ -1171,8 +1222,8 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
         preflight = inspect_sqlite_migration_state(connection, plan)
 
         assert preflight.initialized
-        assert preflight.current_version == 48
-        assert preflight.target_version == 48
+        assert preflight.current_version == 49
+        assert preflight.target_version == 49
         assert preflight.checksum_backfill_required
         assert "migration_checksum" not in _column_names(
             connection,

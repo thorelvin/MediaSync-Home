@@ -508,6 +508,7 @@ def _entry(
         comparison_key=comparison_key,
         object_type=object_type,
         size_bytes=size,
+        birthtime_ns=1_000 if object_type in {"file", "directory"} else None,
         identity_fingerprint_hash="a" * 64 if object_type == "file" else None,
     )
 

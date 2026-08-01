@@ -604,6 +604,14 @@ Indekser/constraints:
 
 Case-kollisjon skal aldri avbryte innsetting. `birthtime_ns` er Windows-opprettelsestid når semantikken er kjent; `ctime_ns` brukes ikke som erstatning. Hashfelt kan fylles mens snapshotet fortsatt er et kontrollert utkast, men fryses ved seal. Hash som blir tilgjengelig senere skrives til `hash_cache`/avledet planinput og kan ikke mutere den historiske filposten.
 
+0B executable status: catalog migration 49 adds non-negative
+`file_entries.birthtime_ns`. Snapshot schema 3 reads the Windows creation
+`FILETIME` through a non-reparse handle and includes the resulting Unix
+nanoseconds in the canonical snapshot checksum. A missing value on a file or
+directory blocks sealing in both the application and SQLite. Snapshot schema
+1/2 serializers remain supported for historical verification, and no
+`st_ctime`/`ctime_ns` fallback is permitted.
+
 #### `case_collision_groups`
 
 - `id TEXT PRIMARY KEY`

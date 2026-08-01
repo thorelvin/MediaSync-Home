@@ -763,6 +763,25 @@ def _validate_source_file_precondition_invariant(
         fail(f"SRC-001 source-file precondition contract drifted: {drifted}")
 
 
+def _validate_windows_birthtime_invariant(invariant: dict[str, Any]) -> None:
+    expected = {
+        "requirement_id": "META-001",
+        "table": "file_entries",
+        "column": "birthtime_ns",
+        "snapshot_schema_version": 3,
+        "source": "WIN32_FILE_CREATION_TIME",
+        "checksum_bound": True,
+        "ctime_fallback_allowed": False,
+        "immutable_after_seal": True,
+    }
+    drifted = sorted(
+        key for key, expected_value in expected.items()
+        if invariant.get(key) != expected_value
+    )
+    if drifted:
+        fail(f"META-001 Windows birthtime contract drifted: {drifted}")
+
+
 def _validate_retained_version_expiry_invariant(invariant: dict[str, Any]) -> None:
     if invariant.get("requirement_id") != "DB-004":
         fail("retained-version expiry invariant must reference DB-004")
@@ -927,6 +946,7 @@ def validate_database_contract(document: dict[str, Any]) -> int:
         "DB-006_JOB_HEADS_ARE_SEPARATE",
         "DB-007_PARENT_SCOPE_COMPOSITE_KEYS",
         "HASH-001_CURRENT_READ_HASH_EVIDENCE",
+        "META-001_WINDOWS_BIRTHTIME",
         "SRC-001_SOURCE_FILE_PRECONDITION",
         "SYNC-002_INITIAL_BACKUP_PLAN_MATERIALIZATION",
     }
@@ -967,6 +987,9 @@ def validate_database_contract(document: dict[str, Any]) -> int:
     )
     _validate_source_file_precondition_invariant(
         invariant_by_id["SRC-001_SOURCE_FILE_PRECONDITION"]
+    )
+    _validate_windows_birthtime_invariant(
+        invariant_by_id["META-001_WINDOWS_BIRTHTIME"]
     )
     _validate_retained_version_expiry_invariant(
         invariant_by_id["DB-004_RETAINED_VERSION_EXPIRY"]

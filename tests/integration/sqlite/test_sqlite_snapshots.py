@@ -57,6 +57,7 @@ def test_sqlite_snapshot_entry_batch_is_idempotent_and_preserves_case_collisions
                 comparison_key="readme.txt",
                 object_type="file",
                 size_bytes=64,
+                birthtime_ns=2_000,
                 identity_fingerprint_hash="b" * 64,
             ),
             SnapshotFileEntry(
@@ -65,6 +66,7 @@ def test_sqlite_snapshot_entry_batch_is_idempotent_and_preserves_case_collisions
                 comparison_key="readme.txt",
                 object_type="file",
                 size_bytes=32,
+                birthtime_ns=1_000,
                 identity_fingerprint_hash="a" * 64,
             ),
         )
@@ -98,7 +100,9 @@ def test_sqlite_snapshot_entry_read_model_pages_by_comparison_key(tmp_path: Path
         assert first_page.has_more is True
         assert first_page.next_cursor is not None
         assert first_page.entries[0].case_collision_group_id is None
+        assert first_page.entries[0].birthtime_ns == 3_000
         assert first_page.entries[1].case_collision_group_id is not None
+        assert first_page.entries[1].birthtime_ns == 2_000
 
         second_page = store.page_snapshot_entries(
             SnapshotEntryPageQuery(
@@ -522,6 +526,7 @@ def _case_collision_batch(
                 comparison_key="readme.txt",
                 object_type="file",
                 size_bytes=32,
+                birthtime_ns=1_000,
                 identity_fingerprint_hash="a" * 64,
             ),
             SnapshotFileEntry(
@@ -530,6 +535,7 @@ def _case_collision_batch(
                 comparison_key="readme.txt",
                 object_type="file",
                 size_bytes=64,
+                birthtime_ns=2_000,
                 identity_fingerprint_hash="b" * 64,
             ),
         ),
@@ -549,6 +555,7 @@ def _alpha_batch():
                 comparison_key="alpha.txt",
                 object_type="file",
                 size_bytes=16,
+                birthtime_ns=3_000,
                 identity_fingerprint_hash="c" * 64,
             ),
         ),

@@ -1468,6 +1468,7 @@ def test_snapshot_entries_query_returns_bounded_entry_page() -> None:
             "comparison_key": "010:pictures/a.jpg",
             "object_type": "file",
             "size_bytes": 128,
+            "birthtime_ns": 1_000,
             "case_collision_group_id": "case-group-a",
         }
     ]
@@ -3444,6 +3445,7 @@ def _snapshot_entry(
         comparison_key=comparison_key,
         object_type="file",
         size_bytes=128,
+        birthtime_ns=1_000,
         case_collision_group_id=case_collision_group_id,
     )
 

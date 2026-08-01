@@ -153,6 +153,23 @@ def test_database_contract_rejects_unbound_source_precondition() -> None:
         validate_contracts.validate_database_contract(document)
 
 
+def test_database_contract_rejects_ctime_birthtime_fallback() -> None:
+    yaml = _yaml_loader()
+    document = validate_contracts.load_yaml(
+        validate_contracts.ROOT / "schema/database-contract.yaml",
+        yaml,
+    )
+    document = copy.deepcopy(document)
+    invariant = _database_invariant(document, "META-001_WINDOWS_BIRTHTIME")
+    invariant["ctime_fallback_allowed"] = True
+
+    with pytest.raises(
+        validate_contracts.ContractValidationError,
+        match="Windows birthtime contract drifted",
+    ):
+        validate_contracts.validate_database_contract(document)
+
+
 def test_database_contract_rejects_unverified_retained_version_delete() -> None:
     yaml = _yaml_loader()
     document = validate_contracts.load_yaml(

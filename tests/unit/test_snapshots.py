@@ -278,6 +278,7 @@ def test_snapshot_seal_checksum_is_deterministic_and_verifiable() -> None:
                     comparison_key="readme.txt",
                     object_type="file",
                     size_bytes=31,
+                    birthtime_ns=1_000,
                     identity_fingerprint_hash="a" * 64,
                 ),
                 batch.entries[1],
@@ -369,6 +370,52 @@ def test_snapshot_seal_rejects_blocking_issue() -> None:
         )
 
 
+def test_snapshot_seal_v3_requires_birthtime_but_v2_remains_verifiable() -> None:
+    batch = _case_collision_batch()
+    entries_without_birthtime = tuple(
+        SnapshotFileEntry(
+            entry_id=entry.entry_id,
+            relative_path=entry.relative_path,
+            comparison_key=entry.comparison_key,
+            object_type=entry.object_type,
+            size_bytes=entry.size_bytes,
+            identity_fingerprint_hash=entry.identity_fingerprint_hash,
+        )
+        for entry in batch.entries
+    )
+
+    with pytest.raises(
+        SnapshotMaterializationError,
+        match="SNAPSHOT_SEAL_REQUIRES_BIRTHTIME",
+    ):
+        snapshot_seal(
+            snapshot_id=batch.snapshot_id,
+            entries=entries_without_birthtime,
+            coverage=batch.coverage_updates,
+            issues=batch.issues,
+            batches=(_summary(batch),),
+            case_collision_group_count=1,
+        )
+
+    legacy = snapshot_seal(
+        snapshot_id=batch.snapshot_id,
+        entries=entries_without_birthtime,
+        coverage=batch.coverage_updates,
+        issues=batch.issues,
+        batches=(_summary(batch),),
+        case_collision_group_count=1,
+        snapshot_schema_version=2,
+    )
+    assert legacy.serializer_version == "0B-SNAPSHOT-CANONICAL-JSON-V2"
+    assert verify_snapshot_checksum(
+        legacy,
+        entries=entries_without_birthtime,
+        coverage=batch.coverage_updates,
+        issues=batch.issues,
+        batches=(_summary(batch),),
+    )
+
+
 def _case_collision_batch(
     *,
     coverage: tuple[SnapshotDirectoryCoverage, ...] | None = None,
@@ -384,6 +431,7 @@ def _case_collision_batch(
                 comparison_key="readme.txt",
                 object_type="file",
                 size_bytes=32,
+                birthtime_ns=1_000,
                 identity_fingerprint_hash="a" * 64,
             ),
             SnapshotFileEntry(
@@ -392,6 +440,7 @@ def _case_collision_batch(
                 comparison_key="readme.txt",
                 object_type="file",
                 size_bytes=64,
+                birthtime_ns=2_000,
                 identity_fingerprint_hash="b" * 64,
             ),
         ),

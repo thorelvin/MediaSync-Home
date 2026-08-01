@@ -28,6 +28,15 @@ invariants:
     collision_tables:
       groups: case_collision_groups
       members: case_collision_members
+  - id: META-001_WINDOWS_BIRTHTIME
+    requirement_id: META-001
+    table: file_entries
+    column: birthtime_ns
+    snapshot_schema_version: 3
+    source: WIN32_FILE_CREATION_TIME
+    checksum_bound: true
+    ctime_fallback_allowed: false
+    immutable_after_seal: true
   - id: DB-006_ENDPOINT_HEADS_ARE_SEPARATE
     requirement_id: DB-006
     stable_table: endpoints
