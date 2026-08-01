@@ -829,6 +829,34 @@ def _validate_endpoint_capability_invariant(invariant: dict[str, Any]) -> None:
             fail(f"END-001 {name} contract drifted")
 
 
+def _validate_final_durability_invariant(invariant: dict[str, Any]) -> None:
+    expected = {
+        "requirement_id": "DUR-001",
+        "receipt_default_state": "FINAL_DURABILITY_UNCONFIRMED",
+        "local_file_state": "LOCAL_FILE_FLUSH_CONFIRMED",
+        "local_directory_state": (
+            "LOCAL_DIRECTORY_MARKER_FLUSH_CONFIRMED_ENTRY_UNCONFIRMED"
+        ),
+        "synthetic_adapter_completion_forbidden": True,
+        "recovery_phase": "FINAL_DURABLE",
+        "recovery_metadata_column": "final_durability_state",
+        "file_flush_required_for_local_confirmed_state": True,
+        "write_through_claim_requires_actual_use": True,
+        "directory_entry_durability_unconfirmed_without_write_through": True,
+    }
+    if any(invariant.get(key) != value for key, value in expected.items()):
+        fail("DUR-001 final durability contract drifted")
+    if _column_tuple(
+        invariant.get("recovery_event_payload_fields"),
+        "DUR-001 recovery event payload fields",
+    ) != (
+        "durability_state",
+        "file_flush_succeeded",
+        "write_through_move_used",
+    ):
+        fail("DUR-001 recovery event evidence drifted")
+
+
 def _validate_retained_version_expiry_invariant(invariant: dict[str, Any]) -> None:
     if invariant.get("requirement_id") != "DB-004":
         fail("retained-version expiry invariant must reference DB-004")
@@ -992,6 +1020,7 @@ def validate_database_contract(document: dict[str, Any]) -> int:
         "DB-006_ENDPOINT_HEADS_ARE_SEPARATE",
         "DB-006_JOB_HEADS_ARE_SEPARATE",
         "DB-007_PARENT_SCOPE_COMPOSITE_KEYS",
+        "DUR-001_FINAL_DURABILITY_EVIDENCE",
         "END-001_ENDPOINT_CAPABILITY_EVIDENCE",
         "HASH-001_CURRENT_READ_HASH_EVIDENCE",
         "META-001_WINDOWS_BIRTHTIME",
@@ -1041,6 +1070,9 @@ def validate_database_contract(document: dict[str, Any]) -> int:
     )
     _validate_endpoint_capability_invariant(
         invariant_by_id["END-001_ENDPOINT_CAPABILITY_EVIDENCE"]
+    )
+    _validate_final_durability_invariant(
+        invariant_by_id["DUR-001_FINAL_DURABILITY_EVIDENCE"]
     )
     _validate_retained_version_expiry_invariant(
         invariant_by_id["DB-004_RETAINED_VERSION_EXPIRY"]

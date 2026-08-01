@@ -59,6 +59,21 @@ invariants:
       immutable: true
     plan_requires_exact_hash: true
     missing_or_invalid_evidence_blocks_seal: true
+  - id: DUR-001_FINAL_DURABILITY_EVIDENCE
+    requirement_id: DUR-001
+    receipt_default_state: FINAL_DURABILITY_UNCONFIRMED
+    local_file_state: LOCAL_FILE_FLUSH_CONFIRMED
+    local_directory_state: LOCAL_DIRECTORY_MARKER_FLUSH_CONFIRMED_ENTRY_UNCONFIRMED
+    synthetic_adapter_completion_forbidden: true
+    recovery_phase: FINAL_DURABLE
+    recovery_metadata_column: final_durability_state
+    recovery_event_payload_fields:
+      - durability_state
+      - file_flush_succeeded
+      - write_through_move_used
+    file_flush_required_for_local_confirmed_state: true
+    write_through_claim_requires_actual_use: true
+    directory_entry_durability_unconfirmed_without_write_through: true
   - id: DB-006_ENDPOINT_HEADS_ARE_SEPARATE
     requirement_id: DB-006
     stable_table: endpoints

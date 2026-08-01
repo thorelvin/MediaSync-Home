@@ -118,7 +118,7 @@ def test_sqlite_journaled_final_commit_records_versioned_replace(
         assert operation is not None
         assert operation.phase is RecoveryOperationPhase.FINAL_VERIFIED
         assert operation.version_object_id == "operation-a"
-        assert operation.final_durability_state == "FINAL_COMMIT_ADAPTER_COMPLETED"
+        assert operation.final_durability_state == "LOCAL_FILE_FLUSH_CONFIRMED"
         assert (target_root / "Photos" / "image.jpg").read_bytes() == payload
         assert (
             target_root / ".mediasync" / "objects" / "versions" / "operation-a.payload"
@@ -130,6 +130,23 @@ def test_sqlite_journaled_final_commit_records_versioned_replace(
             "FINAL_DURABLE",
             "FINAL_VERIFIED",
         ]
+        durability_payload = json.loads(
+            str(
+                connection.execute(
+                    """
+                    SELECT payload_json
+                    FROM recovery_events
+                    WHERE run_id = ? AND operation_id = ? AND to_phase = 'FINAL_DURABLE'
+                    """,
+                    ("run-a", "operation-a"),
+                ).fetchone()[0]
+            )
+        )
+        assert durability_payload == {
+            "durability_state": "LOCAL_FILE_FLUSH_CONFIRMED",
+            "file_flush_succeeded": True,
+            "write_through_move_used": False,
+        }
     finally:
         connection.close()
 

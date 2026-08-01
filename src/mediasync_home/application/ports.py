@@ -27,6 +27,25 @@ class VerifiedStagingArtifact:
 class CommitReceipt:
     operation_id: str
     final_relative_path: RelativePath
+    durability_state: str = "FINAL_DURABILITY_UNCONFIRMED"
+    file_flush_succeeded: bool | None = None
+    write_through_move_used: bool | None = None
+
+    def __post_init__(self) -> None:
+        expected_flags = {
+            "FINAL_DURABILITY_UNCONFIRMED": (None, None),
+            "LOCAL_FILE_FLUSH_CONFIRMED": (True, False),
+            "LOCAL_DIRECTORY_MARKER_FLUSH_CONFIRMED_ENTRY_UNCONFIRMED": (
+                True,
+                False,
+            ),
+        }
+        expected = expected_flags.get(self.durability_state)
+        if expected is None:
+            raise ValueError("FINAL_COMMIT_RECEIPT_DURABILITY_STATE_UNSUPPORTED")
+        actual = (self.file_flush_succeeded, self.write_through_move_used)
+        if actual != expected:
+            raise ValueError("FINAL_COMMIT_RECEIPT_DURABILITY_EVIDENCE_INCONSISTENT")
 
 
 @dataclass(frozen=True)

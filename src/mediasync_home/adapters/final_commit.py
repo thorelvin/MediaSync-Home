@@ -98,10 +98,7 @@ class LabNoOverwriteFinalCommitAdapter(FinalCommitPort):
             final_path=final_path,
             content_hash=artifact.content_hash,
         )
-        return CommitReceipt(
-            operation_id=artifact.object_id,
-            final_relative_path=artifact.relative_path,
-        )
+        return _flushed_file_commit_receipt(artifact=artifact, final_path=final_path)
 
 
 class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
@@ -506,19 +503,13 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
                 final_path=final_path,
                 content_hash=artifact.content_hash,
             )
-            return CommitReceipt(
-                operation_id=artifact.object_id,
-                final_relative_path=artifact.relative_path,
-            )
+            return _flushed_file_commit_receipt(artifact=artifact, final_path=final_path)
         _insert_replacement_payload_without_overwrite(
             staging_payload=staging_payload,
             final_path=final_path,
             content_hash=artifact.content_hash,
         )
-        return CommitReceipt(
-            operation_id=artifact.object_id,
-            final_relative_path=artifact.relative_path,
-        )
+        return _flushed_file_commit_receipt(artifact=artifact, final_path=final_path)
 
     def cleanup_recovery_objects(
         self,
@@ -786,10 +777,7 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
             final_path=final_path,
             content_hash=artifact.content_hash,
         )
-        return CommitReceipt(
-            operation_id=artifact.object_id,
-            final_relative_path=artifact.relative_path,
-        )
+        return _flushed_file_commit_receipt(artifact=artifact, final_path=final_path)
 
     def _commit_new_directory(
         self,
@@ -825,9 +813,9 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
                 operation_id=artifact.object_id,
                 final_relative_path=artifact.relative_path.value,
             ):
-                return CommitReceipt(
-                    operation_id=artifact.object_id,
-                    final_relative_path=artifact.relative_path,
+                return _flushed_directory_commit_receipt(
+                    artifact=artifact,
+                    final_path=final_path,
                 )
             raise FinalCommitAdapterError(
                 "LOCAL_DIRECTORY_COMMIT_TARGET_EXISTS",
@@ -857,9 +845,9 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
                 "LOCAL_DIRECTORY_COMMIT_RENAME_FAILED",
                 "Enter recovery and inspect the staged and final directory marker state.",
             ) from exc
-        return CommitReceipt(
-            operation_id=artifact.object_id,
-            final_relative_path=artifact.relative_path,
+        return _flushed_directory_commit_receipt(
+            artifact=artifact,
+            final_path=final_path,
         )
 
     def _cleanup_created_directory_marker(
@@ -2141,6 +2129,54 @@ def _copy_file_durable(*, source: Path, destination: Path) -> None:
             writer.write(chunk)
         writer.flush()
         os.fsync(writer.fileno())
+
+
+def _flushed_file_commit_receipt(
+    *,
+    artifact: VerifiedStagingArtifact,
+    final_path: Path,
+) -> CommitReceipt:
+    _flush_committed_file(final_path)
+    return CommitReceipt(
+        operation_id=artifact.object_id,
+        final_relative_path=artifact.relative_path,
+        durability_state="LOCAL_FILE_FLUSH_CONFIRMED",
+        file_flush_succeeded=True,
+        write_through_move_used=False,
+    )
+
+
+def _flushed_directory_commit_receipt(
+    *,
+    artifact: VerifiedStagingArtifact,
+    final_path: Path,
+) -> CommitReceipt:
+    _flush_committed_file(final_path / DIRECTORY_MARKER_NAME)
+    return CommitReceipt(
+        operation_id=artifact.object_id,
+        final_relative_path=artifact.relative_path,
+        durability_state=(
+            "LOCAL_DIRECTORY_MARKER_FLUSH_CONFIRMED_ENTRY_UNCONFIRMED"
+        ),
+        file_flush_succeeded=True,
+        write_through_move_used=False,
+    )
+
+
+def _flush_committed_file(path: Path) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise FinalCommitAdapterError(
+            "LOCAL_FINAL_DURABILITY_FILE_MISSING",
+            "Enter recovery and inspect the committed final object before retrying.",
+        )
+    try:
+        with path.open("r+b", buffering=0) as handle:
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        raise FinalCommitAdapterError(
+            "LOCAL_FINAL_FILE_FLUSH_FAILED",
+            "Keep recovery state and retry final-file durability verification.",
+        ) from exc
 
 
 def _hash_file(path: Path) -> str:

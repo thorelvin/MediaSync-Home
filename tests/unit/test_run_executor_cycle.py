@@ -869,7 +869,7 @@ def test_executor_cycle_commits_preserved_replacement_with_retained_lease() -> N
     assert operation is not None
     assert operation.phase is RecoveryOperationPhase.FINAL_VERIFIED
     assert operation.version_object_id == "op-a"
-    assert operation.final_durability_state == "FINAL_COMMIT_ADAPTER_COMPLETED"
+    assert operation.final_durability_state == "LOCAL_FILE_FLUSH_CONFIRMED"
     assert final_commit.calls == (
         (
             "lease-a",
@@ -1876,6 +1876,9 @@ class _FakeFinalCommitPort(FinalCommitPort):
         return CommitReceipt(
             operation_id=artifact.object_id,
             final_relative_path=artifact.relative_path,
+            durability_state="LOCAL_FILE_FLUSH_CONFIRMED",
+            file_flush_succeeded=True,
+            write_through_move_used=False,
         )
 
 

@@ -3922,6 +3922,8 @@ Det skal skilles mellom:
 
 Før `STAGING_DURABLE` skal stagingfilen være lukket av Robocopy, åpnet på nytt av filsystemadapteren og flushet når endepunktet støtter dette. Før `FINAL_DURABLE` brukes `ReplaceFileW`, write-through rename eller eksplisitt flush i henhold til endepunktprofilen. Ukjent/ikke-støttet flush skal bli et synlig durability-nivå, ikke falsk garanti.
 
+I lokal preview flusher final-commit-adapteren den ferdige filen eksplisitt og returnerer `LOCAL_FILE_FLUSH_CONFIRMED` med egne flush-/write-through-flagg. Katalogoppretting flusher den kontrollerte markørfilen, men vanlig rename bekrefter ikke katalogoppføringen; claimen er derfor `LOCAL_DIRECTORY_MARKER_FLUSH_CONFIRMED_ENTRY_UNCONFIRMED`. Recoveryjournalens `FINAL_DURABLE`-fase persisterer adapterens eksakte claim og flagg. Den tidligere syntetiske claimen basert bare på at adapterkallet returnerte er forbudt. Endpointprofilstyrt write-through og eksplisitt parent-directory durability gjenstår før `DUR-001` kan lukkes.
+
 Før første irreversible målmutasjon i en commitbatch publiseres et bounded, immutable **intentsegment** etter §4.5.1. Segmentet er sekundært target-side bevis dersom lokal recoverydatabase mangler eller er korrupt. Det inneholder bare relative stier, persistente IDs, forventede fingerprints, endpointgenerasjon, `lease_id`/`fencing_token` og plan-/manifestchecksum; ingen credentials eller absolutte røtter.
 
 `recovery.sqlite` er fortsatt primær journal. Intentsegmentet kan bevise hvilke mutasjoner som var autorisert, men aldri alene om de faktisk ble utført eller hvilken av to tvetydige brukerfiler som er riktig. Segmentcleanup skjer først når alle refererte operasjoner har nådd `CATALOG_RECORDED`/terminal avstemming, segmenthashen matcher og ingen hold/recovery refererer segmentet.
@@ -7433,7 +7435,7 @@ Før `FILESYSTEM_APPLIED`:
 - commitadapteren revaliderer permit, final-path-chain og preconditions i samme adapterkall som utfører no-overwrite insert, `ReplaceFileW` eller journalført fallback;
 - ingen caller kan sende en absolutt final path; adapteren mottar endpointrevisjon + relativ sti og løser den gjennom `SafePath`.
 
-Etter filsystemoperasjonen vurderes faktisk state via handles/fingerprints; returkode alene bestemmer ikke om operasjonen skjedde. `FINAL_DURABLE` registrerer dokumentert flush/write-through-resultat og begrensning. `FINAL_VERIFIED` kreves før katalogoutcome. `SourceReadGuard` frigis først etter at nødvendig sourcepostcondition og staging/finalbevis er registrert.
+Etter filsystemoperasjonen vurderes faktisk state via handles/fingerprints; returkode alene bestemmer ikke om operasjonen skjedde. `FINAL_DURABLE` er journalfasen der vurderingen registreres, ikke i seg selv en garanti om fysisk varighet. Den lokale adapteren reåpner og flusher den ferdige filen før den kan registrere `LOCAL_FILE_FLUSH_CONFIRMED`. For kataloger flusher den markørfilen og registrerer `LOCAL_DIRECTORY_MARKER_FLUSH_CONFIRMED_ENTRY_UNCONFIRMED`, fordi vanlig rename uten write-through ikke beviser at katalogoppføringen er varig. Recoveryeventen lagrer `durability_state`, `file_flush_succeeded` og `write_through_move_used`; adapterretur alene er aldri durabilitybevis. `FINAL_VERIFIED` kreves før katalogoutcome. `SourceReadGuard` frigis først etter at nødvendig sourcepostcondition og staging/finalbevis er registrert.
 
 ### 17.4 Versjoner som opaque managed objects
 

@@ -43,6 +43,9 @@ def test_commit_next_run_target_verified_artifact_runs_journaled_final_commit() 
     assert outcome.receipt == CommitReceipt(
         operation_id="op-a",
         final_relative_path=RelativePath("Pictures/A.jpg"),
+        durability_state="LOCAL_FILE_FLUSH_CONFIRMED",
+        file_flush_succeeded=True,
+        write_through_move_used=False,
     )
     assert operation.phase is RecoveryOperationPhase.FINAL_VERIFIED
     assert final_commit.calls == (
@@ -93,7 +96,7 @@ def test_commit_next_run_target_verified_artifact_preserves_matching_target_befo
     ]
     assert preservation.calls == (("lease-a", RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED),)
     assert stored.version_object_id == "version-a"
-    assert stored.final_durability_state == "FINAL_COMMIT_ADAPTER_COMPLETED"
+    assert stored.final_durability_state == "LOCAL_FILE_FLUSH_CONFIRMED"
 
 
 def test_commit_next_run_target_verified_artifact_resumes_preserved_replacement() -> None:
@@ -113,7 +116,7 @@ def test_commit_next_run_target_verified_artifact_resumes_preserved_replacement(
     assert outcome.validation_codes == ()
     assert stored.phase is RecoveryOperationPhase.FINAL_VERIFIED
     assert stored.version_object_id == "op-a"
-    assert stored.final_durability_state == "FINAL_COMMIT_ADAPTER_COMPLETED"
+    assert stored.final_durability_state == "LOCAL_FILE_FLUSH_CONFIRMED"
     assert final_commit.calls == (
         (
             "lease-a",
@@ -375,6 +378,9 @@ class _FakeFinalCommitPort(FinalCommitPort):
         return CommitReceipt(
             operation_id=artifact.object_id,
             final_relative_path=artifact.relative_path,
+            durability_state="LOCAL_FILE_FLUSH_CONFIRMED",
+            file_flush_succeeded=True,
+            write_through_move_used=False,
         )
 
 

@@ -492,7 +492,17 @@ Reparasjon av pre-migration-30 pending jobs er nå også levert gjennom den
 eksplisitte, revisjonsbundne **Registrer mål**-handlingen. Den senere
 oppdateringen øverst dekker også kontrollert lokal fremmed-overtakelse.
 
-Nyeste 0B-slice: `END-001` har naa en kanonisk schema-1 endpoint capability-
+Nyeste 0B-slice: `DUR-001` har nå eksplisitt og maskinvaliderbar
+final-durability-evidence. Lokale filcommits reåpner og `fsync`-er den ferdige
+filen før `LOCAL_FILE_FLUSH_CONFIRMED`; katalogcommits flusher markørfilen, men
+oppgir ærlig at directory-entry durability er ubekreftet uten write-through.
+Commit receipts avviser ukjente og inkonsistente claims, og recoveryjournalen
+lagrer adapterens eksakte state samt flush-/write-through-flagg. Den tidligere
+syntetiske adapter-completed-claimen er fjernet. Endpointprofilstyrt
+write-through og parent-directory flush gjenstår, så kravet er fortsatt
+`in_progress`.
+
+Forrige 0B-slice: `END-001` har naa en kanonisk schema-1 endpoint capability-
 profil. Read-only klassifisering lagrer Win32 volum-, filsystem-, navn-, path-,
 case- og metadataevidence. Eksplisitt targetregistrering tester kontrollert
 flush, rename, no-overwrite, replace og named streams i privat probeomraade,

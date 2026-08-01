@@ -48,6 +48,9 @@ def test_journaled_final_commit_records_before_and_after_filesystem_apply() -> N
     assert receipt == CommitReceipt(
         operation_id="operation-a",
         final_relative_path=artifact.relative_path,
+        durability_state="LOCAL_FILE_FLUSH_CONFIRMED",
+        file_flush_succeeded=True,
+        write_through_move_used=False,
     )
     assert actions == [
         "transition:COMMIT_PRECONDITIONS_REVALIDATED",
@@ -65,6 +68,23 @@ def test_journaled_final_commit_records_before_and_after_filesystem_apply() -> N
     assert inner.calls == [(permit, artifact)]
     assert store.operation is not None
     assert store.operation.phase is RecoveryOperationPhase.FINAL_VERIFIED
+    assert store.transitions[2].payload == {
+        "durability_state": "LOCAL_FILE_FLUSH_CONFIRMED",
+        "file_flush_succeeded": True,
+        "write_through_move_used": False,
+    }
+
+
+def test_commit_receipt_rejects_synthetic_adapter_completion_claim() -> None:
+    with pytest.raises(
+        ValueError,
+        match="FINAL_COMMIT_RECEIPT_DURABILITY_STATE_UNSUPPORTED",
+    ):
+        CommitReceipt(
+            operation_id="operation-a",
+            final_relative_path=RelativePath("Photos/image.jpg"),
+            durability_state="FINAL_COMMIT_ADAPTER_COMPLETED",
+        )
 
 
 def test_journaled_final_commit_wraps_lab_no_overwrite_adapter(tmp_path: Path) -> None:
@@ -98,6 +118,9 @@ def test_journaled_final_commit_wraps_lab_no_overwrite_adapter(tmp_path: Path) -
     assert receipt == CommitReceipt(
         operation_id="operation-a",
         final_relative_path=artifact.relative_path,
+        durability_state="LOCAL_FILE_FLUSH_CONFIRMED",
+        file_flush_succeeded=True,
+        write_through_move_used=False,
     )
     assert (target_root / "Photos" / "image.jpg").read_bytes() == payload
     assert store.operation is not None
@@ -128,6 +151,9 @@ def test_journaled_final_commit_records_old_target_preservation_before_replace()
     assert receipt == CommitReceipt(
         operation_id="operation-a",
         final_relative_path=artifact.relative_path,
+        durability_state="LOCAL_FILE_FLUSH_CONFIRMED",
+        file_flush_succeeded=True,
+        write_through_move_used=False,
     )
     assert actions == [
         "transition:COMMIT_PRECONDITIONS_REVALIDATED",
@@ -148,7 +174,7 @@ def test_journaled_final_commit_records_old_target_preservation_before_replace()
     assert preservation.calls == [(permit, RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED)]
     assert store.operation is not None
     assert store.operation.version_object_id == "version-a"
-    assert store.operation.final_durability_state == "FINAL_COMMIT_ADAPTER_COMPLETED"
+    assert store.operation.final_durability_state == "LOCAL_FILE_FLUSH_CONFIRMED"
 
 
 def test_journaled_final_commit_records_directory_quarantine_before_commit() -> None:
@@ -173,6 +199,9 @@ def test_journaled_final_commit_records_directory_quarantine_before_commit() -> 
     assert receipt == CommitReceipt(
         operation_id="operation-a",
         final_relative_path=RelativePath("Photos/image.jpg"),
+        durability_state="LOCAL_FILE_FLUSH_CONFIRMED",
+        file_flush_succeeded=True,
+        write_through_move_used=False,
     )
     assert actions == [
         "transition:COMMIT_PRECONDITIONS_REVALIDATED",
@@ -482,6 +511,9 @@ class _FakeFinalCommitPort(FinalCommitPort):
         return CommitReceipt(
             operation_id=artifact.object_id,
             final_relative_path=artifact.relative_path,
+            durability_state="LOCAL_FILE_FLUSH_CONFIRMED",
+            file_flush_succeeded=True,
+            write_through_move_used=False,
         )
 
 

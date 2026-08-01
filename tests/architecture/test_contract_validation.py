@@ -190,6 +190,26 @@ def test_database_contract_rejects_unbound_endpoint_capability_evidence() -> Non
         validate_contracts.validate_database_contract(document)
 
 
+def test_database_contract_rejects_synthetic_final_durability_claim() -> None:
+    yaml = _yaml_loader()
+    document = validate_contracts.load_yaml(
+        validate_contracts.ROOT / "schema/database-contract.yaml",
+        yaml,
+    )
+    document = copy.deepcopy(document)
+    invariant = _database_invariant(
+        document,
+        "DUR-001_FINAL_DURABILITY_EVIDENCE",
+    )
+    invariant["synthetic_adapter_completion_forbidden"] = False
+
+    with pytest.raises(
+        validate_contracts.ContractValidationError,
+        match="DUR-001 final durability contract drifted",
+    ):
+        validate_contracts.validate_database_contract(document)
+
+
 def test_database_contract_rejects_unverified_retained_version_delete() -> None:
     yaml = _yaml_loader()
     document = validate_contracts.load_yaml(

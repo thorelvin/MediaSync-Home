@@ -336,7 +336,7 @@ Før `FILESYSTEM_APPLIED`:
 - commitadapteren revaliderer permit, final-path-chain og preconditions i samme adapterkall som utfører no-overwrite insert, `ReplaceFileW` eller journalført fallback;
 - ingen caller kan sende en absolutt final path; adapteren mottar endpointrevisjon + relativ sti og løser den gjennom `SafePath`.
 
-Etter filsystemoperasjonen vurderes faktisk state via handles/fingerprints; returkode alene bestemmer ikke om operasjonen skjedde. `FINAL_DURABLE` registrerer dokumentert flush/write-through-resultat og begrensning. `FINAL_VERIFIED` kreves før katalogoutcome. `SourceReadGuard` frigis først etter at nødvendig sourcepostcondition og staging/finalbevis er registrert.
+Etter filsystemoperasjonen vurderes faktisk state via handles/fingerprints; returkode alene bestemmer ikke om operasjonen skjedde. `FINAL_DURABLE` er journalfasen der vurderingen registreres, ikke i seg selv en garanti om fysisk varighet. Den lokale adapteren reåpner og flusher den ferdige filen før den kan registrere `LOCAL_FILE_FLUSH_CONFIRMED`. For kataloger flusher den markørfilen og registrerer `LOCAL_DIRECTORY_MARKER_FLUSH_CONFIRMED_ENTRY_UNCONFIRMED`, fordi vanlig rename uten write-through ikke beviser at katalogoppføringen er varig. Recoveryeventen lagrer `durability_state`, `file_flush_succeeded` og `write_through_move_used`; adapterretur alene er aldri durabilitybevis. `FINAL_VERIFIED` kreves før katalogoutcome. `SourceReadGuard` frigis først etter at nødvendig sourcepostcondition og staging/finalbevis er registrert.
 
 ### 17.4 Versjoner som opaque managed objects
 

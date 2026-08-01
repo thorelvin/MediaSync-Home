@@ -235,9 +235,13 @@ def _commit_preserved_target_replacement(
         operation=applied,
         next_phase=RecoveryOperationPhase.FINAL_DURABLE,
         process_instance_id=process_instance_id,
-        payload={"durability_state": "FINAL_COMMIT_ADAPTER_COMPLETED"},
+        payload={
+            "durability_state": receipt.durability_state,
+            "file_flush_succeeded": receipt.file_flush_succeeded,
+            "write_through_move_used": receipt.write_through_move_used,
+        },
         operation_metadata=RecoveryOperationMetadata(
-            final_durability_state="FINAL_COMMIT_ADAPTER_COMPLETED",
+            final_durability_state=receipt.durability_state,
         ),
     )
     _transition(
