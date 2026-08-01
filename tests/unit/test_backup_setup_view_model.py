@@ -182,7 +182,13 @@ def test_backup_overview_view_model_renders_draft_and_first_job_summary() -> Non
     assert state.setup.can_create is True
     assert state.job_status.title == "Pictures"
     assert state.job_status.configured_target_count == 1
+    assert state.job_status.recommended_action == (
+        "Kontroller backupen når analysefunksjonen er tilgjengelig."
+    )
     assert state.job_status.target_statuses[0].freshness_label == "Ukjent"
+    assert state.job_status.target_statuses[0].recommended_action == (
+        "Venter på analyse og kjøring."
+    )
     assert state.selected_job_id == "job-a"
     assert len(state.jobs) == 1
     assert state.jobs[0].job_id == "job-a"

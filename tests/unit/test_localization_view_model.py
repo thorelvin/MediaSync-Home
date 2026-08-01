@@ -20,6 +20,10 @@ from mediasync_home.presentation.view_models.localization import (
             "Next action: Create backup when source and target are ready.",
             "Neste handling: Opprett backup når kilde og mål er klare.",
         ),
+        (
+            "Connected Engine Host does not support backup creation.",
+            "Tilkoblet Engine Host støtter ikke oppretting av backup.",
+        ),
     ],
 )
 def test_localize_display_value_translates_activity_prefixes_both_directions(

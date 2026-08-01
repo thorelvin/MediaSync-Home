@@ -626,7 +626,7 @@ def _job_status_from_payload(payload: dict[object, object]) -> BackupJobStatusVi
                     activity=ActivityState.INACTIVE,
                     attention=AttentionState.WAITING,
                     freshness=FreshnessState.UNKNOWN,
-                    recommended_action="Venter pÃ¥ analyse og kjÃ¸ring.",
+                    recommended_action="Venter på analyse og kjøring.",
                     independent_device_id=_optional_text(
                         item.get("independent_device_id")
                     ),
@@ -642,7 +642,7 @@ def _job_status_from_payload(payload: dict[object, object]) -> BackupJobStatusVi
         activity=ActivityState.INACTIVE,
         attention=AttentionState.WAITING,
         target_statuses=tuple(targets),
-        recommended_action="Kontroller backupen nÃ¥r analysefunksjonen er tilgjengelig.",
+        recommended_action="Kontroller backupen når analysefunksjonen er tilgjengelig.",
     )
 
 

@@ -1268,6 +1268,9 @@ _NB_TO_EN = {
     "Tidligere versjoner beholdes i 30 dager": "Previous versions are kept for 30 days",
     "Til vurdering": "Review",
     "Tilkoblet": "Connected",
+    "Tilkoblet Engine Host støtter ikke oppretting av backup.": (
+        "Connected Engine Host does not support backup creation."
+    ),
     "Trenger oppmerksomhet": "Needs attention",
     "Ukjent": "Unknown",
     "Historikk": "History",
@@ -1362,9 +1365,6 @@ _EN_TO_NB.update(
         ),
         "The Engine Host accepted the backup check without a request identity.": (
             "Engine Host godtok backupkontrollen uten en forespørselsidentitet."
-        ),
-        "Connected Engine Host does not support backup creation.": (
-            "Tilkoblet Engine Host stÃ¸tter ikke oppretting av backup."
         ),
         "Coverage warning": "Dekningsadvarsel",
         "No cataloged files.": "Ingen katalogf\u00f8rte filer.",
