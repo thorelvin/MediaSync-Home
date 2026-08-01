@@ -53,6 +53,7 @@ from mediasync_home.application.recovery_operations import (
 )
 from mediasync_home.application.version_objects import (
     VersionObjectManifest,
+    create_quarantine_object_manifest,
     create_version_object_manifest,
 )
 from mediasync_home.domain.capabilities import MutationPermit, _issue_mutation_permit
@@ -375,6 +376,41 @@ def test_sqlite_retention_execution_deletes_verified_version_and_journals(
             "FILESYSTEM_DELETED",
             "ITEM_DELETED",
         ]
+    finally:
+        connection.close()
+
+
+def test_sqlite_retention_execution_deletes_verified_empty_directory_quarantine(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_catalog_connection(tmp_path)
+    target_root = tmp_path / "target"
+    try:
+        manifest = _write_quarantine_object(target_root)
+        _insert_job(connection)
+        SqliteFinalFileCatalogHandoffStore(connection).record_final_file_handoff(
+            _handoff_from_manifest(manifest)
+        )
+        store = SqliteVersionRetentionStore(connection)
+        _create_due_plan(store)
+
+        outcome = apply_next_version_retention_item(
+            versions=store,
+            recovery_references=_ReleasedReferences(),
+            leases=_LeaseAuthority(_Lease()),
+            deletion=LocalVersionRetentionDeletionAdapter(
+                root_resolver=_RootResolver(target_root)
+            ),
+            event_utc="2026-09-01T00:00:02.000Z",
+        )
+
+        object_root = target_root / ".mediasync/objects/quarantine"
+        assert outcome.deleted is True
+        assert not (object_root / "version-a.payload").exists()
+        assert not (object_root / "version-a.manifest.json").exists()
+        assert connection.execute(
+            "SELECT state, object_role FROM retained_version_objects"
+        ).fetchone() == ("DELETED", "EMPTY_DIRECTORY_QUARANTINE")
     finally:
         connection.close()
 
@@ -809,6 +845,34 @@ def _write_version_object(target_root: Path) -> VersionObjectManifest:
     return manifest
 
 
+def _write_quarantine_object(target_root: Path) -> VersionObjectManifest:
+    object_root = target_root / ".mediasync" / "objects" / "quarantine"
+    object_root.mkdir(parents=True)
+    manifest = create_quarantine_object_manifest(
+        version_object_id="version-a",
+        operation_id="operation-a",
+        run_id="run-a",
+        run_target_id="run-target-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        target_endpoint_id="target-a",
+        target_endpoint_revision_id="target-rev-a",
+        endpoint_generation=2,
+        owner_installation_id="owner-a",
+        ownership_epoch=3,
+        final_relative_path="Photos/image.jpg",
+        fingerprint={"entry_count": 0, "kind": "DIRECTORY_EMPTY"},
+        created_utc="2026-08-01T00:00:00.000Z",
+        retention_policy="THIRTY_DAYS",
+    )
+    (object_root / "version-a.payload").mkdir()
+    (object_root / "version-a.manifest.json").write_text(
+        manifest.canonical_json,
+        encoding="utf-8",
+    )
+    return manifest
+
+
 def _handoff_from_manifest(manifest: VersionObjectManifest) -> FinalFileCatalogHandoff:
     return replace(
         _handoff(),
@@ -819,15 +883,12 @@ def _handoff_from_manifest(manifest: VersionObjectManifest) -> FinalFileCatalogH
             endpoint_generation=manifest.endpoint_generation,
             owner_installation_id=manifest.owner_installation_id,
             ownership_epoch=manifest.ownership_epoch,
-            original_fingerprint_json=(
-                '{"byte_count":9,"content_hash":"'
-                + manifest.fingerprint_content_hash
-                + '"}'
-            ),
+            original_fingerprint_json=manifest.fingerprint_json,
             created_utc=manifest.created_utc,
             retention_policy=manifest.retention_policy,
             retention_until_utc=manifest.retention_until_utc,
             manifest_hash=manifest.manifest_hash,
+            object_role=manifest.object_role,
         ),
     )
 

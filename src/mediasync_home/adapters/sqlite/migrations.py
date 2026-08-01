@@ -273,6 +273,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_retained_version_restore_rollback_lifecycle",
                 statements=CATALOG_RETAINED_VERSION_RESTORE_ROLLBACK_LIFECYCLE,
             ),
+            SqliteMigration(
+                version=48,
+                name="catalog_retained_recovery_object_roles",
+                statements=CATALOG_RETAINED_RECOVERY_OBJECT_ROLES,
+            ),
         ),
     )
 
@@ -3160,6 +3165,26 @@ CATALOG_RETAINED_VERSION_OBJECTS = (
     BEFORE DELETE ON retained_version_objects
     BEGIN
         SELECT RAISE(ABORT, 'RETAINED_VERSION_RECORD_REQUIRED');
+    END
+    """,
+)
+
+CATALOG_RETAINED_RECOVERY_OBJECT_ROLES = (
+    """
+    ALTER TABLE retained_version_objects
+        ADD COLUMN object_role TEXT NOT NULL DEFAULT 'OLD_TARGET_VERSION'
+        CHECK (object_role IN ('OLD_TARGET_VERSION', 'EMPTY_DIRECTORY_QUARANTINE'))
+    """,
+    """
+    CREATE INDEX idx_retained_version_objects_role_state
+        ON retained_version_objects (object_role, state, retention_until_utc, version_object_id)
+    """,
+    """
+    CREATE TRIGGER trg_retained_version_objects_role_immutable
+    BEFORE UPDATE OF object_role ON retained_version_objects
+    WHEN NEW.object_role IS NOT OLD.object_role
+    BEGIN
+        SELECT RAISE(ABORT, 'RETAINED_RECOVERY_OBJECT_ROLE_IMMUTABLE');
     END
     """,
 )

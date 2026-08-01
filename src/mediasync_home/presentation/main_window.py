@@ -2261,7 +2261,11 @@ class MediaSyncWindow(QMainWindow):
             VirtualTableRow(
                 row_id=version.version_object_id,
                 cells=(
-                    version.final_relative_path,
+                    (
+                        f"{texts.empty_folder}: {version.final_relative_path}"
+                        if version.object_role == "EMPTY_DIRECTORY_QUARANTINE"
+                        else version.final_relative_path
+                    ),
                     self._format_history_timestamp(version.created_utc),
                     self._format_history_timestamp(version.retention_until_utc),
                     self._retained_version_status_text(version),

@@ -188,11 +188,14 @@ invariants:
   - id: DB-004_RETAINED_VERSION_EXPIRY
     requirement_id: DB-004
     assertion: >
-      A preserved old target version is cataloged only with a canonical
-      self-hashed manifest, and time-based expiry uses an immutable plan plus
-      append-only events before deleting the exact payload/manifest pair under
-      a fresh endpoint mutation permit.
+      A preserved old target file or displaced empty directory is cataloged
+      only with a canonical self-hashed manifest, and time-based expiry uses an
+      immutable plan plus append-only events before deleting the exact
+      payload/manifest pair under a fresh endpoint mutation permit.
     root_table: retained_version_objects
+    supported_object_roles:
+      - OLD_TARGET_VERSION
+      - EMPTY_DIRECTORY_QUARANTINE
     plan_table: version_retention_plans
     item_table: version_retention_items
     hold_table: version_retention_holds

@@ -5425,11 +5425,14 @@ Fysisk path skal være kort og ID-basert. `original_relative_path` er metadata o
 #### `retained_version_objects` and `version_retention_*`
 
 Catalog migrations 44-45 implement the first executable reference-driven
-retention branch for preserved old target files. `retained_version_objects`
-stores immutable job/run/operation, endpoint revision/generation, owner/epoch,
-logical path, fingerprint, policy, due time and manifest-hash bindings. Rows are
-never deleted; their state advances through `RETAINED`, `DELETE_PENDING` and
-`DELETED`, or is held for reconciliation.
+retention branch for preserved old target files. Migration 48 extends the same
+branch to displaced empty directories. `retained_version_objects` stores an
+immutable `object_role` of `OLD_TARGET_VERSION` or
+`EMPTY_DIRECTORY_QUARANTINE` together with immutable job/run/operation,
+endpoint revision/generation, owner/epoch, logical path, fingerprint, policy,
+due time and manifest-hash bindings. Rows are never deleted; their state
+advances through `RETAINED`, `DELETE_PENDING` and `DELETED`, or is held for
+reconciliation.
 
 `version_retention_plans` and `version_retention_items` bind a canonical
 self-hashed candidate set before any filesystem delete. `version_retention_holds`
@@ -5437,14 +5440,16 @@ removes active holds from planning, and append-only `version_retention_events`
 records plan creation, delete intent, filesystem completion and catalog
 completion. Planning excludes archived jobs and recovery-protected versions.
 Application rechecks those conditions before delete intent, acquires a fresh
-endpoint lease, validates the exact target-side manifest and payload, and then
-deletes only that pair. A crash after delete intent or filesystem deletion
+endpoint lease, validates the exact target-side manifest and either the
+full-hash file payload or empty-directory payload, and then deletes only that
+pair. A crash after delete intent or filesystem deletion
 resumes from the durable item state without inventing a clean retained object.
 Recovery migration 11 supplies the exact job/policy/time/manifest binding used
 for the cross-store release check.
 
-The GUI lists these immutable roots with bounded keyset pagination scoped to
-one historical run. `PROTECT_RETAINED_VERSION_FOR_RESTORE` inserts one active
+The GUI lists these immutable roots as recovery items, with an explicit
+empty-folder type label and bounded keyset pagination scoped to one historical
+run. `PROTECT_RETAINED_VERSION_FOR_RESTORE` inserts one active
 `RESTORE_REQUESTED` hold only while the object is still `RETAINED` at the
 expected row version. The hold and the idempotent command receipt are committed
 in the same catalog transaction, so expiry-plan admission and restore
@@ -5477,8 +5482,8 @@ then deletes payload before manifest. Restart can prove and finish either a
 fully deleted pair or a payload-deleted, still-bound manifest without repeating
 an unsafe effect. Lifecycle roots are retained as terminal catalog evidence.
 
-Quarantine and general catalog retention stay outside this version-expiry
-branch.
+Other quarantine roles and general catalog retention stay outside this
+recovery-object expiry branch.
 
 #### `run_metrics`
 
@@ -7478,6 +7483,16 @@ verifies the exact pair, records `EXPIRY_INTENT_RECORDED`, then removes payload
 before manifest. Restart treats both-missing as completed and can validate and
 remove a lone manifest after payload deletion; a payload without its ownership
 manifest or any binding drift remains blocked.
+
+Migration 48 makes a displaced empty directory a retained recovery source with
+immutable role and canonical `{entry_count: 0, kind: DIRECTORY_EMPTY}`
+fingerprint. Successful file publication no longer cleans that quarantine after
+catalog handoff. The shared hold and expiry pipeline verifies an empty payload
+directory before deletion. Confirmed restore full-hash verifies and preserves
+the current file, removes it and recreates the empty directory under a fresh
+lease; confirmed undo first proves the restored directory is still empty, then
+restores the rollback file with no-overwrite semantics. Filesystem-before-
+journal retries accept only those exact postconditions.
 
 ### 17.5 Karantene som opaque managed objects og compare-and-swap
 

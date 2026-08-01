@@ -1,5 +1,25 @@
 # Kravsporbarhet
 
+Update 2026-08-01 for `SAF-004`, `REC-004`, `DB-004` and `UX-002`:
+catalog migration 48 promotes displaced empty directories to retained recovery
+objects with immutable `EMPTY_DIRECTORY_QUARANTINE` role binding. The normal
+catalog handoff, active hold, crash-safe expiry, confirmed restore and confirmed
+undo lifecycle now accepts either an old target file or a verified empty-folder
+payload. Restore preserves the current file, recreates the empty directory under
+a fresh lease and verifies its exact type/fingerprint; undo verifies the empty
+directory is unchanged before restoring the full-hash rollback file. History
+labels the item type in Norwegian and English without adding a clipping-prone
+column. Evidence: `schema/database-contract.yaml`,
+`src/mediasync_home/application/version_objects.py`,
+`src/mediasync_home/application/catalog_handoff.py`,
+`src/mediasync_home/adapters/version_restore.py`,
+`src/mediasync_home/adapters/version_retention.py`,
+`src/mediasync_home/presentation/main_window.py`,
+`tests/integration/sqlite/test_sqlite_run_executor_cycle.py`,
+`tests/integration/sqlite/test_sqlite_version_restore.py`,
+`tests/integration/sqlite/test_sqlite_version_retention.py` and
+`tests/gui/test_pyside_shell.py`.
+
 Update 2026-08-01 for `SAF-004`, `REC-001`, `REC-002` and `DB-004`:
 Preserved old target files now become canonical self-hashed version objects
 bound to the exact job revision, run target, operation, endpoint generation,

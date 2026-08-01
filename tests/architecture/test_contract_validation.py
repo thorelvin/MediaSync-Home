@@ -170,6 +170,23 @@ def test_database_contract_rejects_unverified_retained_version_delete() -> None:
         validate_contracts.validate_database_contract(document)
 
 
+def test_database_contract_rejects_missing_quarantine_recovery_role() -> None:
+    yaml = _yaml_loader()
+    document = validate_contracts.load_yaml(
+        validate_contracts.ROOT / "schema/database-contract.yaml",
+        yaml,
+    )
+    document = copy.deepcopy(document)
+    invariant = _database_invariant(document, "DB-004_RETAINED_VERSION_EXPIRY")
+    invariant["supported_object_roles"] = ["OLD_TARGET_VERSION"]
+
+    with pytest.raises(
+        validate_contracts.ContractValidationError,
+        match="retained recovery object roles drifted",
+    ):
+        validate_contracts.validate_database_contract(document)
+
+
 def test_database_contract_rejects_restore_without_current_final_preservation() -> None:
     yaml = _yaml_loader()
     document = validate_contracts.load_yaml(

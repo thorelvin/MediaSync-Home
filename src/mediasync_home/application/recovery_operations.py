@@ -362,8 +362,13 @@ def validate_recovery_operation(operation: RecoveryOperation) -> None:
     )
     if any(value is not None for value in version_metadata):
         if (
-            operation.version_object_id is None
-            or not operation.version_object_id.strip()
+            not any(
+                isinstance(value, str) and bool(value.strip())
+                for value in (
+                    operation.version_object_id,
+                    operation.quarantine_object_id,
+                )
+            )
             or not all(isinstance(value, str) and bool(value.strip()) for value in version_metadata)
             or operation.job_id is None
         ):

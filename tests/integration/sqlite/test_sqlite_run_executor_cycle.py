@@ -1030,10 +1030,26 @@ def test_sqlite_run_executor_cycle_quarantines_empty_directory_before_file_commi
         )
         assert (target_root / "Pictures" / "A.jpg").is_file()
         assert (target_root / "Pictures" / "A.jpg").read_bytes() == payload
-        assert not quarantine_payload.exists()
-        assert not quarantine_manifest.exists()
+        assert quarantine_payload.is_dir()
+        assert list(quarantine_payload.iterdir()) == []
+        assert json.loads(quarantine_manifest.read_text(encoding="utf-8"))[
+            "object_role"
+        ] == "EMPTY_DIRECTORY_QUARANTINE"
         assert handoff is not None
         assert handoff.content_hash == content_hash
+        assert handoff.retained_version is not None
+        assert handoff.retained_version.version_object_id == "op-a"
+        assert (
+            handoff.retained_version.object_role
+            == "EMPTY_DIRECTORY_QUARANTINE"
+        )
+        assert catalog_connection.execute(
+            """
+            SELECT state, object_role
+            FROM retained_version_objects
+            WHERE version_object_id = 'op-a'
+            """
+        ).fetchone() == ("RETAINED", "EMPTY_DIRECTORY_QUARANTINE")
     finally:
         catalog_connection.close()
         recovery_connection.close()

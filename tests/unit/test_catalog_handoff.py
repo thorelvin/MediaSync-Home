@@ -85,6 +85,40 @@ def test_catalog_handoff_carries_journaled_retained_version_root() -> None:
     assert retained.manifest_hash == "d" * 64
 
 
+def test_catalog_handoff_carries_journaled_empty_directory_quarantine() -> None:
+    operation = replace(
+        _final_verified_operation(),
+        target_precondition_kind=RecoveryTargetPreconditionKind.DIRECTORY_EMPTY,
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        retention_policy="THIRTY_DAYS",
+        quarantine_object_id="operation-a",
+        version_created_utc="2026-08-01T10:00:00.000Z",
+        version_retention_until_utc="2026-08-31T10:00:00.000Z",
+        version_manifest_hash="d" * 64,
+        expected_target_fingerprint_json=(
+            '{"entry_count":0,"kind":"DIRECTORY_EMPTY"}'
+        ),
+    )
+
+    outcome = record_catalog_handoff_after_final_verification(
+        run_id=operation.run_id,
+        operation_id=operation.operation_id,
+        content_hash="a" * 64,
+        recovery_operations=_FakeRecoveryOperationStore(operation),
+        catalog_handoffs=_FakeCatalogHandoffStore(),
+        process_instance_id="host-a",
+    )
+
+    retained = outcome.handoff.retained_version
+    assert retained is not None
+    assert retained.version_object_id == "operation-a"
+    assert retained.object_role == "EMPTY_DIRECTORY_QUARANTINE"
+    assert retained.original_fingerprint_json == (
+        '{"entry_count":0,"kind":"DIRECTORY_EMPTY"}'
+    )
+
+
 def test_catalog_handoff_refuses_version_without_manifest_evidence() -> None:
     operation = replace(
         _final_verified_operation(),

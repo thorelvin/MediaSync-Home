@@ -779,6 +779,11 @@ def _validate_retained_version_expiry_invariant(invariant: dict[str, Any]) -> No
     }
     if any(invariant.get(key) != value for key, value in expected_tables.items()):
         fail("DB-004 retained-version expiry table boundary drifted")
+    if _column_tuple(
+        invariant.get("supported_object_roles"),
+        "DB-004 supported_object_roles",
+    ) != ("OLD_TARGET_VERSION", "EMPTY_DIRECTORY_QUARANTINE"):
+        fail("DB-004 retained recovery object roles drifted")
     required_guards = (
         "immutable_root_bindings",
         "immutable_plan_manifest",

@@ -38,6 +38,7 @@ class RetainedVersionCatalogHandoff:
     retention_policy: str
     retention_until_utc: str
     manifest_hash: str
+    object_role: str = "OLD_TARGET_VERSION"
 
 
 @dataclass(frozen=True)
@@ -365,8 +366,14 @@ def _handoff_payload(handoff: FinalFileCatalogHandoff) -> Mapping[str, object]:
 def _retained_version_from_operation(
     operation: RecoveryOperation,
 ) -> RetainedVersionCatalogHandoff | None:
-    if operation.version_object_id is None:
+    object_id = operation.version_object_id or operation.quarantine_object_id
+    if object_id is None:
         return None
+    object_role = (
+        "EMPTY_DIRECTORY_QUARANTINE"
+        if operation.quarantine_object_id is not None
+        else "OLD_TARGET_VERSION"
+    )
     required = (
         operation.job_id,
         operation.job_revision_id,
@@ -382,10 +389,11 @@ def _retained_version_from_operation(
             "Reconcile the preserved version manifest evidence before catalog handoff.",
         )
     fingerprint_json = _canonical_fingerprint_json(
-        operation.expected_target_fingerprint_json or ""
+        operation.expected_target_fingerprint_json or "",
+        object_role=object_role,
     )
     retained = RetainedVersionCatalogHandoff(
-        version_object_id=operation.version_object_id,
+        version_object_id=object_id,
         job_id=operation.job_id or "",
         job_revision_id=operation.job_revision_id or "",
         endpoint_generation=operation.endpoint_generation,
@@ -396,6 +404,7 @@ def _retained_version_from_operation(
         retention_policy=operation.retention_policy or "",
         retention_until_utc=operation.version_retention_until_utc or "",
         manifest_hash=operation.version_manifest_hash or "",
+        object_role=object_role,
     )
     _validate_retained_version_handoff(retained)
     return retained
@@ -431,10 +440,25 @@ def _validate_retained_version_handoff(
             "CATALOG_HANDOFF_RETAINED_VERSION_MANIFEST_HASH_INVALID",
             "Record the canonical version manifest hash before catalog handoff.",
         )
-    _canonical_fingerprint_json(retained.original_fingerprint_json)
+    if retained.object_role not in {
+        "OLD_TARGET_VERSION",
+        "EMPTY_DIRECTORY_QUARANTINE",
+    }:
+        raise CatalogHandoffError(
+            "CATALOG_HANDOFF_RETAINED_VERSION_ROLE_INVALID",
+            "Record a supported immutable recovery-object role before catalog handoff.",
+        )
+    _canonical_fingerprint_json(
+        retained.original_fingerprint_json,
+        object_role=retained.object_role,
+    )
 
 
-def _canonical_fingerprint_json(raw_fingerprint: str) -> str:
+def _canonical_fingerprint_json(
+    raw_fingerprint: str,
+    *,
+    object_role: str = "OLD_TARGET_VERSION",
+) -> str:
     try:
         fingerprint = json.loads(raw_fingerprint)
     except json.JSONDecodeError as exc:
@@ -442,23 +466,30 @@ def _canonical_fingerprint_json(raw_fingerprint: str) -> str:
             "CATALOG_HANDOFF_RETAINED_VERSION_FINGERPRINT_INVALID",
             "Record a canonical original fingerprint for the retained version.",
         ) from exc
-    if not isinstance(fingerprint, dict) or set(fingerprint) != {
-        "byte_count",
-        "content_hash",
-    }:
+    if not isinstance(fingerprint, dict):
         raise CatalogHandoffError(
             "CATALOG_HANDOFF_RETAINED_VERSION_FINGERPRINT_INVALID",
             "Record a canonical original fingerprint for the retained version.",
         )
-    byte_count = fingerprint.get("byte_count")
-    content_hash = fingerprint.get("content_hash")
-    if (
-        not isinstance(byte_count, int)
-        or isinstance(byte_count, bool)
-        or byte_count < 0
-        or not isinstance(content_hash, str)
-        or HASH_PATTERN.fullmatch(content_hash) is None
-    ):
+    if object_role == "OLD_TARGET_VERSION":
+        byte_count = fingerprint.get("byte_count")
+        content_hash = fingerprint.get("content_hash")
+        valid = (
+            set(fingerprint) == {"byte_count", "content_hash"}
+            and isinstance(byte_count, int)
+            and not isinstance(byte_count, bool)
+            and byte_count >= 0
+            and isinstance(content_hash, str)
+            and HASH_PATTERN.fullmatch(content_hash) is not None
+        )
+    else:
+        valid = (
+            object_role == "EMPTY_DIRECTORY_QUARANTINE"
+            and set(fingerprint) == {"entry_count", "kind"}
+            and fingerprint.get("entry_count") == 0
+            and fingerprint.get("kind") == "DIRECTORY_EMPTY"
+        )
+    if not valid:
         raise CatalogHandoffError(
             "CATALOG_HANDOFF_RETAINED_VERSION_FINGERPRINT_INVALID",
             "Record a canonical original fingerprint for the retained version.",

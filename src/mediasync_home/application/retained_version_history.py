@@ -65,6 +65,7 @@ class RetainedVersionSummary:
     rollback_state: str | None = None
     rollback_retention_until_utc: str | None = None
     rollback_validation_code: str | None = None
+    object_role: str = "OLD_TARGET_VERSION"
 
     @property
     def protected_for_restore(self) -> bool:
@@ -100,6 +101,7 @@ class RetainedVersionSummary:
     def to_dict(self) -> dict[str, object]:
         return {
             "version_object_id": self.version_object_id,
+            "object_role": self.object_role,
             "run_id": self.run_id,
             "operation_id": self.operation_id,
             "job_id": self.job_id,

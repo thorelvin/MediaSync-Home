@@ -78,7 +78,8 @@ class SqliteVersionRetentionStore:
                 versions.retention_until_utc,
                 versions.manifest_hash,
                 versions.state,
-                versions.row_version
+                versions.row_version,
+                versions.object_role
             FROM retained_version_objects AS versions
             INNER JOIN jobs
                 ON jobs.id = versions.job_id
@@ -148,7 +149,8 @@ class SqliteVersionRetentionStore:
                 restores.completed_utc,
                 rollbacks.state,
                 rollbacks.retention_until_utc,
-                rollbacks.last_validation_code
+                rollbacks.last_validation_code,
+                versions.object_role
             FROM retained_version_objects AS versions
             LEFT JOIN version_retention_holds AS holds
                 ON holds.version_object_id = versions.version_object_id
@@ -329,7 +331,8 @@ class SqliteVersionRetentionStore:
                 restores.completed_utc,
                 rollbacks.state,
                 rollbacks.retention_until_utc,
-                rollbacks.last_validation_code
+                rollbacks.last_validation_code,
+                versions.object_role
             FROM retained_version_objects AS versions
             LEFT JOIN version_retention_holds AS holds
                 ON holds.version_object_id = versions.version_object_id
@@ -1797,7 +1800,8 @@ class SqliteVersionRetentionStore:
                 versions.retention_until_utc,
                 versions.manifest_hash,
                 versions.state,
-                versions.row_version
+                versions.row_version,
+                versions.object_role
             FROM version_retention_plans AS plans
             INNER JOIN version_retention_items AS items
                 ON items.plan_id = plans.plan_id
@@ -2227,7 +2231,8 @@ class SqliteVersionRetentionStore:
                 versions.retention_until_utc,
                 versions.manifest_hash,
                 versions.state,
-                versions.row_version
+                versions.row_version,
+                versions.object_role
             FROM version_retention_plans AS plans
             INNER JOIN version_retention_items AS items
                 ON items.plan_id = plans.plan_id
@@ -2412,7 +2417,8 @@ _RESTORE_OPERATION_SELECT = """
         versions.retention_until_utc,
         versions.manifest_hash,
         versions.state,
-        versions.row_version
+        versions.row_version,
+        versions.object_role
     FROM retained_version_restore_operations AS restores
     INNER JOIN retained_version_objects AS versions
         ON versions.version_object_id = restores.version_object_id
@@ -2465,7 +2471,8 @@ _RESTORE_ROLLBACK_OPERATION_SELECT = """
         versions.retention_until_utc,
         versions.manifest_hash,
         versions.state,
-        versions.row_version
+        versions.row_version,
+        versions.object_role
     FROM retained_version_restore_rollbacks AS rollbacks
     INNER JOIN retained_version_restore_operations AS restores
         ON restores.restore_id = rollbacks.restore_id
@@ -2494,7 +2501,7 @@ def _restore_operation_from_row(
         completed_utc=None if row[11] is None else str(row[11]),
         last_validation_code=None if row[12] is None else str(row[12]),
         row_version=_int_column(row[13]),
-        record=_record_from_row(tuple(row[14:34])),
+        record=_record_from_row(tuple(row[14:35])),
     )
 
 
@@ -2514,7 +2521,7 @@ def _restore_rollback_operation_from_row(
         completed_utc=None if row[9] is None else str(row[9]),
         last_validation_code=None if row[10] is None else str(row[10]),
         row_version=_int_column(row[11]),
-        restore=_restore_operation_from_row(tuple(row[12:46])),
+        restore=_restore_operation_from_row(tuple(row[12:47])),
     )
 
 
@@ -2672,6 +2679,7 @@ def _record_from_row(row: sqlite3.Row | tuple[object, ...]) -> RetainedVersionRe
         manifest_hash=str(row[17]),
         state=RetainedVersionState(str(row[18])),
         row_version=_int_column(row[19]),
+        object_role=str(row[20]),
     )
 
 
@@ -2702,6 +2710,7 @@ def _summary_from_row(
             None if row[19] is None else str(row[19])
         ),
         rollback_validation_code=None if row[20] is None else str(row[20]),
+        object_role=str(row[21]),
     )
 
 
@@ -2714,7 +2723,7 @@ def _work_item_from_row(
         ordinal=_int_column(row[2]),
         state=VersionRetentionItemState(str(row[3])),
         expected_object_row_version=_int_column(row[4]),
-        record=_record_from_row(tuple(row[5:25])),
+        record=_record_from_row(tuple(row[5:26])),
     )
 
 

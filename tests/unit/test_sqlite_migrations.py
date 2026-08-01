@@ -68,6 +68,7 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
         45,
         46,
         47,
+        48,
     ]
     assert [migration.version for migration in recovery.migrations] == [
         1,
@@ -136,6 +137,10 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
     assert (
         catalog.migrations[46].name
         == "catalog_retained_version_restore_rollback_lifecycle"
+    )
+    assert (
+        catalog.migrations[47].name
+        == "catalog_retained_recovery_object_roles"
     )
     assert recovery.migrations[0].name == "recovery_journal_skeleton"
     assert recovery.migrations[1].name == "recovery_lease_counters"

@@ -309,7 +309,10 @@ def _validate_preservation_receipt(
             "RECOVERY_COMMIT_PRESERVATION_REQUIRES_OBJECT_ID",
             "Record the preserved old target as a version or quarantine object before replacement.",
         )
-    if receipt.version_object_id is not None and not all(
+    if (
+        receipt.version_object_id is not None
+        or receipt.quarantine_object_id is not None
+    ) and not all(
         isinstance(value, str) and bool(value.strip())
         for value in (
             receipt.version_created_utc,
@@ -318,8 +321,8 @@ def _validate_preservation_receipt(
         )
     ):
         raise JournaledFinalCommitError(
-            "RECOVERY_COMMIT_PRESERVATION_REQUIRES_VERSION_METADATA",
-            "Record the version creation time, retention boundary and manifest hash before replacement.",
+            "RECOVERY_COMMIT_PRESERVATION_REQUIRES_RETENTION_METADATA",
+            "Record creation time, retention boundary and manifest hash before replacement.",
         )
 
 

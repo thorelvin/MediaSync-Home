@@ -39,9 +39,11 @@ from mediasync_home.application.staging_objects import (
     require_staging_object_manifest_binding,
 )
 from mediasync_home.application.version_objects import (
+    EMPTY_DIRECTORY_QUARANTINE_ROLE,
     VersionObjectManifest,
     VersionObjectManifestError,
     parse_version_object_manifest,
+    quarantine_object_manifest_from_operation,
     require_version_object_manifest_binding,
     version_object_manifest_from_operation,
 )
@@ -222,12 +224,16 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
             quarantine_object_id=quarantine_object_id,
         )
         final_path = _directory_empty_final_path(self._target_root, operation.final_relative_path)
-        manifest = _quarantine_manifest(
-            operation=operation,
-            quarantine_object_id=quarantine_object_id,
-            fingerprint=expected,
-            payload_path=quarantine_payload,
-        )
+        try:
+            manifest = quarantine_object_manifest_from_operation(
+                operation,
+                created_utc=self._clock.utc_now(),
+            )
+        except VersionObjectManifestError as exc:
+            raise FinalCommitAdapterError(
+                exc.validation_code,
+                "Refresh the sealed job retention binding before quarantining a directory.",
+            ) from exc
 
         if quarantine_payload.exists():
             _validate_existing_quarantine_payload(
@@ -240,6 +246,9 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
                 final_relative_path=RelativePath(operation.final_relative_path),
                 quarantine_object_id=quarantine_object_id,
                 fingerprint_json=_canonical_json(expected),
+                version_created_utc=manifest.created_utc,
+                version_retention_until_utc=manifest.retention_until_utc,
+                version_manifest_hash=manifest.manifest_hash,
             )
 
         if final_path.is_symlink() or not final_path.is_dir():
@@ -261,6 +270,9 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
             final_relative_path=RelativePath(operation.final_relative_path),
             quarantine_object_id=quarantine_object_id,
             fingerprint_json=_canonical_json(expected),
+            version_created_utc=manifest.created_utc,
+            version_retention_until_utc=manifest.retention_until_utc,
+            version_manifest_hash=manifest.manifest_hash,
         )
 
     def restore_old_target(
@@ -699,12 +711,6 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
                 permit=permit,
                 operation=operation,
                 target_root=target_root,
-            )
-            cleaned_object_ids.extend(final_receipt.cleaned_object_ids)
-        elif operation.target_precondition_kind is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY:
-            final_receipt = self._replace_adapter(target_root).cleanup_recovery_objects(
-                permit,
-                operation,
             )
             cleaned_object_ids.extend(final_receipt.cleaned_object_ids)
         return RecoveryObjectCleanupReceipt(
@@ -1743,8 +1749,12 @@ def _require_empty_directory(
     )
 
 
-def _write_quarantine_manifest(*, manifest_path: Path, manifest: dict[str, object]) -> None:
-    payload = _canonical_json(manifest)
+def _write_quarantine_manifest(
+    *,
+    manifest_path: Path,
+    manifest: VersionObjectManifest,
+) -> None:
+    payload = manifest.canonical_json
     if manifest_path.exists():
         try:
             existing = manifest_path.read_text(encoding="utf-8")
@@ -1770,26 +1780,6 @@ def _write_quarantine_manifest(*, manifest_path: Path, manifest: dict[str, objec
         temp_path.unlink(missing_ok=True)
 
 
-def _quarantine_manifest(
-    *,
-    operation: RecoveryOperation,
-    quarantine_object_id: str,
-    fingerprint: dict[str, object],
-    payload_path: Path,
-) -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "object_role": "EMPTY_DIRECTORY_QUARANTINE",
-        "quarantine_object_id": quarantine_object_id,
-        "operation_id": operation.operation_id,
-        "run_id": operation.run_id,
-        "run_target_id": operation.run_target_id,
-        "final_relative_path": _relative_path(operation.final_relative_path),
-        "payload_name": payload_path.name,
-        "fingerprint": fingerprint,
-    }
-
-
 def _load_quarantine_manifest(
     *,
     manifest_path: Path,
@@ -1804,21 +1794,24 @@ def _load_quarantine_manifest(
     mismatch_next_action: str = "Reload recovery state before restoring the quarantined directory.",
 ) -> dict[str, object]:
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        raw_manifest = manifest_path.read_text(encoding="utf-8")
+        parsed = parse_version_object_manifest(raw_manifest)
+        manifest = cast(dict[str, object], json.loads(raw_manifest))
+    except OSError as exc:
         raise FinalCommitAdapterError(
             missing_code,
             missing_next_action,
         ) from exc
-    if not isinstance(manifest, dict) or manifest.get("object_role") != "EMPTY_DIRECTORY_QUARANTINE":
+    except (json.JSONDecodeError, VersionObjectManifestError) as exc:
         raise FinalCommitAdapterError(
             invalid_code,
             invalid_next_action,
-        )
+        ) from exc
     if (
-        manifest.get("operation_id") != expected_operation_id
-        or manifest.get("quarantine_object_id") != expected_quarantine_object_id
-        or manifest.get("final_relative_path") != _relative_path(expected_final_relative_path)
+        parsed.object_role != EMPTY_DIRECTORY_QUARANTINE_ROLE
+        or parsed.operation_id != expected_operation_id
+        or parsed.version_object_id != expected_quarantine_object_id
+        or parsed.final_relative_path != _relative_path(expected_final_relative_path)
     ):
         raise FinalCommitAdapterError(
             mismatch_code,

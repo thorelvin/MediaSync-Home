@@ -6665,6 +6665,7 @@ class _FakeRetainedVersionHistoryEngineClient(_FakeHistoryEngineClient):
                     "versions": [
                         {
                             "version_object_id": "version-a",
+                            "object_role": "EMPTY_DIRECTORY_QUARANTINE",
                             "run_id": run_id,
                             "operation_id": "op-a",
                             "job_id": "job-a",
@@ -6847,6 +6848,7 @@ def test_history_previous_version_can_schedule_restore_without_compact_clipping(
 
         assert provider.version_queries[-1] == ("run-a", 25)
         assert _virtual_row_count(version_list) == 1
+        assert "Tom mappe:" in _virtual_row_text(version_list, 0)
         assert version_list.horizontalScrollBar().maximum() == 0
         assert history_scroll.horizontalScrollBar().maximum() == 0
         _click_virtual_row(version_list, 0)
@@ -6872,7 +6874,8 @@ def test_history_previous_version_can_schedule_restore_without_compact_clipping(
         assert not protect.isEnabled()
         language.menu().actions()[1].trigger()
         qapp.processEvents()
-        assert heading.text() == "Previous versions"
+        assert heading.text() == "Recovery items"
+        assert "Empty folder:" in _virtual_row_text(version_list, 0)
         assert protect.text() == "Restore in progress"
         assert history_scroll.horizontalScrollBar().maximum() == 0
         assert (

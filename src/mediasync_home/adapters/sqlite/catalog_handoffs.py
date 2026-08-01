@@ -151,9 +151,10 @@ class SqliteFinalFileCatalogHandoffStore(FinalFileCatalogHandoffStore):
                 created_utc,
                 retention_policy,
                 retention_until_utc,
-                manifest_hash
+                manifest_hash,
+                object_role
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 retained.version_object_id,
@@ -174,6 +175,7 @@ class SqliteFinalFileCatalogHandoffStore(FinalFileCatalogHandoffStore):
                 retained.retention_policy,
                 retained.retention_until_utc,
                 retained.manifest_hash,
+                retained.object_role,
             ),
         )
 
@@ -194,7 +196,8 @@ class SqliteFinalFileCatalogHandoffStore(FinalFileCatalogHandoffStore):
                 created_utc,
                 retention_policy,
                 retention_until_utc,
-                manifest_hash
+                manifest_hash,
+                object_role
             FROM retained_version_objects
             WHERE handoff_id = ?
             """,
@@ -214,6 +217,7 @@ class SqliteFinalFileCatalogHandoffStore(FinalFileCatalogHandoffStore):
             retention_policy=str(row[8]),
             retention_until_utc=str(row[9]),
             manifest_hash=str(row[10]),
+            object_role=str(row[11]),
         )
 
     def list_recent_cataloged_files(

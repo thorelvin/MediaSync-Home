@@ -1,5 +1,19 @@
 # Implementeringsstatus
 
+Update 2026-08-01: empty-directory quarantine is now a retained, user-visible
+recovery object instead of short-lived cleanup data. Catalog migration 48 adds
+the immutable `EMPTY_DIRECTORY_QUARANTINE` role beside
+`OLD_TARGET_VERSION`. A successful file-over-empty-directory commit keeps the
+canonical self-hashed empty-folder object for 30 days, registers it in the same
+hold/expiry catalog, and exposes it in History as an explicitly labeled
+recovery item. The existing confirmed protect, restore and undo commands now
+restore the empty directory under a fresh endpoint lease while preserving the
+current file as rollback evidence; undo full-hash verifies and restores that
+file. Expiry verifies the empty directory and manifest before journaled
+deletion. SQLite integration covers commit-to-catalog, restore, undo, expiry
+and immutable role binding. Norwegian/English Qt coverage proves the type label,
+language switch, real actions and zero horizontal clipping at 900x560.
+
 Update 2026-08-01: History now provides a complete protected historical-file
 restore path. The bounded `QUERY_RETAINED_VERSIONS` read model shows protection
 and restore state in Norwegian and English. The first confirmed action creates
@@ -32,14 +46,14 @@ quarantine. The executor keeps the live endpoint permit until cleanup validates
 the canonical manifest against the journal, verifies any remaining file hash or
 directory marker, removes the short staging payload and manifest, and journals
 `CLEANED`. Missing/tampered evidence fails closed; an already-removed pair is an
-idempotent retry. Version payloads and manifests remain intact for retention,
-while quarantine and created-directory recovery markers keep their existing
-post-catalog cleanup. Time-based local version expiration is now implemented
+idempotent retry. Version payloads, manifests and empty-directory quarantine
+remain intact for retention, while created-directory recovery markers keep
+their existing post-catalog cleanup. Time-based local recovery-object
+expiration is now implemented
 through catalog migrations 44-45 and recovery migration 11: canonical version
 manifests, immutable due plans, recovery/hold/archive checks, fresh endpoint
 permits, append-only delete events and crash-safe resume. Non-local endpoint
-evidence, quarantine retention and the broader catalog-retention graph remain
-pending.
+evidence and the broader catalog-retention graph remain pending.
 
 Update 2026-08-01: PATH-001 production final publication now requires the
 canonical short-object staging manifest before any new file/directory publish

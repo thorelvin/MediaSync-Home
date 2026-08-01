@@ -8,6 +8,8 @@ from pathlib import Path
 from mediasync_home.adapters.endpoint_leases import EndpointLeaseUnavailable, EndpointRootResolver
 from mediasync_home.adapters.reparse_guard import LocalReparseGuard, ReparseGuardError
 from mediasync_home.application.version_objects import (
+    EMPTY_DIRECTORY_QUARANTINE_ROLE,
+    OLD_TARGET_VERSION_ROLE,
     VersionObjectManifest,
     VersionObjectManifestError,
     parse_version_object_manifest,
@@ -50,13 +52,11 @@ class LocalVersionRetentionDeletionAdapter:
         permit_validator.assert_mutation_permit_current(permit)
         _require_permit_binding(item=item, permit=permit)
         payload_path, manifest_path = self._object_paths(item=item, permit=permit)
-        if not payload_path.is_file() or payload_path.is_symlink():
-            raise VersionRetentionDeletionError(
-                "VERSION_RETENTION_PAYLOAD_MISSING",
-                "Reconcile the retained version because its payload is missing.",
-            )
         manifest = _load_bound_manifest(manifest_path=manifest_path, item=item)
-        _require_payload_matches_manifest(payload_path=payload_path, manifest=manifest)
+        _require_payload_matches_manifest(
+            payload_path=payload_path,
+            manifest=manifest,
+        )
 
     def delete_retained_version(
         self,
@@ -85,14 +85,12 @@ class LocalVersionRetentionDeletionAdapter:
             )
         manifest = _load_bound_manifest(manifest_path=manifest_path, item=item)
         if payload_exists:
-            if not payload_path.is_file() or payload_path.is_symlink():
-                raise VersionRetentionDeletionError(
-                    "VERSION_RETENTION_PAYLOAD_TYPE_INVALID",
-                    "Do not delete a retained-version path that is not a regular file.",
-                )
             _require_payload_matches_manifest(payload_path=payload_path, manifest=manifest)
             try:
-                payload_path.unlink()
+                if manifest.object_role == EMPTY_DIRECTORY_QUARANTINE_ROLE:
+                    payload_path.rmdir()
+                else:
+                    payload_path.unlink()
             except OSError as exc:
                 raise VersionRetentionDeletionError(
                     "VERSION_RETENTION_PAYLOAD_DELETE_FAILED",
@@ -150,7 +148,24 @@ class LocalVersionRetentionDeletionAdapter:
                 reparse_code="VERSION_RETENTION_ENDPOINT_ROOT_REPARSE_UNSUPPORTED",
                 reparse_next_action="Revalidate the endpoint root before retained-version expiry.",
             )
-            object_root = resolved_root / ".mediasync" / "objects" / "versions"
+            if item.record.object_role not in {
+                OLD_TARGET_VERSION_ROLE,
+                EMPTY_DIRECTORY_QUARANTINE_ROLE,
+            }:
+                raise VersionRetentionDeletionError(
+                    "VERSION_RETENTION_OBJECT_ROLE_INVALID",
+                    "Reconcile the retained recovery-object role before expiry.",
+                )
+            object_root = (
+                resolved_root
+                / ".mediasync"
+                / "objects"
+                / (
+                    "quarantine"
+                    if item.record.object_role == EMPTY_DIRECTORY_QUARANTINE_ROLE
+                    else "versions"
+                )
+            )
             self._reparse_guard.require_resolved_under_root(
                 root=resolved_root,
                 path=object_root,
@@ -194,6 +209,7 @@ def _load_bound_manifest(
         ) from exc
     if (
         manifest.version_object_id != record.version_object_id
+        or manifest.object_role != record.object_role
         or manifest.operation_id != record.operation_id
         or manifest.run_id != record.run_id
         or manifest.run_target_id != record.run_target_id
@@ -209,11 +225,8 @@ def _load_bound_manifest(
         or manifest.created_utc != record.created_utc
         or manifest.retention_until_utc != record.retention_until_utc
         or manifest.manifest_hash != record.manifest_hash
-        or {
-            "byte_count": manifest.fingerprint_byte_count,
-            "content_hash": manifest.fingerprint_content_hash,
-        }
-        != original_fingerprint
+        or manifest.fingerprint_json
+        != json.dumps(original_fingerprint, sort_keys=True, separators=(",", ":"))
     ):
         raise VersionRetentionDeletionError(
             "VERSION_RETENTION_MANIFEST_BINDING_MISMATCH",
@@ -227,6 +240,34 @@ def _require_payload_matches_manifest(
     payload_path: Path,
     manifest: VersionObjectManifest,
 ) -> None:
+    if manifest.object_role == EMPTY_DIRECTORY_QUARANTINE_ROLE:
+        if payload_path.is_symlink() or not payload_path.is_dir():
+            raise VersionRetentionDeletionError(
+                "VERSION_RETENTION_PAYLOAD_TYPE_INVALID",
+                "Do not delete a quarantine path that is not a directory.",
+            )
+        try:
+            if next(payload_path.iterdir(), None) is not None:
+                raise VersionRetentionDeletionError(
+                    "VERSION_RETENTION_QUARANTINE_NOT_EMPTY",
+                    "Do not delete a quarantined directory whose contents changed.",
+                )
+        except OSError as exc:
+            raise VersionRetentionDeletionError(
+                "VERSION_RETENTION_PAYLOAD_READ_FAILED",
+                "Retry after checking access to the quarantined directory.",
+            ) from exc
+        return
+    if not payload_path.is_file() or payload_path.is_symlink():
+        raise VersionRetentionDeletionError(
+            "VERSION_RETENTION_PAYLOAD_TYPE_INVALID",
+            "Do not delete a retained-version path that is not a regular file.",
+        )
+    if manifest.fingerprint_byte_count is None or manifest.fingerprint_content_hash is None:
+        raise VersionRetentionDeletionError(
+            "VERSION_RETENTION_MANIFEST_FINGERPRINT_INVALID",
+            "Reconcile the retained-version manifest before expiry.",
+        )
     byte_count, content_hash = _fingerprint_file(payload_path)
     if (
         byte_count != manifest.fingerprint_byte_count

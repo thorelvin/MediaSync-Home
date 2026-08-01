@@ -15,7 +15,7 @@ from mediasync_home.application.runs import (
 from mediasync_home.domain.capabilities import MutationPermit
 
 
-VERSION_RETENTION_PLAN_SCHEMA_VERSION = 1
+VERSION_RETENTION_PLAN_SCHEMA_VERSION = 2
 VERSION_RETENTION_PLAN_HASH_ALGORITHM = "SHA-256"
 VERSION_RETENTION_PLAN_CANONICALIZATION = "JSON_SORT_KEYS_COMPACT_UTF8_V1"
 _HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -71,6 +71,7 @@ class RetainedVersionRecord:
     manifest_hash: str
     state: RetainedVersionState
     row_version: int
+    object_role: str = "OLD_TARGET_VERSION"
 
 
 @dataclass(frozen=True, slots=True)
@@ -480,6 +481,7 @@ def create_version_retention_plan(
         "candidates": [
             {
                 "version_object_id": item.version_object_id,
+                "object_role": item.object_role,
                 "handoff_id": item.handoff_id,
                 "run_id": item.run_id,
                 "operation_id": item.operation_id,
@@ -534,6 +536,11 @@ def _validate_retained_version_record(record: RetainedVersionRecord) -> None:
         raise VersionRetentionError("RETAINED_VERSION_RECORD_NUMBERS_INVALID")
     if record.retention_policy != "THIRTY_DAYS":
         raise VersionRetentionError("RETAINED_VERSION_RECORD_POLICY_INVALID")
+    if record.object_role not in {
+        "OLD_TARGET_VERSION",
+        "EMPTY_DIRECTORY_QUARANTINE",
+    }:
+        raise VersionRetentionError("RETAINED_VERSION_RECORD_ROLE_INVALID")
     if _HASH_PATTERN.fullmatch(record.manifest_hash) is None:
         raise VersionRetentionError("RETAINED_VERSION_RECORD_MANIFEST_HASH_INVALID")
     _require_utc(record.created_utc)

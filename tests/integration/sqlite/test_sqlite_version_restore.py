@@ -37,6 +37,7 @@ from mediasync_home.application.runs import (
 )
 from mediasync_home.application.version_objects import (
     VersionObjectManifest,
+    create_quarantine_object_manifest,
     create_version_object_manifest,
 )
 from mediasync_home.application.version_restore import (
@@ -101,6 +102,131 @@ def test_retained_version_restore_preserves_current_and_applies_historical(
         assert leases.leases and all(lease.released for lease in leases.leases)
     finally:
         connection.close()
+
+
+def test_retained_quarantine_restore_and_undo_preserve_both_types(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    connection = sqlite3.connect(database)
+    apply_sqlite_connection_policy(connection, catalog_critical_writer_policy(database))
+    apply_sqlite_migrations(connection, catalog_migration_plan())
+    connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'STANDARD_BACKUP')")
+    target_root = tmp_path / "target"
+    object_root = target_root / ".mediasync" / "objects" / "quarantine"
+    object_root.mkdir(parents=True)
+    manifest = create_quarantine_object_manifest(
+        version_object_id="quarantine-a",
+        operation_id="operation-a",
+        run_id="run-a",
+        run_target_id="run-target-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        target_endpoint_id="target-a",
+        target_endpoint_revision_id="target-rev-a",
+        endpoint_generation=2,
+        owner_installation_id="owner-a",
+        ownership_epoch=3,
+        final_relative_path="Photos/image.jpg",
+        fingerprint={"entry_count": 0, "kind": "DIRECTORY_EMPTY"},
+        created_utc="2026-08-01T00:00:00.000Z",
+        retention_policy="THIRTY_DAYS",
+    )
+    (object_root / "quarantine-a.payload").mkdir()
+    (object_root / "quarantine-a.manifest.json").write_text(
+        manifest.canonical_json,
+        encoding="utf-8",
+    )
+    final_path = target_root / "Photos" / "image.jpg"
+    final_path.parent.mkdir(parents=True)
+    final_path.write_bytes(b"current-image")
+    SqliteFinalFileCatalogHandoffStore(connection).record_final_file_handoff(
+        FinalFileCatalogHandoff(
+            handoff_id="final-file:run-a:operation-a",
+            run_id="run-a",
+            run_target_id="run-target-a",
+            operation_id="operation-a",
+            target_endpoint_id="target-a",
+            target_endpoint_revision_id="target-rev-a",
+            final_relative_path="Photos/image.jpg",
+            content_hash="a" * 64,
+            lease_id="lease-a",
+            fencing_token=4,
+            retained_version=RetainedVersionCatalogHandoff(
+                version_object_id=manifest.version_object_id,
+                job_id=manifest.job_id,
+                job_revision_id=manifest.job_revision_id,
+                endpoint_generation=manifest.endpoint_generation,
+                owner_installation_id=manifest.owner_installation_id,
+                ownership_epoch=manifest.ownership_epoch,
+                original_fingerprint_json=manifest.fingerprint_json,
+                created_utc=manifest.created_utc,
+                retention_policy=manifest.retention_policy,
+                retention_until_utc=manifest.retention_until_utc,
+                manifest_hash=manifest.manifest_hash,
+                object_role=manifest.object_role,
+            ),
+        )
+    )
+    store = SqliteVersionRetentionStore(connection)
+    protected = store.protect_retained_version_for_restore(
+        command=ProtectRetainedVersionForRestoreCommand(
+            request_id="request-protect-quarantine",
+            idempotency_key="protect-quarantine",
+            version_object_id="quarantine-a",
+            expected_row_version=1,
+            explicit_confirmation=True,
+        ),
+        created_utc="2026-08-10T00:00:00.000Z",
+    )
+    scheduled = store.request_retained_version_restore(
+        command=RestoreRetainedVersionCommand(
+            request_id="request-restore-quarantine",
+            idempotency_key="restore-quarantine",
+            version_object_id="quarantine-a",
+            expected_row_version=1,
+            explicit_confirmation=True,
+        ),
+        created_utc="2026-08-10T00:00:00.000Z",
+    )
+    adapter = LocalRetainedVersionRestoreAdapter(
+        root_resolver=_RootResolver(target_root)
+    )
+    restored = apply_next_version_restore(
+        restores=store,
+        leases=_LeaseAuthority(),
+        filesystem=adapter,
+        event_utc="2026-08-10T00:00:01.000Z",
+    )
+
+    assert protected.protected and scheduled.scheduled
+    assert restored.completed
+    assert final_path.is_dir() and list(final_path.iterdir()) == []
+    rollback = next((target_root / ".mediasync/objects/restores").glob("*.payload"))
+    assert rollback.read_bytes() == b"current-image"
+
+    assert scheduled.restore_id is not None
+    undo = store.request_retained_version_restore_undo(
+        command=UndoRetainedVersionRestoreCommand(
+            request_id="request-undo-quarantine",
+            idempotency_key="undo-quarantine",
+            restore_id=scheduled.restore_id,
+            version_object_id="quarantine-a",
+            expected_row_version=1,
+            explicit_confirmation=True,
+        ),
+        created_utc="2026-08-11T00:00:00.000Z",
+    )
+    undone = apply_next_version_restore_undo(
+        rollbacks=store,
+        leases=_LeaseAuthority(),
+        filesystem=adapter,
+        event_utc="2026-08-11T00:00:01.000Z",
+    )
+
+    assert undo.scheduled and undone.completed
+    assert final_path.is_file() and final_path.read_bytes() == b"current-image"
+    connection.close()
 
 
 @pytest.mark.parametrize("failure_stage", ["preserve", "apply"])

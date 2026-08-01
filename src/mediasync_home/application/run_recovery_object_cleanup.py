@@ -12,7 +12,6 @@ from mediasync_home.application.recovery_operations import (
     RecoveryOperationKind,
     RecoveryOperationPhase,
     RecoveryOperationStore,
-    RecoveryTargetPreconditionKind,
 )
 from mediasync_home.domain.capabilities import MutationPermit
 
@@ -156,11 +155,7 @@ def _requires_cleanup(operation: RecoveryOperation) -> bool:
         return True
     if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
         return True
-    return (
-        operation.target_precondition_kind is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY
-        and operation.quarantine_object_id is not None
-        and bool(operation.quarantine_object_id.strip())
-    )
+    return False
 
 
 def _operation_matches_permit(*, operation: RecoveryOperation, permit: MutationPermit) -> bool:
@@ -193,10 +188,6 @@ def _validate_cleanup_receipt(
             operation.staging_object_id,
             operation.operation_id
             if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY
-            else None,
-            operation.quarantine_object_id
-            if operation.target_precondition_kind
-            is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY
             else None,
         )
         if object_id is not None and object_id.strip()

@@ -405,6 +405,16 @@ before manifest. Restart treats both-missing as completed and can validate and
 remove a lone manifest after payload deletion; a payload without its ownership
 manifest or any binding drift remains blocked.
 
+Migration 48 makes a displaced empty directory a retained recovery source with
+immutable role and canonical `{entry_count: 0, kind: DIRECTORY_EMPTY}`
+fingerprint. Successful file publication no longer cleans that quarantine after
+catalog handoff. The shared hold and expiry pipeline verifies an empty payload
+directory before deletion. Confirmed restore full-hash verifies and preserves
+the current file, removes it and recreates the empty directory under a fresh
+lease; confirmed undo first proves the restored directory is still empty, then
+restores the rollback file with no-overwrite semantics. Filesystem-before-
+journal retries accept only those exact postconditions.
+
 ### 17.5 Karantene som opaque managed objects og compare-and-swap
 
 All speil-«sletting» bevares i objektstore med `logical_role=QUARANTINE`:

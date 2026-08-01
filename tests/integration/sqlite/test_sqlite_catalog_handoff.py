@@ -73,13 +73,20 @@ def test_sqlite_catalog_handoff_atomically_registers_retained_version(
         assert store.load_final_file_handoff(handoff.handoff_id) == handoff
         row = connection.execute(
             """
-            SELECT state, retention_until_utc, manifest_hash, row_version
+            SELECT state, retention_until_utc, manifest_hash, row_version,
+                   object_role
             FROM retained_version_objects
             WHERE version_object_id = ?
             """,
             ("operation-a",),
         ).fetchone()
-        assert row == ("RETAINED", "2026-08-31T10:00:00.000Z", "d" * 64, 1)
+        assert row == (
+            "RETAINED",
+            "2026-08-31T10:00:00.000Z",
+            "d" * 64,
+            1,
+            "OLD_TARGET_VERSION",
+        )
 
         with pytest.raises(sqlite3.IntegrityError, match="RETAINED_VERSION_BINDING_IMMUTABLE"):
             connection.execute(
@@ -89,6 +96,18 @@ def test_sqlite_catalog_handoff_atomically_registers_retained_version(
                 WHERE version_object_id = ?
                 """,
                 ("e" * 64, "operation-a"),
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="RETAINED_RECOVERY_OBJECT_ROLE_IMMUTABLE",
+        ):
+            connection.execute(
+                """
+                UPDATE retained_version_objects
+                SET object_role = 'EMPTY_DIRECTORY_QUARANTINE'
+                WHERE version_object_id = ?
+                """,
+                ("operation-a",),
             )
     finally:
         connection.close()

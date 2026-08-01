@@ -37,7 +37,7 @@ def test_version_retention_plan_is_canonical_and_order_independent() -> None:
         "version-b",
     ]
     assert len(first.manifest_hash) == 64
-    assert first.manifest_json.endswith('"schema_version":1}')
+    assert first.manifest_json.endswith('"schema_version":2}')
 
 
 def test_version_retention_planning_excludes_active_recovery_reference() -> None:

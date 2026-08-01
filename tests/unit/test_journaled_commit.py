@@ -505,6 +505,9 @@ class _FakeOldTargetPreservationPort:
                 final_relative_path=RelativePath(operation.final_relative_path),
                 quarantine_object_id="quarantine-a",
                 fingerprint_json='{"entry_count":0,"kind":"DIRECTORY_EMPTY"}',
+                version_created_utc="2026-08-01T10:00:00.000Z",
+                version_retention_until_utc="2026-08-31T10:00:00.000Z",
+                version_manifest_hash="c" * 64,
             )
         return OldTargetPreservationReceipt(
             operation_id=operation.operation_id,

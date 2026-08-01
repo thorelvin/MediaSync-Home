@@ -27,6 +27,7 @@ class RetainedVersionViewState:
     rollback_validation_code: str | None = None
     restore_undo_available: bool = False
     restore_undo_pending: bool = False
+    object_role: str = "OLD_TARGET_VERSION"
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +99,7 @@ def _version_from_payload(value: object) -> RetainedVersionViewState | None:
         return None
     return RetainedVersionViewState(
         version_object_id=texts["version_object_id"] or "",
+        object_role=_optional_text(value.get("object_role")) or "OLD_TARGET_VERSION",
         run_id=texts["run_id"] or "",
         operation_id=texts["operation_id"] or "",
         target_endpoint_id=texts["target_endpoint_id"] or "",

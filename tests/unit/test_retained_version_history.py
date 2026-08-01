@@ -30,7 +30,15 @@ class _Store:
 
 
 def test_retained_version_query_is_bounded_and_returns_keyset_cursor() -> None:
-    store = _Store((_summary("version-b"), _summary("version-a")))
+    store = _Store(
+        (
+            _summary(
+                "version-b",
+                object_role="EMPTY_DIRECTORY_QUARANTINE",
+            ),
+            _summary("version-a"),
+        )
+    )
 
     page = query_retained_versions(
         version_store=store,
@@ -41,6 +49,7 @@ def test_retained_version_query_is_bounded_and_returns_keyset_cursor() -> None:
     assert store.calls == [("run-a", 2, None)]
     assert [version.version_object_id for version in page.versions] == ["version-b"]
     assert page.has_more is True
+    assert page.versions[0].object_role == "EMPTY_DIRECTORY_QUARANTINE"
     assert page.next_cursor is not None
     assert page.next_cursor.to_dict() == {
         "cursor_version": 1,
@@ -157,7 +166,11 @@ def test_restore_undo_command_requires_restore_binding_and_confirmation() -> Non
         )
 
 
-def _summary(version_object_id: str) -> RetainedVersionSummary:
+def _summary(
+    version_object_id: str,
+    *,
+    object_role: str = "OLD_TARGET_VERSION",
+) -> RetainedVersionSummary:
     return RetainedVersionSummary(
         version_object_id=version_object_id,
         run_id="run-a",
@@ -169,4 +182,5 @@ def _summary(version_object_id: str) -> RetainedVersionSummary:
         retention_until_utc="2026-08-31T00:00:00.000Z",
         state="RETAINED",
         row_version=1,
+        object_role=object_role,
     )

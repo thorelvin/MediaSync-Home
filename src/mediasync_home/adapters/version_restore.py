@@ -15,6 +15,8 @@ from mediasync_home.adapters.endpoint_leases import (
 from mediasync_home.adapters.reparse_guard import LocalReparseGuard, ReparseGuardError
 from mediasync_home.application.safe_paths import SafePathViolation, parse_endpoint_relative_path
 from mediasync_home.application.version_objects import (
+    EMPTY_DIRECTORY_QUARANTINE_ROLE,
+    OLD_TARGET_VERSION_ROLE,
     VersionObjectManifest,
     VersionObjectManifestError,
     parse_version_object_manifest,
@@ -80,12 +82,21 @@ class LocalRetainedVersionRestoreAdapter:
             root=root,
             operation=operation,
         )
-        current = _require_regular_file_fingerprint(
-            final_path,
-            missing_code="VERSION_RESTORE_CURRENT_FINAL_MISSING",
-            invalid_code="VERSION_RESTORE_CURRENT_FINAL_TYPE_INVALID",
-            read_code="VERSION_RESTORE_CURRENT_FINAL_READ_FAILED",
+        current = (
+            _current_final_fingerprint(final_path)
+            if operation.record.object_role == EMPTY_DIRECTORY_QUARANTINE_ROLE
+            else _require_regular_file_fingerprint(
+                final_path,
+                missing_code="VERSION_RESTORE_CURRENT_FINAL_MISSING",
+                invalid_code="VERSION_RESTORE_CURRENT_FINAL_TYPE_INVALID",
+                read_code="VERSION_RESTORE_CURRENT_FINAL_READ_FAILED",
+            )
         )
+        if current is None:
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_CURRENT_FINAL_MISSING",
+                "Review the restore paths before retrying.",
+            )
         historical_json = _fingerprint_json(historical)
         current_json = _fingerprint_json(current)
         return VersionRestoreInspectionReceipt(
@@ -171,31 +182,38 @@ class LocalRetainedVersionRestoreAdapter:
             operation=operation,
             expected=expected_current,
         )
-        observed = _require_regular_file_fingerprint(
-            final_path,
-            missing_code="VERSION_RESTORE_CURRENT_FINAL_MISSING",
-            invalid_code="VERSION_RESTORE_CURRENT_FINAL_TYPE_INVALID",
-            read_code="VERSION_RESTORE_CURRENT_FINAL_READ_FAILED",
-        )
         historical_json = _fingerprint_json(historical)
-        if observed == historical:
-            return VersionRestoreApplyReceipt(
-                historical_fingerprint_json=historical_json
+        if operation.record.object_role == EMPTY_DIRECTORY_QUARANTINE_ROLE:
+            _apply_empty_directory_restore(
+                final_path=final_path,
+                expected_current=expected_current,
             )
-        if observed != expected_current:
-            raise VersionRestoreFilesystemError(
-                "VERSION_RESTORE_CURRENT_FINAL_CHANGED_BEFORE_APPLY",
-                "Review the final file and rollback object before resuming restore.",
+        else:
+            observed = _require_regular_file_fingerprint(
+                final_path,
+                missing_code="VERSION_RESTORE_CURRENT_FINAL_MISSING",
+                invalid_code="VERSION_RESTORE_CURRENT_FINAL_TYPE_INVALID",
+                read_code="VERSION_RESTORE_CURRENT_FINAL_READ_FAILED",
             )
-        source_payload, _ = _version_object_paths(
-            root=root,
-            version_object_id=operation.record.version_object_id,
-        )
-        _replace_with_verified_payload(
-            source=source_payload,
-            final_path=final_path,
-            expected=historical,
-        )
+            if observed == historical:
+                return VersionRestoreApplyReceipt(
+                    historical_fingerprint_json=historical_json
+                )
+            if observed != expected_current:
+                raise VersionRestoreFilesystemError(
+                    "VERSION_RESTORE_CURRENT_FINAL_CHANGED_BEFORE_APPLY",
+                    "Review the final file and rollback object before resuming restore.",
+                )
+            source_payload, _ = _retained_object_paths(
+                root=root,
+                object_id=operation.record.version_object_id,
+                object_role=operation.record.object_role,
+            )
+            _replace_with_verified_payload(
+                source=source_payload,
+                final_path=final_path,
+                expected=historical,
+            )
         return VersionRestoreApplyReceipt(
             historical_fingerprint_json=historical_json
         )
@@ -216,11 +234,9 @@ class LocalRetainedVersionRestoreAdapter:
             )
         root, final_path = self._root_and_final_path(operation=operation, permit=permit)
         historical = self._load_historical_version(root=root, operation=operation)
-        observed = _require_regular_file_fingerprint(
-            final_path,
-            missing_code="VERSION_RESTORE_FINAL_MISSING_AFTER_APPLY",
-            invalid_code="VERSION_RESTORE_FINAL_TYPE_INVALID_AFTER_APPLY",
-            read_code="VERSION_RESTORE_FINAL_READ_FAILED_AFTER_APPLY",
+        observed = _restored_final_fingerprint(
+            final_path=final_path,
+            object_role=operation.record.object_role,
         )
         if observed != historical:
             raise VersionRestoreFilesystemError(
@@ -262,12 +278,7 @@ class LocalRetainedVersionRestoreAdapter:
             operation=operation.restore,
             expected=rollback,
         )
-        observed = _require_regular_file_fingerprint(
-            final_path,
-            missing_code="VERSION_RESTORE_UNDO_FINAL_MISSING",
-            invalid_code="VERSION_RESTORE_UNDO_FINAL_TYPE_INVALID",
-            read_code="VERSION_RESTORE_UNDO_FINAL_READ_FAILED",
-        )
+        observed = _current_final_fingerprint(final_path)
         if observed not in (expected_final, rollback):
             raise VersionRestoreFilesystemError(
                 "VERSION_RESTORE_UNDO_FINAL_CHANGED",
@@ -315,14 +326,9 @@ class LocalRetainedVersionRestoreAdapter:
             operation=operation.restore,
             expected=rollback,
         )
-        observed = _require_regular_file_fingerprint(
-            final_path,
-            missing_code="VERSION_RESTORE_UNDO_FINAL_MISSING",
-            invalid_code="VERSION_RESTORE_UNDO_FINAL_TYPE_INVALID",
-            read_code="VERSION_RESTORE_UNDO_FINAL_READ_FAILED",
-        )
+        observed = _current_final_fingerprint(final_path, allow_missing=True)
         if observed != rollback:
-            if observed != expected_final:
+            if observed is not None and observed != expected_final:
                 raise VersionRestoreFilesystemError(
                     "VERSION_RESTORE_UNDO_FINAL_CHANGED_BEFORE_APPLY",
                     "Keep the rollback object and review the changed final file.",
@@ -332,11 +338,18 @@ class LocalRetainedVersionRestoreAdapter:
                 operation=operation.restore,
                 create=False,
             )
-            _replace_with_verified_payload(
-                source=rollback_payload,
-                final_path=final_path,
-                expected=rollback,
-            )
+            if operation.restore.record.object_role == EMPTY_DIRECTORY_QUARANTINE_ROLE:
+                _replace_empty_directory_with_verified_file(
+                    source=rollback_payload,
+                    final_path=final_path,
+                    expected=rollback,
+                )
+            else:
+                _replace_with_verified_payload(
+                    source=rollback_payload,
+                    final_path=final_path,
+                    expected=rollback,
+                )
         return VersionRestoreUndoApplyReceipt(
             rollback_fingerprint_json=_fingerprint_json(rollback)
         )
@@ -581,7 +594,16 @@ class LocalRetainedVersionRestoreAdapter:
         root: Path,
         operation: VersionRestoreOperation,
     ) -> dict[str, object]:
-        object_root = root / ".mediasync" / "objects" / "versions"
+        object_root = (
+            root
+            / ".mediasync"
+            / "objects"
+            / (
+                "quarantine"
+                if operation.record.object_role == EMPTY_DIRECTORY_QUARANTINE_ROLE
+                else "versions"
+            )
+        )
         try:
             self._reparse_guard.require_resolved_under_root(
                 root=root,
@@ -595,23 +617,33 @@ class LocalRetainedVersionRestoreAdapter:
                 exc.validation_code,
                 exc.next_action,
             ) from exc
-        payload_path, manifest_path = _version_object_paths(
+        payload_path, manifest_path = _retained_object_paths(
             root=root,
-            version_object_id=operation.record.version_object_id,
+            object_id=operation.record.version_object_id,
+            object_role=operation.record.object_role,
         )
         manifest = _load_bound_version_manifest(
             manifest_path=manifest_path,
             operation=operation,
         )
-        expected = {
-            "byte_count": manifest.fingerprint_byte_count,
-            "content_hash": manifest.fingerprint_content_hash,
-        }
-        observed = _require_regular_file_fingerprint(
-            payload_path,
-            missing_code="VERSION_RESTORE_HISTORICAL_PAYLOAD_MISSING",
-            invalid_code="VERSION_RESTORE_HISTORICAL_PAYLOAD_TYPE_INVALID",
-            read_code="VERSION_RESTORE_HISTORICAL_PAYLOAD_READ_FAILED",
+        expected = _fingerprint_from_json(
+            manifest.fingerprint_json,
+            "VERSION_RESTORE_HISTORICAL_FINGERPRINT_INVALID",
+        )
+        observed = (
+            _require_empty_directory_fingerprint(
+                payload_path,
+                missing_code="VERSION_RESTORE_HISTORICAL_PAYLOAD_MISSING",
+                invalid_code="VERSION_RESTORE_HISTORICAL_PAYLOAD_TYPE_INVALID",
+                not_empty_code="VERSION_RESTORE_HISTORICAL_DIRECTORY_NOT_EMPTY",
+            )
+            if operation.record.object_role == EMPTY_DIRECTORY_QUARANTINE_ROLE
+            else _require_regular_file_fingerprint(
+                payload_path,
+                missing_code="VERSION_RESTORE_HISTORICAL_PAYLOAD_MISSING",
+                invalid_code="VERSION_RESTORE_HISTORICAL_PAYLOAD_TYPE_INVALID",
+                read_code="VERSION_RESTORE_HISTORICAL_PAYLOAD_READ_FAILED",
+            )
         )
         if observed != expected:
             raise VersionRestoreFilesystemError(
@@ -790,16 +822,35 @@ def _require_rollback_lifecycle_permit_binding(
         )
 
 
-def _version_object_paths(*, root: Path, version_object_id: str) -> tuple[Path, Path]:
-    if _OBJECT_ID_PATTERN.fullmatch(version_object_id) is None:
+def _retained_object_paths(
+    *,
+    root: Path,
+    object_id: str,
+    object_role: str,
+) -> tuple[Path, Path]:
+    if _OBJECT_ID_PATTERN.fullmatch(object_id) is None:
         raise VersionRestoreFilesystemError(
             "VERSION_RESTORE_HISTORICAL_OBJECT_ID_INVALID",
             "Review the cataloged retained-version identifier before restoring.",
         )
-    object_root = root / ".mediasync" / "objects" / "versions"
+    if object_role not in {OLD_TARGET_VERSION_ROLE, EMPTY_DIRECTORY_QUARANTINE_ROLE}:
+        raise VersionRestoreFilesystemError(
+            "VERSION_RESTORE_HISTORICAL_OBJECT_ROLE_INVALID",
+            "Review the cataloged retained recovery-object role before restoring.",
+        )
+    object_root = (
+        root
+        / ".mediasync"
+        / "objects"
+        / (
+            "quarantine"
+            if object_role == EMPTY_DIRECTORY_QUARANTINE_ROLE
+            else "versions"
+        )
+    )
     return (
-        object_root / f"{version_object_id}.payload",
-        object_root / f"{version_object_id}.manifest.json",
+        object_root / f"{object_id}.payload",
+        object_root / f"{object_id}.manifest.json",
     )
 
 
@@ -833,6 +884,7 @@ def _load_bound_version_manifest(
     )
     if (
         manifest.version_object_id != record.version_object_id
+        or manifest.object_role != record.object_role
         or manifest.operation_id != record.operation_id
         or manifest.run_id != record.run_id
         or manifest.run_target_id != record.run_target_id
@@ -848,11 +900,7 @@ def _load_bound_version_manifest(
         or manifest.retention_policy != record.retention_policy
         or manifest.retention_until_utc != record.retention_until_utc
         or manifest.manifest_hash != record.manifest_hash
-        or {
-            "byte_count": manifest.fingerprint_byte_count,
-            "content_hash": manifest.fingerprint_content_hash,
-        }
-        != expected_fingerprint
+        or manifest.fingerprint_json != _fingerprint_json(expected_fingerprint)
     ):
         raise VersionRestoreFilesystemError(
             "VERSION_RESTORE_HISTORICAL_MANIFEST_BINDING_MISMATCH",
@@ -1029,6 +1077,117 @@ def _replace_with_verified_payload(
         temp_path.unlink(missing_ok=True)
 
 
+def _apply_empty_directory_restore(
+    *,
+    final_path: Path,
+    expected_current: dict[str, object],
+) -> None:
+    if final_path.is_symlink():
+        raise VersionRestoreFilesystemError(
+            "VERSION_RESTORE_CURRENT_FINAL_TYPE_INVALID",
+            "Review the final path before restoring the quarantined directory.",
+        )
+    if final_path.is_dir():
+        _require_empty_directory_fingerprint(
+            final_path,
+            missing_code="VERSION_RESTORE_FINAL_MISSING_AFTER_APPLY",
+            invalid_code="VERSION_RESTORE_FINAL_TYPE_INVALID_AFTER_APPLY",
+            not_empty_code="VERSION_RESTORE_FINAL_DIRECTORY_NOT_EMPTY",
+        )
+        return
+    if final_path.exists():
+        observed = _require_regular_file_fingerprint(
+            final_path,
+            missing_code="VERSION_RESTORE_CURRENT_FINAL_MISSING",
+            invalid_code="VERSION_RESTORE_CURRENT_FINAL_TYPE_INVALID",
+            read_code="VERSION_RESTORE_CURRENT_FINAL_READ_FAILED",
+        )
+        if observed != expected_current:
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_CURRENT_FINAL_CHANGED_BEFORE_APPLY",
+                "Review the final file and rollback object before resuming restore.",
+            )
+        try:
+            final_path.unlink()
+        except OSError as exc:
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_DIRECTORY_REPLACE_REMOVE_FAILED",
+                "Retry from the restore journal after checking final-path permissions.",
+                retryable=True,
+            ) from exc
+    try:
+        final_path.mkdir()
+    except FileExistsError as exc:
+        raise VersionRestoreFilesystemError(
+            "VERSION_RESTORE_DIRECTORY_TARGET_REAPPEARED",
+            "Review the final path before retrying the quarantined-directory restore.",
+        ) from exc
+    except OSError as exc:
+        raise VersionRestoreFilesystemError(
+            "VERSION_RESTORE_DIRECTORY_CREATE_FAILED",
+            "Retry from the restore journal after checking final-path permissions.",
+            retryable=True,
+        ) from exc
+
+
+def _replace_empty_directory_with_verified_file(
+    *,
+    source: Path,
+    final_path: Path,
+    expected: dict[str, object],
+) -> None:
+    if final_path.is_symlink():
+        raise VersionRestoreFilesystemError(
+            "VERSION_RESTORE_UNDO_FINAL_TYPE_INVALID",
+            "Review the final path before undoing the directory restore.",
+        )
+    if final_path.is_dir():
+        _require_empty_directory_fingerprint(
+            final_path,
+            missing_code="VERSION_RESTORE_UNDO_FINAL_MISSING",
+            invalid_code="VERSION_RESTORE_UNDO_FINAL_TYPE_INVALID",
+            not_empty_code="VERSION_RESTORE_UNDO_FINAL_DIRECTORY_NOT_EMPTY",
+        )
+        try:
+            final_path.rmdir()
+        except OSError as exc:
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_UNDO_DIRECTORY_REMOVE_FAILED",
+                "Retry from the undo journal after checking final-path permissions.",
+                retryable=True,
+            ) from exc
+    elif final_path.exists():
+        raise VersionRestoreFilesystemError(
+            "VERSION_RESTORE_UNDO_FINAL_CHANGED_BEFORE_APPLY",
+            "Keep the rollback object and review the changed final path.",
+        )
+    temp_path = final_path.with_name(
+        f".{final_path.name}.{uuid4().hex}.mediasync-quarantine-undo.tmp"
+    )
+    try:
+        _copy_file_durable(source=source, destination=temp_path)
+        if _fingerprint_file(temp_path) != expected:
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_UNDO_TEMP_FINGERPRINT_MISMATCH",
+                "Keep the rollback object and review its payload.",
+            )
+        try:
+            os.link(temp_path, final_path)
+        except FileExistsError as exc:
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_UNDO_TARGET_REAPPEARED",
+                "Review the final path before retrying undo.",
+            ) from exc
+        except OSError as exc:
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_UNDO_NO_OVERWRITE_FAILED",
+                "Retry from the undo journal after checking endpoint support.",
+                retryable=True,
+            ) from exc
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def _copy_file_durable(*, source: Path, destination: Path) -> None:
     try:
         with source.open("rb") as source_handle, destination.open("xb") as target_handle:
@@ -1042,6 +1201,85 @@ def _copy_file_durable(*, source: Path, destination: Path) -> None:
             "Retry after checking source and destination access.",
             retryable=True,
         ) from exc
+
+
+def _current_final_fingerprint(
+    path: Path,
+    *,
+    allow_missing: bool = False,
+) -> dict[str, object] | None:
+    if not path.exists() and not path.is_symlink():
+        if allow_missing:
+            return None
+        raise VersionRestoreFilesystemError(
+            "VERSION_RESTORE_CURRENT_FINAL_MISSING",
+            "Review the restore paths before retrying.",
+        )
+    if path.is_dir() and not path.is_symlink():
+        return _require_empty_directory_fingerprint(
+            path,
+            missing_code="VERSION_RESTORE_CURRENT_FINAL_MISSING",
+            invalid_code="VERSION_RESTORE_CURRENT_FINAL_TYPE_INVALID",
+            not_empty_code="VERSION_RESTORE_CURRENT_FINAL_DIRECTORY_NOT_EMPTY",
+        )
+    return _require_regular_file_fingerprint(
+        path,
+        missing_code="VERSION_RESTORE_CURRENT_FINAL_MISSING",
+        invalid_code="VERSION_RESTORE_CURRENT_FINAL_TYPE_INVALID",
+        read_code="VERSION_RESTORE_CURRENT_FINAL_READ_FAILED",
+    )
+
+
+def _restored_final_fingerprint(
+    *,
+    final_path: Path,
+    object_role: str,
+) -> dict[str, object]:
+    if object_role == EMPTY_DIRECTORY_QUARANTINE_ROLE:
+        return _require_empty_directory_fingerprint(
+            final_path,
+            missing_code="VERSION_RESTORE_FINAL_MISSING_AFTER_APPLY",
+            invalid_code="VERSION_RESTORE_FINAL_TYPE_INVALID_AFTER_APPLY",
+            not_empty_code="VERSION_RESTORE_FINAL_DIRECTORY_NOT_EMPTY",
+        )
+    return _require_regular_file_fingerprint(
+        final_path,
+        missing_code="VERSION_RESTORE_FINAL_MISSING_AFTER_APPLY",
+        invalid_code="VERSION_RESTORE_FINAL_TYPE_INVALID_AFTER_APPLY",
+        read_code="VERSION_RESTORE_FINAL_READ_FAILED_AFTER_APPLY",
+    )
+
+
+def _require_empty_directory_fingerprint(
+    path: Path,
+    *,
+    missing_code: str,
+    invalid_code: str,
+    not_empty_code: str,
+) -> dict[str, object]:
+    if not path.exists():
+        raise VersionRestoreFilesystemError(
+            missing_code,
+            "Review the restore paths before retrying.",
+        )
+    if path.is_symlink() or not path.is_dir():
+        raise VersionRestoreFilesystemError(
+            invalid_code,
+            "Review the restore paths before retrying.",
+        )
+    try:
+        if next(path.iterdir(), None) is not None:
+            raise VersionRestoreFilesystemError(
+                not_empty_code,
+                "Do not replace a directory whose contents changed.",
+            )
+    except OSError as exc:
+        raise VersionRestoreFilesystemError(
+            "VERSION_RESTORE_DIRECTORY_READ_FAILED",
+            "Retry after checking directory access.",
+            retryable=True,
+        ) from exc
+    return {"entry_count": 0, "kind": "DIRECTORY_EMPTY"}
 
 
 def _require_regular_file_fingerprint(

@@ -65,9 +65,14 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         )
         if operation is None:
             return "VERSION_RETENTION_RECOVERY_REFERENCE_MISSING"
+        retained_object_id = (
+            operation.quarantine_object_id
+            if record.object_role == "EMPTY_DIRECTORY_QUARANTINE"
+            else operation.version_object_id
+        )
         if (
             operation.run_target_id != record.run_target_id
-            or operation.version_object_id != record.version_object_id
+            or retained_object_id != record.version_object_id
             or operation.version_manifest_hash != record.manifest_hash
             or operation.job_id != record.job_id
             or operation.job_revision_id != record.job_revision_id

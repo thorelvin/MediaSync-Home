@@ -614,22 +614,26 @@ class ShellText:
     @property
     def previous_versions(self) -> str:
         return (
-            "Previous versions"
+            "Recovery items"
             if self.language_tooltip_prefix == "Language"
-            else "Tidligere versjoner"
+            else "Gjenopprettbare elementer"
         )
 
     @property
     def previous_versions_empty(self) -> str:
         if self.language_tooltip_prefix == "Language":
-            return "This backup run did not preserve an earlier version."
-        return "Denne backupkjøringen bevarte ingen tidligere versjon."
+            return "This backup run did not preserve a recovery item."
+        return "Denne backupkjøringen bevarte ingen gjenopprettbare elementer."
 
     @property
     def previous_versions_unavailable(self) -> str:
         if self.language_tooltip_prefix == "Language":
-            return "Previous versions are not available."
-        return "Tidligere versjoner er ikke tilgjengelige."
+            return "Recovery items are not available."
+        return "Gjenopprettbare elementer er ikke tilgjengelige."
+
+    @property
+    def empty_folder(self) -> str:
+        return "Empty folder" if self.language_tooltip_prefix == "Language" else "Tom mappe"
 
     @property
     def version_saved(self) -> str:

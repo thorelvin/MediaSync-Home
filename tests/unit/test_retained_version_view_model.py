@@ -19,6 +19,7 @@ def test_retained_version_view_model_parses_protection_state() -> None:
                     "versions": [
                         {
                             "version_object_id": "version-a",
+                            "object_role": "EMPTY_DIRECTORY_QUARANTINE",
                             "run_id": "run-a",
                             "operation_id": "operation-a",
                             "job_id": "job-a",
@@ -52,6 +53,7 @@ def test_retained_version_view_model_parses_protection_state() -> None:
     assert state.run_id == "run-a"
     assert state.read_model_available is True
     assert state.versions[0].version_object_id == "version-a"
+    assert state.versions[0].object_role == "EMPTY_DIRECTORY_QUARANTINE"
     assert state.versions[0].protected_for_restore is True
     assert state.versions[0].restore_id == "restore-a"
     assert state.versions[0].restore_state == "HISTORICAL_APPLIED"

@@ -361,7 +361,13 @@ def canonical_fingerprint_json(raw: str) -> str:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise VersionRestoreError("VERSION_RESTORE_FINGERPRINT_INVALID") from exc
-    if not isinstance(value, dict) or set(value) != {"byte_count", "content_hash"}:
+    if not isinstance(value, dict):
+        raise VersionRestoreError("VERSION_RESTORE_FINGERPRINT_INVALID")
+    if set(value) == {"entry_count", "kind"}:
+        if value.get("entry_count") != 0 or value.get("kind") != "DIRECTORY_EMPTY":
+            raise VersionRestoreError("VERSION_RESTORE_FINGERPRINT_INVALID")
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    if set(value) != {"byte_count", "content_hash"}:
         raise VersionRestoreError("VERSION_RESTORE_FINGERPRINT_INVALID")
     byte_count = value.get("byte_count")
     content_hash = value.get("content_hash")

@@ -989,7 +989,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.recovery_connection is not None
         assert runtime.installation_state is not None
         assert runtime.installation_state.product_channel == "local-preview"
-        assert runtime.installation_state.catalog_schema_version == 47
+        assert runtime.installation_state.catalog_schema_version == 48
         assert runtime.installation_state.recovery_schema_version == 11
         assert runtime.installation_state.ipc_protocol_major == 1
         assert runtime.snapshot_materialization_refresh is not None
@@ -1039,7 +1039,7 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         )
         assert (
             current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG)
-            == 47
+            == 48
         )
         assert (
             current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY)
