@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
 
+from mediasync_home.application.endpoint_capabilities import EndpointCapabilityEvidence
+
 
 class WritableEndpointRegistrationState(str, Enum):
     PREPARED = "PREPARED"
@@ -90,6 +92,14 @@ class PreparedWritableEndpoint:
 
 
 @dataclass(frozen=True, slots=True)
+class AppliedWritableEndpointCapabilities:
+    target_ordinal: int
+    endpoint_id: str
+    resulting_endpoint_revision_id: str
+    evidence: EndpointCapabilityEvidence
+
+
+@dataclass(frozen=True, slots=True)
 class WritableEndpointRegistrationIntent:
     intent_id: str
     job_id: str
@@ -165,7 +175,7 @@ class WritableEndpointControlAreaProvisioner(Protocol):
         prepared: PreparedWritableEndpoint,
         *,
         intent_id: str,
-    ) -> None: ...
+    ) -> EndpointCapabilityEvidence: ...
 
 
 class WritableEndpointRegistrationStore(Protocol):
@@ -192,6 +202,7 @@ class WritableEndpointRegistrationStore(Protocol):
         self,
         *,
         intent_id: str,
+        applied_capabilities: tuple[AppliedWritableEndpointCapabilities, ...],
         updated_utc: str,
     ) -> WritableEndpointRegistrationIntent: ...
 
@@ -327,13 +338,25 @@ class WritableEndpointRegistrationCoordinator:
             return _report(intent, replay=replay)
         try:
             if intent.state is WritableEndpointRegistrationState.PREPARED:
+                applied_capabilities: list[AppliedWritableEndpointCapabilities] = []
                 for prepared in intent.prepared_targets:
-                    self._provisioner.apply_prepared_control_area(
+                    evidence = self._provisioner.apply_prepared_control_area(
                         prepared,
                         intent_id=intent.intent_id,
                     )
+                    applied_capabilities.append(
+                        AppliedWritableEndpointCapabilities(
+                            target_ordinal=prepared.target_ordinal,
+                            endpoint_id=prepared.endpoint_id,
+                            resulting_endpoint_revision_id=(
+                                prepared.resulting_endpoint_revision_id
+                            ),
+                            evidence=evidence,
+                        )
+                    )
                 intent = self._store.mark_registration_filesystem_applied(
                     intent_id=intent.intent_id,
+                    applied_capabilities=tuple(applied_capabilities),
                     updated_utc=observed_utc,
                 )
             intent = self._store.commit_registration_intent(

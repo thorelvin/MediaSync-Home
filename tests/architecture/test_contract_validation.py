@@ -170,6 +170,26 @@ def test_database_contract_rejects_ctime_birthtime_fallback() -> None:
         validate_contracts.validate_database_contract(document)
 
 
+def test_database_contract_rejects_unbound_endpoint_capability_evidence() -> None:
+    yaml = _yaml_loader()
+    document = validate_contracts.load_yaml(
+        validate_contracts.ROOT / "schema/database-contract.yaml",
+        yaml,
+    )
+    document = copy.deepcopy(document)
+    invariant = _database_invariant(
+        document,
+        "END-001_ENDPOINT_CAPABILITY_EVIDENCE",
+    )
+    invariant["plan_requires_exact_hash"] = False
+
+    with pytest.raises(
+        validate_contracts.ContractValidationError,
+        match="END-001 endpoint capability contract drifted",
+    ):
+        validate_contracts.validate_database_contract(document)
+
+
 def test_database_contract_rejects_unverified_retained_version_delete() -> None:
     yaml = _yaml_loader()
     document = validate_contracts.load_yaml(

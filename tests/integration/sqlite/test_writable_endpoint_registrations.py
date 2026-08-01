@@ -43,6 +43,10 @@ from mediasync_home.application.writable_endpoint_registration import (
 )
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.command_receipts import CommandReceiptState
+from mediasync_home.application.endpoint_capabilities import (
+    EndpointCapabilityEvidence,
+    EndpointCapabilityProbeScope,
+)
 from mediasync_home.application.runtime_status import startup_status
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
@@ -250,6 +254,19 @@ def test_registration_preserves_ready_binding_while_registering_new_target(
             FROM writable_endpoint_registrations
             """
         ).fetchone() == (2, INTENT_ID, "2026-07-31T11:01:00Z")
+        capability_row = connection.execute(
+            """
+            SELECT write_capabilities_json, write_capabilities_hash
+            FROM writable_endpoint_registrations
+            """
+        ).fetchone()
+        assert capability_row is not None
+        EndpointCapabilityEvidence(
+            profile_json=str(capability_row[0]),
+            capabilities_hash=str(capability_row[1]),
+        ).validated_profile(
+            expected_scope=EndpointCapabilityProbeScope.CONTROLLED_WRITABLE
+        )
 
         refresher.refresh_endpoint_classifications(observed_utc="2026-07-31T11:03:00Z")
         assert connection.execute(

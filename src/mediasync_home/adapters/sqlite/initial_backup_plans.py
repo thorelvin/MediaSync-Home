@@ -20,6 +20,11 @@ from mediasync_home.application.hash_evidence import (
     CurrentReadHashEvidence,
     HashEvidenceKind,
 )
+from mediasync_home.application.endpoint_capabilities import (
+    EndpointCapabilityEvidence,
+    EndpointCapabilityEvidenceError,
+    EndpointCapabilityProbeScope,
+)
 from mediasync_home.application.plans import PlanEndpointRole
 from mediasync_home.application.snapshots import SnapshotFileEntry
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
@@ -319,6 +324,10 @@ class SqliteInitialBackupPlanMaterializer:
                 observations.classification_state,
                 observations.marker_json,
                 registrations.marker_checksum,
+                observations.read_capabilities_json,
+                observations.read_capabilities_hash,
+                registrations.write_capabilities_json,
+                registrations.write_capabilities_hash,
                 (
                     NOT EXISTS (
                         SELECT 1
@@ -405,8 +414,8 @@ class SqliteInitialBackupPlanMaterializer:
         root_case_context_hash = str(row[14])
         root_case_mode = str(row[15])
         destructive_evidence = DestructivePlanningEvidence(
-            scan_coverage_complete=bool(row[20]),
-            snapshot_identity_matches_endpoint_revision=bool(row[21]),
+            scan_coverage_complete=bool(row[24]),
+            snapshot_identity_matches_endpoint_revision=bool(row[25]),
         )
         if not bool(row[12]) or not bool(row[13]) or len(snapshot_checksum) != 64:
             raise InitialBackupPlanningError(
@@ -422,11 +431,15 @@ class SqliteInitialBackupPlanMaterializer:
                     "INITIAL_BACKUP_PLAN_SOURCE_NOT_READY",
                     "Refresh source endpoint classification before planning.",
                 )
+            measured_capabilities_hash = _validated_capability_hash(
+                row[20],
+                row[21],
+                expected_scope=EndpointCapabilityProbeScope.READ_ONLY,
+            )
             capabilities_hash = endpoint_capabilities_hash(
                 {
-                    "mode": "LOCAL_READ_ONLY_SNAPSHOT",
+                    "endpoint_capabilities_hash": measured_capabilities_hash,
                     "snapshot_checksum": snapshot_checksum,
-                    "snapshot_schema_version": 1,
                     "destructive_scan_coverage_complete": (
                         destructive_evidence.scan_coverage_complete
                     ),
@@ -476,14 +489,16 @@ class SqliteInitialBackupPlanMaterializer:
                 "INITIAL_BACKUP_PLAN_TARGET_NOT_WRITABLE",
                 "Complete target registration and classification before planning.",
             )
+        measured_capabilities_hash = _validated_capability_hash(
+            row[22],
+            row[23],
+            expected_scope=EndpointCapabilityProbeScope.CONTROLLED_WRITABLE,
+        )
         capabilities_hash = endpoint_capabilities_hash(
             {
                 "control_schema_version": control_schema_version,
-                "directory_create": "NO_OVERWRITE_JOURNALED_REQUIRED",
-                "local_endpoint_lock": "WIN32_HANDLE",
+                "endpoint_capabilities_hash": measured_capabilities_hash,
                 "marker_checksum": marker_checksum,
-                "mode": "LOCAL_WRITABLE_PREVIEW",
-                "replace": "VERSIONED_COMPARE_AND_SWAP",
                 "snapshot_checksum": snapshot_checksum,
                 "destructive_scan_coverage_complete": (
                     destructive_evidence.scan_coverage_complete
@@ -806,6 +821,31 @@ def _catalog_int(value: object, *, minimum: int) -> int:
             "Refresh catalog endpoint evidence before planning changes.",
         )
     return value
+
+
+def _validated_capability_hash(
+    profile_json: object,
+    capabilities_hash: object,
+    *,
+    expected_scope: EndpointCapabilityProbeScope,
+) -> str:
+    if not isinstance(profile_json, str) or not isinstance(capabilities_hash, str):
+        raise InitialBackupPlanningError(
+            "INITIAL_BACKUP_PLAN_ENDPOINT_CAPABILITIES_MISSING",
+            "Refresh endpoint capability evidence before planning changes.",
+        )
+    try:
+        evidence = EndpointCapabilityEvidence(
+            profile_json=profile_json,
+            capabilities_hash=capabilities_hash,
+        )
+        evidence.validated_profile(expected_scope=expected_scope)
+    except EndpointCapabilityEvidenceError as exc:
+        raise InitialBackupPlanningError(
+            "INITIAL_BACKUP_PLAN_ENDPOINT_CAPABILITIES_INVALID",
+            "Refresh endpoint capability evidence before planning changes.",
+        ) from exc
+    return capabilities_hash
 
 
 def _materialization_id(

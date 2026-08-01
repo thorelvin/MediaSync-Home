@@ -20,6 +20,9 @@ from mediasync_home.adapters.local_endpoint_classifier import (
     endpoint_marker_checksum,
     local_root_identity_hash,
 )
+from mediasync_home.adapters.endpoint_capabilities import (
+    LocalWindowsEndpointCapabilitiesProbe,
+)
 from mediasync_home.adapters.reparse_guard import (
     LocalFilesystemReparsePathProbe,
     ReparseGuardError,
@@ -29,6 +32,11 @@ from mediasync_home.adapters.sqlite.endpoint_roots import local_path_from_file_u
 from mediasync_home.application.endpoint_classification import (
     EndpointControlAreaClassification,
     EndpointControlAreaState,
+)
+from mediasync_home.application.endpoint_capabilities import (
+    EndpointCapabilitiesProbe,
+    EndpointCapabilityEvidence,
+    EndpointCapabilityProbeError,
 )
 from mediasync_home.application.writable_endpoint_registration import (
     PreparedWritableEndpoint,
@@ -48,9 +56,13 @@ class LocalWritableEndpointControlAreaProvisioner:
         *,
         classifier: LocalEndpointControlAreaClassifier | None = None,
         probe: ReparsePathProbe | None = None,
+        capabilities_probe: EndpointCapabilitiesProbe | None = None,
     ) -> None:
         self._probe = probe or LocalFilesystemReparsePathProbe()
         self._classifier = classifier or LocalEndpointControlAreaClassifier(probe=self._probe)
+        self._capabilities_probe = (
+            capabilities_probe or LocalWindowsEndpointCapabilitiesProbe()
+        )
 
     def prepare_new_control_area(
         self,
@@ -144,7 +156,7 @@ class LocalWritableEndpointControlAreaProvisioner:
         prepared: PreparedWritableEndpoint,
         *,
         intent_id: str,
-    ) -> None:
+    ) -> EndpointCapabilityEvidence:
         _require_uuid(intent_id, "WRITABLE_ENDPOINT_REGISTRATION_INTENT_ID_INVALID")
         root = _local_root(prepared.root_uri)
         self._require_matching_root_identity(root, prepared)
@@ -156,8 +168,7 @@ class LocalWritableEndpointControlAreaProvisioner:
             self._require_matching_classification(classification, prepared)
             if staging_control.exists():
                 self._remove_exact_staging(staging_control, prepared)
-            self._writable_probe(final_control, prepared, intent_id=intent_id)
-            return
+            return self._writable_probe(final_control, prepared, intent_id=intent_id)
         if classification.state is not EndpointControlAreaState.ABSENT:
             raise _registration_error(
                 _classification_registration_code(classification.state),
@@ -184,8 +195,9 @@ class LocalWritableEndpointControlAreaProvisioner:
 
         classification = self._classify(root, prepared.owner_installation_id)
         self._require_matching_classification(classification, prepared)
-        self._writable_probe(final_control, prepared, intent_id=intent_id)
+        evidence = self._writable_probe(final_control, prepared, intent_id=intent_id)
         self._require_matching_root_identity(root, prepared)
+        return evidence
 
     def _materialize_staging(
         self,
@@ -297,25 +309,20 @@ class LocalWritableEndpointControlAreaProvisioner:
         prepared: PreparedWritableEndpoint,
         *,
         intent_id: str,
-    ) -> None:
+    ) -> EndpointCapabilityEvidence:
         installation = _installation_namespace(prepared.owner_installation_id)
         probes = control / "installations" / installation / "probes"
         self._require_ordinary_directory(probes)
-        probe_path = probes / f"register-{intent_id}-{prepared.target_ordinal}.probe"
-        expected = f"{prepared.probe_token}\n".encode()
         try:
-            if probe_path.exists():
-                self._require_exact_file(probe_path, expected)
-            else:
-                self._write_new_file(probe_path, expected)
-            self._require_exact_file(probe_path, expected)
-            probe_path.unlink()
-        except WritableEndpointRegistrationError:
-            raise
-        except OSError as exc:
+            return self._capabilities_probe.probe_controlled_writable(
+                control.parent,
+                probe_directory=probes,
+                probe_token=f"{intent_id}-{prepared.target_ordinal}",
+            )
+        except EndpointCapabilityProbeError as exc:
             raise _registration_error(
-                "WRITABLE_ENDPOINT_PROBE_FAILED",
-                "Restore read, write, flush and delete access to the target control area.",
+                exc.validation_code,
+                exc.next_action,
                 retryable=True,
             ) from exc
 

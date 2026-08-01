@@ -9,6 +9,9 @@ from tests.support.sqlite_catalog import insert_default_filter_set_version
 from mediasync_home.adapters.local_snapshot_scanner import (
     LocalFilesystemSnapshotScanner,
 )
+from mediasync_home.adapters.endpoint_capabilities import (
+    LocalWindowsEndpointCapabilitiesProbe,
+)
 from mediasync_home.adapters.sqlite.connection_policy import (
     apply_sqlite_connection_policy,
     catalog_critical_writer_policy,
@@ -395,6 +398,7 @@ def _insert_endpoint(
     ordinal: int,
     registration_state: str,
 ) -> None:
+    capability_evidence = LocalWindowsEndpointCapabilitiesProbe().probe_read_only(root)
     connection.execute("INSERT INTO endpoints (id) VALUES (?)", (endpoint_id,))
     connection.execute(
         """
@@ -449,9 +453,19 @@ def _insert_endpoint(
             classification_state,
             reason_codes_json,
             marker_json,
+            read_capabilities_json,
+            read_capabilities_hash,
             observed_utc
         )
-        VALUES (?, ?, 'installation-a', 'CLASSIFIED', 'ABSENT', '[]', NULL, ?)
+        VALUES (
+            ?, ?, 'installation-a', 'CLASSIFIED', 'ABSENT', '[]', NULL, ?, ?, ?
+        )
         """,
-        (endpoint_id, endpoint_revision_id, "2026-07-30T21:00:00Z"),
+        (
+            endpoint_id,
+            endpoint_revision_id,
+            capability_evidence.profile_json,
+            capability_evidence.capabilities_hash,
+            "2026-07-30T21:00:00Z",
+        ),
     )

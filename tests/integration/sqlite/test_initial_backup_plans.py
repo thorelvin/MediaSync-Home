@@ -236,6 +236,45 @@ def test_initial_plan_materializer_seals_exact_registered_snapshots_and_replays(
             )
 
 
+def test_initial_plan_materializer_blocks_tampered_capability_hash(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    (source / "Readme.txt").write_text("source", encoding="utf-8")
+
+    with sqlite3.connect(database) as connection:
+        _prepare_registered_snapshots(
+            connection,
+            database=database,
+            source=source,
+            target=target,
+        )
+        connection.execute(
+            """
+            UPDATE endpoint_classification_observations
+            SET read_capabilities_hash = ?
+            WHERE endpoint_id = ?
+            """,
+            ("f" * 64, SOURCE_ENDPOINT_ID),
+        )
+        connection.commit()
+
+        report = SqliteInitialBackupPlanMaterializer(
+            connection,
+            plans=SqlitePlanStore(connection),
+            id_factory=_FixedPlanIds(),
+        ).refresh_initial_backup_plans(observed_utc="2026-07-31T15:03:00Z")
+
+        assert report.blocked_job_count == 1
+        assert report.results[0].reason_code == (
+            "INITIAL_BACKUP_PLAN_ENDPOINT_CAPABILITIES_INVALID"
+        )
+
+
 def test_initial_plan_materializer_records_immutable_no_changes(
     tmp_path: Path,
 ) -> None:

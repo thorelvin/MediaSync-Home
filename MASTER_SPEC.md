@@ -4500,10 +4500,20 @@ endpointrevisjonen og registreringsintenten.
 - `root_identity_hash TEXT NOT NULL`
 - `marker_checksum_algorithm TEXT NOT NULL`
 - `marker_checksum TEXT NOT NULL`
+- `write_capabilities_json TEXT NOT NULL` — canonical schema-1 controlled-write profile
+- `write_capabilities_hash TEXT NOT NULL` — SHA-256 over exact canonical profile JSON
 - `probe_completed_utc TEXT NOT NULL`
 - `created_utc TEXT NOT NULL`
 - primærnøkkel og sammensatt FK `(endpoint_id, endpoint_revision_id)`
 - unik `(intent_id, endpoint_id)`
+
+Catalog migration 50 adds read-only capability JSON/hash to
+`endpoint_classification_observations`, an append-only
+`writable_endpoint_capability_observations` handoff between filesystem apply and
+catalog commit, and the exact write profile/hash on
+`writable_endpoint_registrations`. A classified endpoint or newly committed
+writable registration cannot omit its profile. Plan materialization validates
+canonical JSON, SHA-256 and probe scope before sealing.
 
 0B-implementasjonsnote: Catalog migration 30 oppretter begge tabellene og låser
 intentidentitet, state-overganger og registreringsbevis med database-triggere. Etter

@@ -38,7 +38,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 49
+        assert current_schema_version(connection, plan.store) == 50
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -58,6 +58,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "initial_backup_plan_materializations",
             "writable_endpoint_registration_intents",
             "writable_endpoint_registrations",
+            "writable_endpoint_capability_observations",
             "controlled_endpoint_takeover_intents",
             "controlled_endpoint_takeovers",
             "command_receipts",
@@ -94,7 +95,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 49
+        assert _row_count(connection, "schema_migrations") == 50
         assert {
             "idx_initial_backup_materializations_history",
             "idx_initial_backup_materializations_job_history",
@@ -109,6 +110,14 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
         assert _column_names(connection, "endpoint_revisions") >= {"generation"}
         assert _column_names(connection, "snapshots") >= {"endpoint_generation"}
         assert _column_names(connection, "file_entries") >= {"birthtime_ns"}
+        assert _column_names(connection, "endpoint_classification_observations") >= {
+            "read_capabilities_json",
+            "read_capabilities_hash",
+        }
+        assert _column_names(connection, "writable_endpoint_registrations") >= {
+            "write_capabilities_json",
+            "write_capabilities_hash",
+        }
         assert _column_names(connection, "plan_endpoints") >= {"endpoint_generation"}
         assert _column_names(connection, "plan_operation_seal_details") >= {
             "target_endpoint_id"
@@ -158,6 +167,11 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "trg_writable_endpoint_registration_intents_no_delete",
             "trg_writable_endpoint_registrations_no_update",
             "trg_writable_endpoint_registrations_no_delete",
+            "trg_classified_endpoint_requires_read_capabilities_insert",
+            "trg_classified_endpoint_requires_read_capabilities_update",
+            "trg_writable_registration_requires_capabilities",
+            "trg_writable_endpoint_capability_observations_no_update",
+            "trg_writable_endpoint_capability_observations_no_delete",
             "trg_initial_backup_plan_materializations_no_update",
             "trg_initial_backup_plan_materializations_no_delete",
             "trg_run_target_endpoint_wait_events_retry_timing_required",
@@ -1109,7 +1123,7 @@ def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> N
                 name,
                 migration_checksum
             )
-                    VALUES ('catalog', 50, 'future_migration', ?)
+                    VALUES ('catalog', 51, 'future_migration', ?)
             """,
             ("f" * 64,),
         )
@@ -1222,8 +1236,8 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
         preflight = inspect_sqlite_migration_state(connection, plan)
 
         assert preflight.initialized
-        assert preflight.current_version == 49
-        assert preflight.target_version == 49
+        assert preflight.current_version == 50
+        assert preflight.target_version == 50
         assert preflight.checksum_backfill_required
         assert "migration_checksum" not in _column_names(
             connection,

@@ -5,11 +5,16 @@ import sqlite3
 from typing import Any
 
 from mediasync_home.application.writable_endpoint_registration import (
+    AppliedWritableEndpointCapabilities,
     PreparedWritableEndpoint,
     WritableEndpointRegistrationCandidate,
     WritableEndpointRegistrationError,
     WritableEndpointRegistrationIntent,
     WritableEndpointRegistrationState,
+)
+from mediasync_home.application.endpoint_capabilities import (
+    EndpointCapabilityEvidenceError,
+    EndpointCapabilityProbeScope,
 )
 
 
@@ -196,17 +201,98 @@ class SqliteWritableEndpointRegistrationStore:
         self,
         *,
         intent_id: str,
+        applied_capabilities: tuple[AppliedWritableEndpointCapabilities, ...],
         updated_utc: str,
     ) -> WritableEndpointRegistrationIntent:
-        return self._transition(
-            intent_id=intent_id,
-            expected_states=(
-                WritableEndpointRegistrationState.PREPARED,
-                WritableEndpointRegistrationState.FILESYSTEM_APPLIED,
-            ),
-            target_state=WritableEndpointRegistrationState.FILESYSTEM_APPLIED,
-            updated_utc=updated_utc,
-        )
+        intent = self._load_intent_by_id(intent_id)
+        if intent.state is WritableEndpointRegistrationState.FILESYSTEM_APPLIED:
+            return intent
+        if intent.state is not WritableEndpointRegistrationState.PREPARED:
+            raise _registration_error(
+                "WRITABLE_ENDPOINT_REGISTRATION_STATE_CHANGED",
+                "Refresh target registration status before retrying.",
+                retryable=True,
+            )
+        expected = {
+            (
+                target.target_ordinal,
+                target.endpoint_id,
+                target.resulting_endpoint_revision_id,
+            )
+            for target in intent.prepared_targets
+        }
+        observed = {
+            (
+                item.target_ordinal,
+                item.endpoint_id,
+                item.resulting_endpoint_revision_id,
+            )
+            for item in applied_capabilities
+        }
+        if expected != observed or len(observed) != len(applied_capabilities):
+            raise _registration_error(
+                "WRITABLE_ENDPOINT_CAPABILITY_EVIDENCE_INCOMPLETE",
+                "Retry the controlled capability probe for every target.",
+                retryable=True,
+            )
+        try:
+            for item in applied_capabilities:
+                item.evidence.validated_profile(
+                    expected_scope=EndpointCapabilityProbeScope.CONTROLLED_WRITABLE
+                )
+            self._require_idle()
+            self._connection.execute("BEGIN IMMEDIATE")
+            for item in applied_capabilities:
+                self._connection.execute(
+                    """
+                    INSERT INTO writable_endpoint_capability_observations (
+                        intent_id,
+                        endpoint_id,
+                        endpoint_revision_id,
+                        capabilities_json,
+                        capabilities_hash,
+                        observed_utc
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        intent_id,
+                        item.endpoint_id,
+                        item.resulting_endpoint_revision_id,
+                        item.evidence.profile_json,
+                        item.evidence.capabilities_hash,
+                        updated_utc,
+                    ),
+                )
+            cursor = self._connection.execute(
+                """
+                UPDATE writable_endpoint_registration_intents
+                SET state = 'FILESYSTEM_APPLIED', updated_utc = ?, row_version = row_version + 1
+                WHERE intent_id = ? AND state = 'PREPARED'
+                """,
+                (updated_utc, intent_id),
+            )
+            if cursor.rowcount != 1:
+                raise _registration_error(
+                    "WRITABLE_ENDPOINT_REGISTRATION_STATE_CHANGED",
+                    "Refresh target registration status before retrying.",
+                    retryable=True,
+                )
+            self._connection.execute("COMMIT")
+        except EndpointCapabilityEvidenceError as exc:
+            self._rollback()
+            raise _registration_error(
+                str(exc),
+                "Retry the controlled target capability probe.",
+                retryable=True,
+            ) from exc
+        except WritableEndpointRegistrationError:
+            self._rollback()
+            raise
+        except sqlite3.Error as exc:
+            self._rollback()
+            raise _persistence_error() from exc
+        return self._load_intent_by_id(intent_id)
 
     def note_registration_failure(
         self,
@@ -545,10 +631,19 @@ class SqliteWritableEndpointRegistrationStore:
                     root_identity_hash,
                     marker_checksum_algorithm,
                     marker_checksum,
+                    write_capabilities_json,
+                    write_capabilities_hash,
                     probe_completed_utc,
                     created_utc
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    capabilities.capabilities_json,
+                    capabilities.capabilities_hash,
+                    ?, ?
+                FROM writable_endpoint_capability_observations AS capabilities
+                WHERE capabilities.intent_id = ?
+                    AND capabilities.endpoint_id = ?
+                    AND capabilities.endpoint_revision_id = ?
                 """,
                 (
                     target.endpoint_id,
@@ -564,8 +659,17 @@ class SqliteWritableEndpointRegistrationStore:
                     target.marker_checksum,
                     committed_utc,
                     committed_utc,
+                    intent.intent_id,
+                    target.endpoint_id,
+                    target.resulting_endpoint_revision_id,
                 ),
             )
+            if self._connection.execute("SELECT changes()").fetchone()[0] != 1:
+                raise _registration_error(
+                    "WRITABLE_ENDPOINT_CAPABILITY_EVIDENCE_MISSING",
+                    "Retry target registration after completing its capability probe.",
+                    retryable=True,
+                )
 
     def _commit_job_revision(self, intent: WritableEndpointRegistrationIntent) -> None:
         source = self._connection.execute(

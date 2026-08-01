@@ -13,6 +13,7 @@ from mediasync_home.adapters.writable_endpoint_registration import (
     LocalWritableEndpointControlAreaProvisioner,
 )
 from mediasync_home.application.endpoint_classification import EndpointControlAreaState
+from mediasync_home.application.endpoint_capabilities import EndpointCapabilityProbeScope
 from mediasync_home.application.writable_endpoint_registration import (
     WritableEndpointRegistrationCandidate,
     WritableEndpointRegistrationError,
@@ -38,7 +39,9 @@ def test_local_registration_creates_verified_owned_control_area(tmp_path: Path) 
         owner_installation_id=owner_id,
         created_utc="2026-07-31T10:00:00Z",
     )
-    provisioner.apply_prepared_control_area(prepared, intent_id=intent_id)
+    capability_evidence = provisioner.apply_prepared_control_area(
+        prepared, intent_id=intent_id
+    )
 
     classification = LocalEndpointControlAreaClassifier().classify_control_area(
         root,
@@ -50,6 +53,13 @@ def test_local_registration_creates_verified_owned_control_area(tmp_path: Path) 
     assert classification.marker.control_area_id == prepared.control_area_id
     assert classification.marker.marker_checksum == prepared.marker_checksum
     assert not tuple((root / ".mediasync").rglob("*.probe"))
+    profile = capability_evidence.validated_profile(
+        expected_scope=EndpointCapabilityProbeScope.CONTROLLED_WRITABLE
+    )
+    assert profile.supports_atomic_rename
+    assert profile.supports_no_overwrite_insert
+    assert profile.supports_atomic_replace
+    assert profile.supports_file_flush
 
     marker = json.loads((root / ".mediasync" / "endpoint.json").read_text(encoding="utf-8"))
     assert marker["control_schema_version"] == 4

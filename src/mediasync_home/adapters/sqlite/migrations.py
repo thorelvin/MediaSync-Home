@@ -283,6 +283,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_snapshot_birthtime_evidence",
                 statements=CATALOG_SNAPSHOT_BIRTHTIME_EVIDENCE,
             ),
+            SqliteMigration(
+                version=50,
+                name="catalog_endpoint_capability_evidence",
+                statements=CATALOG_ENDPOINT_CAPABILITY_EVIDENCE,
+            ),
         ),
     )
 
@@ -3214,6 +3219,89 @@ CATALOG_SNAPSHOT_BIRTHTIME_EVIDENCE = (
         )
     BEGIN
         SELECT RAISE(ABORT, 'SNAPSHOT_V3_REQUIRES_BIRTHTIME');
+    END
+    """,
+)
+
+
+CATALOG_ENDPOINT_CAPABILITY_EVIDENCE = (
+    """
+    ALTER TABLE endpoint_classification_observations
+        ADD COLUMN read_capabilities_json TEXT
+    """,
+    """
+    ALTER TABLE endpoint_classification_observations
+        ADD COLUMN read_capabilities_hash TEXT
+        CHECK (read_capabilities_hash IS NULL OR length(read_capabilities_hash) = 64)
+    """,
+    """
+    ALTER TABLE writable_endpoint_registrations
+        ADD COLUMN write_capabilities_json TEXT
+    """,
+    """
+    ALTER TABLE writable_endpoint_registrations
+        ADD COLUMN write_capabilities_hash TEXT
+        CHECK (write_capabilities_hash IS NULL OR length(write_capabilities_hash) = 64)
+    """,
+    """
+    CREATE TABLE writable_endpoint_capability_observations (
+        intent_id TEXT NOT NULL,
+        endpoint_id TEXT NOT NULL,
+        endpoint_revision_id TEXT NOT NULL,
+        capabilities_json TEXT NOT NULL CHECK (length(trim(capabilities_json)) > 0),
+        capabilities_hash TEXT NOT NULL CHECK (length(capabilities_hash) = 64),
+        observed_utc TEXT NOT NULL CHECK (length(trim(observed_utc)) > 0),
+        PRIMARY KEY (intent_id, endpoint_id),
+        UNIQUE (endpoint_id, endpoint_revision_id),
+        FOREIGN KEY (intent_id)
+            REFERENCES writable_endpoint_registration_intents (intent_id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TRIGGER trg_classified_endpoint_requires_read_capabilities_insert
+    BEFORE INSERT ON endpoint_classification_observations
+    WHEN NEW.inspection_status = 'CLASSIFIED'
+        AND (
+            NEW.read_capabilities_json IS NULL
+            OR NEW.read_capabilities_hash IS NULL
+        )
+    BEGIN
+        SELECT RAISE(ABORT, 'CLASSIFIED_ENDPOINT_REQUIRES_READ_CAPABILITIES');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_classified_endpoint_requires_read_capabilities_update
+    BEFORE UPDATE ON endpoint_classification_observations
+    WHEN NEW.inspection_status = 'CLASSIFIED'
+        AND (
+            NEW.read_capabilities_json IS NULL
+            OR NEW.read_capabilities_hash IS NULL
+        )
+    BEGIN
+        SELECT RAISE(ABORT, 'CLASSIFIED_ENDPOINT_REQUIRES_READ_CAPABILITIES');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_writable_registration_requires_capabilities
+    BEFORE INSERT ON writable_endpoint_registrations
+    WHEN NEW.write_capabilities_json IS NULL OR NEW.write_capabilities_hash IS NULL
+    BEGIN
+        SELECT RAISE(ABORT, 'WRITABLE_REGISTRATION_REQUIRES_CAPABILITIES');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_writable_endpoint_capability_observations_no_update
+    BEFORE UPDATE ON writable_endpoint_capability_observations
+    BEGIN
+        SELECT RAISE(ABORT, 'WRITABLE_ENDPOINT_CAPABILITY_EVIDENCE_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_writable_endpoint_capability_observations_no_delete
+    BEFORE DELETE ON writable_endpoint_capability_observations
+    BEGIN
+        SELECT RAISE(ABORT, 'WRITABLE_ENDPOINT_CAPABILITY_EVIDENCE_IMMUTABLE');
     END
     """,
 )

@@ -537,6 +537,7 @@ def _validate_immutable_revision_invariant(invariant: dict[str, Any]) -> None:
         "job_revisions",
         "standard_backup_job_revision_details",
         "writable_endpoint_registrations",
+        "writable_endpoint_capability_observations",
         "controlled_endpoint_takeovers",
         "job_lifecycle_events",
         "current_read_hash_evidence",
@@ -782,6 +783,52 @@ def _validate_windows_birthtime_invariant(invariant: dict[str, Any]) -> None:
         fail(f"META-001 Windows birthtime contract drifted: {drifted}")
 
 
+def _validate_endpoint_capability_invariant(invariant: dict[str, Any]) -> None:
+    expected = {
+        "requirement_id": "END-001",
+        "profile_schema_version": 1,
+        "hash_algorithm": "SHA-256",
+        "plan_requires_exact_hash": True,
+        "missing_or_invalid_evidence_blocks_seal": True,
+    }
+    if any(invariant.get(key) != value for key, value in expected.items()):
+        fail("END-001 endpoint capability contract drifted")
+    expected_evidence = {
+        "read_observation": (
+            "endpoint_classification_observations",
+            "read_capabilities_json",
+            "read_capabilities_hash",
+            "read_only",
+            None,
+        ),
+        "writable_observation": (
+            "writable_endpoint_capability_observations",
+            "capabilities_json",
+            "capabilities_hash",
+            "controlled_writable",
+            True,
+        ),
+        "writable_registration": (
+            "writable_endpoint_registrations",
+            "write_capabilities_json",
+            "write_capabilities_hash",
+            None,
+            True,
+        ),
+    }
+    for name, expected_values in expected_evidence.items():
+        evidence = require_mapping(invariant.get(name), f"END-001 {name}")
+        actual_values = (
+            evidence.get("table"),
+            evidence.get("json_column"),
+            evidence.get("hash_column"),
+            evidence.get("probe_scope"),
+            evidence.get("immutable"),
+        )
+        if actual_values != expected_values:
+            fail(f"END-001 {name} contract drifted")
+
+
 def _validate_retained_version_expiry_invariant(invariant: dict[str, Any]) -> None:
     if invariant.get("requirement_id") != "DB-004":
         fail("retained-version expiry invariant must reference DB-004")
@@ -945,6 +992,7 @@ def validate_database_contract(document: dict[str, Any]) -> int:
         "DB-006_ENDPOINT_HEADS_ARE_SEPARATE",
         "DB-006_JOB_HEADS_ARE_SEPARATE",
         "DB-007_PARENT_SCOPE_COMPOSITE_KEYS",
+        "END-001_ENDPOINT_CAPABILITY_EVIDENCE",
         "HASH-001_CURRENT_READ_HASH_EVIDENCE",
         "META-001_WINDOWS_BIRTHTIME",
         "SRC-001_SOURCE_FILE_PRECONDITION",
@@ -990,6 +1038,9 @@ def validate_database_contract(document: dict[str, Any]) -> int:
     )
     _validate_windows_birthtime_invariant(
         invariant_by_id["META-001_WINDOWS_BIRTHTIME"]
+    )
+    _validate_endpoint_capability_invariant(
+        invariant_by_id["END-001_ENDPOINT_CAPABILITY_EVIDENCE"]
     )
     _validate_retained_version_expiry_invariant(
         invariant_by_id["DB-004_RETAINED_VERSION_EXPIRY"]

@@ -492,7 +492,16 @@ Reparasjon av pre-migration-30 pending jobs er nå også levert gjennom den
 eksplisitte, revisjonsbundne **Registrer mål**-handlingen. Den senere
 oppdateringen øverst dekker også kontrollert lokal fremmed-overtakelse.
 
-Nyeste 0B-slice: **Jobber**-arbeidsflaten viser nå live, sekvensbevisst
+Nyeste 0B-slice: `END-001` har naa en kanonisk schema-1 endpoint capability-
+profil. Read-only klassifisering lagrer Win32 volum-, filsystem-, navn-, path-,
+case- og metadataevidence. Eksplisitt targetregistrering tester kontrollert
+flush, rename, no-overwrite, replace og named streams i privat probeomraade,
+lagrer immutable evidence i catalog migration 50 og binder eksakt SHA-256 til
+endpointregistreringen. Planforsegling validerer canonical JSON, hash og
+probe-scope og blokkerer manglende eller manipulert evidence. SMB-/shareprobe,
+fysisk medietype og full capability-driven metadata-loss policy gjenstaar.
+
+Forrige 0B-slice: **Jobber**-arbeidsflaten viser nå live, sekvensbevisst
 `QUERY_RUN_PROGRESS` for den aktive kjøringen med durable runntilstand,
 operasjon-/bytefremdrift og faktisk tilstand per mål. `PAUSE_RUN` publiserer
 først `PAUSING`; den separate executortråden fullfører pause bare mellom

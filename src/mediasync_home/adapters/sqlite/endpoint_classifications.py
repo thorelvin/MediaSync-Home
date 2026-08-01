@@ -5,6 +5,9 @@ import sqlite3
 from dataclasses import dataclass
 
 from mediasync_home.adapters.endpoint_leases import EndpointLeaseUnavailable
+from mediasync_home.adapters.endpoint_capabilities import (
+    LocalWindowsEndpointCapabilitiesProbe,
+)
 from mediasync_home.adapters.local_endpoint_classifier import (
     LocalEndpointClassificationError,
 )
@@ -12,6 +15,11 @@ from mediasync_home.adapters.sqlite.endpoint_roots import local_path_from_file_u
 from mediasync_home.application.endpoint_classification import (
     EndpointControlAreaClassification,
     EndpointControlAreaClassifier,
+)
+from mediasync_home.application.endpoint_capabilities import (
+    EndpointCapabilitiesProbe,
+    EndpointCapabilityEvidence,
+    EndpointCapabilityProbeError,
 )
 from mediasync_home.application.endpoint_registration import (
     EndpointClassificationRefreshReport,
@@ -38,6 +46,7 @@ class _RegisteredEndpointRevision:
 class _ClassificationCandidate:
     endpoint: _RegisteredEndpointRevision
     classification: EndpointControlAreaClassification | None
+    capability_evidence: EndpointCapabilityEvidence | None = None
     error_code: str | None = None
     next_action: str | None = None
 
@@ -49,10 +58,14 @@ class SqliteEndpointClassificationRefresher:
         *,
         classifier: EndpointControlAreaClassifier,
         local_installation_id: str,
+        capabilities_probe: EndpointCapabilitiesProbe | None = None,
     ) -> None:
         self._connection = connection
         self._classifier = classifier
         self._local_installation_id = local_installation_id
+        self._capabilities_probe = (
+            capabilities_probe or LocalWindowsEndpointCapabilitiesProbe()
+        )
 
     def refresh_endpoint_classifications(
         self,
@@ -118,7 +131,12 @@ class SqliteEndpointClassificationRefresher:
                 root,
                 local_installation_id=self._local_installation_id,
             )
-        except (EndpointLeaseUnavailable, LocalEndpointClassificationError) as exc:
+            capability_evidence = self._capabilities_probe.probe_read_only(root)
+        except (
+            EndpointLeaseUnavailable,
+            LocalEndpointClassificationError,
+            EndpointCapabilityProbeError,
+        ) as exc:
             return _ClassificationCandidate(
                 endpoint=endpoint,
                 classification=None,
@@ -137,6 +155,7 @@ class SqliteEndpointClassificationRefresher:
         return _ClassificationCandidate(
             endpoint=endpoint,
             classification=classification,
+            capability_evidence=capability_evidence,
         )
 
     def _persist_observation(
@@ -158,12 +177,14 @@ class SqliteEndpointClassificationRefresher:
                 classification_state,
                 reason_codes_json,
                 marker_json,
+                read_capabilities_json,
+                read_capabilities_hash,
                 error_code,
                 next_action,
                 observed_utc,
                 row_version
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             ON CONFLICT (endpoint_id, endpoint_revision_id)
             DO UPDATE SET
                 local_installation_id = excluded.local_installation_id,
@@ -171,6 +192,8 @@ class SqliteEndpointClassificationRefresher:
                 classification_state = excluded.classification_state,
                 reason_codes_json = excluded.reason_codes_json,
                 marker_json = excluded.marker_json,
+                read_capabilities_json = excluded.read_capabilities_json,
+                read_capabilities_hash = excluded.read_capabilities_hash,
                 error_code = excluded.error_code,
                 next_action = excluded.next_action,
                 observed_utc = excluded.observed_utc,
@@ -184,6 +207,16 @@ class SqliteEndpointClassificationRefresher:
                 None if classification is None else classification.state.value,
                 _canonical_json(list(reason_codes)),
                 None if marker is None else _canonical_json(marker.to_dict()),
+                (
+                    None
+                    if candidate.capability_evidence is None
+                    else candidate.capability_evidence.profile_json
+                ),
+                (
+                    None
+                    if candidate.capability_evidence is None
+                    else candidate.capability_evidence.capabilities_hash
+                ),
                 candidate.error_code,
                 candidate.next_action,
                 observed_utc,

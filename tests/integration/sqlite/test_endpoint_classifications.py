@@ -20,6 +20,10 @@ from mediasync_home.adapters.sqlite.migrations import (
     apply_sqlite_migrations,
     catalog_migration_plan,
 )
+from mediasync_home.application.endpoint_capabilities import (
+    EndpointCapabilityEvidence,
+    EndpointCapabilityProbeScope,
+)
 
 
 INSTALLATION_ID = "11111111-1111-4111-8111-111111111111"
@@ -115,6 +119,19 @@ def test_refresher_persists_absent_roots_without_creating_control_areas(
         assert all(json.loads(str(row[4])) == ["ENDPOINT_CONTROL_AREA_ABSENT"] for row in observations)
         assert all(row[5:8] == (None, None, None) for row in observations)
         assert all(row[8:] == ("2026-07-30T21:01:00Z", 2) for row in observations)
+        capability_rows = connection.execute(
+            """
+            SELECT read_capabilities_json, read_capabilities_hash
+            FROM endpoint_classification_observations
+            ORDER BY endpoint_id
+            """
+        ).fetchall()
+        assert len(capability_rows) == 2
+        for profile_json, capabilities_hash in capability_rows:
+            EndpointCapabilityEvidence(
+                profile_json=str(profile_json),
+                capabilities_hash=str(capabilities_hash),
+            ).validated_profile(expected_scope=EndpointCapabilityProbeScope.READ_ONLY)
         assert not (source / ".mediasync").exists()
         assert not (target / ".mediasync").exists()
 

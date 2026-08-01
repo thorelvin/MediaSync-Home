@@ -37,6 +37,28 @@ invariants:
     checksum_bound: true
     ctime_fallback_allowed: false
     immutable_after_seal: true
+  - id: END-001_ENDPOINT_CAPABILITY_EVIDENCE
+    requirement_id: END-001
+    profile_schema_version: 1
+    hash_algorithm: SHA-256
+    read_observation:
+      table: endpoint_classification_observations
+      json_column: read_capabilities_json
+      hash_column: read_capabilities_hash
+      probe_scope: read_only
+    writable_observation:
+      table: writable_endpoint_capability_observations
+      json_column: capabilities_json
+      hash_column: capabilities_hash
+      probe_scope: controlled_writable
+      immutable: true
+    writable_registration:
+      table: writable_endpoint_registrations
+      json_column: write_capabilities_json
+      hash_column: write_capabilities_hash
+      immutable: true
+    plan_requires_exact_hash: true
+    missing_or_invalid_evidence_blocks_seal: true
   - id: DB-006_ENDPOINT_HEADS_ARE_SEPARATE
     requirement_id: DB-006
     stable_table: endpoints
@@ -65,6 +87,7 @@ invariants:
       - job_revisions
       - standard_backup_job_revision_details
       - writable_endpoint_registrations
+      - writable_endpoint_capability_observations
       - controlled_endpoint_takeovers
       - job_lifecycle_events
       - current_read_hash_evidence
