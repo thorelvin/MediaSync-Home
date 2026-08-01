@@ -6617,8 +6617,11 @@ class _FakeRetainedVersionHistoryEngineClient(_FakeHistoryEngineClient):
     def __init__(self) -> None:
         super().__init__()
         self.protected = False
+        self.restore_state: str | None = None
+        self.pending_restore_queries_before_completion: int | None = None
         self.version_queries: list[tuple[str, int]] = []
         self.protection_commands: list[tuple[str, int, str, str]] = []
+        self.restore_commands: list[tuple[str, int, str, str]] = []
 
     def get_retained_versions(
         self,
@@ -6630,6 +6633,15 @@ class _FakeRetainedVersionHistoryEngineClient(_FakeHistoryEngineClient):
         assert after is None
         normalized_limit = limit or 25
         self.version_queries.append((run_id, normalized_limit))
+        if (
+            self.restore_state == "REQUESTED"
+            and self.pending_restore_queries_before_completion is not None
+        ):
+            if self.pending_restore_queries_before_completion == 0:
+                self.restore_state = "COMPLETED"
+                self.protected = False
+            else:
+                self.pending_restore_queries_before_completion -= 1
         return IpcResponse.accepted(
             {
                 "retained_versions": {
@@ -6655,6 +6667,12 @@ class _FakeRetainedVersionHistoryEngineClient(_FakeHistoryEngineClient):
                             "row_version": 1,
                             "restorable": True,
                             "protected_for_restore": self.protected,
+                            "restore_id": (
+                                "restore-a" if self.restore_state is not None else None
+                            ),
+                            "restore_state": self.restore_state,
+                            "restore_pending": self.restore_state == "REQUESTED",
+                            "restore_validation_code": None,
                             "hold_id": "restore:key-a" if self.protected else None,
                             "hold_reason": (
                                 "RESTORE_REQUESTED" if self.protected else None
@@ -6697,8 +6715,37 @@ class _FakeRetainedVersionHistoryEngineClient(_FakeHistoryEngineClient):
             }
         )
 
+    def restore_retained_version(
+        self,
+        *,
+        version_object_id: str,
+        expected_row_version: int,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        self.restore_commands.append(
+            (
+                version_object_id,
+                expected_row_version,
+                request_id,
+                idempotency_key,
+            )
+        )
+        self.restore_state = "REQUESTED"
+        return IpcResponse.accepted(
+            {
+                "version_restore_request": {
+                    "scheduled": True,
+                    "validation_code": "VERSION_RESTORE_SCHEDULED",
+                    "next_action": "Scheduled.",
+                    "restore_id": "restore-a",
+                    "state": "REQUESTED",
+                }
+            }
+        )
 
-def test_history_previous_version_can_be_protected_without_compact_clipping(
+
+def test_history_previous_version_can_schedule_restore_without_compact_clipping(
     qapp,
     monkeypatch,
 ) -> None:
@@ -6755,17 +6802,32 @@ def test_history_previous_version_can_be_protected_without_compact_clipping(
 
         assert len(provider.protection_commands) == 1
         assert provider.protection_commands[0][:2] == ("version-a", 1)
-        assert protect.text() == "Beskyttet for gjenoppretting"
+        assert protect.text() == "Gjenopprett valgt versjon"
+        assert protect.isEnabled()
+
+        provider.pending_restore_queries_before_completion = 1
+        QTest.mouseClick(protect, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert len(provider.restore_commands) == 1
+        assert provider.restore_commands[0][:2] == ("version-a", 1)
+        assert protect.text() == "Gjenoppretting p\u00e5g\u00e5r"
         assert not protect.isEnabled()
         language.menu().actions()[1].trigger()
         qapp.processEvents()
         assert heading.text() == "Previous versions"
-        assert protect.text() == "Protected for restore"
+        assert protect.text() == "Restore in progress"
         assert history_scroll.horizontalScrollBar().maximum() == 0
         assert (
             protect.fontMetrics().horizontalAdvance(protect.text())
             <= protect.contentsRect().width()
         )
+        QTest.qWait(1_200)
+        qapp.processEvents()
+        assert "Restored" in _virtual_row_text(version_list, 0)
+        assert protect.text() == "Protect for restore"
+        assert protect.isEnabled()
+        assert len(provider.version_queries) >= 4
     finally:
         window.close()
         window.deleteLater()

@@ -170,6 +170,23 @@ def test_database_contract_rejects_unverified_retained_version_delete() -> None:
         validate_contracts.validate_database_contract(document)
 
 
+def test_database_contract_rejects_restore_without_current_final_preservation() -> None:
+    yaml = _yaml_loader()
+    document = validate_contracts.load_yaml(
+        validate_contracts.ROOT / "schema/database-contract.yaml",
+        yaml,
+    )
+    document = copy.deepcopy(document)
+    invariant = _database_invariant(document, "DB-004_RETAINED_VERSION_EXPIRY")
+    invariant["restore_preserves_current_before_replace"] = False
+
+    with pytest.raises(
+        validate_contracts.ContractValidationError,
+        match="retained-version expiry safety guard drifted",
+    ):
+        validate_contracts.validate_database_contract(document)
+
+
 def test_database_contract_rejects_missing_immutable_revision_table() -> None:
     yaml = _yaml_loader()
     document = validate_contracts.load_yaml(

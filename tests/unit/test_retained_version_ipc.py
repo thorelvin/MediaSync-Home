@@ -11,7 +11,9 @@ from mediasync_home.application.retained_version_history import (
     ProtectRetainedVersionForRestoreCommand,
     RetainedVersionCursor,
     RetainedVersionSummary,
+    RestoreRetainedVersionCommand,
     VersionRestoreProtectionOutcome,
+    VersionRestoreRequestOutcome,
 )
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
@@ -28,6 +30,7 @@ class _VersionStore:
     def __init__(self) -> None:
         self.query_calls: list[tuple[str, int, RetainedVersionCursor | None]] = []
         self.protection_calls: list[ProtectRetainedVersionForRestoreCommand] = []
+        self.restore_calls: list[RestoreRetainedVersionCommand] = []
 
     def list_retained_versions_for_run(
         self,
@@ -57,6 +60,28 @@ class _VersionStore:
                 hold_created_utc=created_utc,
             ),
             idempotent_replay=len(self.protection_calls) > 1,
+        )
+
+    def request_retained_version_restore(
+        self,
+        *,
+        command: RestoreRetainedVersionCommand,
+        created_utc: str,
+    ) -> VersionRestoreRequestOutcome:
+        del created_utc
+        self.restore_calls.append(command)
+        return VersionRestoreRequestOutcome(
+            scheduled=True,
+            validation_code="VERSION_RESTORE_SCHEDULED",
+            next_action="Scheduled.",
+            restore_id="restore-a",
+            state="REQUESTED",
+            version=replace(
+                _summary(),
+                hold_id="restore:protect-key",
+                hold_reason="RESTORE_REQUESTED",
+            ),
+            idempotent_replay=len(self.restore_calls) > 1,
         )
 
 
@@ -163,6 +188,25 @@ def test_restore_protection_rejects_missing_confirmation() -> None:
     assert response.reason is IpcReason.INVALID_FRAME
 
 
+def test_engine_client_schedules_protected_version_restore() -> None:
+    store = _VersionStore()
+    engine = EngineClient(_client(_service(store, mutations_enabled=True)))
+
+    response = engine.restore_retained_version(
+        version_object_id="version-a",
+        expected_row_version=1,
+        request_id="33333333-3333-4333-8333-333333333333",
+        idempotency_key="44444444-4444-4444-8444-444444444444",
+    )
+
+    assert response.status is IpcStatus.ACCEPTED
+    request = response.payload["version_restore_request"]
+    assert request["scheduled"] is True
+    assert request["restore_id"] == "restore-a"
+    assert response.payload["receipt"]["state"] == "SUCCEEDED"
+    assert len(store.restore_calls) == 1
+
+
 def test_rejected_restore_protection_replay_never_retries_the_effect() -> None:
     store = _RejectingVersionStore()
     engine = EngineClient(_client(_service(store, mutations_enabled=True)))
@@ -193,6 +237,7 @@ def _service(
         ),
         retained_version_read_store=store,
         version_restore_protection_store=store,
+        version_restore_request_store=store,
         retained_version_utc_now=lambda: "2026-08-10T00:00:00.000Z",
         command_receipt_store=_ReceiptStore(),
     )

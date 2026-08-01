@@ -211,6 +211,20 @@ invariants:
     crash_resume_states:
       - DELETE_INTENT_RECORDED
       - FILESYSTEM_DELETED
+    restore_operation_table: retained_version_restore_operations
+    restore_event_table: retained_version_restore_events
+    restore_requires_active_hold: true
+    restore_immutable_binding: true
+    restore_append_only_events: true
+    restore_requires_fresh_mutation_permit: true
+    restore_preserves_current_before_replace: true
+    restore_verifies_source_rollback_and_final: true
+    restore_releases_hold_only_after_final_verification: true
+    restore_crash_resume_states:
+      - INTENT_RECORDED
+      - CURRENT_FINAL_PRESERVED
+      - HISTORICAL_APPLIED
+      - FINAL_VERIFIED
   - id: TIME-001_ENDPOINT_RETRY_TIMING
     requirement_id: TIME-001
     table: run_target_endpoint_wait_events

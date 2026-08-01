@@ -772,6 +772,8 @@ def _validate_retained_version_expiry_invariant(invariant: dict[str, Any]) -> No
         "item_table": "version_retention_items",
         "hold_table": "version_retention_holds",
         "event_table": "version_retention_events",
+        "restore_operation_table": "retained_version_restore_operations",
+        "restore_event_table": "retained_version_restore_events",
     }
     if any(invariant.get(key) != value for key, value in expected_tables.items()):
         fail("DB-004 retained-version expiry table boundary drifted")
@@ -786,6 +788,13 @@ def _validate_retained_version_expiry_invariant(invariant: dict[str, Any]) -> No
         "rechecks_before_delete_intent",
         "filesystem_delete_requires_fresh_mutation_permit",
         "manifest_and_payload_verified_before_delete",
+        "restore_requires_active_hold",
+        "restore_immutable_binding",
+        "restore_append_only_events",
+        "restore_requires_fresh_mutation_permit",
+        "restore_preserves_current_before_replace",
+        "restore_verifies_source_rollback_and_final",
+        "restore_releases_hold_only_after_final_verification",
     )
     if any(invariant.get(key) is not True for key in required_guards):
         fail("DB-004 retained-version expiry safety guard drifted")
@@ -796,6 +805,16 @@ def _validate_retained_version_expiry_invariant(invariant: dict[str, Any]) -> No
         "DB-004 crash_resume_states",
     ) != ("DELETE_INTENT_RECORDED", "FILESYSTEM_DELETED"):
         fail("DB-004 retained-version crash resume states drifted")
+    if _column_tuple(
+        invariant.get("restore_crash_resume_states"),
+        "DB-004 restore_crash_resume_states",
+    ) != (
+        "INTENT_RECORDED",
+        "CURRENT_FINAL_PRESERVED",
+        "HISTORICAL_APPLIED",
+        "FINAL_VERIFIED",
+    ):
+        fail("DB-004 retained-version restore crash resume states drifted")
 
 
 def validate_state_machines(document: dict[str, Any]) -> int:

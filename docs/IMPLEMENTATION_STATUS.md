@@ -1,17 +1,21 @@
 # Implementeringsstatus
 
-Update 2026-08-01: History now exposes preserved old-target versions through a
-bounded, run-scoped `QUERY_RETAINED_VERSIONS` keyset read model. The Norwegian
-and English compact UI shows logical path, preservation time, retention due
-time and exact catalog state without reading SQLite on the GUI thread. A
-confirmed `PROTECT_RETAINED_VERSION_FOR_RESTORE` command creates a durable
-`RESTORE_REQUESTED` hold through the normal idempotent command receipt
-transaction. Expected row-version and `RETAINED` checks make the hold race
-atomically with expiry planning; an active hold removes the version from later
-retention plans. The protected-state action and long paths are proven without
-horizontal clipping at 900x560. Actual historical restore still requires its
-own endpoint lease, recovery operation and safe replacement choreography and
-remains the next restore slice.
+Update 2026-08-01: History now provides a complete protected historical-file
+restore path. The bounded `QUERY_RETAINED_VERSIONS` read model shows protection
+and restore state in Norwegian and English. The first confirmed action creates
+the durable `RESTORE_REQUESTED` hold; the second confirmed
+`RESTORE_RETAINED_VERSION` command atomically creates catalog migration 46's
+restore operation and append-only event chain through the normal command
+receipt transaction. The maintenance worker acquires the exact endpoint lease,
+validates the retained manifest/payload and current final path, journals the
+current fingerprint, writes and verifies a durable 30-day rollback object, then
+atomically replaces and full-hash verifies the final file. Retries after either
+filesystem-before-journal crash window are idempotent. Manifest drift, payload
+drift, path/reparse mismatch, stale permit or changed final bytes fail closed;
+the live file and hold remain untouched/protected. The hold is released only
+after terminal final verification. Compact GUI tests cover both confirmed
+actions, language switching and no horizontal clipping at 900x560. Automated
+expiry and user-visible undo for restore rollback objects remain later work.
 
 Update 2026-08-01: PATH-001 catalog-recorded cleanup now covers every managed
 staging object, not only created-directory markers and empty-directory

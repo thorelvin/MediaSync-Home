@@ -18,6 +18,10 @@ class RetainedVersionViewState:
     row_version: int
     restorable: bool
     protected_for_restore: bool
+    restore_id: str | None = None
+    restore_state: str | None = None
+    restore_pending: bool = False
+    restore_validation_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +103,12 @@ def _version_from_payload(value: object) -> RetainedVersionViewState | None:
         row_version=row_version,
         restorable=value.get("restorable") is True,
         protected_for_restore=value.get("protected_for_restore") is True,
+        restore_id=_optional_text(value.get("restore_id")),
+        restore_state=_optional_text(value.get("restore_state")),
+        restore_pending=value.get("restore_pending") is True,
+        restore_validation_code=_optional_text(
+            value.get("restore_validation_code")
+        ),
     )
 
 

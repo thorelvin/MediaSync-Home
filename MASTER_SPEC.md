@@ -3428,6 +3428,18 @@ kan derfor ikke skjult gjenopplive et objekt som allerede er tatt inn i en
 expiry-plan. Kommandoen endrer ingen endpointfiler; historisk restore får en
 egen lease- og recoveryoperasjon.
 
+`RESTORE_RETAINED_VERSION` krever det aktive holdet og oppretter en separat
+`retained_version_restore_operations`-rad med immutable kilde-/rollbackbinding
+og append-only hendelser i samme Catalog-transaksjon som command receipt.
+Arbeideren tar en fersk eksklusiv endpointlease og journalfører fasene
+`REQUESTED`, `INTENT_RECORDED`, `CURRENT_FINAL_PRESERVED`,
+`HISTORICAL_APPLIED`, `FINAL_VERIFIED` og `COMPLETED`. Før finalfilen erstattes,
+kopieres dagens bytes til et checksummet rollbackobjekt under kontrollområdet.
+Både rollback- og historisk payload verifiseres mot canonical manifest, og
+atomisk replace godtas bare mens finalfilen fortsatt matcher journalført
+fingerprint. Krasj mellom filsystemeffekt og faseoppdatering gjenopptas ved å
+bevise postcondition; avvik ender `FAILED_BLOCKED` med aktivt hold.
+
 Lokale GUI-preferanser følger en separat, ikke-autoritativ port i
 `application.user_preferences`. Composition kobler denne til en atomisk
 JSON-adapter under samme brukers lokale state-root og injiserer porten i
@@ -5417,7 +5429,21 @@ one historical run. `PROTECT_RETAINED_VERSION_FOR_RESTORE` inserts one active
 expected row version. The hold and the idempotent command receipt are committed
 in the same catalog transaction, so expiry-plan admission and restore
 protection cannot both win. The hold protects evidence only; it does not mutate
-the target and is released only by a later journaled restore/cancel workflow.
+the target.
+
+Catalog migration 46 adds `retained_version_restore_operations` and
+`retained_version_restore_events`. A confirmed restore request requires the
+active `RESTORE_REQUESTED` hold, the exact retained row version and an immutable
+source binding. The operation records current-final fingerprint, current lease
+and fencing token, rollback object/manifest hash, terminal result and row
+version. Its append-only hash chain records request, intent, rollback
+preservation, historical apply, final verification and completion. The worker
+stores current bytes in `.mediasync/objects/restores` before atomic replacement;
+the rollback manifest is bound to restore/source/endpoint/owner/path and a
+30-day due time. The source hold is released only in the transaction that marks
+the verified restore `COMPLETED`; blocked work keeps the hold. Automated expiry
+and user-visible undo of completed rollback objects are not yet implemented.
+
 Quarantine and general catalog retention stay outside this version-expiry
 branch.
 
@@ -7397,6 +7423,17 @@ before removing bytes. `FILESYSTEM_DELETED` completes idempotently after a
 crash; a partial deletion keeps its intent journal for reconciliation. Archived
 jobs, active holds, active/mismatched recovery references, manifest drift and
 payload drift all fail closed.
+
+Historical file restore uses a separate catalog journal rather than pretending
+to be a backup-run recovery operation. Migration 46 binds one protected source
+version to a deterministic rollback object and append-only phases. Under a
+fresh endpoint permit the worker verifies source and current final, records
+intent, durably preserves current bytes, atomically applies the historical
+payload, and verifies the final fingerprint before completion releases the
+hold. Existing matching rollback/final postconditions make crashes after
+preserve or replace resumable without repeating an unsafe effect. A changed
+final, invalid manifest/payload, stale permit, unsafe path or reparse boundary
+blocks the operation and keeps protected evidence.
 
 ### 17.5 Karantene som opaque managed objects og compare-and-swap
 

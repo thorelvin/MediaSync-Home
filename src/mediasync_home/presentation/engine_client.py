@@ -611,6 +611,29 @@ class EngineClient:
             )
         )
 
+    def restore_retained_version(
+        self,
+        *,
+        version_object_id: str,
+        expected_row_version: int,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        payload: dict[str, object] = {
+            "version_object_id": version_object_id,
+            "expected_row_version": expected_row_version,
+            "explicit_confirmation": True,
+        }
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.submit_command(
+                VersionRestoreCommandName.RESTORE_RETAINED_VERSION.value,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                payload_hash=canonical_command_payload_hash(payload),
+            )
+        )
+
     def pause_backup(
         self,
         *,

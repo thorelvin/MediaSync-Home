@@ -383,6 +383,17 @@ crash; a partial deletion keeps its intent journal for reconciliation. Archived
 jobs, active holds, active/mismatched recovery references, manifest drift and
 payload drift all fail closed.
 
+Historical file restore uses a separate catalog journal rather than pretending
+to be a backup-run recovery operation. Migration 46 binds one protected source
+version to a deterministic rollback object and append-only phases. Under a
+fresh endpoint permit the worker verifies source and current final, records
+intent, durably preserves current bytes, atomically applies the historical
+payload, and verifies the final fingerprint before completion releases the
+hold. Existing matching rollback/final postconditions make crashes after
+preserve or replace resumable without repeating an unsafe effect. A changed
+final, invalid manifest/payload, stale permit, unsafe path or reparse boundary
+blocks the operation and keeps protected evidence.
+
 ### 17.5 Karantene som opaque managed objects og compare-and-swap
 
 All speil-«sletting» bevares i objektstore med `logical_role=QUARANTINE`:

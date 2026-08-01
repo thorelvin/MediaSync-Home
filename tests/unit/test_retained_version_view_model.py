@@ -30,6 +30,10 @@ def test_retained_version_view_model_parses_protection_state() -> None:
                             "row_version": 1,
                             "restorable": True,
                             "protected_for_restore": True,
+                            "restore_id": "restore-a",
+                            "restore_state": "HISTORICAL_APPLIED",
+                            "restore_pending": True,
+                            "restore_validation_code": "RESTORE_RESUMING",
                             "hold_id": "restore:key-a",
                             "hold_reason": "RESTORE_REQUESTED",
                             "hold_created_utc": "2026-08-10T00:00:00.000Z",
@@ -44,6 +48,10 @@ def test_retained_version_view_model_parses_protection_state() -> None:
     assert state.read_model_available is True
     assert state.versions[0].version_object_id == "version-a"
     assert state.versions[0].protected_for_restore is True
+    assert state.versions[0].restore_id == "restore-a"
+    assert state.versions[0].restore_state == "HISTORICAL_APPLIED"
+    assert state.versions[0].restore_pending is True
+    assert state.versions[0].restore_validation_code == "RESTORE_RESUMING"
 
 
 def test_retained_version_view_model_drops_malformed_rows() -> None:

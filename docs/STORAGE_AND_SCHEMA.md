@@ -1163,7 +1163,21 @@ one historical run. `PROTECT_RETAINED_VERSION_FOR_RESTORE` inserts one active
 expected row version. The hold and the idempotent command receipt are committed
 in the same catalog transaction, so expiry-plan admission and restore
 protection cannot both win. The hold protects evidence only; it does not mutate
-the target and is released only by a later journaled restore/cancel workflow.
+the target.
+
+Catalog migration 46 adds `retained_version_restore_operations` and
+`retained_version_restore_events`. A confirmed restore request requires the
+active `RESTORE_REQUESTED` hold, the exact retained row version and an immutable
+source binding. The operation records current-final fingerprint, current lease
+and fencing token, rollback object/manifest hash, terminal result and row
+version. Its append-only hash chain records request, intent, rollback
+preservation, historical apply, final verification and completion. The worker
+stores current bytes in `.mediasync/objects/restores` before atomic replacement;
+the rollback manifest is bound to restore/source/endpoint/owner/path and a
+30-day due time. The source hold is released only in the transaction that marks
+the verified restore `COMPLETED`; blocked work keeps the hold. Automated expiry
+and user-visible undo of completed rollback objects are not yet implemented.
+
 Quarantine and general catalog retention stay outside this version-expiry
 branch.
 

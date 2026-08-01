@@ -819,6 +819,18 @@ kan derfor ikke skjult gjenopplive et objekt som allerede er tatt inn i en
 expiry-plan. Kommandoen endrer ingen endpointfiler; historisk restore får en
 egen lease- og recoveryoperasjon.
 
+`RESTORE_RETAINED_VERSION` krever det aktive holdet og oppretter en separat
+`retained_version_restore_operations`-rad med immutable kilde-/rollbackbinding
+og append-only hendelser i samme Catalog-transaksjon som command receipt.
+Arbeideren tar en fersk eksklusiv endpointlease og journalfører fasene
+`REQUESTED`, `INTENT_RECORDED`, `CURRENT_FINAL_PRESERVED`,
+`HISTORICAL_APPLIED`, `FINAL_VERIFIED` og `COMPLETED`. Før finalfilen erstattes,
+kopieres dagens bytes til et checksummet rollbackobjekt under kontrollområdet.
+Både rollback- og historisk payload verifiseres mot canonical manifest, og
+atomisk replace godtas bare mens finalfilen fortsatt matcher journalført
+fingerprint. Krasj mellom filsystemeffekt og faseoppdatering gjenopptas ved å
+bevise postcondition; avvik ender `FAILED_BLOCKED` med aktivt hold.
+
 Lokale GUI-preferanser følger en separat, ikke-autoritativ port i
 `application.user_preferences`. Composition kobler denne til en atomisk
 JSON-adapter under samme brukers lokale state-root og injiserer porten i

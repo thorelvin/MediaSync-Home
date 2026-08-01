@@ -680,6 +680,64 @@ class ShellText:
         return "Versjonen kunne ikke beskyttes"
 
     @property
+    def restore_selected_version(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Restore selected version"
+        return "Gjenopprett valgt versjon"
+
+    @property
+    def restore_selected_version_tooltip(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Replace the live file after preserving its current contents"
+        return "Erstatt den aktive filen etter at dagens innhold er bevart"
+
+    @property
+    def restore_version_title(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Restore this version?"
+        return "Gjenopprette denne versjonen?"
+
+    @property
+    def restore_version_confirmation(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return (
+                "The current live file will be preserved before this historical "
+                "version replaces it."
+            )
+        return (
+            "Den aktive filen bevares f\u00f8r denne historiske versjonen "
+            "erstatter den."
+        )
+
+    @property
+    def version_restore_scheduled(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Restore queued"
+        return "Gjenoppretting er lagt i k\u00f8"
+
+    @property
+    def version_restore_in_progress(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Restore in progress"
+        return "Gjenoppretting p\u00e5g\u00e5r"
+
+    @property
+    def version_restored(self) -> str:
+        return "Restored" if self.language_tooltip_prefix == "Language" else "Gjenopprettet"
+
+    @property
+    def version_restore_needs_attention(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Restore needs attention"
+        return "Gjenoppretting krever oppmerksomhet"
+
+    @property
+    def version_restore_failed(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "The version could not be restored"
+        return "Versjonen kunne ikke gjenopprettes"
+
+    @property
     def history_unavailable(self) -> str:
         return (
             "History is not available."

@@ -41,6 +41,7 @@ from mediasync_home.adapters.task_scheduler import (
 from mediasync_home.adapters.version_retention import (
     LocalVersionRetentionDeletionAdapter,
 )
+from mediasync_home.adapters.version_restore import LocalRetainedVersionRestoreAdapter
 from mediasync_home.adapters.writable_endpoint_registration import (
     LocalWritableEndpointControlAreaProvisioner,
 )
@@ -255,6 +256,12 @@ from mediasync_home.application.version_retention import (
     VersionRetentionRecoveryReferencePort,
     maintain_version_retention,
 )
+from mediasync_home.application.version_restore import (
+    VersionRestoreApplyOutcome,
+    VersionRestoreExecutionStore,
+    VersionRestoreFilesystemPort,
+    apply_next_version_restore,
+)
 from mediasync_home.application.writable_endpoint_registration import (
     WritableEndpointRegistrationCandidate,
     WritableEndpointRegistrationCoordinator,
@@ -455,6 +462,9 @@ class EngineHostRuntime:
     ) = None
     version_retention_lease_authority: EndpointLeaseAuthority | None = None
     version_retention_deletion_port: VersionRetentionDeletionPort | None = None
+    version_restore_store: VersionRestoreExecutionStore | None = None
+    version_restore_lease_authority: EndpointLeaseAuthority | None = None
+    version_restore_filesystem_port: VersionRestoreFilesystemPort | None = None
     backup_analysis_request_store: BackupAnalysisRequestStore | None = None
     backup_analysis_endpoint_refresher: SqliteEndpointClassificationRefresher | None = (
         None
@@ -846,6 +856,20 @@ class EngineHostRuntime:
             limit=limit,
         )
 
+    def run_version_restore_cycle(self) -> VersionRestoreApplyOutcome:
+        if (
+            self.version_restore_store is None
+            or self.version_restore_lease_authority is None
+            or self.version_restore_filesystem_port is None
+        ):
+            raise RuntimeError("VERSION_RESTORE_RUNTIME_NOT_CONFIGURED")
+        return apply_next_version_restore(
+            restores=self.version_restore_store,
+            leases=self.version_restore_lease_authority,
+            filesystem=self.version_restore_filesystem_port,
+            event_utc=self.clock.utc_now(),
+        )
+
     def _run_capacity_block(self) -> RunExecutorCyclePumpOutcome | None:
         if self.state_capacity_gate is None:
             return None
@@ -930,6 +954,7 @@ class ExecutorMaintenanceLoop:
                 try:
                     _run_backup_analysis_cycle_if_configured(runtime)
                     outcome = runtime.run_executor_cycle(max_steps=self._max_steps)
+                    _run_version_restore_cycle_if_configured(runtime)
                     _run_version_retention_cycle_if_configured(runtime)
                 except Exception as exc:
                     next_interval_ms = self._backed_off_interval(next_interval_ms)
@@ -1770,6 +1795,9 @@ def build_engine_host_runtime(
         version_retention_deletion_port = LocalVersionRetentionDeletionAdapter(
             root_resolver=endpoint_root_resolver,
         )
+        version_restore_filesystem_port = LocalRetainedVersionRestoreAdapter(
+            root_resolver=endpoint_root_resolver,
+        )
         final_artifact_verifier = LocalFinalArtifactVerificationAdapter(
             root_resolver=endpoint_root_resolver,
         )
@@ -1846,6 +1874,7 @@ def build_engine_host_runtime(
             history_timeline_read_store=history,
             retained_version_read_store=version_retention_store,
             version_restore_protection_store=version_retention_store,
+            version_restore_request_store=version_retention_store,
             retained_version_utc_now=runtime_clock.utc_now,
             operation_audit_read_store=operation_audits,
             run_activity_read_store=runs,
@@ -1909,6 +1938,9 @@ def build_engine_host_runtime(
         version_retention_recovery_references=recovery_operations,
         version_retention_lease_authority=run_executor_lease_authority,
         version_retention_deletion_port=version_retention_deletion_port,
+        version_restore_store=version_retention_store,
+        version_restore_lease_authority=run_executor_lease_authority,
+        version_restore_filesystem_port=version_restore_filesystem_port,
         backup_analysis_request_store=backup_analysis_requests,
         backup_analysis_endpoint_refresher=endpoint_classification_refresher,
         backup_analysis_snapshot_refresher=job_snapshot_materializer,
@@ -2062,6 +2094,8 @@ def _build_after_request_executor_cycle(
     def run_cycle() -> None:
         _run_backup_analysis_cycle_if_configured(runtime)
         outcome = runtime.run_executor_cycle(max_steps=max_steps)
+        _run_version_restore_cycle_if_configured(runtime)
+        _run_version_retention_cycle_if_configured(runtime)
         _emit_run_executor_cycle_event(
             output=output,
             pipe_name=pipe_name,
@@ -2080,6 +2114,12 @@ def _run_backup_analysis_cycle_if_configured(runtime: EngineHostRuntime) -> None
 
 def _run_version_retention_cycle_if_configured(runtime: EngineHostRuntime) -> None:
     cycle = getattr(runtime, "run_version_retention_cycle", None)
+    if callable(cycle):
+        cycle()
+
+
+def _run_version_restore_cycle_if_configured(runtime: EngineHostRuntime) -> None:
+    cycle = getattr(runtime, "run_version_restore_cycle", None)
     if callable(cycle):
         cycle()
 
