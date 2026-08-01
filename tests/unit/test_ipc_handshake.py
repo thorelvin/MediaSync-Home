@@ -29,6 +29,7 @@ from mediasync_home.application.command_receipts import (
     CommandReceiptStore,
     ensure_idempotency_compatible,
 )
+from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.endpoint_registration import (
     EndpointClassificationRefreshReport,
 )
@@ -115,6 +116,12 @@ from mediasync_home.application.snapshots import (
     validate_snapshot_issue_page_query,
 )
 from mediasync_home.application.state_maintenance import StateMaintenanceCommandName
+from mediasync_home.application.writable_endpoint_registration import (
+    WritableEndpointRegistrationCommandName,
+    WritableEndpointRegistrationError,
+    WritableEndpointRegistrationReport,
+    WritableEndpointRegistrationState,
+)
 from mediasync_home.application.trigger_occurrences import (
     TriggerCommandName,
     TriggerKind,
@@ -244,6 +251,27 @@ class _InMemoryCommandReceiptStore(CommandReceiptStore):
 
     def update_command_receipt(self, receipt: CommandReceipt) -> None:
         self.receipts[receipt.idempotency_key] = receipt
+
+
+class _RecordingWritableEndpointRegistration:
+    def __init__(self, *, error: WritableEndpointRegistrationError | None = None) -> None:
+        self.error = error
+        self.calls: list[dict[str, str]] = []
+
+    def register_job_targets(self, **kwargs: str) -> WritableEndpointRegistrationReport:
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return WritableEndpointRegistrationReport(
+            job_id=kwargs["job_id"],
+            source_job_revision_id=kwargs["job_revision_id"],
+            active_job_revision_id="job-revision-registered",
+            intent_id="registration-intent-a",
+            state=WritableEndpointRegistrationState.COMMITTED,
+            target_count=1,
+            registered_target_count=1,
+            idempotent_replay=len(self.calls) > 1,
+        )
 
 
 class _InMemoryStandardBackupJobCatalog(StandardBackupJobCatalog):
@@ -1664,6 +1692,122 @@ def test_create_standard_backup_job_command_records_rejected_receipt() -> None:
         "state": "REJECTED",
         "rejection_reason": IpcReason.MUTATING_COMMANDS_DISABLED.value,
     }
+
+
+def test_register_writable_targets_command_is_recognized_and_receipted_when_disabled() -> None:
+    receipts = _InMemoryCommandReceiptStore()
+    service = _service()
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    payload = {"job_id": "job-a", "job_revision_id": "job-revision-a"}
+
+    response = ipc_client.submit_command(
+        WritableEndpointRegistrationCommandName.REGISTER_WRITABLE_TARGETS.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=payload,
+        payload_hash=canonical_command_payload_hash(payload),
+    )
+
+    receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.MUTATING_COMMANDS_DISABLED
+    assert response.payload["recognized"] is True
+    assert response.payload["requested_job_revision_id"] == "job-revision-a"
+    assert receipt is not None
+    assert receipt.state is CommandReceiptState.REJECTED
+    assert receipt.command_name == "REGISTER_WRITABLE_TARGETS"
+
+
+def test_enabled_register_writable_targets_commits_receipt_and_replays_intent() -> None:
+    receipts = _InMemoryCommandReceiptStore()
+    registration = _RecordingWritableEndpointRegistration()
+    service = _service(mutations_enabled=True)
+    service.command_receipt_store = receipts
+    service.writable_endpoint_registration = registration  # type: ignore[assignment]
+    service.writable_endpoint_registration_utc_now = lambda: "2026-08-01T07:00:00Z"
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    payload = {"job_id": "job-a", "job_revision_id": "job-revision-a"}
+    payload_digest = canonical_command_payload_hash(payload)
+
+    response = ipc_client.submit_command(
+        WritableEndpointRegistrationCommandName.REGISTER_WRITABLE_TARGETS.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=payload,
+        payload_hash=payload_digest,
+    )
+    replay = ipc_client.submit_command(
+        WritableEndpointRegistrationCommandName.REGISTER_WRITABLE_TARGETS.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=payload,
+        payload_hash=payload_digest,
+    )
+
+    receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
+    assert response.status is IpcStatus.ACCEPTED
+    assert response.payload["job"] == {
+        "job_id": "job-a",
+        "job_revision_id": "job-revision-registered",
+    }
+    assert response.payload["writable_endpoint_registration"]["completed"] is True
+    assert response.payload["idempotent_replay"] is False
+    assert response.payload["receipt"]["state"] == "SUCCEEDED"
+    assert response.payload["receipt"]["result_entity_type"] == (
+        "writable_endpoint_registration"
+    )
+    assert response.payload["receipt"]["result_entity_id"] == "registration-intent-a"
+    assert replay.status is IpcStatus.ACCEPTED
+    assert replay.payload["idempotent_replay"] is True
+    assert len(registration.calls) == 2
+    assert registration.calls[0] == {
+        "job_id": "job-a",
+        "job_revision_id": "job-revision-a",
+        "command_request_id": REQUEST_ID_A,
+        "command_idempotency_key": IDEMPOTENCY_KEY_A,
+        "observed_utc": "2026-08-01T07:00:00Z",
+    }
+    assert receipt is not None
+    assert receipt.state is CommandReceiptState.SUCCEEDED
+
+
+def test_register_writable_targets_rejects_stale_reviewed_revision() -> None:
+    receipts = _InMemoryCommandReceiptStore()
+    registration = _RecordingWritableEndpointRegistration(
+        error=WritableEndpointRegistrationError(
+            "WRITABLE_ENDPOINT_JOB_REVISION_STALE",
+            "Refresh the active backup job before registering its targets.",
+            retryable=False,
+        )
+    )
+    service = _service(mutations_enabled=True)
+    service.command_receipt_store = receipts
+    service.writable_endpoint_registration = registration  # type: ignore[assignment]
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    payload = {"job_id": "job-a", "job_revision_id": "job-revision-stale"}
+
+    response = ipc_client.submit_command(
+        WritableEndpointRegistrationCommandName.REGISTER_WRITABLE_TARGETS.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=payload,
+        payload_hash=canonical_command_payload_hash(payload),
+    )
+
+    receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
+    registration_payload = response.payload["writable_endpoint_registration"]
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.COMMAND_PRECONDITION_FAILED
+    assert registration_payload["validation_codes"] == [
+        "WRITABLE_ENDPOINT_JOB_REVISION_STALE"
+    ]
+    assert receipt is not None
+    assert receipt.state is CommandReceiptState.REJECTED
+    assert receipt.rejection_reason == IpcReason.COMMAND_PRECONDITION_FAILED.value
 
 
 def test_enqueue_trigger_occurrence_command_records_rejected_receipt() -> None:

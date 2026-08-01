@@ -335,6 +335,17 @@ class BackupJobCreationProvider(Protocol):
     ) -> IpcResponse: ...
 
 
+class WritableTargetRegistrationProvider(Protocol):
+    def register_writable_targets(
+        self,
+        *,
+        job_id: str,
+        job_revision_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse: ...
+
+
 class BackupStartProvider(Protocol):
     def start_backup(
         self,
@@ -459,6 +470,11 @@ class MediaSyncWindow(QMainWindow):
         self._setup_idempotency_key: str | None = None
         self._setup_command_pending = False
         self._setup_registration_retry_required = False
+        self._registration_request_id: str | None = None
+        self._registration_idempotency_key: str | None = None
+        self._registration_command_job_id: str | None = None
+        self._registration_command_revision_id: str | None = None
+        self._registration_command_pending = False
         self._start_request_id: str | None = None
         self._start_idempotency_key: str | None = None
         self._start_command_pending = False
@@ -5054,6 +5070,9 @@ class MediaSyncWindow(QMainWindow):
                     row.setText("")
                     row.setVisible(False)
         analysis_pending = state.analysis_request_state in {"QUEUED", "RUNNING"}
+        registration_mode = (
+            state.found and state.writable_target_registration_required
+        )
         completed_plan_already_run = (
             state.job_id is not None
             and state.job_id == self._latest_run_job_id
@@ -5087,10 +5106,13 @@ class MediaSyncWindow(QMainWindow):
                 and self._run_progress_state.job_id == state.job_id
             )
             start_button.setVisible(
-                state.found and not active_for_job and (has_plan or check_mode)
+                state.found
+                and not active_for_job
+                and (registration_mode or has_plan or check_mode)
             )
             start_button.setEnabled(
                 not self._job_detail_query_pending
+                and not self._registration_command_pending
                 and not self._analysis_command_pending
                 and not self._start_command_pending
                 and not analysis_pending
@@ -5099,16 +5121,26 @@ class MediaSyncWindow(QMainWindow):
                 and not self._command_worker_active()
                 and self._engine_client is not None
                 and (
-                    hasattr(self._engine_client, "check_backup")
-                    if check_mode
+                    hasattr(self._engine_client, "register_writable_targets")
+                    if registration_mode
                     else (
-                        has_plan
-                        and state.plan_runnable
-                        and hasattr(self._engine_client, "start_backup")
+                        hasattr(self._engine_client, "check_backup")
+                        if check_mode
+                        else (
+                            has_plan
+                            and state.plan_runnable
+                            and hasattr(self._engine_client, "start_backup")
+                        )
                     )
                 )
             )
-            if analysis_pending:
+            if registration_mode and self._registration_command_pending:
+                start_button.setText(self._texts().registering_targets)
+                start_button.setToolTip(self._texts().register_targets_tooltip)
+            elif registration_mode:
+                start_button.setText(self._texts().register_targets)
+                start_button.setToolTip(self._texts().register_targets_tooltip)
+            elif analysis_pending:
                 start_button.setText(self._texts().checking_backup)
                 start_button.setToolTip(self._texts().checking_backup_tooltip)
             elif queued:
@@ -5127,6 +5159,9 @@ class MediaSyncWindow(QMainWindow):
         if self._job_detail_query_pending:
             return
         state = self._job_detail_state
+        if state.found and state.writable_target_registration_required:
+            self._register_selected_targets()
+            return
         completed_plan_already_run = (
             state.job_id is not None
             and state.job_id == self._latest_run_job_id
@@ -5145,6 +5180,133 @@ class MediaSyncWindow(QMainWindow):
             self._check_selected_backup()
             return
         self._start_selected_backup()
+
+    def _register_selected_targets(self) -> bool:
+        state = self._job_detail_state
+        job_id = state.job_id
+        job_revision_id = state.job_revision_id
+        if (
+            self._engine_client is None
+            or not hasattr(self._engine_client, "register_writable_targets")
+            or job_id is None
+            or job_revision_id is None
+            or not state.writable_target_registration_required
+            or self._job_detail_query_pending
+            or self._registration_command_pending
+            or self._command_worker_active()
+        ):
+            return False
+        if (
+            self._registration_command_job_id != job_id
+            or self._registration_command_revision_id != job_revision_id
+            or self._registration_request_id is None
+            or self._registration_idempotency_key is None
+        ):
+            self._registration_command_job_id = job_id
+            self._registration_command_revision_id = job_revision_id
+            self._registration_request_id = str(uuid4())
+            self._registration_idempotency_key = str(uuid4())
+        request_id = self._registration_request_id
+        idempotency_key = self._registration_idempotency_key
+        assert request_id is not None
+        assert idempotency_key is not None
+        self._registration_command_pending = True
+        self._refresh_command_buttons()
+
+        def command(client: object) -> object:
+            return cast(
+                WritableTargetRegistrationProvider,
+                client,
+            ).register_writable_targets(
+                job_id=job_id,
+                job_revision_id=job_revision_id,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+            )
+
+        def accept(value: object) -> None:
+            self._registration_command_pending = False
+            self._apply_target_registration_response(
+                cast(IpcResponse, value),
+                job_id=job_id,
+            )
+
+        def reject(_error: Exception) -> None:
+            self._registration_command_pending = False
+            self._apply_command_transport_failure(
+                "Target registration could not be submitted. Retry to reuse the same request."
+            )
+            self._refresh_command_buttons()
+
+        submitted = self._submit_engine_command(
+            name="register-writable-targets",
+            operation=command,
+            on_result=accept,
+            on_error=reject,
+        )
+        if not submitted:
+            self._registration_command_pending = False
+            self._refresh_command_buttons()
+        return submitted
+
+    def _clear_target_registration_command_identity(self) -> None:
+        self._registration_request_id = None
+        self._registration_idempotency_key = None
+        self._registration_command_job_id = None
+        self._registration_command_revision_id = None
+
+    def _apply_target_registration_response(
+        self,
+        response: IpcResponse,
+        *,
+        job_id: str,
+    ) -> None:
+        registration = response.payload.get("writable_endpoint_registration")
+        completed = (
+            isinstance(registration, dict)
+            and registration.get("completed") is True
+        )
+        if response.status is IpcStatus.REJECTED:
+            reason = response.reason.value if response.reason is not None else "UNKNOWN"
+            if isinstance(registration, dict):
+                codes = registration.get("validation_codes")
+                if isinstance(codes, list) and codes and isinstance(codes[0], str):
+                    reason = codes[0]
+            self._clear_target_registration_command_identity()
+            self.apply_engine_status(
+                replace(
+                    self._engine_status_state,
+                    detail=f"{self._texts().target_registration_failed}: {reason}",
+                    status_kind="warning",
+                )
+            )
+        elif completed:
+            self._clear_target_registration_command_identity()
+            self.apply_engine_status(
+                replace(
+                    self._engine_status_state,
+                    detail=self._texts().target_registration_complete,
+                    status_kind="ready",
+                )
+            )
+        else:
+            reason = "WRITABLE_ENDPOINT_REGISTRATION_INCOMPLETE"
+            if isinstance(registration, dict):
+                codes = registration.get("validation_codes")
+                if isinstance(codes, list) and codes and isinstance(codes[0], str):
+                    reason = codes[0]
+            self.apply_engine_status(
+                replace(
+                    self._engine_status_state,
+                    detail=f"{self._texts().target_registration_failed}: {reason}",
+                    status_kind="warning",
+                )
+            )
+        if self._selected_job_id == job_id:
+            self._refresh_backup_job_detail(job_id)
+        self._refresh_backup_overview()
+        self._refresh_activity_overview()
+        self._refresh_command_buttons()
 
     def _check_selected_backup(
         self,

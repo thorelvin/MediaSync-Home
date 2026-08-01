@@ -7,6 +7,9 @@ from mediasync_home.application.command_payloads import canonical_command_payloa
 from mediasync_home.application.job_creation import JobCreationCommandName
 from mediasync_home.application.job_drafts import DraftTarget, StandardBackupJobDraft
 from mediasync_home.application.runs import RunCommandName
+from mediasync_home.application.writable_endpoint_registration import (
+    WritableEndpointRegistrationCommandName,
+)
 from mediasync_home.ipc.protocol import IpcReason, IpcResponse
 from mediasync_home.presentation.engine_client import EngineClient
 
@@ -75,6 +78,30 @@ def test_engine_client_submits_checksum_bound_start_run() -> None:
     assert ipc_client.payload == {
         "plan_id": "plan-a",
         "plan_checksum": "a" * 64,
+    }
+    assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
+
+
+def test_engine_client_submits_revision_bound_writable_target_registration() -> None:
+    ipc_client = _RecordingIpcClient()
+    client = EngineClient(ipc_client)  # type: ignore[arg-type]
+
+    response = client.register_writable_targets(
+        job_id="job-a",
+        job_revision_id="job-revision-a",
+        request_id="request-a",
+        idempotency_key="idempotency-a",
+    )
+
+    assert response.reason is None
+    assert ipc_client.command_name == (
+        WritableEndpointRegistrationCommandName.REGISTER_WRITABLE_TARGETS.value
+    )
+    assert ipc_client.request_id == "request-a"
+    assert ipc_client.idempotency_key == "idempotency-a"
+    assert ipc_client.payload == {
+        "job_id": "job-a",
+        "job_revision_id": "job-revision-a",
     }
     assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
 

@@ -287,6 +287,8 @@ def test_backup_job_detail_view_model_renders_exact_job_revision() -> None:
     assert state.read_model_available is True
     assert state.found is True
     assert state.job_id == "job-a"
+    assert state.job_revision_id == "job-rev-a"
+    assert state.writable_target_registration_required is False
     assert state.title == "Pictures"
     assert state.source_label == "C:/Users/Ada/Pictures"
     assert state.revision_label == "Revisjon: job-rev-a - Filter: filter-a"
@@ -302,6 +304,49 @@ def test_backup_job_detail_view_model_renders_exact_job_revision() -> None:
     assert state.plan_summary_label == (
         "3 operasjoner fra plan-a. · 256 B · Kun forhåndsvisning"
     )
+
+
+@pytest.mark.parametrize(
+    ("registration_states", "registration_required"),
+    (
+        (("REGISTRATION_PENDING",), True),
+        (("REGISTRATION_PENDING", "REGISTRATION_PENDING"), True),
+        (("WRITABLE_READY",), False),
+        (("REGISTRATION_PENDING", "WRITABLE_READY"), False),
+        ((), False),
+    ),
+)
+def test_backup_job_detail_requires_explicit_registration_only_for_all_pending_targets(
+    registration_states: tuple[str, ...],
+    registration_required: bool,
+) -> None:
+    response = IpcResponse.accepted(
+        {
+            "backup_job_detail": {
+                "job_id": "job-a",
+                "read_model_available": True,
+                "found": True,
+                "job": {
+                    "job_id": "job-a",
+                    "job_revision_id": "job-rev-a",
+                    "title": "Pictures",
+                    "targets": [
+                        {
+                            "name": f"Target {index}",
+                            "path_label": f"E:/Backup-{index}",
+                            "registration_state": state,
+                        }
+                        for index, state in enumerate(registration_states, start=1)
+                    ],
+                },
+            }
+        }
+    )
+
+    state = backup_job_detail_from_response(response)
+
+    assert state.job_revision_id == "job-rev-a"
+    assert state.writable_target_registration_required is registration_required
 
 
 def test_backup_job_detail_view_model_handles_missing_read_model() -> None:

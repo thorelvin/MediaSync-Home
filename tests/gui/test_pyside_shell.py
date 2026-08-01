@@ -3075,6 +3075,85 @@ def test_start_backup_button_submits_sealed_plan_once(qapp) -> None:
         window.deleteLater()
 
 
+def test_pending_target_registration_stays_responsive_and_bounded(qapp) -> None:
+    provider = _FakePendingRegistrationDashboardEngineClient()
+    worker_provider = _BlockingTargetRegistrationEngineClient(provider)
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=lambda: worker_provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window._refresh_engine_status_now()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+        register = window.findChild(QPushButton, "jobsStartBackupButton")
+        target_rows = window.findChildren(QLabel, "jobsDetailTargetRow")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+        nav = window.findChild(QListWidget, "navigationRail")
+
+        assert register is not None and register.isVisible() and register.isEnabled()
+        assert register.text() == "Registrer mål"
+        assert target_rows and target_rows[0].isVisible()
+        assert target_rows[0].toolTip() == target_rows[0].text()
+        assert "…" in str(target_rows[0].property("displayText"))
+        assert (
+            target_rows[0].fontMetrics().horizontalAdvance(
+                str(target_rows[0].property("displayText"))
+            )
+            <= target_rows[0].contentsRect().width()
+        )
+        assert language is not None and language.menu() is not None
+        assert nav is not None
+
+        QTest.mouseClick(register, Qt.MouseButton.LeftButton)
+        assert worker_provider.started.wait(timeout=1)
+        qapp.processEvents()
+        assert register.isEnabled() is False
+        assert register.text() == "Registrerer mål..."
+        QTest.mouseClick(register, Qt.MouseButton.LeftButton)
+
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(3)).center(),
+        )
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+
+        assert nav.currentRow() == 3
+        assert register.text() == "Registering targets..."
+        assert worker_provider.attempted_calls == 1
+        assert worker_provider.worker_thread_id != get_ident()
+        assert worker_provider.registration_attempts[0][:2] == (
+            "job-a",
+            "job-rev-a",
+        )
+        worker_provider.release.set()
+        assert window._command_submissions is not None
+        deadline = monotonic() + 3
+        while (
+            window._job_detail_state.job_revision_id != "job-rev-b"
+            and monotonic() < deadline
+        ):
+            qapp.processEvents()
+            QTest.qWait(10)
+
+        assert window._job_detail_state.job_revision_id == "job-rev-b"
+        assert window._job_detail_state.writable_target_registration_required is False
+        assert provider.registered is True
+        assert worker_provider.attempted_calls == 1
+        assert register.text() == "Start backup"
+    finally:
+        worker_provider.release.set()
+        window.close()
+        window.deleteLater()
+
+
 def test_stalled_create_command_keeps_shell_responsive_and_submits_once(qapp) -> None:
     provider = _FakeBackupCreationEngineClient()
     worker_provider = _BlockingBackupCreationEngineClient()
@@ -4649,6 +4728,117 @@ class _FakeBackupStartDashboardEngineClient(_FakeDashboardEngineClient):
         self.started_scope = (target_endpoint_ids, resumed_from_run_id)
         self.started_operation_ids = source_operation_ids
         return IpcResponse.accepted({"created": True, "run": {"run_id": "run-a"}})
+
+
+class _FakePendingRegistrationDashboardEngineClient(_FakeDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.registered = False
+
+    def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        response = super().get_backup_job_detail(job_id=job_id)
+        payload = dict(response.payload)
+        detail = dict(payload["backup_job_detail"])
+        job = dict(detail["job"])
+        job["job_revision_id"] = "job-rev-b" if self.registered else "job-rev-a"
+        targets = list(job["targets"])
+        target = dict(targets[0])
+        target.update(
+            {
+                "path_label": (
+                    "E:/MediaSync Home Backups/Primary External Drive/"
+                    "CompleteComputerBackupTargetFolderWithoutBreaks"
+                ),
+                "registration_state": (
+                    "WRITABLE_READY" if self.registered else "REGISTRATION_PENDING"
+                ),
+                "registration_reason_code": (
+                    "ENDPOINT_TARGET_WRITABLE_PROBE_VERIFIED"
+                    if self.registered
+                    else "WRITABLE_ENDPOINT_REGISTRATION_REQUIRED"
+                ),
+            }
+        )
+        targets[0] = target
+        job["targets"] = targets
+        detail["job"] = job
+        payload["backup_job_detail"] = detail
+        return IpcResponse.accepted(payload)
+
+    def register_writable_targets(
+        self,
+        *,
+        job_id: str,
+        job_revision_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        assert job_id == "job-a"
+        assert job_revision_id == "job-rev-a"
+        assert request_id
+        assert idempotency_key
+        self.registered = True
+        return IpcResponse.accepted(
+            {
+                "job": {
+                    "job_id": job_id,
+                    "job_revision_id": "job-rev-b",
+                },
+                "writable_endpoint_registration": {
+                    "completed": True,
+                    "state": "COMMITTED",
+                    "registered_target_count": 1,
+                },
+            }
+        )
+
+
+class _BlockingTargetRegistrationEngineClient(
+    _FakePendingRegistrationDashboardEngineClient
+):
+    def __init__(
+        self,
+        state_owner: _FakePendingRegistrationDashboardEngineClient,
+    ) -> None:
+        super().__init__()
+        self._state_owner = state_owner
+        self.started = Event()
+        self.release = Event()
+        self.attempted_calls = 0
+        self.worker_thread_id: int | None = None
+        self.registration_attempts: list[tuple[str, str, str, str]] = []
+
+    def register_writable_targets(
+        self,
+        *,
+        job_id: str,
+        job_revision_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        self.attempted_calls += 1
+        self.worker_thread_id = get_ident()
+        self.registration_attempts.append(
+            (job_id, job_revision_id, request_id, idempotency_key)
+        )
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise TimeoutError("test target registration release timed out")
+        self.registered = True
+        self._state_owner.registered = True
+        return IpcResponse.accepted(
+            {
+                "job": {
+                    "job_id": job_id,
+                    "job_revision_id": "job-rev-b",
+                },
+                "writable_endpoint_registration": {
+                    "completed": True,
+                    "state": "COMMITTED",
+                    "registered_target_count": 1,
+                },
+            }
+        )
 
 
 class _FailOnceStartCommandEngineClient(_FakeBackupStartDashboardEngineClient):

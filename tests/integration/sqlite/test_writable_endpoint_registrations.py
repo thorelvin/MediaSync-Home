@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     apply_sqlite_connection_policy,
     catalog_critical_writer_policy,
 )
+from mediasync_home.adapters.sqlite.command_receipts import SqliteCommandReceiptStore
 from mediasync_home.adapters.sqlite.endpoint_classifications import (
     SqliteEndpointClassificationRefresher,
 )
@@ -22,6 +24,7 @@ from mediasync_home.adapters.sqlite.migrations import (
     apply_sqlite_migrations,
     catalog_migration_plan,
 )
+from mediasync_home.adapters.sqlite.transactions import SqliteImmediateTransactionRunner
 from mediasync_home.adapters.sqlite.writable_endpoint_registrations import (
     SqliteWritableEndpointRegistrationStore,
 )
@@ -36,7 +39,19 @@ from mediasync_home.application.writable_endpoint_registration import (
     WritableEndpointRegistrationState,
     WritableEndpointRegistrationCandidate,
     WritableEndpointTargetIds,
+    WritableEndpointRegistrationCommandName,
 )
+from mediasync_home.application.command_payloads import canonical_command_payload_hash
+from mediasync_home.application.command_receipts import CommandReceiptState
+from mediasync_home.application.runtime_status import startup_status
+from mediasync_home.domain.process_roles import ProcessRole
+from mediasync_home.ipc.client import InProcessIpcClient
+from mediasync_home.ipc.client_identity import (
+    ClientAuthorizationPolicy,
+    VerifiedClientIdentity,
+)
+from mediasync_home.ipc.protocol import IpcStatus
+from mediasync_home.ipc.server import EngineHostIpcService
 
 
 INSTALLATION_ID = "11111111-1111-4111-8111-111111111111"
@@ -211,6 +226,122 @@ def test_startup_reconciliation_finishes_exact_published_intent(
             """,
             (INTENT_ID,),
         ).fetchone() == ("COMMITTED", "2026-07-31T12:02:00Z")
+
+
+def test_explicit_ipc_command_repairs_pending_job_without_registration_intent(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database, source=source, target=target)
+        refresher = _refresher(connection)
+        initial_refresh = refresher.refresh_endpoint_classifications(
+            observed_utc="2026-08-01T07:00:00Z"
+        )
+        receipts = SqliteCommandReceiptStore(connection)
+        coordinator = WritableEndpointRegistrationCoordinator(
+            store=SqliteWritableEndpointRegistrationStore(connection),
+            provisioner=LocalWritableEndpointControlAreaProvisioner(),
+            id_factory=_FixedIds(),
+            owner_installation_id=INSTALLATION_ID,
+        )
+        service = EngineHostIpcService(
+            ClientAuthorizationPolicy(
+                expected_user_sid_hash="same-user",
+                expected_session_id=42,
+            ),
+            status=replace(
+                startup_status(ProcessRole.ENGINE_HOST),
+                mutations_enabled=True,
+                scope="0B_LOCAL_MUTATION_PREVIEW",
+            ),
+            command_receipt_store=receipts,
+            command_effect_transaction=SqliteImmediateTransactionRunner(connection),
+            writable_endpoint_registration=coordinator,
+            writable_endpoint_registration_utc_now=(
+                lambda: "2026-08-01T07:01:00Z"
+            ),
+            endpoint_classification_refresh=(
+                lambda: refresher.refresh_endpoint_classifications(
+                    observed_utc="2026-08-01T07:02:00Z"
+                )
+            ),
+        )
+        ipc_client = InProcessIpcClient(
+            service=service,
+            identity=VerifiedClientIdentity(
+                user_sid_hash="same-user",
+                session_id=42,
+                is_remote=False,
+                transport="sqlite-registration-repair-test",
+            ),
+            role=ProcessRole.GUI,
+            client_instance_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        )
+        ipc_client.connect()
+        payload = {
+            "job_id": JOB_ID,
+            "job_revision_id": JOB_REVISION_ID,
+        }
+
+        response = ipc_client.submit_command(
+            WritableEndpointRegistrationCommandName.REGISTER_WRITABLE_TARGETS.value,
+            request_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            idempotency_key="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            payload=payload,
+            payload_hash=canonical_command_payload_hash(payload),
+        )
+        replay = ipc_client.submit_command(
+            WritableEndpointRegistrationCommandName.REGISTER_WRITABLE_TARGETS.value,
+            request_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            idempotency_key="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            payload=payload,
+            payload_hash=canonical_command_payload_hash(payload),
+        )
+
+        receipt = receipts.load_command_receipt(
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        )
+        assert initial_refresh.pending_binding_count == 1
+        assert response.status is IpcStatus.ACCEPTED
+        assert response.payload["writable_endpoint_registration"]["completed"] is True
+        assert response.payload["job"]["job_revision_id"] == NEW_JOB_REVISION_ID
+        assert response.payload["endpoint_classification_refresh"]["completed"] is True
+        assert replay.status is IpcStatus.ACCEPTED
+        assert replay.payload["idempotent_replay"] is True
+        assert receipt is not None
+        assert receipt.state is CommandReceiptState.SUCCEEDED
+        assert receipt.result_entity_id == INTENT_ID
+        assert (target / ".mediasync" / "endpoint.json").is_file()
+        assert connection.execute(
+            "SELECT active_revision_id FROM job_heads WHERE job_id = ?",
+            (JOB_ID,),
+        ).fetchone() == (NEW_JOB_REVISION_ID,)
+        assert connection.execute(
+            """
+            SELECT registration_state, registration_reason_code
+            FROM standard_backup_job_endpoint_bindings
+            WHERE job_id = ? AND job_revision_id = ? AND role = 'TARGET'
+            """,
+            (JOB_ID, NEW_JOB_REVISION_ID),
+        ).fetchone() == (
+            "WRITABLE_READY",
+            "ENDPOINT_TARGET_WRITABLE_PROBE_VERIFIED",
+        )
+        assert connection.execute(
+            "SELECT count(*) FROM writable_endpoint_registration_intents"
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT count(*) FROM writable_endpoint_registrations"
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT count(*) FROM endpoint_revisions WHERE endpoint_id = ?",
+            (TARGET_ENDPOINT_ID,),
+        ).fetchone() == (2,)
 
 
 def test_registration_tables_reject_identity_rewrite(tmp_path: Path) -> None:

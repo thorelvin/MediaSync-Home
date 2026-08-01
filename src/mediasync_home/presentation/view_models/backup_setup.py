@@ -151,6 +151,8 @@ class BackupJobDetailViewState:
     analysis_request_state: str | None = None
     analysis_request_reason_code: str | None = None
     analysis_request_started_run_id: str | None = None
+    job_revision_id: str | None = None
+    writable_target_registration_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -677,6 +679,14 @@ def _job_detail_from_payload(payload: dict[object, object], *, job_id: str | Non
         ),
         analysis_request_started_run_id=_optional_text(
             request_payload.get("started_run_id")
+        ),
+        job_revision_id=job_revision_id,
+        writable_target_registration_required=(
+            bool(targets)
+            and all(
+                target.registration_state == "REGISTRATION_PENDING"
+                for target in targets
+            )
         ),
     )
 

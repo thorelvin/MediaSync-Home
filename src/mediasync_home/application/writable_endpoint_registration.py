@@ -12,6 +12,14 @@ class WritableEndpointRegistrationState(str, Enum):
     BLOCKED = "BLOCKED"
 
 
+class WritableEndpointRegistrationCommandName(str, Enum):
+    REGISTER_WRITABLE_TARGETS = "REGISTER_WRITABLE_TARGETS"
+
+
+class WritableEndpointRegistrationPayloadError(ValueError):
+    pass
+
+
 class WritableEndpointRegistrationError(RuntimeError):
     def __init__(
         self,
@@ -24,6 +32,14 @@ class WritableEndpointRegistrationError(RuntimeError):
         self.validation_code = validation_code
         self.next_action = next_action
         self.retryable = retryable
+
+
+@dataclass(frozen=True, slots=True)
+class RegisterWritableTargetsCommand:
+    request_id: str
+    idempotency_key: str
+    job_id: str
+    job_revision_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,6 +345,38 @@ class WritableEndpointRegistrationCoordinator:
                 updated_utc=observed_utc,
             )
         return _report(intent, replay=replay)
+
+
+def parse_register_writable_targets_command(
+    *,
+    request_id: str,
+    idempotency_key: str,
+    payload: dict[str, object],
+) -> RegisterWritableTargetsCommand:
+    if set(payload) != {"job_id", "job_revision_id"}:
+        raise WritableEndpointRegistrationPayloadError(
+            "REGISTER_WRITABLE_TARGETS_PAYLOAD_INVALID"
+        )
+    job_id = payload.get("job_id")
+    if not isinstance(job_id, str) or not job_id.strip() or len(job_id) > 128:
+        raise WritableEndpointRegistrationPayloadError(
+            "REGISTER_WRITABLE_TARGETS_JOB_ID_INVALID"
+        )
+    job_revision_id = payload.get("job_revision_id")
+    if (
+        not isinstance(job_revision_id, str)
+        or not job_revision_id.strip()
+        or len(job_revision_id) > 128
+    ):
+        raise WritableEndpointRegistrationPayloadError(
+            "REGISTER_WRITABLE_TARGETS_JOB_REVISION_ID_INVALID"
+        )
+    return RegisterWritableTargetsCommand(
+        request_id=request_id,
+        idempotency_key=idempotency_key,
+        job_id=job_id,
+        job_revision_id=job_revision_id,
+    )
 
 
 def _report(

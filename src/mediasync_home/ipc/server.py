@@ -154,8 +154,13 @@ from mediasync_home.application.trigger_runs import (
     enqueue_trigger_occurrence_run,
 )
 from mediasync_home.application.writable_endpoint_registration import (
+    RegisterWritableTargetsCommand,
+    WritableEndpointRegistrationCommandName,
     WritableEndpointRegistrationCoordinator,
     WritableEndpointRegistrationError,
+    WritableEndpointRegistrationPayloadError,
+    WritableEndpointRegistrationReport,
+    parse_register_writable_targets_command,
 )
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
@@ -646,6 +651,11 @@ class EngineHostIpcService:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         if command.command_name == JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value:
             return self._handle_create_standard_backup_job(command, identity)
+        if (
+            command.command_name
+            == WritableEndpointRegistrationCommandName.REGISTER_WRITABLE_TARGETS.value
+        ):
+            return self._handle_register_writable_targets(command, identity)
         if command.command_name == BackupAnalysisCommandName.CHECK_BACKUP.value:
             return self._handle_check_backup(command, identity)
         if command.command_name == RunCommandName.START_RUN.value:
@@ -1070,6 +1080,218 @@ class EngineHostIpcService:
                 drafts=self.job_draft_store,
             ).to_dict()
         return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, response_payload)
+
+    def _handle_register_writable_targets(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+    ) -> IpcResponse:
+        try:
+            command = parse_register_writable_targets_command(
+                request_id=envelope.request_id,
+                idempotency_key=envelope.idempotency_key,
+                payload=envelope.payload,
+            )
+        except WritableEndpointRegistrationPayloadError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+
+        if self.status.mutations_enabled:
+            response = self._dispatch_register_writable_targets(
+                envelope,
+                identity,
+                command,
+            )
+            response = self._refresh_endpoint_classification_after_job_command(response)
+            response = self._refresh_job_snapshots_after_job_command(response)
+            return self._refresh_initial_backup_plan_after_job_command(response)
+
+        receipt_response = self._record_terminal_rejected_receipt(
+            envelope,
+            identity,
+            rejection_reason=IpcReason.MUTATING_COMMANDS_DISABLED.value,
+        )
+        if receipt_response is not None:
+            return receipt_response
+        payload = _writable_endpoint_registration_response_payload(
+            envelope=envelope,
+            command=command,
+            mutations_enabled=False,
+            recognized=True,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, payload)
+
+    def _dispatch_register_writable_targets(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: RegisterWritableTargetsCommand,
+    ) -> IpcResponse:
+        if (
+            self.command_receipt_store is None
+            or self.writable_endpoint_registration is None
+        ):
+            return self._reject_config_missing_writable_target_registration(
+                envelope,
+                identity,
+                command,
+            )
+
+        receipt, conflict_response = self._record_received_receipt(envelope, identity)
+        if conflict_response is not None:
+            return conflict_response
+        if receipt is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+        if receipt.state is CommandReceiptState.REJECTED:
+            payload = _writable_endpoint_registration_response_payload(
+                envelope=envelope,
+                command=command,
+                mutations_enabled=True,
+                recognized=True,
+                idempotent_replay=True,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(_receipt_rejection_reason(receipt), payload)
+
+        try:
+            report = self.writable_endpoint_registration.register_job_targets(
+                job_id=command.job_id,
+                job_revision_id=command.job_revision_id,
+                command_request_id=envelope.request_id,
+                command_idempotency_key=envelope.idempotency_key,
+                observed_utc=(
+                    self.writable_endpoint_registration_utc_now()
+                    if self.writable_endpoint_registration_utc_now is not None
+                    else _system_utc_now()
+                ),
+            )
+        except WritableEndpointRegistrationError as exc:
+            validation_code = exc.validation_code
+            next_action = exc.next_action
+            return self._run_command_effect_transaction(
+                lambda: self._reject_writable_target_registration(
+                    envelope,
+                    command,
+                    validation_code=validation_code,
+                    next_action=next_action,
+                )
+            )
+
+        return self._run_command_effect_transaction(
+            lambda: self._accept_writable_target_registration(
+                envelope,
+                command,
+                report,
+            )
+        )
+
+    def _accept_writable_target_registration(
+        self,
+        envelope: IpcCommandEnvelope,
+        command: RegisterWritableTargetsCommand,
+        report: WritableEndpointRegistrationReport,
+    ) -> IpcResponse:
+        assert self.command_receipt_store is not None
+        receipt = self.command_receipt_store.load_command_receipt(
+            envelope.idempotency_key
+        )
+        if receipt is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+        if receipt.state is CommandReceiptState.RECEIVED:
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.VALIDATED,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+        if receipt.state is CommandReceiptState.VALIDATED:
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.EFFECT_PREPARED,
+                result_entity_type="writable_endpoint_registration",
+                result_entity_id=report.intent_id or command.job_id,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+        if receipt.state is CommandReceiptState.EFFECT_PREPARED:
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.ACCEPTED,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+        if receipt.state is CommandReceiptState.ACCEPTED:
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.SUCCEEDED,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+            self._enqueue_command_effect_outbox(receipt)
+        payload = _writable_endpoint_registration_response_payload(
+            envelope=envelope,
+            command=command,
+            mutations_enabled=True,
+            recognized=True,
+            report=report,
+            idempotent_replay=(
+                report.idempotent_replay
+                or receipt.state is not CommandReceiptState.SUCCEEDED
+            ),
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.accepted(payload)
+
+    def _reject_writable_target_registration(
+        self,
+        envelope: IpcCommandEnvelope,
+        command: RegisterWritableTargetsCommand,
+        *,
+        validation_code: str,
+        next_action: str,
+    ) -> IpcResponse:
+        assert self.command_receipt_store is not None
+        receipt = self.command_receipt_store.load_command_receipt(
+            envelope.idempotency_key
+        )
+        if receipt is not None and receipt.state in {
+            CommandReceiptState.RECEIVED,
+            CommandReceiptState.VALIDATED,
+        }:
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.REJECTED,
+                rejection_reason=IpcReason.COMMAND_PRECONDITION_FAILED.value,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+        payload = _writable_endpoint_registration_response_payload(
+            envelope=envelope,
+            command=command,
+            mutations_enabled=True,
+            recognized=True,
+            validation_code=validation_code,
+            next_action=next_action,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.rejected(IpcReason.COMMAND_PRECONDITION_FAILED, payload)
+
+    def _reject_config_missing_writable_target_registration(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: RegisterWritableTargetsCommand,
+    ) -> IpcResponse:
+        receipt_response = self._record_terminal_rejected_receipt(
+            envelope,
+            identity,
+            rejection_reason=IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED.value,
+        )
+        if receipt_response is not None:
+            return receipt_response
+        payload = _writable_endpoint_registration_response_payload(
+            envelope=envelope,
+            command=command,
+            mutations_enabled=True,
+            recognized=True,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload)
 
     def _handle_start_run(
         self,
@@ -2047,6 +2269,53 @@ def _create_standard_backup_job_response_payload(
         }
     if endpoint_set is not None:
         result["endpoint_bindings"] = endpoint_set.to_dict()
+    return result
+
+
+def _writable_endpoint_registration_response_payload(
+    *,
+    envelope: IpcCommandEnvelope,
+    command: RegisterWritableTargetsCommand,
+    mutations_enabled: bool,
+    recognized: bool,
+    report: WritableEndpointRegistrationReport | None = None,
+    idempotent_replay: bool = False,
+    validation_code: str | None = None,
+    next_action: str | None = None,
+) -> dict[str, Any]:
+    active_job_revision_id = (
+        command.job_revision_id
+        if report is None
+        else report.active_job_revision_id
+    )
+    result: dict[str, Any] = {
+        "command_name": envelope.command_name,
+        "job_id": command.job_id,
+        "requested_job_revision_id": command.job_revision_id,
+        "recognized": recognized,
+        "mutations_enabled": mutations_enabled,
+        "idempotent_replay": idempotent_replay,
+        "job": {
+            "job_id": command.job_id,
+            "job_revision_id": active_job_revision_id,
+        },
+    }
+    if report is not None:
+        result["writable_endpoint_registration"] = report.to_dict()
+    elif validation_code is not None:
+        result["writable_endpoint_registration"] = {
+            "job_id": command.job_id,
+            "source_job_revision_id": command.job_revision_id,
+            "active_job_revision_id": command.job_revision_id,
+            "intent_id": None,
+            "state": None,
+            "target_count": 0,
+            "registered_target_count": 0,
+            "idempotent_replay": idempotent_replay,
+            "completed": False,
+            "validation_codes": [validation_code],
+            "next_action": next_action,
+        }
     return result
 
 

@@ -8153,7 +8153,9 @@ checksummet schema-4-markør, immutable ownership-record, installasjonsspesifikk
 namespaces, kontrollert writable probe og append-only endpoint-/jobbrevisjoner.
 Startup-resume og fail-closed avvisning av ukjent/fremmed/korrupt kontrollstate er
 dekket. Dette fullfører ikke Milepæl 2: takeover, bred endpointvelger/kapabiliteter,
-pre-migration-30 pending-jobbreparasjon og SMB-bevis gjenstår.
+og SMB-bevis gjenstår. Pre-migration-30 pending-jobber kan nå repareres gjennom
+en eksplisitt, revisjonsbundet **Registrer mål**-handling med restartbar intent,
+command receipt og ny klassifisering/snapshot/plan etter commit.
 
 #### Kvalitetsport
 

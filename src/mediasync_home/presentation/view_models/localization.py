@@ -120,6 +120,36 @@ class ShellText:
         return "Kontrollerer endringer..."
 
     @property
+    def register_targets(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Register targets"
+        return "Registrer mål"
+
+    @property
+    def register_targets_tooltip(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Review and register the selected targets as writable endpoints"
+        return "Kontroller og registrer valgte mål som skrivbare endepunkter"
+
+    @property
+    def registering_targets(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Registering targets..."
+        return "Registrerer mål..."
+
+    @property
+    def target_registration_complete(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Writable targets registered"
+        return "Skrivbare mål er registrert"
+
+    @property
+    def target_registration_failed(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Target registration needs attention"
+        return "Målregistreringen trenger oppfølging"
+
+    @property
     def checking_backup_tooltip(self) -> str:
         if self.language_tooltip_prefix == "Language":
             return "The Engine Host is checking this backup"
@@ -834,6 +864,9 @@ _EN_TO_NB.update(
         ),
         "Backup start could not be submitted. Retry to reuse the same request.": (
             "Backupstarten kunne ikke sendes. Prøv igjen for å bruke samme forespørsel."
+        ),
+        "Target registration could not be submitted. Retry to reuse the same request.": (
+            "Målregistreringen kunne ikke sendes. Prøv igjen for å bruke samme forespørsel."
         ),
         "Run control could not be submitted. Retry the action.": (
             "Kjøringshandlingen kunne ikke sendes. Prøv handlingen igjen."
