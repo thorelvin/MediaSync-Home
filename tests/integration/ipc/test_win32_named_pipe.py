@@ -153,7 +153,12 @@ def test_named_pipe_history_timeline_query_succeeds_after_handshake() -> None:
             activity_filter="CONTROLS",
             job_id="job-a",
             limit=5,
-            offset=0,
+            after={
+                "cursor_version": 1,
+                "started_utc": "2026-07-20T12:00:00.000Z",
+                "activity_kind": "CONTROL",
+                "activity_id": "analysis-z",
+            },
         ),
     )
 
@@ -162,6 +167,7 @@ def test_named_pipe_history_timeline_query_succeeds_after_handshake() -> None:
     assert timeline.payload["history_timeline"]["read_model_available"] is False
     assert timeline.payload["history_timeline"]["activity_filter"] == "CONTROLS"
     assert timeline.payload["history_timeline"]["job_id"] == "job-a"
+    assert timeline.payload["history_timeline"]["next_cursor"] is None
 
 
 def test_named_pipe_run_progress_query_succeeds_after_handshake() -> None:

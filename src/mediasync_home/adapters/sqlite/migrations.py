@@ -238,6 +238,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_run_operation_audit",
                 statements=CATALOG_RUN_OPERATION_AUDIT,
             ),
+            SqliteMigration(
+                version=41,
+                name="catalog_history_timeline_keyset_indexes",
+                statements=CATALOG_HISTORY_TIMELINE_KEYSET_INDEXES,
+            ),
         ),
     )
 
@@ -3488,6 +3493,50 @@ CATALOG_RUN_ACTIVITY_READ_MODEL_INDEXES = (
     """
     CREATE INDEX idx_runs_job_started_id
         ON runs (job_id, started_utc DESC, id DESC)
+    """,
+)
+
+CATALOG_HISTORY_TIMELINE_KEYSET_INDEXES = (
+    """
+    CREATE INDEX idx_initial_backup_materializations_history
+        ON initial_backup_plan_materializations (
+            started_utc DESC,
+            COALESCE(
+                analysis_id,
+                'control:' || job_id || ':' || job_revision_id
+            ) DESC
+        )
+    """,
+    """
+    CREATE INDEX idx_initial_backup_materializations_job_history
+        ON initial_backup_plan_materializations (
+            job_id,
+            started_utc DESC,
+            COALESCE(
+                analysis_id,
+                'control:' || job_id || ':' || job_revision_id
+            ) DESC
+        )
+    """,
+    """
+    CREATE INDEX idx_backup_analysis_requests_history
+        ON backup_analysis_requests (
+            COALESCE(started_utc, requested_utc) DESC,
+            request_id DESC
+        )
+    """,
+    """
+    CREATE INDEX idx_backup_analysis_requests_job_history
+        ON backup_analysis_requests (
+            job_id,
+            COALESCE(started_utc, requested_utc) DESC,
+            request_id DESC
+        )
+    """,
+    """
+    CREATE INDEX idx_backup_analysis_requests_analysis
+        ON backup_analysis_requests (analysis_id)
+        WHERE analysis_id IS NOT NULL
     """,
 )
 

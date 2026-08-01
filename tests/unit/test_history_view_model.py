@@ -18,6 +18,12 @@ def test_history_view_model_parses_activity_targets_and_duration() -> None:
                     "has_more": True,
                     "activity_filter": "ALL",
                     "job_id": None,
+                    "next_cursor": {
+                        "cursor_version": 1,
+                        "started_utc": "2026-07-20T12:00:00.000Z",
+                        "activity_kind": "BACKUP",
+                        "activity_id": "run-a",
+                    },
                     "activities": [
                         {
                             "activity_id": "run-a",
@@ -62,6 +68,13 @@ def test_history_view_model_parses_activity_targets_and_duration() -> None:
     assert state.read_model_available is True
     assert state.has_more is True
     assert state.limit == 25
+    assert state.keyset_paging_available is True
+    assert state.next_cursor == {
+        "cursor_version": 1,
+        "started_utc": "2026-07-20T12:00:00.000Z",
+        "activity_kind": "BACKUP",
+        "activity_id": "run-a",
+    }
     assert state.selected_activity_id == "BACKUP:run-a"
     assert len(state.activities) == 1
     assert state.activities[0].duration_seconds == 90
@@ -87,3 +100,22 @@ def test_history_view_model_distinguishes_empty_and_unavailable() -> None:
     assert empty.activity_filter == "CONTROLS"
     assert empty.activities == ()
     assert unavailable == empty_history_timeline_state()
+
+
+def test_history_view_model_disables_more_for_malformed_new_host_cursor() -> None:
+    state = history_timeline_from_response(
+        IpcResponse.accepted(
+            {
+                "history_timeline": {
+                    "read_model_available": True,
+                    "has_more": True,
+                    "next_cursor": {"cursor_version": 1},
+                    "activities": [],
+                }
+            }
+        )
+    )
+
+    assert state.keyset_paging_available is True
+    assert state.next_cursor is None
+    assert state.has_more is False

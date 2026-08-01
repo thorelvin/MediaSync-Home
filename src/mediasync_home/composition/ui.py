@@ -51,6 +51,7 @@ class GuiIpcClient(Protocol):
         activity_filter: str | None = None,
         job_id: str | None = None,
         limit: int | None = None,
+        after: dict[str, object] | None = None,
         offset: int | None = None,
     ) -> IpcResponse: ...
 

@@ -55,6 +55,8 @@ class HistoryTimelineViewState:
     activities: tuple[HistoryActivityViewState, ...]
     limit: int = 10
     offset: int = 0
+    next_cursor: dict[str, object] | None = None
+    keyset_paging_available: bool = False
     selected_activity_id: str | None = None
 
 
@@ -78,6 +80,8 @@ def history_timeline_from_response(
         return empty_history_timeline_state()
     activity_filter = _history_filter(timeline.get("activity_filter"))
     job_id = _optional_text(timeline.get("job_id"))
+    keyset_paging_available = "next_cursor" in timeline
+    next_cursor = _history_cursor(timeline.get("next_cursor"))
     if not bool(timeline.get("read_model_available", False)):
         return HistoryTimelineViewState(
             read_model_available=False,
@@ -87,6 +91,7 @@ def history_timeline_from_response(
             activities=(),
             limit=_positive_int(timeline.get("limit")) or 10,
             offset=_non_negative_int(timeline.get("offset")) or 0,
+            keyset_paging_available=keyset_paging_available,
         )
     payloads = timeline.get("activities")
     activities = tuple(
@@ -95,14 +100,19 @@ def history_timeline_from_response(
         if isinstance(payload, dict)
         and (activity := _activity_from_payload(payload)) is not None
     ) if isinstance(payloads, list) else ()
+    has_more = bool(timeline.get("has_more", False))
+    if keyset_paging_available and next_cursor is None:
+        has_more = False
     return HistoryTimelineViewState(
         read_model_available=True,
-        has_more=bool(timeline.get("has_more", False)),
+        has_more=has_more,
         activity_filter=activity_filter,
         job_id=job_id,
         activities=activities,
         limit=_positive_int(timeline.get("limit")) or 10,
         offset=_non_negative_int(timeline.get("offset")) or 0,
+        next_cursor=next_cursor,
+        keyset_paging_available=keyset_paging_available,
         selected_activity_id=activities[0].selection_key if activities else None,
     )
 
@@ -194,6 +204,36 @@ def _duration_seconds(started_utc: str, finished_utc: str | None) -> int | None:
 def _history_filter(value: object) -> str:
     normalized = _required_text(value)
     return normalized if normalized in {"ALL", "CONTROLS", "BACKUPS"} else "ALL"
+
+
+def _history_cursor(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    if set(value) != {
+        "cursor_version",
+        "started_utc",
+        "activity_kind",
+        "activity_id",
+    }:
+        return None
+    version = value.get("cursor_version")
+    started_utc = _required_text(value.get("started_utc"))
+    activity_kind = _required_text(value.get("activity_kind"))
+    activity_id = _required_text(value.get("activity_id"))
+    if (
+        isinstance(version, bool)
+        or version != 1
+        or started_utc is None
+        or activity_kind not in {"CONTROL", "BACKUP"}
+        or activity_id is None
+    ):
+        return None
+    return {
+        "cursor_version": 1,
+        "started_utc": started_utc,
+        "activity_kind": activity_kind,
+        "activity_id": activity_id,
+    }
 
 
 def _required_text(value: object) -> str | None:

@@ -402,6 +402,7 @@ class EngineHostIpcService:
         activity_filter: str | None = None,
         job_id: str | None = None,
         limit: int | None = None,
+        after: dict[str, object] | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
         rejection = self._authorize_client_request(client_instance_id)
@@ -413,6 +414,7 @@ class EngineHostIpcService:
                 activity_filter=activity_filter,
                 job_id=job_id,
                 limit=limit,
+                after=after,
                 offset=offset,
             )
         except HistoryTimelineQueryError:

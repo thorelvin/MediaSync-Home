@@ -977,6 +977,16 @@ før målterminalisering. Derfor kan et prosesskrasj mellom de to databasene
 repareres uten å finne opp nytt bevis. Bounded `QUERY_OPERATION_AUDIT` leser
 forsøk og outcome per `(run_id, operation_id)`.
 
+0B-implementasjonsnote: Catalog schema 41 legger bounded History-keysetindekser
+på `(started_utc, activity_id)` for førstegangsplanmaterialiseringer,
+`(COALESCE(started_utc, requested_utc), request_id)` for manuelle kontroller og
+tilsvarende jobbfiltrerte varianter. Et partial index på
+`backup_analysis_requests.analysis_id` gjør duplikatundertrykkingen mot
+førstegangskontrollen indeksert. Runs gjenbruker schema 18-indeksene over
+`(started_utc, id)` og `(job_id, started_utc, id)`. Adapteren søker hver kilde
+separat og merger bare en bounded kandidatmengde i den synkende totalrekkefølgen
+`(started_utc, activity_kind, activity_id)`.
+
 #### `hash_cache`
 
 - `id INTEGER PRIMARY KEY`

@@ -673,8 +673,10 @@ class _FakeGuiIpcClient:
         activity_filter: str | None = None,
         job_id: str | None = None,
         limit: int | None = None,
+        after: dict[str, object] | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
+        del after
         self.calls = (*self.calls, "query_history_timeline")
         self.history_query = {
             "activity_filter": activity_filter,

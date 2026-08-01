@@ -38,7 +38,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 40
+        assert current_schema_version(connection, plan.store) == 41
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -83,7 +83,14 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 40
+        assert _row_count(connection, "schema_migrations") == 41
+        assert {
+            "idx_initial_backup_materializations_history",
+            "idx_initial_backup_materializations_job_history",
+            "idx_backup_analysis_requests_history",
+            "idx_backup_analysis_requests_job_history",
+            "idx_backup_analysis_requests_analysis",
+        } <= _index_names(connection)
         assert _column_names(connection, "run_target_endpoint_wait_events") >= {
             "backoff_ms",
             "retry_not_before_utc",
@@ -1036,7 +1043,7 @@ def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> N
                 name,
                 migration_checksum
             )
-                    VALUES ('catalog', 41, 'future_migration', ?)
+                    VALUES ('catalog', 42, 'future_migration', ?)
             """,
             ("f" * 64,),
         )
@@ -1149,8 +1156,8 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
         preflight = inspect_sqlite_migration_state(connection, plan)
 
         assert preflight.initialized
-        assert preflight.current_version == 40
-        assert preflight.target_version == 40
+        assert preflight.current_version == 41
+        assert preflight.target_version == 41
         assert preflight.checksum_backfill_required
         assert "migration_checksum" not in _column_names(
             connection,
@@ -1907,6 +1914,18 @@ def _index_is_unique(
         if index_columns == columns:
             return bool(index_row[2])
     return None
+
+
+def _index_names(connection: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'index' AND name NOT LIKE 'sqlite_%'
+            """
+        )
+    }
 
 
 def _trigger_names(connection: sqlite3.Connection) -> set[str]:

@@ -2195,7 +2195,7 @@ def test_history_rechecks_then_retries_only_selected_unfinished_file(qapp) -> No
         window.deleteLater()
 
 
-def test_history_workspace_pages_with_bounded_offsets(qapp) -> None:
+def test_history_workspace_pages_with_stable_cursors(qapp) -> None:
     provider = _FakePagedHistoryEngineClient()
     window = build_main_window(
         initial_state=EngineStatusViewState.disconnected(),
@@ -2227,7 +2227,13 @@ def test_history_workspace_pages_with_bounded_offsets(qapp) -> None:
         QTest.mouseClick(next_button, Qt.MouseButton.LeftButton)
         qapp.processEvents()
 
-        assert provider.history_queries[-1][3] == 25
+        assert provider.history_queries[-1][3] == {
+            "cursor_version": 1,
+            "started_utc": "2026-07-20T12:00:00.000Z",
+            "activity_kind": "BACKUP",
+            "activity_id": "run-a",
+        }
+        assert provider.history_queries[-1][4] is None
         assert _virtual_row_count(history_list) == 1
         assert _virtual_row_id(history_list, 0) == "BACKUP:run-z"
         assert previous.isEnabled() is True
@@ -2235,7 +2241,42 @@ def test_history_workspace_pages_with_bounded_offsets(qapp) -> None:
 
         QTest.mouseClick(previous, Qt.MouseButton.LeftButton)
         qapp.processEvents()
-        assert provider.history_queries[-1][3] == 0
+        assert provider.history_queries[-1][3] is None
+        assert provider.history_queries[-1][4] is None
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_history_workspace_falls_back_for_legacy_offset_host(qapp) -> None:
+    provider = _FakeLegacyPagedHistoryEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.show()
+        window.refresh_engine_status()
+        window._select_navigation_row(2)
+        qapp.processEvents()
+        history_list = window.findChild(BoundedVirtualTableView, "historyList")
+        previous = window.findChild(QToolButton, "historyPreviousButton")
+        next_button = window.findChild(QToolButton, "historyNextButton")
+
+        assert history_list is not None
+        assert previous is not None
+        assert next_button is not None and next_button.isEnabled()
+        assert provider.history_queries[0] == ("ALL", None, 25, None, None)
+        assert provider.history_queries[-1] == ("ALL", None, 25, None, 0)
+
+        QTest.mouseClick(next_button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert provider.history_queries[-1] == ("ALL", None, 25, None, 25)
+        assert _virtual_row_id(history_list, 0) == "BACKUP:run-z"
+        assert previous.isEnabled()
     finally:
         window.close()
         window.deleteLater()
@@ -2349,9 +2390,20 @@ def test_history_query_stall_keeps_navigation_and_latest_filter_responsive(
         assert worker_provider.max_active == 1
         assert len(factory_calls) == 1
         assert worker_provider.history_queries == [
-            ("ALL", None, 25, 0),
-            ("ALL", None, 25, 25),
-            ("BACKUPS", None, 25, 0),
+            ("ALL", None, 25, None, None),
+            (
+                "ALL",
+                None,
+                25,
+                {
+                    "cursor_version": 1,
+                    "started_utc": "2026-07-20T12:00:00.000Z",
+                    "activity_kind": "BACKUP",
+                    "activity_id": "run-a",
+                },
+                None,
+            ),
+            ("BACKUPS", None, 25, None, None),
         ]
         assert _virtual_row_count(history_list) == 1
         assert _virtual_row_id(history_list, 0) == "BACKUP:run-a"
@@ -5004,7 +5056,15 @@ class _BlockingPagedJobsEngineClient(_FakePagedJobsEngineClient):
 class _FakeHistoryEngineClient(_FakeDashboardEngineClient):
     def __init__(self) -> None:
         super().__init__()
-        self.history_queries: list[tuple[str, str | None, int, int]] = []
+        self.history_queries: list[
+            tuple[
+                str,
+                str | None,
+                int,
+                dict[str, object] | None,
+                int | None,
+            ]
+        ] = []
         self.operation_audit_queries: list[tuple[str, str, int]] = []
 
     def get_history_timeline(
@@ -5013,17 +5073,19 @@ class _FakeHistoryEngineClient(_FakeDashboardEngineClient):
         activity_filter: str | None = None,
         job_id: str | None = None,
         limit: int | None = None,
+        after: dict[str, object] | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
         normalized_filter = activity_filter or "ALL"
         normalized_limit = limit or 25
-        normalized_offset = offset or 0
+        normalized_offset = 0 if offset is None else offset
         self.history_queries.append(
             (
                 normalized_filter,
                 job_id,
                 normalized_limit,
-                normalized_offset,
+                after,
+                offset,
             )
         )
         activities = [
@@ -5049,6 +5111,7 @@ class _FakeHistoryEngineClient(_FakeDashboardEngineClient):
                     "has_more": False,
                     "activity_filter": normalized_filter,
                     "job_id": job_id,
+                    "next_cursor": None,
                     "activities": activities,
                 }
             }
@@ -5179,12 +5242,14 @@ class _FakeHistoryOperationRetryEngineClient(_FakeHistoryEngineClient):
         activity_filter: str | None = None,
         job_id: str | None = None,
         limit: int | None = None,
+        after: dict[str, object] | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
         response = super().get_history_timeline(
             activity_filter=activity_filter,
             job_id=job_id,
             limit=limit,
+            after=after,
             offset=offset,
         )
         payload = dict(response.payload)
@@ -5334,20 +5399,23 @@ class _FakePagedHistoryEngineClient(_FakeHistoryEngineClient):
         activity_filter: str | None = None,
         job_id: str | None = None,
         limit: int | None = None,
+        after: dict[str, object] | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
         normalized_filter = activity_filter or "ALL"
         normalized_limit = limit or 25
-        normalized_offset = offset or 0
+        normalized_offset = 0 if offset is None else offset
         self.history_queries.append(
             (
                 normalized_filter,
                 job_id,
                 normalized_limit,
-                normalized_offset,
+                after,
+                offset,
             )
         )
-        activity_id = "run-a" if normalized_offset == 0 else "run-z"
+        first_page = after is None and normalized_offset == 0
+        activity_id = "run-a" if first_page else "run-z"
         payload = _history_activity_payload(activity_id, kind="BACKUP")
         return IpcResponse.accepted(
             {
@@ -5355,10 +5423,48 @@ class _FakePagedHistoryEngineClient(_FakeHistoryEngineClient):
                     "read_model_available": True,
                     "limit": normalized_limit,
                     "offset": normalized_offset,
-                    "has_more": normalized_offset == 0,
+                    "has_more": first_page,
                     "activity_filter": normalized_filter,
                     "job_id": job_id,
+                    "next_cursor": (
+                        _history_cursor_payload(payload) if first_page else None
+                    ),
                     "activities": [payload],
+                }
+            }
+        )
+
+
+class _FakeLegacyPagedHistoryEngineClient(_FakeHistoryEngineClient):
+    def get_history_timeline(
+        self,
+        *,
+        activity_filter: str | None = None,
+        job_id: str | None = None,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        normalized_filter = activity_filter or "ALL"
+        normalized_limit = limit or 25
+        normalized_offset = 0 if offset is None else offset
+        self.history_queries.append(
+            (normalized_filter, job_id, normalized_limit, after, offset)
+        )
+        first_page = normalized_offset == 0
+        activity_id = "run-a" if first_page else "run-z"
+        return IpcResponse.accepted(
+            {
+                "history_timeline": {
+                    "read_model_available": True,
+                    "limit": normalized_limit,
+                    "offset": normalized_offset,
+                    "has_more": first_page,
+                    "activity_filter": normalized_filter,
+                    "job_id": job_id,
+                    "activities": [
+                        _history_activity_payload(activity_id, kind="BACKUP")
+                    ],
                 }
             }
         )
@@ -5381,6 +5487,7 @@ class _BlockingPagedHistoryEngineClient(_FakePagedHistoryEngineClient):
         activity_filter: str | None = None,
         job_id: str | None = None,
         limit: int | None = None,
+        after: dict[str, object] | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
         with self._worker_lock:
@@ -5397,6 +5504,7 @@ class _BlockingPagedHistoryEngineClient(_FakePagedHistoryEngineClient):
                 activity_filter=activity_filter,
                 job_id=job_id,
                 limit=limit,
+                after=after,
                 offset=offset,
             )
         finally:
@@ -5521,6 +5629,15 @@ def _history_activity_payload(
                 "error_count": 0,
             }
         ],
+    }
+
+
+def _history_cursor_payload(activity: dict[str, object]) -> dict[str, object]:
+    return {
+        "cursor_version": 1,
+        "started_utc": activity["started_utc"],
+        "activity_kind": activity["activity_kind"],
+        "activity_id": activity["activity_id"],
     }
 
 

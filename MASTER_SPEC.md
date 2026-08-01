@@ -3391,6 +3391,15 @@ Engine Host-startupkoordinereren kjører command receipt-avstemming før nye mut
 
 0B read-model-linjen implementerer `QUERY_STATUS`, bounded `QUERY_BACKUP_OVERVIEW`, `QUERY_BACKUP_JOB_DETAIL`, bounded `QUERY_ACTIVITY_OVERVIEW`, bounded `QUERY_HISTORY_TIMELINE`, bounded `QUERY_RUN_PROGRESS`, bounded `QUERY_PLAN_OPERATIONS`, bounded `QUERY_SNAPSHOT_ENTRIES`, bounded `QUERY_SNAPSHOT_COVERAGE` og bounded `QUERY_SNAPSHOT_ISSUES` etter handshake. `QUERY_BACKUP_OVERVIEW` leser standard-backup draft og aktive jobbsammendrag gjennom Engine Host-eide katalogporter. `QUERY_BACKUP_JOB_DETAIL` leser én aktiv standard-backup jobbrevisjon med kilde, mål, filter-/revisjons-ID-er og standardvalg gjennom Engine Host-eid katalogport. `QUERY_ACTIVITY_OVERVIEW` leser nylige run-/target-sammendrag gjennom Engine Host-eid run read store og bruker catalog indexer for global og job-filtered recent-run order. `QUERY_HISTORY_TIMELINE` slår sammen immutable førstegangsplanmaterialiseringer og run-/target-resultater i én tidsordnet read-only side, med aktivitets- og jobbfilter; `(activity_kind, activity_id)` er radidentiteten fordi analysis- og run-ID-er har separate namespaces. `QUERY_RUN_PROGRESS` leser ett autoritativt run-/target-snapshot med maksimalt 32 mål og en responsgrense på 64 KiB. Klienten kan sende sist observerte `sequence_no`; lik sekvens gir `changed=false` uten snapshot, høyere autoritativ sekvens gir nytt snapshot, og lavere autoritativ sekvens etter state restore gir `sequence_reset=true` med full refresh. Sekvensen avledes monotont fra persisterte run-/target-`row_version`-felt. `QUERY_PLAN_OPERATIONS` leser forseglete planoperasjoner gjennom Engine Host-eid plan read store med `limit <= 1000` og keysetcursor over `execution_phase`, `stable_order_key` og `operation_id`. `QUERY_SNAPSHOT_ENTRIES` leser materialiserte snapshot entries gjennom Engine Host-eid snapshot read store med `limit <= 1000` og keysetcursor over `comparison_key`, `relative_path` og `entry_id`. `QUERY_SNAPSHOT_COVERAGE` leser materialisert directory coverage med `limit <= 1000`, keysetcursor over `comparison_key`/`relative_path` og valgfritt `coverage_states`-filter. `QUERY_SNAPSHOT_ISSUES` leser materialiserte snapshot issues med `limit <= 1000`, keysetcursor over `relative_path`/`issue_type`/`issue_id` og valgfritt `blocking_only`-filter. Backup-, activity- og history-oversiktsqueries krever `limit <= 25` og ikke-negativ `offset`, og alle read-model queries returnerer `read_model_available=false` når hosten kjører uten relevant read store. GUI-/presentation-laget får bare IPC-payloaden og åpner ikke SQLite.
 
+For `QUERY_HISTORY_TIMELINE` erstatter catalog schema 41 produksjons-offset med
+en streng versjon-1-keysetcursor over den synkende totalrekkefølgen
+`(started_utc, activity_kind, activity_id)`. Adapteren gjør separate bounded
+index seeks i de to kontrollkildene og runkilden og merger bare kandidatene for
+én side. En eldre klient kan fortsatt sende offset uten cursor opp til 10 000;
+GUI-et bruker denne kompatibilitetsbanen bare når en eldre Host-respons mangler
+det additive `next_cursor`-feltet. Offsetsetningen i read-model-noten over
+gjelder derfor nå Backup-/Activity-oversiktene og legacy History-klienter.
+
 Lokale GUI-preferanser følger en separat, ikke-autoritativ port i
 `application.user_preferences`. Composition kobler denne til en atomisk
 JSON-adapter under samme brukers lokale state-root og injiserer porten i
@@ -5193,6 +5202,16 @@ først, og catalog-avstemming skjer i neste executorsteg og ved startup-resume
 før målterminalisering. Derfor kan et prosesskrasj mellom de to databasene
 repareres uten å finne opp nytt bevis. Bounded `QUERY_OPERATION_AUDIT` leser
 forsøk og outcome per `(run_id, operation_id)`.
+
+0B-implementasjonsnote: Catalog schema 41 legger bounded History-keysetindekser
+på `(started_utc, activity_id)` for førstegangsplanmaterialiseringer,
+`(COALESCE(started_utc, requested_utc), request_id)` for manuelle kontroller og
+tilsvarende jobbfiltrerte varianter. Et partial index på
+`backup_analysis_requests.analysis_id` gjør duplikatundertrykkingen mot
+førstegangskontrollen indeksert. Runs gjenbruker schema 18-indeksene over
+`(started_utc, id)` og `(job_id, started_utc, id)`. Adapteren søker hver kilde
+separat og merger bare en bounded kandidatmengde i den synkende totalrekkefølgen
+`(started_utc, activity_kind, activity_id)`.
 
 #### `hash_cache`
 

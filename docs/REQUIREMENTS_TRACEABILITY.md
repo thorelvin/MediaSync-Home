@@ -1,5 +1,23 @@
 # Kravsporbarhet
 
+Oppdatering 2026-08-01 for `DB-003`, `PERF-001`, `UX-002` og `UX-004`:
+Historikk-tidslinjen bruker nå en validert versjon-1-keysetcursor over
+`(started_utc, activity_kind, activity_id)` gjennom application, IPC,
+Engine-client og GUI. Catalog schema 41 gir branch-lokale expression-index
+seeks for førstegangskontroller, manuelle kontroller og runs; bare maksimalt 26
+kandidater per kilde merges for en vanlig 25-raders side. Legacy offset er
+beholdt additivt med grense 10 000, og GUI-et faller bare tilbake når Host ikke
+returnerer `next_cursor`. Testene dekker tie-order, insertion drift, 100 000
+runs, lagret `EXPLAIN QUERY PLAN`, malformed cursors, named-pipe-roundtrip,
+cursorstack, eldre Host og stale bakgrunnssvar. Kontrollert prefetch gjenstår.
+Bevis: `src/mediasync_home/application/history_read_models.py`,
+`src/mediasync_home/adapters/sqlite/history.py`,
+`src/mediasync_home/adapters/sqlite/migrations.py`,
+`src/mediasync_home/ipc/`, `src/mediasync_home/presentation/`,
+`tests/unit/test_history_read_models.py`, `tests/unit/test_history_ipc.py`,
+`tests/integration/sqlite/test_sqlite_history.py` og
+`tests/gui/test_pyside_shell.py`.
+
 Oppdatering 2026-08-01 for `UX-002`, `UX-004`, `ARC-004` og `PERF-001`:
 Alle muterende GUI-submissions bruker nå en dedikert, serialisert command-worker
 med separat gjenbrukt Engine-client. Oppretting/målregistrering, `CHECK_BACKUP`,
@@ -98,12 +116,12 @@ Endringer, Historikk-tidslinjen og Historikk-filresultater bruker nå
 `QAbstractTableModel`/`QTableView` med Qt-delegater og immutable rad-ID-er.
 Modellen holder bare én hardt avgrenset side, avviser overflow og oppretter
 ingen per-rad QWidget/QObject-graf. Plan-/filresultater bruker 200-raders
-keyset-sider; tidslinjen beholder foreløpig sin bounded 25-raders IPC-side.
+keyset-sider; tidslinjen bruker bounded 25-raders keyset-sider.
 Millionradtesten bytter mellom første og siste 200-raders side og beviser at
 den tidligere siden ikke beholdes. GUI-testene dekker reelle radklikk,
 detalj/audit/retry, filter, språk, paging, stale-query-sperre og null
-horisontal overflow ved 900×560. Tidslinjens SQL-keyset-migrasjon og bounded
-bakgrunnsprefetch gjenstår. Bevis:
+horisontal overflow ved 900×560. Tidslinjens SQL-keyset-migrasjon er levert;
+bounded bakgrunnsprefetch gjenstår. Bevis:
 `src/mediasync_home/presentation/virtual_tables.py`,
 `src/mediasync_home/presentation/main_window.py`,
 `src/mediasync_home/presentation/theme/qss_builder.py`,

@@ -45,6 +45,7 @@ class StatusIpcClient(Protocol):
         activity_filter: str | None = None,
         job_id: str | None = None,
         limit: int | None = None,
+        after: dict[str, object] | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
         pass
@@ -188,6 +189,7 @@ class EngineClient:
         activity_filter: str | None = None,
         job_id: str | None = None,
         limit: int | None = None,
+        after: dict[str, object] | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
         return self._request_with_handshake_retry(
@@ -195,6 +197,7 @@ class EngineClient:
                 activity_filter=activity_filter,
                 job_id=job_id,
                 limit=limit,
+                after=after,
                 offset=offset,
             )
         )

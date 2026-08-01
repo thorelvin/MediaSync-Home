@@ -1,5 +1,17 @@
 # Implementeringsstatus
 
+Oppdatering 2026-08-01: **Historikk**-tidslinjen bruker nå en versjonert,
+typet keyset-cursor med total rekkefølge over
+`(started_utc, activity_kind, activity_id)` i stedet for produksjons-`OFFSET`.
+GUI-et holder en avgrenset cursorstack for tilbakeknappen, validerer stale
+bakgrunnssvar mot eksakt cursor og oppdager automatisk en eldre Engine Host som
+ikke sender `next_cursor`; bare den kompatibilitetsbanen bruker offset, med hard
+grense 10 000. Catalog schema 41 legger globale og jobbfiltrerte
+expression-indekser på begge kontrollkildene samt analyseoppslaget; runs bruker
+de eksisterende recent-run-indeksene. SQLite-testene beviser identiske
+tidsstempler, innsetting mellom sider, faktiske index seeks og varm side ved en
+100 000-raders runkatalog. Kontrollert bakgrunnsprefetch gjenstår.
+
 Oppdatering 2026-08-01: De tre uavgrensede resultatsflatene **Endringer**,
 **Historikk**-tidslinjen og historikkens **Filresultater** bruker nå en delt
 `QAbstractTableModel`/`QTableView`-grense med Qt-delegater i stedet for
@@ -12,8 +24,8 @@ fortsatt til immutable activity-/operation-ID. En simulert millionradkilde
 beviser at første og siste side bare holder 200 plain row records og ingen
 per-rad `QObject`/`QWidget`-graf. Reelle Qt-klikk bevarer filter, paging,
 filaudit/retry, stale-query-sperre, norsk/engelsk og null horisontal overflow
-ved 900×560. Keyset-migrasjon for selve historikktidslinjen og kontrollert
-bakgrunnsprefetch gjenstår.
+ved 900×560. Tidslinjens keyset-migrasjon er levert i oppdateringen over;
+kontrollert bakgrunnsprefetch gjenstår.
 
 Oppdatering 2026-08-01: Alle ikke-rekonstruerbare GUI-kommandoer kjører nå på
 en egen serialisert command-worker med en separat, gjenbrukt Engine-client.
@@ -49,8 +61,8 @@ holder maksimalt 16 kanaler og anvender bare siste snapshot per kanal ved høyst
 analyse, Endringer, Historikk og filaudit med vilje, utfører reelle klikk mens de
 venter og verifiserer latest-wins, én aktiv worker, én client-factory-resolusjon,
 close-cancellation, bounded overflow, norsk/engelsk og 900×560 uten horisontal
-clipping. Virtuelle resultattabeller er levert i oppdateringen over;
-historikktidslinjens keyset-migrasjon og kontrollert prefetch gjenstår.
+clipping. Virtuelle resultattabeller og historikktidslinjens keyset-migrasjon er
+levert i oppdateringene over; kontrollert prefetch gjenstår.
 
 Oppdatering 2026-07-31: **Historikk** kan nå prøve én valgt uferdig fil på
 nytt fra den bounded, paginerte filresultatvisningen. Handlingen vises bare
@@ -86,8 +98,8 @@ og materialiserer høyst 25 rader i GUI-et. Valgt endring viser beslutning,
 operasjonstype, mål, sti, rå årsakskode, målprecondition og planlagte byte.
 Norsk/engelsk språkbytte bevarer filtre og valgt detalj; to sider, to mål,
 safe/review/high/blocked og 900×560 uten horisontal overflow er dekket.
-Virtuelle resultattabeller er levert i oppdateringen over. Historikktidslinjens
-keyset-migrasjon, kontrollert sideprefetch og bredere faktisk kansellering av
+Virtuelle resultattabeller og historikktidslinjens keyset-migrasjon er levert i
+oppdateringene over. Kontrollert sideprefetch og bredere faktisk kansellering av
 allerede kjørende bakgrunnsspørringer gjenstår.
 
 Oppdatering 2026-07-31: Terminale resultater i **Jobber** viser nå et stabilt,

@@ -95,6 +95,7 @@ class InProcessIpcClient:
         activity_filter: str | None = None,
         job_id: str | None = None,
         limit: int | None = None,
+        after: dict[str, object] | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
         return self._correlated_response(
@@ -103,6 +104,7 @@ class InProcessIpcClient:
                 activity_filter=activity_filter,
                 job_id=job_id,
                 limit=limit,
+                after=after,
                 offset=offset,
             )
         )

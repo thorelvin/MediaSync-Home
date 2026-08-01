@@ -759,6 +759,7 @@ class Win32NamedPipeServer:
                 activity_filter=_optional_query_str(request.get("activity_filter")),
                 job_id=_optional_query_str(request.get("job_id")),
                 limit=_optional_query_int(request.get("limit")),
+                after=_optional_query_object(request.get("after")),
                 offset=_optional_query_int(request.get("offset")),
             )
         if message_type == "QUERY_RUN_PROGRESS":
@@ -915,6 +916,7 @@ class Win32NamedPipeClient:
         activity_filter: str | None = None,
         job_id: str | None = None,
         limit: int | None = None,
+        after: dict[str, object] | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
         request: dict[str, Any] = {
@@ -927,6 +929,8 @@ class Win32NamedPipeClient:
             request["job_id"] = job_id
         if limit is not None:
             request["limit"] = limit
+        if after is not None:
+            request["after"] = after
         if offset is not None:
             request["offset"] = offset
         return self._roundtrip(request)

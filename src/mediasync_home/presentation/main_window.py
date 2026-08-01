@@ -222,6 +222,7 @@ class HistoryTimelineProvider(Protocol):
         activity_filter: str | None = None,
         job_id: str | None = None,
         limit: int | None = None,
+        after: dict[str, object] | None = None,
         offset: int | None = None,
     ) -> IpcResponse: ...
 
@@ -491,7 +492,9 @@ class MediaSyncWindow(QMainWindow):
         self._history_previous_button: QToolButton | None = None
         self._history_next_button: QToolButton | None = None
         self._history_page_limit = 25
-        self._history_page_offset = 0
+        self._history_page_index = 0
+        self._history_page_cursors: list[dict[str, object] | None] = [None]
+        self._history_legacy_offset_mode = False
         self._history_query_pending = False
         self._history_activity_filter = "ALL"
         self._history_job_id: str | None = None
@@ -1294,7 +1297,15 @@ class MediaSyncWindow(QMainWindow):
         activity_filter = self._history_activity_filter
         job_id = self._history_job_id
         page_limit = self._history_page_limit
-        page_offset = self._history_page_offset
+        page_index = self._history_page_index
+        page_cursor = (
+            None
+            if self._history_legacy_offset_mode
+            else self._history_page_cursors[page_index]
+        )
+        page_offset = (
+            page_index * page_limit if self._history_legacy_offset_mode else None
+        )
         if background and self._background_queries is not None:
 
             def query(client: object) -> object:
@@ -1303,6 +1314,7 @@ class MediaSyncWindow(QMainWindow):
                     activity_filter=activity_filter,
                     job_id=job_id,
                     limit=page_limit,
+                    after=page_cursor,
                     offset=page_offset,
                 )
 
@@ -1312,6 +1324,8 @@ class MediaSyncWindow(QMainWindow):
                         response=cast(IpcResponse, value),
                         activity_filter=activity_filter,
                         job_id=job_id,
+                        page_index=page_index,
+                        page_cursor=page_cursor,
                         page_offset=page_offset,
                     )
 
@@ -1327,6 +1341,8 @@ class MediaSyncWindow(QMainWindow):
                     error=error,
                     activity_filter=activity_filter,
                     job_id=job_id,
+                    page_index=page_index,
+                    page_cursor=page_cursor,
                     page_offset=page_offset,
                 )
 
@@ -1348,6 +1364,7 @@ class MediaSyncWindow(QMainWindow):
                 activity_filter=activity_filter,
                 job_id=job_id,
                 limit=page_limit,
+                after=page_cursor,
                 offset=page_offset,
             )
         )
@@ -1358,11 +1375,15 @@ class MediaSyncWindow(QMainWindow):
         response: IpcResponse,
         activity_filter: str,
         job_id: str | None,
-        page_offset: int,
+        page_index: int,
+        page_cursor: dict[str, object] | None,
+        page_offset: int | None,
     ) -> None:
         if not self._history_query_context_matches(
             activity_filter=activity_filter,
             job_id=job_id,
+            page_index=page_index,
+            page_cursor=page_cursor,
             page_offset=page_offset,
         ):
             return
@@ -1375,12 +1396,16 @@ class MediaSyncWindow(QMainWindow):
         error: Exception,
         activity_filter: str,
         job_id: str | None,
-        page_offset: int,
+        page_index: int,
+        page_cursor: dict[str, object] | None,
+        page_offset: int | None,
     ) -> None:
         del error
         if not self._history_query_context_matches(
             activity_filter=activity_filter,
             job_id=job_id,
+            page_index=page_index,
+            page_cursor=page_cursor,
             page_offset=page_offset,
         ):
             return
@@ -1398,16 +1423,31 @@ class MediaSyncWindow(QMainWindow):
         *,
         activity_filter: str,
         job_id: str | None,
-        page_offset: int,
+        page_index: int,
+        page_cursor: dict[str, object] | None,
+        page_offset: int | None,
     ) -> bool:
+        current_cursor = (
+            None
+            if self._history_legacy_offset_mode
+            else self._history_page_cursors[self._history_page_index]
+        )
+        current_offset = (
+            self._history_page_index * self._history_page_limit
+            if self._history_legacy_offset_mode
+            else None
+        )
         return (
             self._history_activity_filter == activity_filter
             and self._history_job_id == job_id
-            and self._history_page_offset == page_offset
+            and self._history_page_index == page_index
+            and current_cursor == page_cursor
+            and current_offset == page_offset
         )
 
     def _apply_history_response(self, response: IpcResponse) -> None:
         state = history_timeline_from_response(response)
+        self._history_legacy_offset_mode = not state.keyset_paging_available
         activity_ids = {activity.selection_key for activity in state.activities}
         if self._selected_history_activity_id not in activity_ids:
             self._selected_history_activity_id = state.selected_activity_id
@@ -1423,7 +1463,7 @@ class MediaSyncWindow(QMainWindow):
         self._history_query_pending = pending
         if self._history_previous_button is not None:
             self._history_previous_button.setEnabled(
-                not pending and self._history_page_offset > 0
+                not pending and self._history_page_index > 0
             )
         if self._history_next_button is not None:
             self._history_next_button.setEnabled(
@@ -1481,12 +1521,16 @@ class MediaSyncWindow(QMainWindow):
                 not has_activities or not state.read_model_available
             )
         if self._history_page_label is not None:
-            first = state.offset + 1 if has_activities else 0
-            last = state.offset + len(state.activities)
+            first = (
+                self._history_page_index * self._history_page_limit + 1
+                if has_activities
+                else 0
+            )
+            last = first + len(state.activities) - 1 if has_activities else 0
             self._history_page_label.setText(f"{first}-{last}")
         if self._history_previous_button is not None:
             self._history_previous_button.setEnabled(
-                not self._history_query_pending and state.offset > 0
+                not self._history_query_pending and self._history_page_index > 0
             )
             self._history_previous_button.setToolTip(
                 self._texts().previous_page_tooltip
@@ -1534,8 +1578,7 @@ class MediaSyncWindow(QMainWindow):
         if activity_filter not in {"ALL", "CONTROLS", "BACKUPS"}:
             return
         self._history_activity_filter = activity_filter
-        self._history_page_offset = 0
-        self._selected_history_activity_id = None
+        self._reset_history_paging()
         self._refresh_history_timeline()
 
     def _set_history_job_filter(self, index: int) -> None:
@@ -1543,24 +1586,34 @@ class MediaSyncWindow(QMainWindow):
             return
         job_id = self._history_job_filter.itemData(index, Qt.ItemDataRole.UserRole)
         self._history_job_id = job_id if isinstance(job_id, str) and job_id else None
-        self._history_page_offset = 0
-        self._selected_history_activity_id = None
+        self._reset_history_paging()
         self._refresh_history_timeline()
 
+    def _reset_history_paging(self) -> None:
+        self._history_page_index = 0
+        self._history_page_cursors = [None]
+        self._history_legacy_offset_mode = False
+        self._selected_history_activity_id = None
+
     def _show_previous_history_page(self) -> None:
-        if self._history_query_pending or self._history_page_offset <= 0:
+        if self._history_query_pending or self._history_page_index <= 0:
             return
-        self._history_page_offset = max(
-            0,
-            self._history_page_offset - self._history_page_limit,
-        )
+        self._history_page_index -= 1
         self._selected_history_activity_id = None
         self._refresh_history_timeline()
 
     def _show_next_history_page(self) -> None:
         if self._history_query_pending or not self._history_timeline_state.has_more:
             return
-        self._history_page_offset += self._history_page_limit
+        next_cursor = self._history_timeline_state.next_cursor
+        if not self._history_legacy_offset_mode and next_cursor is None:
+            return
+        next_index = self._history_page_index + 1
+        self._history_page_cursors = self._history_page_cursors[:next_index]
+        self._history_page_cursors.append(
+            None if next_cursor is None else dict(next_cursor)
+        )
+        self._history_page_index = next_index
         self._selected_history_activity_id = None
         self._refresh_history_timeline()
 

@@ -321,6 +321,7 @@ def test_sqlite_run_completion_bridge_marks_exhausted_file_warning(
             catalog_connection
         ).list_recent_history_activities(
             limit=10,
+            after=None,
             offset=0,
             activity_filter=HistoryActivityFilter.BACKUPS,
             job_id="job-a",

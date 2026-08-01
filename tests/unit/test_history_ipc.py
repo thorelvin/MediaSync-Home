@@ -5,6 +5,7 @@ from mediasync_home.application.history_read_models import (
     HistoryActivityKind,
     HistoryActivitySummary,
     HistoryTargetSummary,
+    HistoryTimelineCursor,
 )
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
@@ -19,17 +20,26 @@ from mediasync_home.presentation.engine_client import EngineClient
 
 class _HistoryStore:
     def __init__(self) -> None:
-        self.calls: list[tuple[int, int, HistoryActivityFilter, str | None]] = []
+        self.calls: list[
+            tuple[
+                int,
+                HistoryTimelineCursor | None,
+                int,
+                HistoryActivityFilter,
+                str | None,
+            ]
+        ] = []
 
     def list_recent_history_activities(
         self,
         *,
         limit: int,
+        after: HistoryTimelineCursor | None,
         offset: int,
         activity_filter: HistoryActivityFilter,
         job_id: str | None,
     ) -> tuple[HistoryActivitySummary, ...]:
-        self.calls.append((limit, offset, activity_filter, job_id))
+        self.calls.append((limit, after, offset, activity_filter, job_id))
         return (_activity(),)
 
 
@@ -57,12 +67,57 @@ def test_engine_client_queries_bounded_history_after_handshake_retry() -> None:
 
     assert response.status is IpcStatus.ACCEPTED
     assert store.calls == [
-        (2, 25, HistoryActivityFilter.BACKUPS, "job-a"),
+        (2, None, 25, HistoryActivityFilter.BACKUPS, "job-a"),
     ]
     timeline = response.payload["history_timeline"]
     assert timeline["activity_filter"] == "BACKUPS"
     assert timeline["job_id"] == "job-a"
     assert timeline["activities"][0]["activity_id"] == "run-a"
+
+
+def test_engine_client_forwards_typed_history_cursor() -> None:
+    store = _HistoryStore()
+    engine_client = EngineClient(_client(_service(store)))
+    cursor = {
+        "cursor_version": 1,
+        "started_utc": "2026-07-20T12:00:00.000Z",
+        "activity_kind": "BACKUP",
+        "activity_id": "run-z",
+    }
+
+    response = engine_client.get_history_timeline(limit=1, after=cursor)
+
+    assert response.status is IpcStatus.ACCEPTED
+    assert store.calls == [
+        (
+            2,
+            HistoryTimelineCursor(
+                started_utc="2026-07-20T12:00:00.000Z",
+                activity_kind=HistoryActivityKind.BACKUP,
+                activity_id="run-z",
+            ),
+            0,
+            HistoryActivityFilter.ALL,
+            None,
+        )
+    ]
+
+
+def test_history_ipc_rejects_cursor_with_offset() -> None:
+    client = _client(_service(_HistoryStore()))
+    client.connect()
+
+    response = client.query_history_timeline(
+        after={
+            "cursor_version": 1,
+            "started_utc": "2026-07-20T12:00:00.000Z",
+            "activity_kind": "BACKUP",
+            "activity_id": "run-z",
+        },
+        offset=0,
+    )
+
+    assert response.reason is IpcReason.INVALID_FRAME
 
 
 def _service(store: _HistoryStore) -> EngineHostIpcService:
