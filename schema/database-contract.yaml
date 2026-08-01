@@ -79,6 +79,32 @@ invariants:
     file_flush_required_for_local_confirmed_state: true
     write_through_claim_requires_actual_use: true
     directory_entry_durability_unconfirmed_without_write_through: true
+  - id: VER-001_OPERATION_RESULT_AXES
+    requirement_id: VER-001
+    outcome_table: operation_outcomes
+    attempt_table: operation_attempts
+    axis_columns: [transfer_state, assurance_level, durability_level]
+    raw_evidence_json_column: verification_json
+    transfer_states: [NOT_STARTED, TRANSFERRED, FAILED, CANCELLED]
+    assurance_levels:
+      - NONE
+      - MANIFEST_VERIFIED
+      - METADATA_VERIFIED
+      - PRIMARY_STREAM_HASH_VERIFIED
+      - NAMED_STREAMS_VERIFIED
+      - FULL_OBJECT_VERIFIED
+    durability_states:
+      - NOT_REQUESTED
+      - LOCAL_FILE_FLUSH_CONFIRMED
+      - WRITE_THROUGH_REQUEST_CONFIRMED
+      - REMOTE_ACK_ONLY
+      - UNKNOWN
+    successful_result_requires:
+      transfer_state: TRANSFERRED
+      assurance_level_not: NONE
+    write_through_claim_scope: request_confirmed
+    physical_persistence_claim_forbidden: true
+    immutable: true
   - id: DB-006_ENDPOINT_HEADS_ARE_SEPARATE
     requirement_id: DB-006
     stable_table: endpoints

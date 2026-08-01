@@ -288,6 +288,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_endpoint_capability_evidence",
                 statements=CATALOG_ENDPOINT_CAPABILITY_EVIDENCE,
             ),
+            SqliteMigration(
+                version=51,
+                name="catalog_operation_verification_axes",
+                statements=CATALOG_OPERATION_VERIFICATION_AXES,
+            ),
         ),
     )
 
@@ -3302,6 +3307,200 @@ CATALOG_ENDPOINT_CAPABILITY_EVIDENCE = (
     BEFORE DELETE ON writable_endpoint_capability_observations
     BEGIN
         SELECT RAISE(ABORT, 'WRITABLE_ENDPOINT_CAPABILITY_EVIDENCE_IMMUTABLE');
+    END
+    """,
+)
+
+
+CATALOG_OPERATION_VERIFICATION_AXES = (
+    "DROP TRIGGER trg_operation_attempts_no_update",
+    "DROP TRIGGER trg_operation_attempts_no_delete",
+    "DROP TRIGGER trg_operation_outcomes_no_update",
+    "DROP TRIGGER trg_operation_outcomes_no_delete",
+    """
+    UPDATE operation_attempts
+    SET
+        transfer_state = CASE
+            WHEN transfer_state IS NULL THEN NULL
+            WHEN upper(trim(transfer_state)) IN (
+                'NOT_STARTED', 'TRANSFERRED', 'FAILED', 'CANCELLED'
+            ) THEN upper(trim(transfer_state))
+            WHEN upper(trim(transfer_state)) LIKE '%NOT_TRANSFERRED%' THEN 'FAILED'
+            WHEN upper(trim(transfer_state)) LIKE '%TRANSFERRED%' THEN 'TRANSFERRED'
+            WHEN state = 'FAILED' THEN 'FAILED'
+            ELSE 'NOT_STARTED'
+        END,
+        assurance_level = CASE
+            WHEN assurance_level IS NULL THEN NULL
+            WHEN upper(trim(assurance_level)) IN (
+                'NONE', 'MANIFEST_VERIFIED', 'METADATA_VERIFIED',
+                'PRIMARY_STREAM_HASH_VERIFIED', 'NAMED_STREAMS_VERIFIED',
+                'FULL_OBJECT_VERIFIED'
+            ) THEN upper(trim(assurance_level))
+            WHEN upper(trim(assurance_level)) IN (
+                'FULL_HASH', 'STAGING_HASH_MATCHES_POST_TRANSFER_SOURCE_HASH'
+            ) THEN 'PRIMARY_STREAM_HASH_VERIFIED'
+            WHEN upper(trim(assurance_level)) = 'STAGING_DIRECTORY_MARKER_VERIFIED'
+                THEN 'MANIFEST_VERIFIED'
+            ELSE 'NONE'
+        END,
+        durability_level = CASE
+            WHEN durability_level IS NULL THEN NULL
+            WHEN upper(trim(durability_level)) IN (
+                'NOT_REQUESTED', 'LOCAL_FILE_FLUSH_CONFIRMED',
+                'WRITE_THROUGH_REQUEST_CONFIRMED', 'REMOTE_ACK_ONLY', 'UNKNOWN'
+            ) THEN upper(trim(durability_level))
+            WHEN upper(trim(durability_level)) IN (
+                'LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED',
+                'LOCAL_DIRECTORY_MARKER_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED'
+            ) THEN 'WRITE_THROUGH_REQUEST_CONFIRMED'
+            WHEN upper(trim(durability_level)) IN (
+                'LOCAL_FILE_FLUSH_CONFIRMED',
+                'LOCAL_DIRECTORY_MARKER_FLUSH_CONFIRMED_ENTRY_UNCONFIRMED',
+                'FILE_FSYNC_COMPLETED',
+                'DIRECTORY_MARKER_FILE_FSYNC_COMPLETED'
+            ) THEN 'LOCAL_FILE_FLUSH_CONFIRMED'
+            WHEN upper(trim(durability_level)) LIKE 'REMOTE_ACK%'
+                THEN 'REMOTE_ACK_ONLY'
+            ELSE 'UNKNOWN'
+        END
+    """,
+    """
+    UPDATE operation_outcomes
+    SET
+        transfer_state = CASE
+            WHEN upper(trim(transfer_state)) IN (
+                'NOT_STARTED', 'TRANSFERRED', 'FAILED', 'CANCELLED'
+            ) THEN upper(trim(transfer_state))
+            WHEN upper(trim(transfer_state)) LIKE '%NOT_TRANSFERRED%' THEN 'FAILED'
+            WHEN upper(trim(transfer_state)) LIKE '%TRANSFERRED%' THEN 'TRANSFERRED'
+            WHEN final_state = 'CANCELLED' THEN 'CANCELLED'
+            WHEN final_state = 'SUCCEEDED' THEN 'NOT_STARTED'
+            ELSE 'FAILED'
+        END,
+        assurance_level = CASE
+            WHEN upper(trim(assurance_level)) IN (
+                'NONE', 'MANIFEST_VERIFIED', 'METADATA_VERIFIED',
+                'PRIMARY_STREAM_HASH_VERIFIED', 'NAMED_STREAMS_VERIFIED',
+                'FULL_OBJECT_VERIFIED'
+            ) THEN upper(trim(assurance_level))
+            WHEN upper(trim(assurance_level)) IN (
+                'FULL_HASH', 'STAGING_HASH_MATCHES_POST_TRANSFER_SOURCE_HASH'
+            ) THEN 'PRIMARY_STREAM_HASH_VERIFIED'
+            WHEN upper(trim(assurance_level)) = 'STAGING_DIRECTORY_MARKER_VERIFIED'
+                THEN 'MANIFEST_VERIFIED'
+            ELSE 'NONE'
+        END,
+        durability_level = CASE
+            WHEN upper(trim(durability_level)) IN (
+                'NOT_REQUESTED', 'LOCAL_FILE_FLUSH_CONFIRMED',
+                'WRITE_THROUGH_REQUEST_CONFIRMED', 'REMOTE_ACK_ONLY', 'UNKNOWN'
+            ) THEN upper(trim(durability_level))
+            WHEN upper(trim(durability_level)) IN (
+                'LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED',
+                'LOCAL_DIRECTORY_MARKER_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED'
+            ) THEN 'WRITE_THROUGH_REQUEST_CONFIRMED'
+            WHEN upper(trim(durability_level)) IN (
+                'LOCAL_FILE_FLUSH_CONFIRMED',
+                'LOCAL_DIRECTORY_MARKER_FLUSH_CONFIRMED_ENTRY_UNCONFIRMED',
+                'FILE_FSYNC_COMPLETED',
+                'DIRECTORY_MARKER_FILE_FSYNC_COMPLETED'
+            ) THEN 'LOCAL_FILE_FLUSH_CONFIRMED'
+            WHEN upper(trim(durability_level)) LIKE 'REMOTE_ACK%'
+                THEN 'REMOTE_ACK_ONLY'
+            ELSE 'UNKNOWN'
+        END
+    """,
+    """
+    CREATE TRIGGER trg_operation_attempts_verification_axes_valid
+    BEFORE INSERT ON operation_attempts
+    WHEN
+        (
+            NEW.transfer_state IS NOT NULL
+            AND NEW.transfer_state NOT IN (
+                'NOT_STARTED', 'TRANSFERRED', 'FAILED', 'CANCELLED'
+            )
+        )
+        OR (
+            NEW.assurance_level IS NOT NULL
+            AND NEW.assurance_level NOT IN (
+                'NONE', 'MANIFEST_VERIFIED', 'METADATA_VERIFIED',
+                'PRIMARY_STREAM_HASH_VERIFIED', 'NAMED_STREAMS_VERIFIED',
+                'FULL_OBJECT_VERIFIED'
+            )
+        )
+        OR (
+            NEW.durability_level IS NOT NULL
+            AND NEW.durability_level NOT IN (
+                'NOT_REQUESTED', 'LOCAL_FILE_FLUSH_CONFIRMED',
+                'WRITE_THROUGH_REQUEST_CONFIRMED', 'REMOTE_ACK_ONLY', 'UNKNOWN'
+            )
+        )
+        OR (
+            NEW.state = 'SUCCEEDED'
+            AND (
+                NEW.transfer_state != 'TRANSFERRED'
+                OR NEW.assurance_level IS NULL
+                OR NEW.assurance_level = 'NONE'
+            )
+        )
+    BEGIN
+        SELECT RAISE(ABORT, 'OPERATION_ATTEMPT_VERIFICATION_AXES_INVALID');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_operation_outcomes_verification_axes_valid
+    BEFORE INSERT ON operation_outcomes
+    WHEN
+        NEW.transfer_state NOT IN (
+            'NOT_STARTED', 'TRANSFERRED', 'FAILED', 'CANCELLED'
+        )
+        OR NEW.assurance_level NOT IN (
+            'NONE', 'MANIFEST_VERIFIED', 'METADATA_VERIFIED',
+            'PRIMARY_STREAM_HASH_VERIFIED', 'NAMED_STREAMS_VERIFIED',
+            'FULL_OBJECT_VERIFIED'
+        )
+        OR NEW.durability_level NOT IN (
+            'NOT_REQUESTED', 'LOCAL_FILE_FLUSH_CONFIRMED',
+            'WRITE_THROUGH_REQUEST_CONFIRMED', 'REMOTE_ACK_ONLY', 'UNKNOWN'
+        )
+        OR (
+            NEW.final_state = 'SUCCEEDED'
+            AND (
+                NEW.transfer_state != 'TRANSFERRED'
+                OR NEW.assurance_level = 'NONE'
+            )
+        )
+    BEGIN
+        SELECT RAISE(ABORT, 'OPERATION_OUTCOME_VERIFICATION_AXES_INVALID');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_operation_outcomes_no_update
+    BEFORE UPDATE ON operation_outcomes
+    BEGIN
+        SELECT RAISE(ABORT, 'OPERATION_OUTCOME_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_operation_outcomes_no_delete
+    BEFORE DELETE ON operation_outcomes
+    BEGIN
+        SELECT RAISE(ABORT, 'OPERATION_OUTCOME_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_operation_attempts_no_update
+    BEFORE UPDATE ON operation_attempts
+    BEGIN
+        SELECT RAISE(ABORT, 'OPERATION_ATTEMPT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_operation_attempts_no_delete
+    BEFORE DELETE ON operation_attempts
+    BEGIN
+        SELECT RAISE(ABORT, 'OPERATION_ATTEMPT_IMMUTABLE');
     END
     """,
 )

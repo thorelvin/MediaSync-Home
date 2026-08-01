@@ -768,12 +768,29 @@ def _record_final_verified_operation(store: SqliteRecoveryOperationStore) -> Rec
         RecoveryOperationPhase.FINAL_DURABLE,
         RecoveryOperationPhase.FINAL_VERIFIED,
     ):
+        payload = None
+        operation_metadata = None
+        if next_phase is RecoveryOperationPhase.FINAL_DURABLE:
+            payload = {
+                "durability_state": (
+                    "LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED"
+                ),
+                "file_flush_succeeded": True,
+                "write_through_move_used": True,
+            }
+            operation_metadata = RecoveryOperationMetadata(
+                final_durability_state=(
+                    "LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED"
+                )
+            )
         updated = store.record_operation_phase_transition(
             run_id=operation.run_id,
             operation_id=operation.operation_id,
             expected_phase=operation.phase,
             next_phase=next_phase,
             process_instance_id="host-a",
+            payload=payload,
+            operation_metadata=operation_metadata,
         )
         assert updated is not None
         operation = updated
@@ -819,12 +836,26 @@ def _record_commit_preconditions_operation(
         RecoveryOperationPhase.STAGING_DURABLE,
         RecoveryOperationPhase.STAGING_VERIFIED,
     ):
+        operation_metadata = None
+        if next_phase is RecoveryOperationPhase.TRANSFERRED:
+            operation_metadata = RecoveryOperationMetadata(
+                transfer_state="TRANSFERRED_TO_STAGING"
+            )
+        elif next_phase is RecoveryOperationPhase.STAGING_DURABLE:
+            operation_metadata = RecoveryOperationMetadata(
+                staging_durability_state="FILE_FSYNC_COMPLETED"
+            )
+        elif next_phase is RecoveryOperationPhase.STAGING_VERIFIED:
+            operation_metadata = RecoveryOperationMetadata(
+                assurance_level="STAGING_HASH_MATCHES_POST_TRANSFER_SOURCE_HASH"
+            )
         updated = store.record_operation_phase_transition(
             run_id=operation.run_id,
             operation_id=operation.operation_id,
             expected_phase=operation.phase,
             next_phase=next_phase,
             process_instance_id="host-a",
+            operation_metadata=operation_metadata,
         )
         assert updated is not None
         operation = updated

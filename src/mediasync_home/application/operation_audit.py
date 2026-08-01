@@ -11,6 +11,14 @@ from mediasync_home.application.recovery_operations import (
     RecoveryOperationPhase,
     TERMINAL_PHASES,
 )
+from mediasync_home.application.verification_results import (
+    AssuranceLevel,
+    DurabilityState,
+    TransferState,
+    canonical_assurance_level,
+    canonical_durability_state,
+    canonical_transfer_state,
+)
 
 
 MAX_OPERATION_AUDIT_TARGET_OPERATIONS = 10_000
@@ -325,7 +333,41 @@ def _attempt_from_event(
     if run_attempt_id is None:
         raise OperationAuditViolation("OPERATION_AUDIT_RUN_ATTEMPT_MISSING")
     evidence = _audit_evidence(event.payload)
-    verification_json = _verification_json(operation, evidence=evidence)
+    raw_transfer_state = _evidence_text(
+        evidence, "transfer_state", operation.transfer_state
+    )
+    raw_assurance_level = _evidence_text(
+        evidence, "assurance_level", operation.assurance_level
+    )
+    raw_durability_state = _evidence_text(
+        evidence,
+        "durability_level",
+        operation.staging_durability_state,
+    )
+    transfer_state = canonical_transfer_state(
+        raw_transfer_state,
+        fallback=(
+            TransferState.TRANSFERRED
+            if state is OperationAttemptState.SUCCEEDED
+            else TransferState.FAILED
+        ),
+    )
+    assurance_level = canonical_assurance_level(raw_assurance_level)
+    durability_level = canonical_durability_state(
+        raw_durability_state,
+        fallback=(
+            DurabilityState.UNKNOWN
+            if state is OperationAttemptState.SUCCEEDED
+            else DurabilityState.NOT_REQUESTED
+        ),
+    )
+    verification_json = _verification_json(
+        operation,
+        evidence=evidence,
+        raw_transfer_state=raw_transfer_state,
+        raw_assurance_level=raw_assurance_level,
+        raw_staging_durability_state=raw_durability_state,
+    )
     return OperationAttemptAudit(
         id=_audit_id(
             "operation-attempt",
@@ -355,17 +397,9 @@ def _attempt_from_event(
             "source_guard_evidence_hash",
             operation.source_guard_evidence_hash,
         ),
-        transfer_state=_evidence_text(
-            evidence, "transfer_state", operation.transfer_state
-        ),
-        assurance_level=_evidence_text(
-            evidence, "assurance_level", operation.assurance_level
-        ),
-        durability_level=_evidence_text(
-            evidence,
-            "durability_level",
-            operation.staging_durability_state,
-        ),
+        transfer_state=transfer_state.value,
+        assurance_level=assurance_level.value,
+        durability_level=durability_level.value,
         bytes_transferred=bytes_transferred,
         verification_json=verification_json,
         error_code=error_code,
@@ -385,30 +419,68 @@ def _operation_outcome(
         return None
     evidence = _audit_evidence(completed_event.payload)
     succeeded = state is OperationOutcomeState.SUCCEEDED
+    raw_transfer_state = _evidence_text(
+        evidence, "transfer_state", operation.transfer_state
+    )
+    raw_assurance_level = _evidence_text(
+        evidence, "assurance_level", operation.assurance_level
+    )
+    final_durability_event = _last_event_to_phase(
+        events,
+        RecoveryOperationPhase.FINAL_DURABLE,
+    )
+    final_durability_evidence = (
+        {} if final_durability_event is None else final_durability_event.payload
+    )
+    raw_final_durability_state = (
+        _optional_text(final_durability_evidence.get("durability_state"))
+        or operation.final_durability_state
+    )
+    transfer_state = canonical_transfer_state(
+        raw_transfer_state,
+        fallback=(
+            TransferState.NOT_STARTED
+            if succeeded
+            else (
+                TransferState.CANCELLED
+                if state is OperationOutcomeState.CANCELLED
+                else TransferState.FAILED
+            )
+        ),
+    )
+    assurance_level = canonical_assurance_level(raw_assurance_level)
+    durability_level = canonical_durability_state(
+        raw_final_durability_state,
+        fallback=(
+            DurabilityState.UNKNOWN
+            if succeeded
+            else DurabilityState.NOT_REQUESTED
+        ),
+    )
+    if succeeded and (
+        transfer_state is not TransferState.TRANSFERRED
+        or assurance_level is AssuranceLevel.NONE
+    ):
+        return None
     return OperationOutcomeAudit(
         run_id=operation.run_id,
         run_target_id=operation.run_target_id,
         operation_id=operation.operation_id,
         final_state=state,
         bytes_transferred=operation.planned_bytes if succeeded else 0,
-        transfer_state=(
-            _evidence_text(evidence, "transfer_state", operation.transfer_state)
-            or "NOT_RECORDED"
-        ),
-        assurance_level=(
-            _evidence_text(evidence, "assurance_level", operation.assurance_level)
-            or "NOT_RECORDED"
-        ),
+        transfer_state=transfer_state.value,
+        assurance_level=assurance_level.value,
         hash_evidence_kind=operation.source_hash_evidence_kind,
-        durability_level=(
-            _evidence_text(
-                evidence,
-                "durability_level",
-                operation.final_durability_state or operation.staging_durability_state,
-            )
-            or "NOT_RECORDED"
+        durability_level=durability_level.value,
+        verification_json=_verification_json(
+            operation,
+            evidence=evidence,
+            raw_transfer_state=raw_transfer_state,
+            raw_assurance_level=raw_assurance_level,
+            raw_staging_durability_state=operation.staging_durability_state,
+            raw_final_durability_state=raw_final_durability_state,
+            final_durability_evidence=final_durability_evidence,
         ),
-        verification_json=_verification_json(operation, evidence=evidence),
         error_code=None if succeeded else operation.last_error_code,
         completed_utc=completed_event.event_utc,
     )
@@ -451,6 +523,16 @@ def _terminal_event(
     )
 
 
+def _last_event_to_phase(
+    events: tuple[RecoveryOperationAuditEvent, ...],
+    phase: RecoveryOperationPhase,
+) -> RecoveryOperationAuditEvent | None:
+    return next(
+        (event for event in reversed(events) if event.to_phase is phase),
+        None,
+    )
+
+
 def _audit_evidence(payload: Mapping[str, object]) -> Mapping[str, object]:
     evidence = payload.get("operation_audit")
     return evidence if isinstance(evidence, Mapping) else {}
@@ -460,7 +542,15 @@ def _verification_json(
     operation: RecoveryOperation,
     *,
     evidence: Mapping[str, object],
+    raw_transfer_state: str | None,
+    raw_assurance_level: str | None,
+    raw_staging_durability_state: str | None,
+    raw_final_durability_state: str | None = None,
+    final_durability_evidence: Mapping[str, object] | None = None,
 ) -> str | None:
+    final_evidence = (
+        {} if final_durability_evidence is None else final_durability_evidence
+    )
     values = {
         "expected_final_fingerprint_json": operation.expected_final_fingerprint_json,
         "expected_staging_fingerprint_json": (
@@ -473,6 +563,16 @@ def _verification_json(
         ),
         "source_guard_kind": _evidence_text(
             evidence, "source_guard_kind", operation.source_guard_kind
+        ),
+        "raw_assurance_level": raw_assurance_level,
+        "raw_final_durability_state": raw_final_durability_state,
+        "raw_staging_durability_state": raw_staging_durability_state,
+        "raw_transfer_state": raw_transfer_state,
+        "final_file_flush_succeeded": _optional_bool(
+            final_evidence.get("file_flush_succeeded")
+        ),
+        "final_write_through_move_used": _optional_bool(
+            final_evidence.get("write_through_move_used")
         ),
     }
     populated = {key: value for key, value in values.items() if value is not None}
@@ -508,6 +608,10 @@ def _optional_text(value: object) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     return value.strip()
+
+
+def _optional_bool(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
 
 
 def _audit_id(kind: str, *identity: str) -> str:

@@ -866,6 +866,62 @@ def _validate_final_durability_invariant(invariant: dict[str, Any]) -> None:
         fail("DUR-001 recovery event evidence drifted")
 
 
+def _validate_operation_result_axes_invariant(invariant: dict[str, Any]) -> None:
+    expected = {
+        "requirement_id": "VER-001",
+        "outcome_table": "operation_outcomes",
+        "attempt_table": "operation_attempts",
+        "raw_evidence_json_column": "verification_json",
+        "write_through_claim_scope": "request_confirmed",
+        "physical_persistence_claim_forbidden": True,
+        "immutable": True,
+    }
+    if any(invariant.get(key) != value for key, value in expected.items()):
+        fail("VER-001 operation result axes contract drifted")
+    if _column_tuple(
+        invariant.get("axis_columns"),
+        "VER-001 axis columns",
+    ) != ("transfer_state", "assurance_level", "durability_level"):
+        fail("VER-001 operation result axis columns drifted")
+    if _column_tuple(
+        invariant.get("transfer_states"),
+        "VER-001 transfer states",
+    ) != ("NOT_STARTED", "TRANSFERRED", "FAILED", "CANCELLED"):
+        fail("VER-001 transfer states drifted")
+    if _column_tuple(
+        invariant.get("assurance_levels"),
+        "VER-001 assurance levels",
+    ) != (
+        "NONE",
+        "MANIFEST_VERIFIED",
+        "METADATA_VERIFIED",
+        "PRIMARY_STREAM_HASH_VERIFIED",
+        "NAMED_STREAMS_VERIFIED",
+        "FULL_OBJECT_VERIFIED",
+    ):
+        fail("VER-001 assurance levels drifted")
+    if _column_tuple(
+        invariant.get("durability_states"),
+        "VER-001 durability states",
+    ) != (
+        "NOT_REQUESTED",
+        "LOCAL_FILE_FLUSH_CONFIRMED",
+        "WRITE_THROUGH_REQUEST_CONFIRMED",
+        "REMOTE_ACK_ONLY",
+        "UNKNOWN",
+    ):
+        fail("VER-001 durability states drifted")
+    success = require_mapping(
+        invariant.get("successful_result_requires"),
+        "VER-001 successful_result_requires",
+    )
+    if success != {
+        "transfer_state": "TRANSFERRED",
+        "assurance_level_not": "NONE",
+    }:
+        fail("VER-001 successful result evidence drifted")
+
+
 def _validate_retained_version_expiry_invariant(invariant: dict[str, Any]) -> None:
     if invariant.get("requirement_id") != "DB-004":
         fail("retained-version expiry invariant must reference DB-004")
@@ -1035,6 +1091,7 @@ def validate_database_contract(document: dict[str, Any]) -> int:
         "META-001_WINDOWS_BIRTHTIME",
         "SRC-001_SOURCE_FILE_PRECONDITION",
         "SYNC-002_INITIAL_BACKUP_PLAN_MATERIALIZATION",
+        "VER-001_OPERATION_RESULT_AXES",
     }
     missing = sorted(required_ids - set(invariant_by_id))
     if missing:
@@ -1082,6 +1139,9 @@ def validate_database_contract(document: dict[str, Any]) -> int:
     )
     _validate_final_durability_invariant(
         invariant_by_id["DUR-001_FINAL_DURABILITY_EVIDENCE"]
+    )
+    _validate_operation_result_axes_invariant(
+        invariant_by_id["VER-001_OPERATION_RESULT_AXES"]
     )
     _validate_retained_version_expiry_invariant(
         invariant_by_id["DB-004_RETAINED_VERSION_EXPIRY"]

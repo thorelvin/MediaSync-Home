@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -133,6 +134,19 @@ def test_reconcile_derives_failed_and_successful_attempts_before_outcome() -> No
         _event(
             sequence=2,
             process="process-b",
+            from_phase=RecoveryOperationPhase.FILESYSTEM_APPLIED,
+            to_phase=RecoveryOperationPhase.FINAL_DURABLE,
+            payload={
+                "durability_state": (
+                    "LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED"
+                ),
+                "file_flush_succeeded": True,
+                "write_through_move_used": True,
+            },
+        ),
+        _event(
+            sequence=3,
+            process="process-b",
             from_phase=RecoveryOperationPhase.FINAL_VERIFIED,
             to_phase=RecoveryOperationPhase.CATALOG_RECORDED,
         ),
@@ -159,10 +173,21 @@ def test_reconcile_derives_failed_and_successful_attempts_before_outcome() -> No
     assert attempts[0].lease_id == "lease-old"
     assert attempts[1].lease_id == "lease-a"
     assert attempts[1].bytes_transferred == 7
+    assert attempts[1].transfer_state == "TRANSFERRED"
+    assert attempts[1].assurance_level == "PRIMARY_STREAM_HASH_VERIFIED"
+    assert attempts[1].durability_level == "UNKNOWN"
     assert final.final_state is OperationOutcomeState.SUCCEEDED
     assert final.bytes_transferred == 7
+    assert final.transfer_state == "TRANSFERRED"
+    assert final.assurance_level == "PRIMARY_STREAM_HASH_VERIFIED"
+    assert final.durability_level == "WRITE_THROUGH_REQUEST_CONFIRMED"
     assert final.hash_evidence_kind == "CURRENT_READ_HASH"
     assert final.error_code is None
+    verification = json.loads(final.verification_json)
+    assert verification["raw_assurance_level"] == "FULL_HASH"
+    assert verification["raw_transfer_state"] == "TRANSFERRED"
+    assert verification["final_file_flush_succeeded"] is True
+    assert verification["final_write_through_move_used"] is True
 
     second = reconcile_next_run_target_operation_audit(
         run_id="run-a",
@@ -214,6 +239,38 @@ def test_reconcile_records_exhausted_retry_as_skipped_outcome() -> None:
     assert attempts[0].state is OperationAttemptState.FAILED
     assert final.final_state is OperationOutcomeState.SKIPPED
     assert final.error_code == "SOURCE_CHANGED_DURING_COPY"
+
+
+def test_reconcile_does_not_materialize_success_without_transfer_assurance() -> None:
+    operation = replace(
+        _operation(),
+        phase=RecoveryOperationPhase.CLEANED,
+        final_durability_state="FINAL_DURABILITY_UNCONFIRMED",
+    )
+    events = (
+        _event(
+            sequence=0,
+            process="process-a",
+            from_phase=RecoveryOperationPhase.FINAL_VERIFIED,
+            to_phase=RecoveryOperationPhase.CATALOG_RECORDED,
+        ),
+    )
+    catalog = _CatalogAuditStore()
+
+    outcome = reconcile_next_run_target_operation_audit(
+        run_id="run-a",
+        run_target_id="target-a",
+        recovery_operations=_RecoveryAuditStore(
+            operation,
+            events,
+            (_processes()[0],),
+        ),
+        operation_audits=catalog,
+        max_operations=2,
+    )
+
+    assert outcome.terminal_outcomes_complete is False
+    assert catalog.calls[0][2] is None
 
 
 def test_reconcile_rejects_unbounded_operation_page() -> None:

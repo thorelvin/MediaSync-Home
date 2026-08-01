@@ -3346,13 +3346,18 @@ class MediaSyncWindow(QMainWindow):
             "transferred": (
                 _format_bytes(outcome.bytes_transferred) if outcome is not None else "-"
             ),
+            "transfer_status": (
+                self._history_transfer_label(outcome.transfer_state)
+                if outcome is not None
+                else "-"
+            ),
             "verification": (
-                self._history_evidence_label(outcome.assurance_level)
+                self._history_assurance_label(outcome.assurance_level)
                 if outcome is not None
                 else "-"
             ),
             "durability": (
-                self._history_evidence_label(outcome.durability_level)
+                self._history_durability_label(outcome.durability_level)
                 if outcome is not None
                 else "-"
             ),
@@ -3582,12 +3587,63 @@ class MediaSyncWindow(QMainWindow):
         pair = labels.get(state, (state.replace("_", " ").title(), state))
         return pair[0] if english else pair[1]
 
-    def _history_evidence_label(self, value: str) -> str:
+    def _history_transfer_label(self, value: str) -> str:
         english = self._selected_language_code is LanguageCode.ENGLISH
         labels = {
-            "FULL_HASH": ("Full content hash", "Full innholdshash"),
-            "DURABLE": ("Durably written", "Varig skrevet"),
-            "NOT_RECORDED": ("Not recorded", "Ikke registrert"),
+            "NOT_STARTED": ("Not started", "Ikke startet"),
+            "TRANSFERRED": ("Transferred", "Overført"),
+            "FAILED": ("Failed", "Feilet"),
+            "CANCELLED": ("Cancelled", "Avbrutt"),
+        }
+        pair = labels.get(value, (value.replace("_", " ").title(), value))
+        return pair[0] if english else pair[1]
+
+    def _history_assurance_label(self, value: str) -> str:
+        english = self._selected_language_code is LanguageCode.ENGLISH
+        labels = {
+            "NONE": ("No verification evidence", "Ingen verifiseringsevidens"),
+            "MANIFEST_VERIFIED": ("Manifest verified", "Manifest verifisert"),
+            "METADATA_VERIFIED": ("Metadata verified", "Metadata verifisert"),
+            "PRIMARY_STREAM_HASH_VERIFIED": (
+                "Primary content hash verified",
+                "Hash for hovedinnhold verifisert",
+            ),
+            "NAMED_STREAMS_VERIFIED": (
+                "Named streams verified",
+                "Navngitte strømmer verifisert",
+            ),
+            "FULL_OBJECT_VERIFIED": (
+                "Full object verified",
+                "Hele objektet verifisert",
+            ),
+            "FULL_HASH": (
+                "Primary content hash verified",
+                "Hash for hovedinnhold verifisert",
+            ),
+            "NOT_RECORDED": ("No verification evidence", "Ingen verifiseringsevidens"),
+        }
+        pair = labels.get(value, (value.replace("_", " ").title(), value))
+        return pair[0] if english else pair[1]
+
+    def _history_durability_label(self, value: str) -> str:
+        english = self._selected_language_code is LanguageCode.ENGLISH
+        labels = {
+            "NOT_REQUESTED": ("Not requested", "Ikke forespurt"),
+            "LOCAL_FILE_FLUSH_CONFIRMED": (
+                "File flush confirmed",
+                "Filflush bekreftet",
+            ),
+            "WRITE_THROUGH_REQUEST_CONFIRMED": (
+                "Write-through request confirmed",
+                "Write-through-forespørsel bekreftet",
+            ),
+            "REMOTE_ACK_ONLY": (
+                "Remote acknowledgement only",
+                "Kun fjernbekreftelse",
+            ),
+            "UNKNOWN": ("Unknown", "Ukjent"),
+            "DURABLE": ("Unknown", "Ukjent"),
+            "NOT_RECORDED": ("Unknown", "Ukjent"),
         }
         pair = labels.get(value, (value.replace("_", " ").title(), value))
         return pair[0] if english else pair[1]
@@ -8516,7 +8572,8 @@ class MediaSyncWindow(QMainWindow):
         operation_detail_rows = (
             ("result", texts.file_result),
             ("finished", texts.finished),
-            ("transferred", texts.transferred),
+            ("transfer_status", texts.transfer_status),
+            ("transferred", texts.transferred_bytes),
             ("verification", texts.verification),
             ("durability", texts.durability),
             ("attempts", texts.attempts),
@@ -8546,12 +8603,12 @@ class MediaSyncWindow(QMainWindow):
         retry_operation.setVisible(False)
         retry_operation.clicked.connect(self._retry_selected_history_operation)
         self._history_retry_operation_button = retry_operation
-        layout.addWidget(retry_operation, 31, 2)
+        layout.addWidget(retry_operation, 32, 2)
 
         attempt_heading = QLabel(texts.file_attempts)
         attempt_heading.setObjectName("mutedLabel")
         self._history_attempt_heading = attempt_heading
-        layout.addWidget(attempt_heading, 32, 0, 1, 3)
+        layout.addWidget(attempt_heading, 33, 0, 1, 3)
         attempt_list = QListWidget()
         attempt_list.setObjectName("historyAttemptList")
         attempt_list.setAccessibleName(texts.file_attempts)
@@ -8561,7 +8618,7 @@ class MediaSyncWindow(QMainWindow):
         attempt_list.setMinimumHeight(112)
         attempt_list.setMaximumHeight(190)
         self._history_attempt_list = attempt_list
-        layout.addWidget(attempt_list, 33, 0, 1, 3)
+        layout.addWidget(attempt_list, 34, 0, 1, 3)
         layout.setColumnStretch(1, 1)
         return panel
 
@@ -9802,7 +9859,8 @@ class MediaSyncWindow(QMainWindow):
         for key, text in (
             ("result", texts.file_result),
             ("finished", texts.finished),
-            ("transferred", texts.transferred),
+            ("transfer_status", texts.transfer_status),
+            ("transferred", texts.transferred_bytes),
             ("verification", texts.verification),
             ("durability", texts.durability),
             ("attempts", texts.attempts),

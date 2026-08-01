@@ -377,26 +377,37 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
             WHERE run_id = 'run-a' AND operation_id = 'op-a'
             """
         ).fetchall() == [(1, "SUCCEEDED", 128)]
-        assert catalog_connection.execute(
+        outcome_row = catalog_connection.execute(
             """
             SELECT final_state, bytes_transferred, transfer_state,
-                   assurance_level, durability_level
+                   assurance_level, durability_level, verification_json
             FROM operation_outcomes
             WHERE run_id = 'run-a' AND operation_id = 'op-a'
             """
-        ).fetchall() == [
-            (
-                "SUCCEEDED",
-                128,
-                (
-                    "ROBOCOPY_EXIT_1_COPIED_TRANSFERRED_TO_STAGING"
-                    if staging_backend == "robocopy"
-                    else "TRANSFERRED_TO_STAGING"
-                ),
-                "STAGING_HASH_MATCHES_POST_TRANSFER_SOURCE_HASH",
-                "LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED",
-            ),
-        ]
+        ).fetchone()
+        assert outcome_row is not None
+        assert outcome_row[:5] == (
+            "SUCCEEDED",
+            128,
+            "TRANSFERRED",
+            "PRIMARY_STREAM_HASH_VERIFIED",
+            "WRITE_THROUGH_REQUEST_CONFIRMED",
+        )
+        outcome_verification = json.loads(str(outcome_row[5]))
+        assert outcome_verification["raw_transfer_state"] == (
+            "ROBOCOPY_EXIT_1_COPIED_TRANSFERRED_TO_STAGING"
+            if staging_backend == "robocopy"
+            else "TRANSFERRED_TO_STAGING"
+        )
+        assert (
+            outcome_verification["raw_assurance_level"]
+            == "STAGING_HASH_MATCHES_POST_TRANSFER_SOURCE_HASH"
+        )
+        assert outcome_verification["raw_final_durability_state"] == (
+            "LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED"
+        )
+        assert outcome_verification["final_file_flush_succeeded"] is True
+        assert outcome_verification["final_write_through_move_used"] is True
         audit_detail = query_operation_audit(
             operation_audit_store=operation_audits,
             run_id="run-a",

@@ -7437,6 +7437,16 @@ Før `FILESYSTEM_APPLIED`:
 
 Etter filsystemoperasjonen vurderes faktisk state via handles/fingerprints; returkode alene bestemmer ikke om operasjonen skjedde. `FINAL_DURABLE` er journalfasen der vurderingen registreres, ikke i seg selv en garanti om fysisk varighet. Den lokale adapteren flusher en target-side tempfil, verifiserer den, publiserer finalnavnet med `MoveFileExW(MOVEFILE_WRITE_THROUGH)`, reåpner finalfilen og flusher den før `LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED`. Kataloger bruker samme write-through-move og flusher markørfilen før `LOCAL_DIRECTORY_MARKER_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED`. Idempotent katalogreplay som bare finner og re-verifiserer en allerede eksisterende katalog registrerer fortsatt `LOCAL_DIRECTORY_MARKER_FLUSH_CONFIRMED_ENTRY_UNCONFIRMED`. Planen må være bundet til en kontrollert targetprofil som beviser write-through-støtte. Recoveryeventen lagrer `durability_state`, `file_flush_succeeded` og `write_through_move_used`; adapterretur alene er aldri durabilitybevis. `FINAL_VERIFIED` kreves før katalogoutcome. `SourceReadGuard` frigis først etter at nødvendig sourcepostcondition og staging/finalbevis er registrert.
 
+Implementasjonsnote 2026-08-01: Catalog schema 51 lagrer de kanoniske
+`TransferState`-, `AssuranceLevel`- og `DurabilityState`-verdiene i separate
+kolonner og beholder de eksakte underliggende claimene og final-eventens
+flush-/write-through-flagg i `verification_json`. Historiske, tvetydige
+`DURABLE`-verdier normaliseres til `UNKNOWN`; de oppgraderes aldri til en
+write-through-claim. Ny terminal `SUCCEEDED`-audit krever `TRANSFERRED` og et
+assurance-nivå over `NONE`. GUI viser alle tre akser separat og beskriver
+`WRITE_THROUGH_REQUEST_CONFIRMED` som en bekreftet forespørsel, ikke som bevis
+på fysisk varighet.
+
 ### 17.4 Versjoner som opaque managed objects
 
 En bevart tidligere målfil lagres som et kort objekt, ikke under originalt mappetre:

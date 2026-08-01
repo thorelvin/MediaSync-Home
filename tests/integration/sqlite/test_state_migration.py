@@ -58,7 +58,7 @@ def test_fresh_state_initialization_commits_one_restartable_epoch(
         (store.store, store.initial_version, store.final_version)
         for store in report.stores
     ] == [
-        (SqliteStore.CATALOG, 0, 50),
+        (SqliteStore.CATALOG, 0, 51),
         (SqliteStore.RECOVERY, 0, 11),
     ]
     epoch_dir = layout.root / STATE_MIGRATION_EPOCHS_DIR_NAME / "fresh-a"
@@ -112,13 +112,13 @@ def test_existing_state_upgrade_resumes_after_only_catalog_migrates(
             after_store_migrated=crash_after_catalog,
         )
 
-    assert _schema_versions(layout) == (51, 11)
+    assert _schema_versions(layout) == (52, 11)
     upgrade_dir = layout.root / STATE_MIGRATION_EPOCHS_DIR_NAME / "upgrade-a"
     assert (upgrade_dir / STATE_MIGRATION_INTENT_FILENAME).is_file()
     assert not (upgrade_dir / STATE_MIGRATION_COMMITTED_FILENAME).exists()
     backup_dir = upgrade_dir / "backup-sets" / "pre-migration"
     backup = verify_sqlite_state_backup_set(backup_dir)
-    assert [store.schema_version for store in backup.stores] == [50, 11]
+    assert [store.schema_version for store in backup.stores] == [51, 11]
 
     resumed = migrate_sqlite_state_stores(
         layout,
@@ -136,7 +136,7 @@ def test_existing_state_upgrade_resumes_after_only_catalog_migrates(
     assert resumed.committed_epoch_ids == ("upgrade-a",)
     assert resumed.latest_backup_set_path == backup_dir
     assert resumed.latest_backup_state_set_hash == backup.state_set_hash
-    assert _schema_versions(layout) == (51, 12)
+    assert _schema_versions(layout) == (52, 12)
     assert (upgrade_dir / STATE_MIGRATION_COMMITTED_FILENAME).is_file()
     with sqlite3.connect(layout.catalog) as connection:
         assert connection.execute(
@@ -202,7 +202,7 @@ def test_pending_migration_rejects_tampered_plan_hash_before_second_store(
             completed_utc="2026-07-31T03:03:01Z",
         )
 
-    assert _schema_versions(layout) == (51, 11)
+    assert _schema_versions(layout) == (52, 11)
 
 
 def test_committed_epoch_rejects_tampered_final_store_version(tmp_path: Path) -> None:
@@ -314,7 +314,7 @@ def _extended_plans() -> tuple[SqliteMigrationPlan, SqliteMigrationPlan]:
             migrations=(
                 *catalog.migrations,
                 SqliteMigration(
-                    version=51,
+                    version=52,
                     name="test_catalog_migration_epoch",
                     statements=(
                         """

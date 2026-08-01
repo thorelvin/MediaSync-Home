@@ -38,7 +38,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 50
+        assert current_schema_version(connection, plan.store) == 51
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -95,7 +95,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 50
+        assert _row_count(connection, "schema_migrations") == 51
         assert {
             "idx_initial_backup_materializations_history",
             "idx_initial_backup_materializations_job_history",
@@ -179,8 +179,10 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "trg_run_target_endpoint_wait_events_no_delete",
             "trg_operation_attempts_no_update",
             "trg_operation_attempts_no_delete",
+            "trg_operation_attempts_verification_axes_valid",
             "trg_operation_outcomes_no_update",
             "trg_operation_outcomes_no_delete",
+            "trg_operation_outcomes_verification_axes_valid",
             "trg_retained_version_restore_rollback_binding_immutable",
             "trg_retained_version_restore_rollback_no_delete",
             "trg_retained_version_restore_rollback_events_no_update",
@@ -291,6 +293,91 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             ("job_id", "job_revision_id"),
             ("job_id", "id"),
         )
+
+
+def test_catalog_verification_axes_migration_backfills_and_enforces_claims(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    plan = catalog_migration_plan()
+    version_50_plan = replace(plan, migrations=plan.migrations[:50])
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        apply_sqlite_migrations(connection, version_50_plan)
+        connection.execute(
+            """
+            INSERT INTO operation_attempts (
+                id, run_attempt_id, run_id, plan_id, run_target_id,
+                operation_id, attempt_number, state, transfer_state,
+                assurance_level, durability_level, finished_utc
+            )
+            VALUES (
+                'attempt-a', 'run-attempt-a', 'run-a', 'plan-a', 'target-a',
+                'operation-a', 1, 'SUCCEEDED', 'TRANSFERRED_TO_STAGING',
+                'FULL_HASH', 'FILE_FSYNC_COMPLETED',
+                '2026-08-01T10:00:00.000Z'
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO operation_outcomes (
+                run_id, plan_id, run_target_id, operation_id, final_state,
+                transfer_state, assurance_level, durability_level, completed_utc
+            )
+            VALUES (
+                'run-a', 'plan-a', 'target-a', 'operation-a', 'SUCCEEDED',
+                'TRANSFERRED_TO_STAGING', 'FULL_HASH',
+                'LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED',
+                '2026-08-01T10:00:01.000Z'
+            )
+            """
+        )
+        connection.commit()
+
+        apply_sqlite_migrations(connection, plan)
+
+        assert connection.execute(
+            """
+            SELECT transfer_state, assurance_level, durability_level
+            FROM operation_attempts
+            WHERE id = 'attempt-a'
+            """
+        ).fetchone() == (
+            "TRANSFERRED",
+            "PRIMARY_STREAM_HASH_VERIFIED",
+            "LOCAL_FILE_FLUSH_CONFIRMED",
+        )
+        assert connection.execute(
+            """
+            SELECT transfer_state, assurance_level, durability_level
+            FROM operation_outcomes
+            WHERE run_id = 'run-a' AND operation_id = 'operation-a'
+            """
+        ).fetchone() == (
+            "TRANSFERRED",
+            "PRIMARY_STREAM_HASH_VERIFIED",
+            "WRITE_THROUGH_REQUEST_CONFIRMED",
+        )
+
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="OPERATION_OUTCOME_VERIFICATION_AXES_INVALID",
+        ):
+            connection.execute(
+                """
+                INSERT INTO operation_outcomes (
+                    run_id, plan_id, run_target_id, operation_id, final_state,
+                    transfer_state, assurance_level, durability_level,
+                    completed_utc
+                )
+                VALUES (
+                    'run-b', 'plan-b', 'target-b', 'operation-b', 'SUCCEEDED',
+                    'TRANSFERRED', 'NONE', 'UNKNOWN',
+                    '2026-08-01T10:00:02.000Z'
+                )
+                """
+            )
         assert _foreign_key(
             connection,
             "standard_backup_job_endpoint_bindings",
@@ -1123,7 +1210,7 @@ def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> N
                 name,
                 migration_checksum
             )
-                    VALUES ('catalog', 51, 'future_migration', ?)
+                    VALUES ('catalog', 52, 'future_migration', ?)
             """,
             ("f" * 64,),
         )
@@ -1236,8 +1323,8 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
         preflight = inspect_sqlite_migration_state(connection, plan)
 
         assert preflight.initialized
-        assert preflight.current_version == 50
-        assert preflight.target_version == 50
+        assert preflight.current_version == 51
+        assert preflight.target_version == 51
         assert preflight.checksum_backfill_required
         assert "migration_checksum" not in _column_names(
             connection,

@@ -328,7 +328,8 @@ binder radene til samme run, plan, mål og planoperasjon. Bounded
 leser SQLite direkte. **Historikk** viser nå en bounded, keyset-paginert liste
 over den valgte backupkjøringens forseglede planoperasjoner. Valg av én fil
 henter bare den eksakte auditposten og viser sluttresultat, fullført tid,
-overførte byte, assurance, durability, siste feil og opptil 25 forsøk. Et
+transferstatus, overførte byte, assurance, durability, siste feil og opptil 25
+forsøk. Et
 transient feilforsøk etterfulgt av suksess vises som to separate, tidsstemplete
 rader. Kontrollaktiviteter skjuler filseksjonen, språkbytte bevarer valgt fil,
 og 900×560-dekning verifiserer at lange filstier ikke gir horisontal clipping.
@@ -492,7 +493,20 @@ Reparasjon av pre-migration-30 pending jobs er nå også levert gjennom den
 eksplisitte, revisjonsbundne **Registrer mål**-handlingen. Den senere
 oppdateringen øverst dekker også kontrollert lokal fremmed-overtakelse.
 
-Nyeste 0B-slice: `DUR-001` bruker nå `MoveFileExW` med
+Nyeste 0B-slice: `VER-001` har nå tre kanoniske og uavhengige resultatakser:
+transfer, assurance og durability. Catalog migration 51 normaliserer eldre
+auditposter konservativt, beholder tvetydig `DURABLE` som `UNKNOWN`, og
+installerer insert-guards som avviser ukjente verdier og suksess uten
+transfer-/assurancebevis. Materialiseringen beholder de eksakte rå claimene og
+final-eventens `file_flush_succeeded`/`write_through_move_used` i
+`verification_json`; manglende suksessevidens gir ingen terminal suksessrad.
+Historikk viser transferstatus, byte, verifisering og durability i separate
+norske/engelske rader ved 900×560. `WRITE_THROUGH_REQUEST_CONFIRMED` vises som
+bekreftet forespørsel, aldri som fysisk mediegaranti. Named streams,
+full-object-verifisering og writable SMB-evidens gjenstår, så `VER-001` er
+fortsatt `in_progress`.
+
+Forrige 0B-slice: `DUR-001` bruker nå `MoveFileExW` med
 `MOVEFILE_WRITE_THROUGH` for no-overwrite finalfil, replacement og
 katalogpublisering etter at target-side tempinnhold er flushet og verifisert.
 Finalfilen reåpnes og flushes før receipt. Den kontrollerte capability-proben

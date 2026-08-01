@@ -847,6 +847,14 @@ class ShellText:
         )
 
     @property
+    def transferred_bytes(self) -> str:
+        return (
+            "Transferred bytes"
+            if self.language_tooltip_prefix == "Language"
+            else "Overførte byte"
+        )
+
+    @property
     def average_speed(self) -> str:
         return (
             "Average speed"
@@ -919,6 +927,14 @@ class ShellText:
     @property
     def file_result(self) -> str:
         return "Result" if self.language_tooltip_prefix == "Language" else "Resultat"
+
+    @property
+    def transfer_status(self) -> str:
+        return (
+            "Transfer status"
+            if self.language_tooltip_prefix == "Language"
+            else "Overføringsstatus"
+        )
 
     @property
     def verification(self) -> str:

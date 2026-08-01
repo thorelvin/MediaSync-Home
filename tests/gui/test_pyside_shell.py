@@ -2493,6 +2493,18 @@ def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) 
             QLabel,
             "historyOperationDetailResultValue",
         )
+        operation_transfer_status = window.findChild(
+            QLabel,
+            "historyOperationDetailTransferStatusValue",
+        )
+        operation_verification = window.findChild(
+            QLabel,
+            "historyOperationDetailVerificationValue",
+        )
+        operation_durability = window.findChild(
+            QLabel,
+            "historyOperationDetailDurabilityValue",
+        )
         operation_attempts = window.findChild(
             QLabel,
             "historyOperationDetailAttemptsValue",
@@ -2521,6 +2533,9 @@ def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) 
         assert operation_list.bounded_model.max_cached_rows == 200
         assert operation_title is not None
         assert operation_result is not None
+        assert operation_transfer_status is not None
+        assert operation_verification is not None
+        assert operation_durability is not None
         assert operation_attempts is not None
         assert operation_last_error is not None
         assert attempt_list is not None
@@ -2557,6 +2572,9 @@ def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) 
         assert _virtual_row_count(operation_list) == 2
         assert operation_title.text() == "Photos"
         assert operation_result.text() == "Fullført"
+        assert operation_transfer_status.text() == "Overført"
+        assert operation_verification.text() == "Hash for hovedinnhold verifisert"
+        assert operation_durability.text() == "Write-through-forespørsel bekreftet"
         assert operation_attempts.text() == "1"
 
         _click_virtual_row(operation_list, 1)
@@ -2606,6 +2624,14 @@ def test_history_workspace_filters_selects_and_localizes_without_clipping(qapp) 
         assert filter_buttons["CONTROLS"].text() == "Controls"
         assert detail_title.text() == "Control · Pictures"
         assert detail_status.text() == "No changes"
+        assert (
+            window._history_operation_detail_labels["transfer_status"].text()
+            == "Transfer status"
+        )
+        assert (
+            window._history_operation_detail_labels["transferred"].text()
+            == "Transferred bytes"
+        )
         assert history_scroll.horizontalScrollBar().maximum() == 0
         history_page = history_scroll.widget()
         assert history_page is not None
@@ -6569,9 +6595,9 @@ class _FakeHistoryEngineClient(_FakeDashboardEngineClient):
                     "state": "FAILED",
                     "finished_utc": "2026-07-20T12:00:05.000Z",
                     "bytes_transferred": 0,
-                    "transfer_state": "NOT_TRANSFERRED",
-                    "assurance_level": "NOT_RECORDED",
-                    "durability_level": "NOT_RECORDED",
+                    "transfer_state": "FAILED",
+                    "assurance_level": "NONE",
+                    "durability_level": "NOT_REQUESTED",
                     "error_code": "LOCAL_IO_TRANSIENT",
                 }
             )
@@ -6581,9 +6607,9 @@ class _FakeHistoryEngineClient(_FakeDashboardEngineClient):
                 "state": "SUCCEEDED",
                 "finished_utc": "2026-07-20T12:00:08.000Z",
                 "bytes_transferred": 2048 if retried else 0,
-                "transfer_state": "TRANSFERRED_TO_STAGING",
-                "assurance_level": "FULL_HASH",
-                "durability_level": "DURABLE",
+                "transfer_state": "TRANSFERRED",
+                "assurance_level": "PRIMARY_STREAM_HASH_VERIFIED",
+                "durability_level": "LOCAL_FILE_FLUSH_CONFIRMED",
                 "error_code": None,
             }
         )
@@ -6602,10 +6628,10 @@ class _FakeHistoryEngineClient(_FakeDashboardEngineClient):
                         "final_state": "SUCCEEDED",
                         "completed_utc": "2026-07-20T12:00:09.000Z",
                         "bytes_transferred": 2048 if retried else 0,
-                        "transfer_state": "TRANSFERRED_TO_STAGING",
-                        "assurance_level": "FULL_HASH",
+                        "transfer_state": "TRANSFERRED",
+                        "assurance_level": "PRIMARY_STREAM_HASH_VERIFIED",
                         "hash_evidence_kind": "CURRENT_READ_HASH",
-                        "durability_level": "DURABLE",
+                        "durability_level": "WRITE_THROUGH_REQUEST_CONFIRMED",
                         "error_code": None,
                     },
                 }
@@ -7021,10 +7047,10 @@ class _FakeHistoryOperationRetryEngineClient(_FakeHistoryEngineClient):
             {
                 "final_state": "SKIPPED",
                 "bytes_transferred": 0,
-                "transfer_state": "NOT_TRANSFERRED",
-                "assurance_level": "NOT_RECORDED",
+                "transfer_state": "FAILED",
+                "assurance_level": "NONE",
                 "hash_evidence_kind": None,
-                "durability_level": "NOT_RECORDED",
+                "durability_level": "NOT_REQUESTED",
                 "error_code": "LOCAL_IO_TRANSIENT",
             }
         )
