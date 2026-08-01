@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from threading import Event
 from typing import Protocol
 
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
@@ -141,6 +142,11 @@ class StatusIpcClient(Protocol):
 class EngineClient:
     def __init__(self, ipc_client: StatusIpcClient) -> None:
         self._ipc_client = ipc_client
+
+    def bind_background_cancellation(self, cancellation: Event | None) -> None:
+        binder = getattr(self._ipc_client, "bind_background_cancellation", None)
+        if callable(binder):
+            binder(cancellation)
 
     def connect(self) -> IpcResponse:
         return self._ipc_client.connect()

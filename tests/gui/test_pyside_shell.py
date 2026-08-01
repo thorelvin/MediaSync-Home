@@ -1947,6 +1947,71 @@ def test_background_query_close_discards_late_worker_result(qapp) -> None:
     controller.deleteLater()
 
 
+def test_background_query_replacement_interrupts_cancellation_aware_client(
+    qapp,
+) -> None:
+    class InterruptibleClient:
+        def __init__(self) -> None:
+            self.cancellation: Event | None = None
+            self.started = Event()
+            self.interrupted = Event()
+            self.calls: list[str] = []
+
+        def bind_background_cancellation(
+            self,
+            cancellation: Event | None,
+        ) -> None:
+            self.cancellation = cancellation
+
+        def query(self, name: str) -> str:
+            self.calls.append(name)
+            if name != "old":
+                return name
+            self.started.set()
+            cancellation = self.cancellation
+            if cancellation is None or not cancellation.wait(timeout=2):
+                raise TimeoutError("old query was not cancelled")
+            self.interrupted.set()
+            raise InterruptedError("old query cancelled")
+
+    client = InterruptibleClient()
+    applied: list[str] = []
+    errors: list[str] = []
+    controller = BackgroundQueryController(
+        client_factory=lambda: client,
+        max_pending=1,
+    )
+
+    assert controller.submit(
+        key="history-timeline",
+        operation=lambda worker: client.query("old"),
+        on_result=lambda value: applied.append(str(value)),
+        on_error=lambda error: errors.append(str(error)),
+    )
+    assert client.started.wait(timeout=1)
+    assert controller.submit(
+        key="history-timeline",
+        operation=lambda worker: client.query("new"),
+        on_result=lambda value: applied.append(str(value)),
+        on_error=lambda error: errors.append(str(error)),
+    )
+
+    deadline = monotonic() + 2
+    while (controller.active or controller.pending_count) and monotonic() < deadline:
+        qapp.processEvents()
+        QTest.qWait(10)
+
+    assert client.interrupted.is_set()
+    assert client.calls == ["old", "new"]
+    assert applied == ["new"]
+    assert errors == []
+    assert not controller.active
+    assert controller.pending_count == 0
+    assert client.cancellation is None
+    controller.close()
+    controller.deleteLater()
+
+
 def test_command_worker_is_dedicated_serial_and_reuses_its_client(qapp) -> None:
     started = Event()
     release = Event()

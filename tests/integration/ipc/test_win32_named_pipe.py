@@ -4,6 +4,7 @@ import os
 import struct
 import threading
 from collections.abc import Callable
+from time import monotonic
 from typing import TypeVar
 from uuid import uuid4
 
@@ -16,6 +17,7 @@ from mediasync_home.ipc.protocol import (
     PROTOCOL_VERSION,
     SCHEMA_VERSION,
     IpcReason,
+    IpcResponse,
     IpcStatus,
 )
 from mediasync_home.ipc.server import EngineHostIpcService, IpcResourceLimits
@@ -396,6 +398,75 @@ def test_named_pipe_rejects_oversized_declared_frame_before_reading_body() -> No
         raise errors[0]
     assert payload["status"] == IpcStatus.REJECTED.value
     assert payload["reason"] == IpcReason.INVALID_FRAME.value
+
+
+def test_named_pipe_background_cancellation_interrupts_pending_response_read() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingStatusService(EngineHostIpcService):
+        def query_status(self, client_instance_id: str) -> IpcResponse:
+            started.set()
+            if not release.wait(timeout=5):
+                raise TimeoutError("status query release timed out")
+            return super().query_status(client_instance_id)
+
+    service = BlockingStatusService(win32_named_pipe.current_user_policy())
+    pipe_name = win32_named_pipe.make_pipe_name(
+        installation_id="integration-test",
+        suffix=uuid4().hex,
+    )
+    server = win32_named_pipe.Win32NamedPipeServer(
+        pipe_name=pipe_name,
+        service=service,
+    )
+    client = win32_named_pipe.Win32NamedPipeClient(
+        pipe_name=pipe_name,
+        timeout_ms=5_000,
+    )
+    server_errors: list[BaseException] = []
+
+    def serve_two_requests() -> None:
+        try:
+            server.serve_once()
+            server.serve_once()
+        except BaseException as exc:  # pragma: no cover - re-raised below
+            server_errors.append(exc)
+
+    server_thread = threading.Thread(target=serve_two_requests, daemon=True)
+    server_thread.start()
+    handshake = client.connect()
+    assert handshake.status is IpcStatus.ACCEPTED
+
+    cancellation = threading.Event()
+    client.bind_background_cancellation(cancellation)
+    client_errors: list[BaseException] = []
+
+    def query_status() -> None:
+        try:
+            client.query_status()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            client_errors.append(exc)
+
+    client_thread = threading.Thread(target=query_status, daemon=True)
+    client_thread.start()
+    assert started.wait(timeout=2)
+    cancelled_at = monotonic()
+    cancellation.set()
+    client_thread.join(timeout=1)
+    cancellation_latency = monotonic() - cancelled_at
+
+    assert not client_thread.is_alive(), "cancelled client read remained blocked"
+    assert cancellation_latency < 1
+    assert len(client_errors) == 1
+    assert isinstance(client_errors[0], InterruptedError)
+
+    client.bind_background_cancellation(None)
+    release.set()
+    server_thread.join(timeout=5)
+    assert not server_thread.is_alive()
+    if server_errors:
+        raise server_errors[0]
 
 
 def test_named_pipe_disconnects_client_that_stalls_before_frame_header() -> None:

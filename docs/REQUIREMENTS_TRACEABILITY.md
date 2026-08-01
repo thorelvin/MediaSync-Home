@@ -1,5 +1,24 @@
 # Kravsporbarhet
 
+Oppdatering 2026-08-01 for `UX-002`, `UX-004`, `PERF-001` og `ARC-004`:
+Rekonstruerbare GUI-reads binder nå ett nivådreven cancellation-event per query
+fra den bounded bakgrunnskontrolleren gjennom `EngineClient` til Win32
+named-pipe-klienten. Same-key replacement, cancel, cancel-all og window-close
+signalerer aktivt arbeid. Klienten sjekker signalet under pipe-open og minst
+hver 25 ms under overlapped request-, response- og acknowledgment-I/O, avbryter
+den eksakte operasjonen med `CancelIoEx`, drenerer completion og forkaster
+worker-klienten før latest-wins-arbeidet fortsetter. Querytokenet beskytter
+fortsatt mot sent repaint. Durable GUI-kommandoer bruker en separat worker og
+blir med hensikt ikke kansellert etter submission. Et samarbeidende
+controllerbevis viser at erstatningen frigjør den eneste queryplassen uten
+manuell test-release; en ekte Windows named-pipe-test holder Engine Host-
+responsen og beviser at klientreaden avbrytes på under ett sekund. Bevis:
+`src/mediasync_home/presentation/background_queries.py`,
+`src/mediasync_home/presentation/engine_client.py`,
+`src/mediasync_home/ipc/win32_named_pipe.py`,
+`tests/gui/test_pyside_shell.py`, `tests/unit/test_engine_client.py` og
+`tests/integration/ipc/test_win32_named_pipe.py`.
+
 Oppdatering 2026-08-01 for `UX-002`, `UX-004` og `PERF-001`:
 Endringer, Historikk-tidslinjen og Historikk-filresultater har nå kontrollert
 én-sides lookahead. En egen serialisert prefetch-worker med høyst én aktiv og én

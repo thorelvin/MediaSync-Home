@@ -4,9 +4,9 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from math import ceil
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from time import monotonic
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, cast
 
 from PySide6.QtCore import QObject, QTimer, Qt, Signal, Slot
 
@@ -24,6 +24,7 @@ _PageT = TypeVar("_PageT")
 class _QueuedQuery:
     key: str
     token: int
+    cancellation: Event
     operation: BackgroundOperation
     on_result: BackgroundResultHandler
     on_error: BackgroundErrorHandler | None
@@ -142,6 +143,7 @@ class BackgroundQueryController(QObject):
         query = _QueuedQuery(
             key=normalized_key,
             token=token,
+            cancellation=Event(),
             operation=operation,
             on_result=on_result,
             on_error=on_error,
@@ -156,16 +158,22 @@ class BackgroundQueryController(QObject):
         if normalized_key not in self._pending:
             self._pending_order.append(normalized_key)
         self._pending[normalized_key] = query
+        if self._active.key == normalized_key:
+            self._active.cancellation.set()
         return True
 
     def cancel(self, key: str) -> None:
         normalized_key = key.strip()
+        if self._active is not None and self._active.key == normalized_key:
+            self._active.cancellation.set()
         self._latest_tokens.pop(normalized_key, None)
         if normalized_key in self._pending:
             del self._pending[normalized_key]
             self._pending_order.remove(normalized_key)
 
     def cancel_all(self) -> None:
+        if self._active is not None:
+            self._active.cancellation.set()
         self._latest_tokens.clear()
         self._pending.clear()
         self._pending_order.clear()
@@ -189,7 +197,21 @@ class BackgroundQueryController(QObject):
             client: object | None = None
             try:
                 client = client_state.get()
-                result = query.operation(client)
+                candidate = getattr(client, "bind_background_cancellation", None)
+                bind_cancellation = (
+                    cast(Callable[[Event | None], object], candidate)
+                    if callable(candidate)
+                    else None
+                )
+                try:
+                    if bind_cancellation is not None:
+                        bind_cancellation(query.cancellation)
+                    if query.cancellation.is_set():
+                        raise InterruptedError("background query was cancelled")
+                    result = query.operation(client)
+                finally:
+                    if bind_cancellation is not None:
+                        bind_cancellation(None)
             except Exception as exc:
                 client_state.discard(client)
                 error = exc
@@ -271,6 +293,7 @@ class CommandSubmissionController(QObject):
         command = _QueuedQuery(
             key=normalized_name,
             token=token,
+            cancellation=Event(),
             operation=operation,
             on_result=on_result,
             on_error=on_error,

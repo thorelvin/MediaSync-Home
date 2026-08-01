@@ -3323,6 +3323,17 @@ Bindende sikkerhetsregler:
 - ingen run-kommando inneholder en vilkårlig filsystemsti. Den refererer `job_id`, `plan_id`, `run_id` eller andre persisterte ID-er som Engine Host selv slår opp og revaliderer;
 - launch nonce, capability token og klienttokenopplysninger logges aldri.
 
+0B-implementasjonsnote: Rekonstruerbare GUI-reads kan binde et nivådreven
+cancellation-event gjennom `EngineClient` til Win32 named-pipe-klienten.
+Same-key replacement og shutdown signaliserer aktiv I/O; klienten poller den
+bundne eventen minst hver 25 ms under overlapped request, response og
+acknowledgment, bruker `CancelIoEx` mot den eksakte `OVERLAPPED`-operasjonen og
+drenerer completion før handle og worker-klient forkastes. Pipe-open sjekker
+samme signal mellom bounded 250 ms busy/missing-pipe-venter. Dette frigjør
+GUI-arbeidsplassen og sperrer sen repaint; det er ikke et vilkårlig avbrudd av
+Engine Hostens application-/SQLite-arbeid. Muterende submissions følger den
+separate durable command-policyen og fullfører etter at de er sendt.
+
 Kommandoenvelope:
 
 ```json

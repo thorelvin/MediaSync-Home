@@ -8,6 +8,7 @@ import time
 from ctypes import wintypes
 from dataclasses import dataclass, field
 from math import ceil
+from threading import Event
 from typing import Any
 from uuid import uuid4
 
@@ -75,6 +76,7 @@ DEFAULT_BUFFER_SIZE = 65_536
 DEFAULT_REQUEST_TIMEOUT_MS = 5_000
 DEFAULT_RESPONSE_TIMEOUT_MS = 5_000
 DEFAULT_ACK_TIMEOUT_MS = 1_000
+CANCELLATION_POLL_MS = 25
 RESPONSE_ACK = b"\x06"
 WAIT_OBJECT_0 = 0
 WAIT_TIMEOUT = 258
@@ -380,8 +382,32 @@ def _complete_overlapped(
     *,
     timeout_ms: int,
     operation_name: str,
+    cancellation: Event | None = None,
 ) -> int:
-    wait_result = kernel32.WaitForSingleObject(operation.hEvent, timeout_ms)
+    if cancellation is None:
+        wait_result = kernel32.WaitForSingleObject(operation.hEvent, timeout_ms)
+    else:
+        deadline = time.monotonic() + timeout_ms / 1000
+        while True:
+            if cancellation.is_set():
+                _cancel_overlapped_for_background_request(
+                    handle,
+                    operation,
+                    operation_name=operation_name,
+                )
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                wait_result = WAIT_TIMEOUT
+                break
+            remaining_ms = max(1, ceil(remaining_seconds * 1000))
+            wait_result = kernel32.WaitForSingleObject(
+                operation.hEvent,
+                min(CANCELLATION_POLL_MS, remaining_ms),
+            )
+            if wait_result != WAIT_TIMEOUT:
+                break
+            if time.monotonic() >= deadline:
+                break
     if wait_result == WAIT_TIMEOUT:
         cancelled = kernel32.CancelIoEx(handle, ctypes.byref(operation))
         if not cancelled:
@@ -427,12 +453,53 @@ def _complete_overlapped(
     return int(transferred.value)
 
 
+def _cancel_overlapped_for_background_request(
+    handle: HANDLE,
+    operation: Overlapped,
+    *,
+    operation_name: str,
+) -> None:
+    cancelled = kernel32.CancelIoEx(handle, ctypes.byref(operation))
+    if not cancelled:
+        code = ctypes.get_last_error()
+        if code != ERROR_NOT_FOUND:
+            raise Win32PipeError(
+                code,
+                f"CancelIoEx({operation_name}): {ctypes.FormatError(code)}",
+            )
+    wait_result = kernel32.WaitForSingleObject(operation.hEvent, INFINITE)
+    if wait_result != WAIT_OBJECT_0:
+        raise Win32PipeError(
+            int(wait_result),
+            f"WaitForSingleObject({operation_name}) returned {wait_result}",
+        )
+    transferred = DWORD(0)
+    if not kernel32.GetOverlappedResult(
+        handle,
+        ctypes.byref(operation),
+        ctypes.byref(transferred),
+        False,
+    ):
+        code = ctypes.get_last_error()
+        if code not in {
+            ERROR_OPERATION_ABORTED,
+            ERROR_BROKEN_PIPE,
+            ERROR_NO_DATA,
+        }:
+            raise Win32PipeError(
+                code,
+                f"GetOverlappedResult({operation_name}): {ctypes.FormatError(code)}",
+            )
+    raise InterruptedError(f"{operation_name} cancelled")
+
+
 def _read_chunk(
     handle: HANDLE,
     size: int,
     *,
     timeout_ms: int,
     operation_name: str,
+    cancellation: Event | None = None,
 ) -> bytes:
     buffer = ctypes.create_string_buffer(size)
     immediate_bytes = DWORD(0)
@@ -456,6 +523,7 @@ def _read_chunk(
             operation,
             timeout_ms=timeout_ms,
             operation_name=operation_name,
+            cancellation=cancellation,
         )
         if transferred == 0:
             raise ConnectionError(f"pipe closed during {operation_name}")
@@ -470,6 +538,7 @@ def _read_exact(
     *,
     timeout_ms: int = DEFAULT_REQUEST_TIMEOUT_MS,
     operation_name: str = "pipe read",
+    cancellation: Event | None = None,
 ) -> bytes:
     chunks: list[bytes] = []
     remaining = size
@@ -481,6 +550,7 @@ def _read_exact(
             chunk_size,
             timeout_ms=_remaining_timeout_ms(deadline, operation_name),
             operation_name=operation_name,
+            cancellation=cancellation,
         )
         chunks.append(chunk)
         remaining -= len(chunk)
@@ -493,6 +563,7 @@ def _write_chunk(
     *,
     timeout_ms: int,
     operation_name: str,
+    cancellation: Event | None = None,
 ) -> int:
     immediate_bytes = DWORD(0)
     buffer = ctypes.create_string_buffer(payload)
@@ -516,6 +587,7 @@ def _write_chunk(
             operation,
             timeout_ms=timeout_ms,
             operation_name=operation_name,
+            cancellation=cancellation,
         )
         if transferred == 0:
             raise ConnectionError(f"pipe closed during {operation_name}")
@@ -530,6 +602,7 @@ def _write_all(
     *,
     timeout_ms: int = DEFAULT_RESPONSE_TIMEOUT_MS,
     operation_name: str = "pipe write",
+    cancellation: Event | None = None,
 ) -> None:
     offset = 0
     deadline = time.monotonic() + timeout_ms / 1000
@@ -540,6 +613,7 @@ def _write_all(
             chunk,
             timeout_ms=_remaining_timeout_ms(deadline, operation_name),
             operation_name=operation_name,
+            cancellation=cancellation,
         )
 
 
@@ -548,6 +622,7 @@ def _read_message(
     *,
     limit: int = MAX_FRAME_BYTES,
     timeout_ms: int = DEFAULT_REQUEST_TIMEOUT_MS,
+    cancellation: Event | None = None,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_ms / 1000
     header = _read_exact(
@@ -555,6 +630,7 @@ def _read_message(
         4,
         timeout_ms=_remaining_timeout_ms(deadline, "pipe frame header read"),
         operation_name="pipe frame header read",
+        cancellation=cancellation,
     )
     (length,) = struct.unpack("<I", header)
     if length > limit:
@@ -565,6 +641,7 @@ def _read_message(
             length,
             timeout_ms=_remaining_timeout_ms(deadline, "pipe frame body read"),
             operation_name="pipe frame body read",
+            cancellation=cancellation,
         ),
         limit=limit,
     )
@@ -576,6 +653,7 @@ def _write_message(
     *,
     limit: int = MAX_FRAME_BYTES,
     timeout_ms: int = DEFAULT_RESPONSE_TIMEOUT_MS,
+    cancellation: Event | None = None,
 ) -> None:
     payload = encode_frame(message, limit=limit)
     _write_all(
@@ -583,6 +661,7 @@ def _write_message(
         struct.pack("<I", len(payload)) + payload,
         timeout_ms=timeout_ms,
         operation_name="pipe frame write",
+        cancellation=cancellation,
     )
 
 
@@ -835,6 +914,14 @@ class Win32NamedPipeClient:
     role: ProcessRole = ProcessRole.GUI
     client_instance_id: str = field(default_factory=lambda: str(uuid4()))
     timeout_ms: int = 5000
+    _background_cancellation: Event | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+
+    def bind_background_cancellation(self, cancellation: Event | None) -> None:
+        self._background_cancellation = cancellation
 
     def connect(
         self,
@@ -1121,17 +1208,22 @@ class Win32NamedPipeClient:
         wire_request = dict(request)
         wire_request.setdefault("request_id", str(uuid4()))
         request_id = request_id_from_frame(wire_request)
-        handle = self._open()
+        cancellation = self._background_cancellation
+        if cancellation is not None and cancellation.is_set():
+            raise InterruptedError("named-pipe request cancelled before open")
+        handle = self._open(cancellation=cancellation)
         try:
             _write_message(
                 handle,
                 wire_request,
                 timeout_ms=self.timeout_ms,
+                cancellation=cancellation,
             )
             payload = _read_message(
                 handle,
                 limit=MAX_QUERY_RESPONSE_BYTES,
                 timeout_ms=self.timeout_ms,
+                cancellation=cancellation,
             )
             response = IpcResponse.from_dict(
                 payload,
@@ -1145,15 +1237,18 @@ class Win32NamedPipeClient:
                 RESPONSE_ACK,
                 timeout_ms=self.timeout_ms,
                 operation_name="pipe response acknowledgment write",
+                cancellation=cancellation,
             )
         finally:
             _close_handle(handle)
         return response
 
-    def _open(self) -> HANDLE:
+    def _open(self, *, cancellation: Event | None = None) -> HANDLE:
         deadline = time.monotonic() + self.timeout_ms / 1000
         path = _pipe_path(self.pipe_name)
         while True:
+            if cancellation is not None and cancellation.is_set():
+                raise InterruptedError("named-pipe request cancelled while opening")
             handle = kernel32.CreateFileW(
                 path,
                 GENERIC_READ | GENERIC_WRITE,
@@ -1165,10 +1260,18 @@ class Win32NamedPipeClient:
             )
             value = _handle_value(handle)
             if value not in (0, INVALID_HANDLE_VALUE):
-                return HANDLE(value)
+                opened = HANDLE(value)
+                if cancellation is not None and cancellation.is_set():
+                    _close_handle(opened)
+                    raise InterruptedError(
+                        "named-pipe request cancelled while opening"
+                    )
+                return opened
             code = ctypes.get_last_error()
             if code in {ERROR_PIPE_BUSY, ERROR_FILE_NOT_FOUND}:
                 kernel32.WaitNamedPipeW(path, 250)
+            if cancellation is not None and cancellation.is_set():
+                raise InterruptedError("named-pipe request cancelled while opening")
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"timed out opening pipe {self.pipe_name}; last_error={code}")
             time.sleep(0.02)

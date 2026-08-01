@@ -1,5 +1,22 @@
 # Implementeringsstatus
 
+Oppdatering 2026-08-01: Rekonstruerbare GUI-spørringer har nå faktisk
+transportkansellering i tillegg til den eksisterende logical cancellation og
+stale-result-sperren. Hver query får et eget kanselleringssignal; same-key
+erstatning, eksplisitt cancel, cancel-all og window-close signaliserer også en
+allerede kjørende query. Workerens `EngineClient` binder signalet til
+Win32-klienten, som avbryter den eksakte overlapped pipe-operasjonen med
+`CancelIoEx` under request, response og acknowledgment. Overlapped venting
+sjekker signalet minst hver 25 ms, mens pipe-open fortsatt har maksimalt 250 ms
+busy/missing-pipe-intervall. En avbrutt transport forkaster klienten før den
+nyere queryen starter med en fersk tilkobling; sent resultat er fortsatt bundet
+til querytokenet. En server-side read kan fullføre etter at klienten har koblet
+fra, men den holder ikke lenger GUI-workerens eneste plass. Muterende kommandoer
+beholder sin separate durable policy og kanselleres ikke etter submission.
+Adversarial Qt-bevis avbryter en aktiv same-key-query uten testutløsing, og en
+ekte Windows named-pipe-integrasjon avbryter en blokkert statusrespons på under
+ett sekund.
+
 Oppdatering 2026-08-01: **Endringer**, **Historikk**-tidslinjen og historikkens
 **Filresultater** prefetchet nå høyst én neste side per arbeidsflate. Hver cache
 er bundet til eksakt plan, aktivitet, run, filter, side, keyset-cursor og
@@ -116,7 +133,7 @@ Norsk/engelsk språkbytte bevarer filtre og valgt detalj; to sider, to mål,
 safe/review/high/blocked og 900×560 uten horisontal overflow er dekket.
 Virtuelle resultattabeller, historikktidslinjens keyset-migrasjon og kontrollert
 sideprefetch er levert i oppdateringene over. Bredere faktisk kansellering av
-allerede kjørende bakgrunnsspørringer gjenstår.
+allerede kjørende bakgrunnsspørringer er levert i oppdateringen over.
 
 Oppdatering 2026-07-31: Terminale resultater i **Jobber** viser nå et stabilt,
 lokalisert sammendrag av hvor mange mål som ble fullført, for eksempel

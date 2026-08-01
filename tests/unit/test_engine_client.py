@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from threading import Event
 from typing import Any
 
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
@@ -8,6 +9,17 @@ from mediasync_home.application.job_drafts import DraftTarget, StandardBackupJob
 from mediasync_home.application.runs import RunCommandName
 from mediasync_home.ipc.protocol import IpcReason, IpcResponse
 from mediasync_home.presentation.engine_client import EngineClient
+
+
+def test_engine_client_forwards_background_cancellation_binding() -> None:
+    ipc_client = _CancellationBindingIpcClient()
+    client = EngineClient(ipc_client)  # type: ignore[arg-type]
+    cancellation = Event()
+
+    client.bind_background_cancellation(cancellation)
+    client.bind_background_cancellation(None)
+
+    assert ipc_client.bindings == [cancellation, None]
 
 
 def test_engine_client_submits_reviewed_standard_backup_draft() -> None:
@@ -196,6 +208,14 @@ class _RecordingIpcClient:
         self.payload = kwargs.get("payload")
         self.payload_hash = kwargs.get("payload_hash")
         return IpcResponse.accepted({"created": True})
+
+
+class _CancellationBindingIpcClient:
+    def __init__(self) -> None:
+        self.bindings: list[Event | None] = []
+
+    def bind_background_cancellation(self, cancellation: Event | None) -> None:
+        self.bindings.append(cancellation)
 
 
 class _RestartedHostIpcClient:
