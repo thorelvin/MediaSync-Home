@@ -6,6 +6,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from mediasync_home.application.initial_backup_planning import (
+    DestructivePlanningEvidence,
     InitialBackupPlanIdFactory,
     InitialBackupPlanMaterializationResult,
     InitialBackupPlanRefreshReport,
@@ -274,6 +275,22 @@ class SqliteInitialBackupPlanMaterializer:
                 "INITIAL_BACKUP_PLAN_ANALYSIS_MISSING",
                 "Refresh sealed snapshots before planning changes.",
             )
+        expected_endpoint_count = int(
+            self._connection.execute(
+                """
+                SELECT count(*)
+                FROM standard_backup_job_endpoint_bindings
+                WHERE job_id = ?
+                    AND job_revision_id = ?
+                """,
+                (candidate.job_id, candidate.job_revision_id),
+            ).fetchone()[0]
+        )
+        if expected_endpoint_count == 0:
+            raise InitialBackupPlanningError(
+                "INITIAL_BACKUP_PLAN_ENDPOINTS_MISSING",
+                "Refresh endpoint bindings and sealed snapshots before planning.",
+            )
         rows = self._connection.execute(
             """
             SELECT
@@ -301,7 +318,26 @@ class SqliteInitialBackupPlanMaterializer:
                 ),
                 observations.classification_state,
                 observations.marker_json,
-                registrations.marker_checksum
+                registrations.marker_checksum,
+                (
+                    NOT EXISTS (
+                        SELECT 1
+                        FROM directory_coverage AS unsafe_coverage
+                        WHERE unsafe_coverage.snapshot_id = snapshots.id
+                            AND unsafe_coverage.coverage_state <> 'COMPLETE'
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM snapshot_issues AS unsafe_issue
+                        WHERE unsafe_issue.snapshot_id = snapshots.id
+                            AND unsafe_issue.blocks_destructive_actions = 1
+                    )
+                ) AS destructive_scan_coverage_complete,
+                (
+                    snapshots.endpoint_id = bindings.endpoint_id
+                    AND snapshots.endpoint_revision_id = bindings.endpoint_revision_id
+                    AND snapshots.endpoint_generation = revisions.generation
+                ) AS snapshot_identity_matches_endpoint_revision
             FROM standard_backup_job_endpoint_bindings AS bindings
             INNER JOIN snapshots
                 ON snapshots.analysis_id = ?
@@ -337,6 +373,11 @@ class SqliteInitialBackupPlanMaterializer:
                 "INITIAL_BACKUP_PLAN_ENDPOINTS_MISSING",
                 "Refresh endpoint bindings and sealed snapshots before planning.",
             )
+        if len(rows) != expected_endpoint_count:
+            raise InitialBackupPlanningError(
+                "INITIAL_BACKUP_PLAN_ENDPOINT_SNAPSHOT_IDENTITY_MISMATCH",
+                "Refresh every endpoint snapshot against the active job revision before planning.",
+            )
         endpoints = tuple(self._planning_endpoint(row) for row in rows)
         if sum(endpoint.role is PlanEndpointRole.SOURCE for endpoint in endpoints) != 1:
             raise InitialBackupPlanningError(
@@ -363,6 +404,10 @@ class SqliteInitialBackupPlanMaterializer:
         snapshot_checksum = "" if row[11] is None else str(row[11])
         root_case_context_hash = str(row[14])
         root_case_mode = str(row[15])
+        destructive_evidence = DestructivePlanningEvidence(
+            scan_coverage_complete=bool(row[20]),
+            snapshot_identity_matches_endpoint_revision=bool(row[21]),
+        )
         if not bool(row[12]) or not bool(row[13]) or len(snapshot_checksum) != 64:
             raise InitialBackupPlanningError(
                 "INITIAL_BACKUP_PLAN_SNAPSHOT_NOT_SEALED",
@@ -382,6 +427,12 @@ class SqliteInitialBackupPlanMaterializer:
                     "mode": "LOCAL_READ_ONLY_SNAPSHOT",
                     "snapshot_checksum": snapshot_checksum,
                     "snapshot_schema_version": 1,
+                    "destructive_scan_coverage_complete": (
+                        destructive_evidence.scan_coverage_complete
+                    ),
+                    "snapshot_identity_matches_endpoint_revision": (
+                        destructive_evidence.snapshot_identity_matches_endpoint_revision
+                    ),
                 }
             )
             return InitialBackupPlanningEndpoint(
@@ -393,6 +444,7 @@ class SqliteInitialBackupPlanMaterializer:
                 root_case_context_hash=root_case_context_hash,
                 root_case_mode=root_case_mode,
                 capabilities_hash=capabilities_hash,
+                destructive_evidence=destructive_evidence,
                 entries=entries,
                 role=PlanEndpointRole.SOURCE,
                 hash_evidence=hash_evidence,
@@ -433,6 +485,12 @@ class SqliteInitialBackupPlanMaterializer:
                 "mode": "LOCAL_WRITABLE_PREVIEW",
                 "replace": "VERSIONED_COMPARE_AND_SWAP",
                 "snapshot_checksum": snapshot_checksum,
+                "destructive_scan_coverage_complete": (
+                    destructive_evidence.scan_coverage_complete
+                ),
+                "snapshot_identity_matches_endpoint_revision": (
+                    destructive_evidence.snapshot_identity_matches_endpoint_revision
+                ),
             }
         )
         return InitialBackupPlanningEndpoint(
@@ -444,6 +502,7 @@ class SqliteInitialBackupPlanMaterializer:
             root_case_context_hash=root_case_context_hash,
             root_case_mode=root_case_mode,
             capabilities_hash=capabilities_hash,
+            destructive_evidence=destructive_evidence,
             entries=entries,
             role=PlanEndpointRole.TARGET_WRITABLE,
             hash_evidence=hash_evidence,

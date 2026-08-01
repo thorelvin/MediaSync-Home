@@ -33,6 +33,12 @@ class InitialBackupPlanningError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class DestructivePlanningEvidence:
+    scan_coverage_complete: bool
+    snapshot_identity_matches_endpoint_revision: bool
+
+
+@dataclass(frozen=True, slots=True)
 class InitialBackupPlanningEndpoint:
     endpoint_id: str
     endpoint_revision_id: str
@@ -42,6 +48,7 @@ class InitialBackupPlanningEndpoint:
     root_case_context_hash: str
     root_case_mode: str
     capabilities_hash: str
+    destructive_evidence: DestructivePlanningEvidence
     entries: tuple[SnapshotFileEntry, ...]
     role: PlanEndpointRole
     hash_evidence: tuple[CurrentReadHashEvidence, ...] = ()
@@ -262,6 +269,7 @@ def _plan_target(
     )
     source_hash_evidence = _hash_evidence_by_entry_id(source)
     target_hash_evidence = _hash_evidence_by_entry_id(target)
+    destructive_block_reason = _destructive_block_reason(source, target)
     operations: list[PlanOperation] = []
     directory_operations: dict[str, str] = {}
     for entry in sorted(
@@ -295,6 +303,7 @@ def _plan_target(
             ),
             target_comparison_key=target_comparison_key,
             target_descendant_count=target_descendant_counts.get(target_comparison_key, 0),
+            destructive_block_reason=destructive_block_reason,
             sequence_no=first_sequence_no + len(operations),
         )
         if operation is None:
@@ -378,6 +387,7 @@ def _plan_entry(
     target_hash_evidence: CurrentReadHashEvidence | None,
     target_comparison_key: str,
     target_descendant_count: int,
+    destructive_block_reason: str | None,
     sequence_no: int,
 ) -> PlanOperation | None:
     if source_entry.object_type == "directory":
@@ -450,6 +460,16 @@ def _plan_entry(
             == target_hash_evidence.content_hash
         ):
             return None
+        if destructive_block_reason is not None:
+            return _blocked_operation(
+                plan_id=plan_id,
+                target_endpoint_id=target_endpoint_id,
+                target_ordinal=target_ordinal,
+                entry=source_entry,
+                target_comparison_key=target_comparison_key,
+                sequence_no=sequence_no,
+                reason_code=destructive_block_reason,
+            )
         return _operation(
             plan_id=plan_id,
             target_endpoint_id=target_endpoint_id,
@@ -465,6 +485,16 @@ def _plan_entry(
             source_snapshot_id=source_snapshot_id,
         )
     if target_entry.object_type == "directory" and target_descendant_count == 0:
+        if destructive_block_reason is not None:
+            return _blocked_operation(
+                plan_id=plan_id,
+                target_endpoint_id=target_endpoint_id,
+                target_ordinal=target_ordinal,
+                entry=source_entry,
+                target_comparison_key=target_comparison_key,
+                sequence_no=sequence_no,
+                reason_code=destructive_block_reason,
+            )
         return _operation(
             plan_id=plan_id,
             target_endpoint_id=target_endpoint_id,
@@ -574,6 +604,20 @@ def _blocked_operation(
         reason_code=reason_code,
         risk_level=PlanRiskLevel.BLOCKED,
     )
+
+
+def _destructive_block_reason(
+    source: InitialBackupPlanningEndpoint,
+    target: InitialBackupPlanningEndpoint,
+) -> str | None:
+    evidence = (source.destructive_evidence, target.destructive_evidence)
+    if any(
+        not item.snapshot_identity_matches_endpoint_revision for item in evidence
+    ):
+        return "DESTRUCTIVE_ENDPOINT_IDENTITY_MISMATCH"
+    if any(not item.scan_coverage_complete for item in evidence):
+        return "DESTRUCTIVE_SCAN_COVERAGE_INCOMPLETE"
+    return None
 
 
 def _operation_id(

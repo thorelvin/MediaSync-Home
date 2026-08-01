@@ -47,6 +47,10 @@ from mediasync_home.adapters.writable_endpoint_registration import (
 from mediasync_home.application.initial_backup_planning import (
     InitialBackupPlanIdFactory,
 )
+from mediasync_home.application.plans import (
+    PlanOperationType,
+    TargetPreconditionKind,
+)
 from mediasync_home.application.snapshot_scanning import (
     DirectoryCaseContext,
     SnapshotMaterializationIds,
@@ -321,6 +325,107 @@ def test_current_read_hash_evidence_skips_identical_existing_file(
                 SET computed_utc = 'changed'
                 """
             )
+
+
+def test_incomplete_coverage_evidence_blocks_persisted_replacement_plan(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    (source / "Readme.txt").write_text("new", encoding="utf-8")
+    (target / "Readme.txt").write_text("old", encoding="utf-8")
+
+    with sqlite3.connect(database) as connection:
+        _prepare_registered_snapshots(
+            connection,
+            database=database,
+            source=source,
+            target=target,
+        )
+        # Simulate persisted coverage corruption past the normal immutable guard.
+        connection.execute(
+            "DROP TRIGGER trg_directory_coverage_no_update_after_snapshot_immutable"
+        )
+        connection.execute(
+            """
+            UPDATE directory_coverage
+            SET coverage_state = 'UNREADABLE'
+            WHERE snapshot_id = 'snapshot-source'
+                AND relative_path = '.'
+            """
+        )
+        connection.commit()
+        plans = SqlitePlanStore(connection)
+
+        report = SqliteInitialBackupPlanMaterializer(
+            connection,
+            plans=plans,
+            id_factory=_FixedPlanIds(),
+        ).refresh_initial_backup_plans(
+            observed_utc="2026-07-31T16:03:00Z",
+        )
+
+        assert report.sealed_plan_count == 1
+        assert report.results[0].plan_runnable is False
+        plan = plans.load_sealed_plan("plan-1")
+        assert plan is not None
+        assert plan.operation_count == 1
+        operation = plan.operations[0]
+        assert (
+            operation.operation_type
+            is PlanOperationType.BLOCK_ENDPOINT_CAPABILITIES_UNKNOWN
+        )
+        assert operation.target_precondition_kind is TargetPreconditionKind.NONE
+        assert operation.reason_code == "DESTRUCTIVE_SCAN_COVERAGE_INCOMPLETE"
+
+
+def test_snapshot_endpoint_identity_drift_blocks_plan_materialization(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    (source / "Readme.txt").write_text("new", encoding="utf-8")
+    (target / "Readme.txt").write_text("old", encoding="utf-8")
+
+    with sqlite3.connect(database) as connection:
+        _prepare_registered_snapshots(
+            connection,
+            database=database,
+            source=source,
+            target=target,
+        )
+        # Simulate identity drift past the normal immutable catalog guards.
+        connection.execute("DROP TRIGGER trg_snapshots_no_update_after_immutable")
+        connection.execute("DROP TRIGGER trg_snapshots_endpoint_identity_immutable")
+        connection.execute(
+            """
+            UPDATE snapshots
+            SET endpoint_generation = endpoint_generation + 1
+            WHERE id = 'snapshot-target'
+            """
+        )
+        connection.commit()
+
+        report = SqliteInitialBackupPlanMaterializer(
+            connection,
+            plans=SqlitePlanStore(connection),
+            id_factory=_FixedPlanIds(),
+        ).refresh_initial_backup_plans(
+            observed_utc="2026-07-31T16:03:00Z",
+        )
+
+        assert report.blocked_job_count == 1
+        assert report.results[0].state == "BLOCKED"
+        assert report.results[0].reason_code == (
+            "INITIAL_BACKUP_PLAN_ENDPOINT_SNAPSHOT_IDENTITY_MISMATCH"
+        )
+        assert connection.execute("SELECT count(*) FROM plans").fetchone() == (0,)
 
 
 def test_initial_plan_materializer_persists_operations_for_two_targets(

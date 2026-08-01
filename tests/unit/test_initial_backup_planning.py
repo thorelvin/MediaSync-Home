@@ -9,6 +9,7 @@ from mediasync_home.application.hash_evidence import (
     HashEvidenceKind,
 )
 from mediasync_home.application.initial_backup_planning import (
+    DestructivePlanningEvidence,
     InitialBackupPlanningEndpoint,
     InitialBackupPlanningError,
     build_initial_backup_plan,
@@ -125,6 +126,118 @@ def test_initial_backup_plan_blocks_nonempty_directory_file_conflict() -> None:
         PlanOperationType.BLOCK_ENDPOINT_CAPABILITIES_UNKNOWN
     )
     assert result.plan.operations[0].reason_code == "SOURCE_FILE_TARGET_TYPE_CONFLICT"
+
+
+@pytest.mark.parametrize(
+    ("target_object_type", "target_size"),
+    (
+        ("file", 2),
+        ("directory", None),
+    ),
+)
+def test_incomplete_scan_coverage_blocks_every_supported_replacement(
+    target_object_type: str,
+    target_size: int | None,
+) -> None:
+    result = build_initial_backup_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(
+            _endpoint(
+                role=PlanEndpointRole.SOURCE,
+                endpoint_id="source-a",
+                entries=(_entry("Archive", "archive", "file", size=5),),
+                scan_coverage_complete=False,
+            ),
+            _endpoint(
+                role=PlanEndpointRole.TARGET_WRITABLE,
+                endpoint_id="target-a",
+                target_ordinal=1,
+                entries=(
+                    _entry(
+                        "Archive",
+                        "archive",
+                        target_object_type,
+                        size=target_size,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    assert result.plan is not None
+    assert initial_backup_plan_runnable(result.plan) is False
+    assert result.plan.operation_count == 1
+    operation = result.plan.operations[0]
+    assert operation.operation_type is (
+        PlanOperationType.BLOCK_ENDPOINT_CAPABILITIES_UNKNOWN
+    )
+    assert operation.target_precondition_kind is TargetPreconditionKind.NONE
+    assert operation.reason_code == "DESTRUCTIVE_SCAN_COVERAGE_INCOMPLETE"
+
+
+def test_endpoint_identity_mismatch_blocks_replacement() -> None:
+    result = build_initial_backup_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(
+            _endpoint(
+                role=PlanEndpointRole.SOURCE,
+                endpoint_id="source-a",
+                entries=(_entry("Readme.txt", "readme.txt", "file", size=5),),
+            ),
+            _endpoint(
+                role=PlanEndpointRole.TARGET_WRITABLE,
+                endpoint_id="target-a",
+                target_ordinal=1,
+                entries=(_entry("Readme.txt", "readme.txt", "file", size=2),),
+                identity_matches_endpoint_revision=False,
+            ),
+        ),
+    )
+
+    assert result.plan is not None
+    assert initial_backup_plan_runnable(result.plan) is False
+    assert result.plan.operations[0].reason_code == (
+        "DESTRUCTIVE_ENDPOINT_IDENTITY_MISMATCH"
+    )
+
+
+def test_unsafe_destructive_evidence_still_allows_no_overwrite_copy_new() -> None:
+    result = build_initial_backup_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(
+            _endpoint(
+                role=PlanEndpointRole.SOURCE,
+                endpoint_id="source-a",
+                entries=(_entry("New.txt", "new.txt", "file", size=5),),
+                scan_coverage_complete=False,
+                identity_matches_endpoint_revision=False,
+            ),
+            _endpoint(
+                role=PlanEndpointRole.TARGET_WRITABLE,
+                endpoint_id="target-a",
+                target_ordinal=1,
+                entries=(),
+                scan_coverage_complete=False,
+                identity_matches_endpoint_revision=False,
+            ),
+        ),
+    )
+
+    assert result.plan is not None
+    assert initial_backup_plan_runnable(result.plan) is True
+    operation = result.plan.operations[0]
+    assert operation.operation_type is PlanOperationType.COPY_NEW
+    assert operation.target_precondition_kind is TargetPreconditionKind.ABSENT
+    assert operation.reason_code == "COPY_NEW"
 
 
 def test_initial_backup_plan_reports_no_changes_for_matching_directory_structure() -> None:
@@ -353,6 +466,8 @@ def _endpoint(
     entries: tuple[SnapshotFileEntry, ...],
     target_ordinal: int | None = None,
     hash_evidence: tuple[CurrentReadHashEvidence, ...] = (),
+    scan_coverage_complete: bool = True,
+    identity_matches_endpoint_revision: bool = True,
 ) -> InitialBackupPlanningEndpoint:
     writable = role is PlanEndpointRole.TARGET_WRITABLE
     return InitialBackupPlanningEndpoint(
@@ -364,6 +479,12 @@ def _endpoint(
         root_case_context_hash="2" * 64,
         root_case_mode="CASE_INSENSITIVE",
         capabilities_hash="3" * 64,
+        destructive_evidence=DestructivePlanningEvidence(
+            scan_coverage_complete=scan_coverage_complete,
+            snapshot_identity_matches_endpoint_revision=(
+                identity_matches_endpoint_revision
+            ),
+        ),
         entries=entries,
         role=role,
         hash_evidence=hash_evidence,
