@@ -60,6 +60,9 @@ from mediasync_home.presentation.view_models.engine_status import (  # noqa: E40
     EngineStatusViewState,
     engine_status_from_response,
 )
+from mediasync_home.presentation.view_models.backup_setup import (  # noqa: E402
+    BackupSetupStep,
+)
 
 
 def _virtual_row_count(table: BoundedVirtualTableView) -> int:
@@ -464,6 +467,8 @@ def test_target_selection_reflows_without_horizontal_clipping(
         setup_actions = window.findChild(QWidget, "setupActions")
         dashboard_scroll = window.findChild(QScrollArea, "dashboardScrollArea")
         activity_scroll = window.findChild(QScrollArea, "activityScrollArea")
+        detail_row = window.findChild(QWidget, "dashboardDetailRow")
+        activity_bar = window.findChild(QFrame, "activityBar")
 
         assert create_backup is not None
         assert add_target is not None
@@ -479,6 +484,8 @@ def test_target_selection_reflows_without_horizontal_clipping(
         assert setup_actions is not None
         assert dashboard_scroll is not None
         assert activity_scroll is not None
+        assert detail_row is not None
+        assert activity_bar is not None
         QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
         qapp.processEvents()
         for _ in range(3):
@@ -525,8 +532,10 @@ def test_target_selection_reflows_without_horizontal_clipping(
         )
         assert dashboard_scroll.horizontalScrollBar().maximum() == 0
         assert activity_scroll.horizontalScrollBar().maximum() == 0
-        assert dashboard_scroll.verticalScrollBar().maximum() > 0
-        assert activity_scroll.verticalScrollBar().maximum() > 0
+        assert detail_row.isHidden()
+        assert activity_bar.isHidden()
+        if window_width >= 1000:
+            assert dashboard_scroll.verticalScrollBar().maximum() == 0
         assert target_controls.height() >= target_controls.minimumSizeHint().height()
         assert setup_panel.height() >= setup_panel.minimumSizeHint().height()
         assert setup_panel.rect().contains(setup_actions.geometry())
@@ -672,13 +681,19 @@ def test_compact_target_selection_keeps_complete_step_actions_visible(qapp) -> N
         window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
         create_backup = window.findChild(QPushButton, "createBackupButton")
         add_target = window.findChild(QToolButton, "addTargetButton")
+        setup_back = window.findChild(QToolButton, "setupBackButton")
         setup_panel = window.findChild(QFrame, "standardBackupPanel")
         dashboard_scroll = window.findChild(QScrollArea, "dashboardScrollArea")
+        detail_row = window.findChild(QWidget, "dashboardDetailRow")
+        activity_bar = window.findChild(QFrame, "activityBar")
 
         assert create_backup is not None
         assert add_target is not None
+        assert setup_back is not None
         assert setup_panel is not None
         assert dashboard_scroll is not None
+        assert detail_row is not None
+        assert activity_bar is not None
         assert window._setup_defaults_label is not None
         assert window._setup_retention_label is not None
 
@@ -692,6 +707,8 @@ def test_compact_target_selection_keeps_complete_step_actions_visible(qapp) -> N
         assert window._setup_retention_label.isHidden()
         assert create_backup.isEnabled()
         assert create_backup.text() == "Fortsett"
+        assert detail_row.isHidden()
+        assert activity_bar.isHidden()
         assert dashboard_scroll.verticalScrollBar().value() == 0
         panel_position = setup_panel.mapTo(
             dashboard_scroll.viewport(), setup_panel.rect().topLeft()
@@ -709,6 +726,15 @@ def test_compact_target_selection_keeps_complete_step_actions_visible(qapp) -> N
             create_backup.mapTo(setup_panel, create_backup.rect().topLeft())
         )
         assert dashboard_scroll.horizontalScrollBar().maximum() == 0
+        assert dashboard_scroll.verticalScrollBar().maximum() == 0
+
+        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert window._setup_state.current_step is BackupSetupStep.DEFAULTS
+        assert setup_back.isVisible() and setup_back.isEnabled()
+        QTest.mouseClick(setup_back, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert window._setup_state.current_step is BackupSetupStep.TARGETS
     finally:
         window.close()
         window.deleteLater()
@@ -1190,6 +1216,75 @@ def test_background_status_stall_keeps_navigation_and_language_responsive(
         assert refresh.isEnabled()
         assert chip.text() == "Connected: Ready"
         assert nav.currentRow() == 3
+    finally:
+        worker_provider.release.set()
+        window.close()
+        window.deleteLater()
+
+
+def test_background_status_completion_preserves_active_local_setup(qapp) -> None:
+    provider = _FakeDashboardEngineClient()
+    worker_provider = _BlockingStatusDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=lambda: worker_provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        qapp.processEvents()
+        refresh = window.findChild(QPushButton, "refreshEngineButton")
+        source_action = window.findChild(QPushButton, "createBackupButton")
+        source_value = window.findChild(QLabel, "setupSourceValue")
+        detail_row = window.findChild(QWidget, "dashboardDetailRow")
+        activity_bar = window.findChild(QFrame, "activityBar")
+        assert refresh is not None
+        assert source_action is not None
+        assert source_value is not None
+        assert detail_row is not None
+        assert activity_bar is not None
+
+        QTest.mouseClick(refresh, Qt.MouseButton.LeftButton)
+        assert worker_provider.started.wait(timeout=1)
+        assert not refresh.isEnabled()
+        selected_source = "C:/Users/Ada/Pictures"
+        window._choose_directory = lambda _title: selected_source  # type: ignore[method-assign]
+        QTest.mouseClick(source_action, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert window._setup_state.current_step is BackupSetupStep.TARGETS
+        assert window._setup_draft.source_path_label == selected_source
+        assert source_value.text() == selected_source
+        assert detail_row.isHidden()
+        assert activity_bar.isHidden()
+
+        worker_provider.release.set()
+
+        def reads_settled() -> bool:
+            return (
+                window._background_queries is not None
+                and not window._background_queries.active
+                and window._background_queries.pending_count == 0
+                and window._ui_update_coalescer.pending_count == 0
+            )
+
+        deadline = monotonic() + 4
+        while not reads_settled() and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+
+        assert reads_settled()
+        assert refresh.isEnabled()
+        assert window._setup_state.current_step is BackupSetupStep.TARGETS
+        assert window._setup_draft.source_path_label == selected_source
+        assert source_value.text() == selected_source
+        assert source_action.text() == "Fortsett"
+        assert source_action.isEnabled() is False
+        assert detail_row.isHidden()
+        assert activity_bar.isHidden()
     finally:
         worker_provider.release.set()
         window.close()

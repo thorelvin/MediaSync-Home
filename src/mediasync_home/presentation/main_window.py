@@ -672,6 +672,7 @@ class MediaSyncWindow(QMainWindow):
         self._history_attempt_heading: QLabel | None = None
         self._history_attempt_list: QListWidget | None = None
         self._dashboard_detail_layout: QBoxLayout | None = None
+        self._dashboard_detail_row: QWidget | None = None
         self._setup_stepper_layout: QGridLayout | None = None
         self._compact_dashboard_layout: bool | None = None
         self._stacked_dashboard_details: bool | None = None
@@ -775,6 +776,7 @@ class MediaSyncWindow(QMainWindow):
         self._activity_dimension_rows: list[QLabel] = []
         self._activity_content: QWidget | None = None
         self._activity_scroll_area: QScrollArea | None = None
+        self._activity_bar: QFrame | None = None
         self._plan_preview_title: QLabel | None = None
         self._plan_preview_summary: QLabel | None = None
         self._plan_preview_rows: list[QLabel] = []
@@ -860,6 +862,7 @@ class MediaSyncWindow(QMainWindow):
         self._apply_selected_language()
 
         self._build_layout()
+        self._apply_backup_setup_state(self._setup_state)
         self.apply_engine_status(initial_state)
         self._update_responsive_dashboard_layout()
 
@@ -1083,7 +1086,7 @@ class MediaSyncWindow(QMainWindow):
     def apply_backup_overview(self, state: BackupOverviewViewState) -> None:
         self._backup_overview_state = state
         self._job_status_state = state.job_status
-        if not self._is_setup_editing():
+        if not self._local_setup_in_progress():
             self._setup_state = state.setup
             self._apply_backup_setup_state(state.setup)
         self._apply_job_status_state(state.job_status)
@@ -4778,6 +4781,7 @@ class MediaSyncWindow(QMainWindow):
             )
         self._apply_setup_field_visibility(state)
         self._apply_setup_target_controls(state)
+        self._apply_setup_workspace_focus()
         if self._setup_back_button is not None:
             can_go_back = self._setup_can_go_back(state)
             self._setup_back_button.setVisible(can_go_back)
@@ -4836,6 +4840,20 @@ class MediaSyncWindow(QMainWindow):
         self._lay_out_setup_actions(compact=self.width() < 1040)
         self._refresh_dashboard_geometry()
         QTimer.singleShot(0, self._refresh_dashboard_geometry)
+
+    def _local_setup_in_progress(self) -> bool:
+        return (
+            self._is_setup_editing()
+            or self._setup_draft.source_path_label is not None
+            or bool(self._setup_draft.targets)
+        )
+
+    def _apply_setup_workspace_focus(self) -> None:
+        focused = self._local_setup_in_progress()
+        if self._dashboard_detail_row is not None:
+            self._dashboard_detail_row.setVisible(not focused)
+        if self._activity_bar is not None:
+            self._activity_bar.setVisible(not focused)
 
     def _apply_setup_field_visibility(
         self,
@@ -7155,7 +7173,9 @@ class MediaSyncWindow(QMainWindow):
             QLayout.SizeConstraint.SetMinAndMaxSize,
         )
         layout.addWidget(self._build_backup_setup_panel(self._setup_state))
-        layout.addWidget(self._build_dashboard_detail_row())
+        detail_row = self._build_dashboard_detail_row()
+        self._dashboard_detail_row = detail_row
+        layout.addWidget(detail_row)
         layout.addStretch(1)
         return page
 
@@ -8485,6 +8505,7 @@ class MediaSyncWindow(QMainWindow):
         scroll.setWidget(content)
         self._activity_scroll_area = scroll
         outer_layout.addWidget(scroll)
+        self._activity_bar = activity
         return activity
 
     def _add_activity_status(
