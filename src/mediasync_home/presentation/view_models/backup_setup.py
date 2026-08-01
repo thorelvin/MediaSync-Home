@@ -161,6 +161,9 @@ class BackupJobDetailViewState:
     writable_target_registration_required: bool = False
     controlled_takeover_required: bool = False
     target_details: tuple[BackupJobDetailTargetViewState, ...] = ()
+    lifecycle_state: str = "ACTIVE"
+    lifecycle_row_version: int = 1
+    archived_utc: str | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +172,8 @@ class BackupJobListItemViewState:
     title: str
     source_label: str
     target_summary_label: str
+    lifecycle_state: str = "ACTIVE"
+    lifecycle_row_version: int = 1
 
 
 @dataclass(frozen=True)
@@ -181,6 +186,7 @@ class BackupOverviewViewState:
     limit: int = 10
     offset: int = 0
     selected_job_id: str | None = None
+    lifecycle_state: str = "ACTIVE"
 
 
 @dataclass(frozen=True)
@@ -388,6 +394,7 @@ def backup_overview_from_response(
         limit=_positive_int(overview.get("limit")) or 10,
         offset=_non_negative_int(overview.get("offset")) or 0,
         selected_job_id=selected_job_id,
+        lifecycle_state=_lifecycle_state(overview.get("lifecycle_state")),
     )
 
 
@@ -680,6 +687,11 @@ def _job_list_item_from_payload(
             f"{_count_label(configured_target_count, 'mål', 'mål')} / "
             f"{_count_label(independent_device_count, 'uavhengig enhet', 'uavhengige enheter')}"
         ),
+        lifecycle_state=_lifecycle_state(payload.get("lifecycle_state")),
+        lifecycle_row_version=_positive_int(
+            payload.get("lifecycle_row_version")
+        )
+        or 1,
     )
 
 
@@ -759,7 +771,17 @@ def _job_detail_from_payload(
             for target in targets
         ),
         target_details=targets,
+        lifecycle_state=_lifecycle_state(payload.get("lifecycle_state")),
+        lifecycle_row_version=_positive_int(
+            payload.get("lifecycle_row_version")
+        )
+        or 1,
+        archived_utc=_optional_text(payload.get("archived_utc")),
     )
+
+
+def _lifecycle_state(value: object) -> str:
+    return "ARCHIVED" if value == "ARCHIVED" else "ACTIVE"
 
 
 def _initial_plan_summary(payload: dict[object, object]) -> str:

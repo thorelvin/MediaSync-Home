@@ -111,8 +111,10 @@ class SqliteBackupAnalysisRequestStore:
             row = self._connection.execute(
                 """
                 SELECT request_id
-                FROM backup_analysis_requests
-                WHERE state = 'QUEUED'
+                FROM backup_analysis_requests AS requests
+                INNER JOIN jobs ON jobs.id = requests.job_id
+                WHERE requests.state = 'QUEUED'
+                    AND jobs.lifecycle_state = 'ACTIVE'
                 ORDER BY requested_utc, request_id
                 LIMIT 1
                 """

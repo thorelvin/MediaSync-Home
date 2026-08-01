@@ -31,6 +31,7 @@ class GuiIpcClient(Protocol):
         self,
         *,
         draft_id: str | None = None,
+        lifecycle_state: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse: ...

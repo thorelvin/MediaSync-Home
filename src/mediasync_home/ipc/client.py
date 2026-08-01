@@ -53,6 +53,7 @@ class InProcessIpcClient:
         self,
         *,
         draft_id: str | None = None,
+        lifecycle_state: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
@@ -60,6 +61,7 @@ class InProcessIpcClient:
             self.service.query_backup_overview(
                 self.client_instance_id,
                 draft_id=draft_id,
+                lifecycle_state=lifecycle_state,
                 limit=limit,
                 offset=offset,
             )

@@ -14,6 +14,7 @@ from mediasync_home.application.plans import (
     SealedPlan,
     verify_plan_checksum,
 )
+from mediasync_home.application.job_lifecycle import JobLifecycleState, JobLifecycleStore
 from mediasync_home.application.operation_audit_read_models import (
     OperationAuditReadModelStore,
 )
@@ -629,10 +630,18 @@ def evaluate_start_run(
     *,
     command: StartRunCommand,
     plans: PlanStore,
+    job_lifecycle: JobLifecycleStore | None = None,
 ) -> RunStartReadiness:
     plan = plans.load_sealed_plan(command.plan_id)
     if plan is None:
         return _missing_plan(command.plan_id)
+    lifecycle_rejection = _job_lifecycle_run_rejection(
+        job_lifecycle=job_lifecycle,
+        job_id=plan.job_id,
+        readiness=_readiness_for_plan(command=command, plan=plan),
+    )
+    if lifecycle_rejection is not None:
+        return lifecycle_rejection
     return _readiness_for_plan(command=command, plan=plan)
 
 
@@ -643,6 +652,7 @@ def start_run_from_sealed_plan(
     runs: RunStore,
     id_factory: RunIdFactory,
     operation_audit_store: OperationAuditReadModelStore | None = None,
+    job_lifecycle: JobLifecycleStore | None = None,
 ) -> RunStartOutcome:
     existing = runs.load_started_run_by_idempotency_key(
         _effective_run_idempotency_key(command)
@@ -661,6 +671,18 @@ def start_run_from_sealed_plan(
             created=False,
             idempotent_replay=False,
             readiness=_missing_plan(command.plan_id),
+        )
+
+    lifecycle_rejection = _job_lifecycle_run_rejection(
+        job_lifecycle=job_lifecycle,
+        job_id=plan.job_id,
+        readiness=_readiness_for_plan(command=command, plan=plan),
+    )
+    if lifecycle_rejection is not None:
+        return RunStartOutcome(
+            created=False,
+            idempotent_replay=False,
+            readiness=lifecycle_rejection,
         )
 
     retry_source: StartedRun | None = None
@@ -746,6 +768,24 @@ def start_run_from_sealed_plan(
         idempotent_replay=False,
         readiness=readiness,
         run=run,
+    )
+
+
+def _job_lifecycle_run_rejection(
+    *,
+    job_lifecycle: JobLifecycleStore | None,
+    job_id: str,
+    readiness: RunStartReadiness,
+) -> RunStartReadiness | None:
+    if job_lifecycle is None:
+        return None
+    record = job_lifecycle.load_job_lifecycle(job_id)
+    if record is not None and record.state is JobLifecycleState.ACTIVE:
+        return None
+    return _not_ready_to_queue(
+        readiness,
+        "RUN_JOB_ARCHIVED" if record is not None else "RUN_JOB_NOT_FOUND",
+        "Reactivate and check the job before starting another backup.",
     )
 
 

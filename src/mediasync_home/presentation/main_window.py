@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -230,8 +231,31 @@ class BackupOverviewProvider(Protocol):
         self,
         *,
         draft_id: str | None = None,
+        lifecycle_state: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
+    ) -> IpcResponse: ...
+
+
+class JobLifecycleProvider(Protocol):
+    def archive_standard_backup_job(
+        self,
+        *,
+        job_id: str,
+        expected_job_revision_id: str,
+        expected_lifecycle_row_version: int,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse: ...
+
+    def reactivate_standard_backup_job(
+        self,
+        *,
+        job_id: str,
+        expected_job_revision_id: str,
+        expected_lifecycle_row_version: int,
+        request_id: str,
+        idempotency_key: str,
     ) -> IpcResponse: ...
 
 
@@ -547,6 +571,13 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_page_label: QLabel | None = None
         self._jobs_previous_button: QToolButton | None = None
         self._jobs_next_button: QToolButton | None = None
+        self._jobs_lifecycle_filter_combo: QComboBox | None = None
+        self._jobs_lifecycle_filter = "ACTIVE"
+        self._jobs_lifecycle_button: QPushButton | None = None
+        self._job_lifecycle_command_pending = False
+        self._job_lifecycle_request_id: str | None = None
+        self._job_lifecycle_idempotency_key: str | None = None
+        self._job_lifecycle_command_key: tuple[str, str, int] | None = None
         self._jobs_page_limit = 25
         self._jobs_page_offset = 0
         self._jobs_query_pending = False
@@ -1036,11 +1067,13 @@ class MediaSyncWindow(QMainWindow):
             return
         page_limit = self._jobs_page_limit
         page_offset = self._jobs_page_offset
+        lifecycle_filter = self._jobs_lifecycle_filter
         if background and self._background_queries is not None:
 
             def query(client: object) -> object:
                 provider = cast(BackupOverviewProvider, client)
                 return provider.get_backup_overview(
+                    lifecycle_state=lifecycle_filter,
                     limit=page_limit,
                     offset=page_offset,
                 )
@@ -1050,6 +1083,7 @@ class MediaSyncWindow(QMainWindow):
                     self._accept_background_backup_overview(
                         response=cast(IpcResponse, value),
                         page_offset=page_offset,
+                        lifecycle_filter=lifecycle_filter,
                     )
 
                 if not self._ui_update_coalescer.submit(
@@ -1064,18 +1098,23 @@ class MediaSyncWindow(QMainWindow):
                 operation=query,
                 on_result=accept,
                 on_error=lambda _error: self._reject_background_backup_overview(
-                    page_offset=page_offset
+                    page_offset=page_offset,
+                    lifecycle_filter=lifecycle_filter,
                 ),
             )
             if submitted:
                 self._set_jobs_query_pending(True)
             else:
-                self._reject_background_backup_overview(page_offset=page_offset)
+                self._reject_background_backup_overview(
+                    page_offset=page_offset,
+                    lifecycle_filter=lifecycle_filter,
+                )
             return
 
         provider = cast(BackupOverviewProvider, self._engine_client)
         self._apply_backup_overview_response(
             provider.get_backup_overview(
+                lifecycle_state=lifecycle_filter,
                 limit=page_limit,
                 offset=page_offset,
             ),
@@ -1088,8 +1127,12 @@ class MediaSyncWindow(QMainWindow):
         *,
         response: IpcResponse,
         page_offset: int,
+        lifecycle_filter: str,
     ) -> None:
-        if self._jobs_page_offset != page_offset:
+        if (
+            self._jobs_page_offset != page_offset
+            or self._jobs_lifecycle_filter != lifecycle_filter
+        ):
             return
         self._set_jobs_query_pending(False)
         self._apply_backup_overview_response(
@@ -1098,8 +1141,16 @@ class MediaSyncWindow(QMainWindow):
             background=True,
         )
 
-    def _reject_background_backup_overview(self, *, page_offset: int) -> None:
-        if self._jobs_page_offset != page_offset:
+    def _reject_background_backup_overview(
+        self,
+        *,
+        page_offset: int,
+        lifecycle_filter: str,
+    ) -> None:
+        if (
+            self._jobs_page_offset != page_offset
+            or self._jobs_lifecycle_filter != lifecycle_filter
+        ):
             return
         self._set_jobs_query_pending(False)
         self.apply_engine_status(
@@ -1271,6 +1322,8 @@ class MediaSyncWindow(QMainWindow):
             self._jobs_next_button.setEnabled(
                 not pending and self._backup_overview_state.has_more_jobs
             )
+        if self._jobs_lifecycle_filter_combo is not None:
+            self._jobs_lifecycle_filter_combo.setEnabled(not pending)
 
     def _set_job_detail_query_pending(self, pending: bool) -> None:
         self._job_detail_query_pending = pending
@@ -1278,6 +1331,7 @@ class MediaSyncWindow(QMainWindow):
             for button in (
                 self._start_backup_button,
                 self._jobs_start_backup_button,
+                self._jobs_lifecycle_button,
             ):
                 if button is not None:
                     button.setEnabled(False)
@@ -1302,6 +1356,14 @@ class MediaSyncWindow(QMainWindow):
         if selected_row >= 0:
             jobs_list.setCurrentRow(selected_row)
         jobs_list.blockSignals(False)
+        if self._jobs_lifecycle_filter_combo is not None:
+            combo = self._jobs_lifecycle_filter_combo
+            index = combo.findData(self._jobs_lifecycle_filter)
+            combo.blockSignals(True)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+            combo.blockSignals(False)
+            combo.setEnabled(not self._jobs_query_pending)
 
         has_jobs = bool(state.jobs)
         jobs_list.setVisible(state.read_model_available and has_jobs)
@@ -1394,6 +1456,22 @@ class MediaSyncWindow(QMainWindow):
             return
         self._jobs_page_offset += self._jobs_page_limit
         self._selected_job_id = None
+        self._refresh_backup_overview()
+
+    def _change_jobs_lifecycle_filter(self, index: int) -> None:
+        combo = self._jobs_lifecycle_filter_combo
+        if combo is None:
+            return
+        lifecycle_filter = combo.itemData(index)
+        if lifecycle_filter not in {"ACTIVE", "ARCHIVED"}:
+            return
+        if lifecycle_filter == self._jobs_lifecycle_filter:
+            return
+        self._jobs_lifecycle_filter = lifecycle_filter
+        self._jobs_page_offset = 0
+        self._selected_job_id = None
+        self.apply_backup_job_detail(empty_backup_job_detail_state())
+        self._clear_selected_plan_previews()
         self._refresh_backup_overview()
 
     def _refresh_history_timeline(self, *, background: bool = True) -> None:
@@ -5120,6 +5198,11 @@ class MediaSyncWindow(QMainWindow):
             or state.plan_state != "SEALED"
             or completed_plan_already_run
         )
+        lifecycle_active = state.lifecycle_state == "ACTIVE"
+        active_for_job = (
+            self._run_progress_state.active
+            and self._run_progress_state.job_id == state.job_id
+        )
         for start_button in (
             self._start_backup_button,
             self._jobs_start_backup_button,
@@ -5133,12 +5216,9 @@ class MediaSyncWindow(QMainWindow):
                 and state.plan_checksum is not None
             )
             queued = state.job_id in self._queued_backup_job_ids
-            active_for_job = (
-                self._run_progress_state.active
-                and self._run_progress_state.job_id == state.job_id
-            )
             start_button.setVisible(
                 state.found
+                and lifecycle_active
                 and not active_for_job
                 and (takeover_mode or registration_mode or has_plan or check_mode)
             )
@@ -5151,6 +5231,7 @@ class MediaSyncWindow(QMainWindow):
                 and not analysis_pending
                 and not queued
                 and not active_for_job
+                and lifecycle_active
                 and not self._command_worker_active()
                 and self._engine_client is not None
                 and (
@@ -5199,6 +5280,26 @@ class MediaSyncWindow(QMainWindow):
             else:
                 start_button.setText(self._texts().start_backup)
                 start_button.setToolTip(self._texts().start_backup_tooltip)
+        if self._jobs_lifecycle_button is not None:
+            button = self._jobs_lifecycle_button
+            button.setVisible(state.found)
+            button.setText(
+                self._texts().archive_job
+                if lifecycle_active
+                else self._texts().reactivate_job
+            )
+            button.setIcon(
+                self._icons.icon("archive")
+                if lifecycle_active
+                else self._icons.icon("refresh")
+            )
+            button.setEnabled(
+                state.found
+                and not self._job_detail_query_pending
+                and not self._job_lifecycle_command_pending
+                and not self._command_worker_active()
+                and not active_for_job
+            )
         self._apply_run_progress_state(self._run_progress_state)
         self._refresh_dashboard_geometry()
 
@@ -5227,6 +5328,148 @@ class MediaSyncWindow(QMainWindow):
             self._check_selected_backup()
             return
         self._start_selected_backup()
+
+    def _confirm_selected_job_lifecycle_change(self) -> None:
+        state = self._job_detail_state
+        if not state.found or state.job_id is None or state.job_revision_id is None:
+            return
+        archived = state.lifecycle_state == "ARCHIVED"
+        answer = QMessageBox.question(
+            self,
+            (
+                self._texts().reactivate_job_title
+                if archived
+                else self._texts().archive_job_title
+            ),
+            (
+                self._texts().reactivate_job_confirmation
+                if archived
+                else self._texts().archive_job_confirmation
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._change_selected_job_lifecycle()
+
+    def _change_selected_job_lifecycle(self) -> bool:
+        state = self._job_detail_state
+        archived = state.lifecycle_state == "ARCHIVED"
+        method_name = (
+            "reactivate_standard_backup_job"
+            if archived
+            else "archive_standard_backup_job"
+        )
+        if (
+            self._engine_client is None
+            or not hasattr(self._engine_client, method_name)
+            or not state.found
+            or state.job_id is None
+            or state.job_revision_id is None
+            or self._job_detail_query_pending
+            or self._job_lifecycle_command_pending
+            or self._command_worker_active()
+        ):
+            return False
+        command_key = (
+            state.job_id,
+            state.lifecycle_state,
+            state.lifecycle_row_version,
+        )
+        if (
+            self._job_lifecycle_command_key != command_key
+            or self._job_lifecycle_request_id is None
+            or self._job_lifecycle_idempotency_key is None
+        ):
+            self._job_lifecycle_command_key = command_key
+            self._job_lifecycle_request_id = str(uuid4())
+            self._job_lifecycle_idempotency_key = str(uuid4())
+        request_id = self._job_lifecycle_request_id
+        idempotency_key = self._job_lifecycle_idempotency_key
+        assert request_id is not None
+        assert idempotency_key is not None
+        self._job_lifecycle_command_pending = True
+        self._refresh_command_buttons()
+
+        def command(client: object) -> object:
+            provider = cast(JobLifecycleProvider, client)
+            method = getattr(provider, method_name)
+            return method(
+                job_id=state.job_id,
+                expected_job_revision_id=state.job_revision_id,
+                expected_lifecycle_row_version=state.lifecycle_row_version,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+            )
+
+        def accept(value: object) -> None:
+            self._job_lifecycle_command_pending = False
+            self._apply_job_lifecycle_response(
+                cast(IpcResponse, value),
+                archived=archived,
+            )
+
+        def reject(_error: Exception) -> None:
+            self._job_lifecycle_command_pending = False
+            self._apply_command_transport_failure(
+                "Job lifecycle command could not be submitted. Retry to reuse the same request."
+            )
+            self._refresh_command_buttons()
+
+        submitted = self._submit_engine_command(
+            name="reactivate-job" if archived else "archive-job",
+            operation=command,
+            on_result=accept,
+            on_error=reject,
+        )
+        if not submitted:
+            self._job_lifecycle_command_pending = False
+            self._refresh_command_buttons()
+        return submitted
+
+    def _apply_job_lifecycle_response(
+        self,
+        response: IpcResponse,
+        *,
+        archived: bool,
+    ) -> None:
+        if response.status is IpcStatus.REJECTED:
+            reason_value = response.payload.get("validation_code")
+            reason = str(
+                reason_value
+                if reason_value is not None
+                else response.reason.value
+                if response.reason is not None
+                else "UNKNOWN"
+            )
+            self.apply_engine_status(
+                replace(
+                    self._engine_status_state,
+                    detail=f"{self._texts().job_lifecycle_failed}: {reason}",
+                    status_kind="warning",
+                )
+            )
+        else:
+            self.apply_engine_status(
+                replace(
+                    self._engine_status_state,
+                    detail=(
+                        self._texts().job_reactivated
+                        if archived
+                        else self._texts().job_archived
+                    ),
+                    status_kind="ready",
+                )
+            )
+        self._job_lifecycle_command_key = None
+        self._job_lifecycle_request_id = None
+        self._job_lifecycle_idempotency_key = None
+        self._selected_job_id = None
+        self.apply_backup_job_detail(empty_backup_job_detail_state())
+        self._clear_selected_plan_previews()
+        self._refresh_backup_overview()
+        self._refresh_activity_overview()
+        self._refresh_command_buttons()
 
     def _start_controlled_endpoint_takeover(self) -> bool:
         state = self._job_detail_state
@@ -6358,6 +6601,15 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_next_button = next_button
         header_layout.addWidget(title)
         header_layout.addStretch(1)
+        lifecycle_filter = QComboBox()
+        lifecycle_filter.setObjectName("jobsLifecycleFilter")
+        lifecycle_filter.addItem(texts.active_jobs, "ACTIVE")
+        lifecycle_filter.addItem(texts.archived_jobs, "ARCHIVED")
+        lifecycle_filter.currentIndexChanged.connect(
+            self._change_jobs_lifecycle_filter
+        )
+        self._jobs_lifecycle_filter_combo = lifecycle_filter
+        header_layout.addWidget(lifecycle_filter)
         header_layout.addWidget(previous)
         header_layout.addWidget(page_label)
         header_layout.addWidget(next_button)
@@ -6571,6 +6823,12 @@ class MediaSyncWindow(QMainWindow):
         start_backup.clicked.connect(self._invoke_primary_backup_action)
         self._jobs_start_backup_button = start_backup
         layout.addWidget(start_backup, 17, 2)
+
+        lifecycle_button = QPushButton()
+        lifecycle_button.setObjectName("jobsLifecycleButton")
+        lifecycle_button.clicked.connect(self._confirm_selected_job_lifecycle_change)
+        self._jobs_lifecycle_button = lifecycle_button
+        layout.addWidget(lifecycle_button, 17, 0, 1, 2)
         layout.setColumnStretch(1, 1)
         return panel
 
@@ -8052,6 +8310,10 @@ class MediaSyncWindow(QMainWindow):
             self._jobs_title_label.setText(texts.saved_jobs)
         if self._jobs_list is not None:
             self._jobs_list.setAccessibleName(texts.saved_jobs)
+        if self._jobs_lifecycle_filter_combo is not None:
+            combo = self._jobs_lifecycle_filter_combo
+            combo.setItemText(combo.findData("ACTIVE"), texts.active_jobs)
+            combo.setItemText(combo.findData("ARCHIVED"), texts.archived_jobs)
         if self._changes_title_label is not None:
             self._changes_title_label.setText(texts.changes)
         if self._changes_list is not None:

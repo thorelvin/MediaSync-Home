@@ -33,6 +33,7 @@ from mediasync_home.application.command_payloads import canonical_command_payloa
 from mediasync_home.application.endpoint_registration import (
     EndpointClassificationRefreshReport,
 )
+from mediasync_home.application.endpoint_takeover import EndpointTakeoverCommandName
 from mediasync_home.application.job_creation import (
     JobCreationCommandName,
     SealedStandardBackupJob,
@@ -45,6 +46,12 @@ from mediasync_home.application.job_drafts import (
     JobDraftStore,
     StandardBackupDefaults,
     StandardBackupJobDraft,
+)
+from mediasync_home.application.job_lifecycle import (
+    ChangeJobLifecycleCommand,
+    JobLifecycleRecord,
+    JobLifecycleState,
+    JobLifecycleTransitionOutcome,
 )
 from mediasync_home.application.job_read_models import (
     StandardBackupJobDetail,
@@ -272,6 +279,47 @@ class _RecordingWritableEndpointRegistration:
             registered_target_count=1,
             idempotent_replay=len(self.calls) > 1,
         )
+
+
+class _StaticArchivedJobLifecycleStore:
+    def load_job_lifecycle(self, job_id: str) -> JobLifecycleRecord | None:
+        if job_id != "job-a":
+            return None
+        return JobLifecycleRecord(
+            job_id=job_id,
+            job_revision_id="job-revision-a",
+            state=JobLifecycleState.ARCHIVED,
+            row_version=2,
+            archived_utc="2026-08-01T06:00:00Z",
+        )
+
+    def archive_standard_backup_job(
+        self,
+        *,
+        command: ChangeJobLifecycleCommand,
+        occurred_utc: str,
+    ) -> JobLifecycleTransitionOutcome:
+        del command, occurred_utc
+        raise AssertionError("lifecycle transition was not expected")
+
+    def reactivate_standard_backup_job(
+        self,
+        *,
+        command: ChangeJobLifecycleCommand,
+        occurred_utc: str,
+    ) -> JobLifecycleTransitionOutcome:
+        del command, occurred_utc
+        raise AssertionError("lifecycle transition was not expected")
+
+
+class _RecordingEndpointTakeover:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def start_controlled_takeover(self, **kwargs: object) -> object:
+        del kwargs
+        self.calls += 1
+        raise AssertionError("archived job reached endpoint takeover coordinator")
 
 
 class _InMemoryStandardBackupJobCatalog(StandardBackupJobCatalog):
@@ -1808,6 +1856,76 @@ def test_register_writable_targets_rejects_stale_reviewed_revision() -> None:
     assert receipt is not None
     assert receipt.state is CommandReceiptState.REJECTED
     assert receipt.rejection_reason == IpcReason.COMMAND_PRECONDITION_FAILED.value
+
+
+def test_register_writable_targets_rejects_archived_job_before_coordinator() -> None:
+    receipts = _InMemoryCommandReceiptStore()
+    registration = _RecordingWritableEndpointRegistration()
+    service = _service(mutations_enabled=True)
+    service.command_receipt_store = receipts
+    service.writable_endpoint_registration = registration  # type: ignore[assignment]
+    service.job_lifecycle_store = _StaticArchivedJobLifecycleStore()
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    payload = {"job_id": "job-a", "job_revision_id": "job-revision-a"}
+
+    response = ipc_client.submit_command(
+        WritableEndpointRegistrationCommandName.REGISTER_WRITABLE_TARGETS.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=payload,
+        payload_hash=canonical_command_payload_hash(payload),
+    )
+
+    receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.COMMAND_PRECONDITION_FAILED
+    assert response.payload["writable_endpoint_registration"]["validation_codes"] == [
+        "JOB_ARCHIVED"
+    ]
+    assert registration.calls == []
+    assert receipt is not None
+    assert receipt.state is CommandReceiptState.REJECTED
+
+
+def test_controlled_endpoint_takeover_rejects_archived_job_before_coordinator() -> None:
+    receipts = _InMemoryCommandReceiptStore()
+    takeover = _RecordingEndpointTakeover()
+    service = _service(mutations_enabled=True)
+    service.command_receipt_store = receipts
+    service.endpoint_takeover = takeover  # type: ignore[assignment]
+    service.job_lifecycle_store = _StaticArchivedJobLifecycleStore()
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    payload: dict[str, object] = {
+        "job_id": "job-a",
+        "job_revision_id": "job-revision-a",
+        "target_ordinal": 1,
+        "endpoint_id": "11111111-1111-4111-8111-111111111111",
+        "expected_foreign_owner_installation_id": (
+            "22222222-2222-4222-8222-222222222222"
+        ),
+        "expected_ownership_epoch": 7,
+        "explicit_confirmation": True,
+    }
+
+    response = ipc_client.submit_command(
+        EndpointTakeoverCommandName.START_CONTROLLED_ENDPOINT_TAKEOVER.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=payload,
+        payload_hash=canonical_command_payload_hash(payload),
+    )
+
+    receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.COMMAND_PRECONDITION_FAILED
+    assert response.payload["endpoint_takeover"]["validation_codes"] == [
+        "JOB_ARCHIVED"
+    ]
+    assert takeover.calls == 0
+    assert receipt is not None
+    assert receipt.state is CommandReceiptState.REJECTED
 
 
 def test_enqueue_trigger_occurrence_command_records_rejected_receipt() -> None:

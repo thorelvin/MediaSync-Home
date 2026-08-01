@@ -79,6 +79,7 @@ from mediasync_home.adapters.sqlite.hash_evidence import (
     SqliteCurrentReadHashEvidenceRefresher,
 )
 from mediasync_home.adapters.sqlite.job_catalog import SqliteStandardBackupJobCatalog
+from mediasync_home.adapters.sqlite.job_lifecycle import SqliteJobLifecycleStore
 from mediasync_home.adapters.sqlite.job_draft_store import SqliteJobDraftStore
 from mediasync_home.adapters.sqlite.job_endpoints import (
     SqliteStandardBackupJobEndpointRegistrar,
@@ -1331,6 +1332,7 @@ def run_engine_host(
                 _inactive_external_resource_owner_instance_ids(args)
             ),
             run_executor_staging_backend=args.run_executor_staging_backend,
+            task_scheduler_executable_path=args.task_scheduler_executable_path,
         )
         if args.publish_host_locator:
             host_locator_publication, host_locator_path = _publish_local_host_locator(
@@ -1521,6 +1523,7 @@ def build_engine_host_runtime(
     endpoint_retry_scheduler: MonotonicEndpointRetryScheduler | None = None,
     staging_retry_scheduler: MonotonicStagingRetryScheduler | None = None,
     recover_interrupted_analyses: bool = True,
+    task_scheduler_executable_path: str | None = None,
 ) -> EngineHostRuntime:
     runtime_clock = clock or SystemClock()
     runtime_endpoint_retry_scheduler = (
@@ -1679,6 +1682,11 @@ def build_engine_host_runtime(
             endpoint_retry_scheduler=runtime_endpoint_retry_scheduler,
         )
         backup_analysis_requests = SqliteBackupAnalysisRequestStore(catalog_connection)
+        job_lifecycle = SqliteJobLifecycleStore(
+            catalog_connection,
+            installation_id=installation_id,
+            task_scheduler_executable_path=task_scheduler_executable_path,
+        )
         if recover_interrupted_analyses:
             backup_analysis_requests.requeue_interrupted_backup_analyses()
         history = SqliteHistoryReadModelStore(catalog_connection)
@@ -1794,6 +1802,8 @@ def build_engine_host_runtime(
             external_resource_state_store=external_resource_state,
             cataloged_file_read_store=catalog_handoffs,
             backup_analysis_request_store=backup_analysis_requests,
+            job_lifecycle_store=job_lifecycle,
+            job_lifecycle_utc_now=runtime_clock.utc_now,
             command_receipt_store=command_receipts,
             command_effect_transaction=SqliteImmediateTransactionRunner(
                 catalog_connection,
@@ -2032,6 +2042,7 @@ def _build_executor_maintenance_loop(
             endpoint_retry_scheduler=endpoint_retry_scheduler,
             staging_retry_scheduler=staging_retry_scheduler,
             recover_interrupted_analyses=False,
+            task_scheduler_executable_path=args.task_scheduler_executable_path,
         )
 
     return ExecutorMaintenanceLoop(
@@ -2064,6 +2075,7 @@ def _build_task_scheduler_maintenance_loop(
             reconciler_instance_id=f"{args.installation_id}-task-scheduler-maintenance",
             run_executor_staging_backend=args.run_executor_staging_backend,
             recover_interrupted_analyses=False,
+            task_scheduler_executable_path=options.executable_path,
         )
 
     return TaskSchedulerMaintenanceLoop(

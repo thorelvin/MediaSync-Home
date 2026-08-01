@@ -538,6 +538,7 @@ def _validate_immutable_revision_invariant(invariant: dict[str, Any]) -> None:
         "standard_backup_job_revision_details",
         "writable_endpoint_registrations",
         "controlled_endpoint_takeovers",
+        "job_lifecycle_events",
         "current_read_hash_evidence",
         "operation_attempts",
         "operation_outcomes",

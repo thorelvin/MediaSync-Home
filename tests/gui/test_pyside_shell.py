@@ -1508,6 +1508,62 @@ def test_jobs_workspace_pages_without_losing_bounded_query_state(qapp) -> None:
         window.deleteLater()
 
 
+def test_jobs_workspace_filters_archived_jobs_and_reactivates_without_clipping(
+    qapp,
+) -> None:
+    provider = _FakeJobLifecycleDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(760, 520)
+        window.show()
+        window.refresh_engine_status()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+        lifecycle_filter = window.findChild(QComboBox, "jobsLifecycleFilter")
+        lifecycle_button = window.findChild(QPushButton, "jobsLifecycleButton")
+        jobs_scroll = window.findChild(QScrollArea, "jobsScrollArea")
+        detail_panel = window.findChild(QFrame, "jobsDetailPanel")
+
+        assert lifecycle_filter is not None
+        assert [lifecycle_filter.itemText(index) for index in range(2)] == [
+            "Aktive",
+            "Arkiverte",
+        ]
+        assert lifecycle_button is not None
+        assert lifecycle_button.text() == "Arkiver jobb"
+        assert lifecycle_button.isEnabled()
+
+        lifecycle_filter.setCurrentIndex(lifecycle_filter.findData("ARCHIVED"))
+        qapp.processEvents()
+
+        assert provider.lifecycle_queries[-1] == "ARCHIVED"
+        assert lifecycle_button.text() == "Aktiver igjen"
+        assert lifecycle_button.isEnabled()
+        language = window.findChild(QToolButton, "languageSelectorButton")
+        assert language is not None and language.menu() is not None
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+        assert lifecycle_filter.itemText(0) == "Active"
+        assert lifecycle_filter.itemText(1) == "Archived"
+        assert lifecycle_button.text() == "Reactivate"
+
+        assert window._change_selected_job_lifecycle()
+        qapp.processEvents()
+        assert provider.lifecycle_commands == ["REACTIVATE"]
+        assert jobs_scroll is not None
+        assert jobs_scroll.horizontalScrollBar().maximum() == 0
+        assert detail_panel is not None
+        assert lifecycle_button.geometry().right() <= detail_panel.contentsRect().right()
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_background_job_selection_keeps_only_latest_detail(qapp) -> None:
     provider = _FakeMultiJobDashboardEngineClient()
     worker_provider = _BlockingMultiJobDashboardEngineClient()
@@ -4272,10 +4328,11 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
         self,
         *,
         draft_id: str | None = None,
+        lifecycle_state: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
-        del draft_id, limit, offset
+        del draft_id, lifecycle_state, limit, offset
         self.calls.append("get_backup_overview")
         return IpcResponse.accepted(
             {
@@ -4664,6 +4721,81 @@ class _BlockingStatusDashboardEngineClient(_FakeDashboardEngineClient):
         if not self.release.wait(timeout=5):
             raise TimeoutError("test query release timed out")
         return super().get_status()
+
+
+class _FakeJobLifecycleDashboardEngineClient(_FakeDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lifecycle_filter = "ACTIVE"
+        self.lifecycle_queries: list[str] = []
+        self.lifecycle_commands: list[str] = []
+
+    def get_backup_overview(
+        self,
+        *,
+        draft_id: str | None = None,
+        lifecycle_state: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        self.lifecycle_filter = lifecycle_state or "ACTIVE"
+        self.lifecycle_queries.append(self.lifecycle_filter)
+        response = super().get_backup_overview(
+            draft_id=draft_id,
+            lifecycle_state=lifecycle_state,
+            limit=limit,
+            offset=offset,
+        )
+        payload = dict(response.payload)
+        overview = dict(payload["backup_overview"])
+        overview["lifecycle_state"] = self.lifecycle_filter
+        jobs = [dict(job) for job in overview["jobs"]]
+        for job in jobs:
+            job["lifecycle_state"] = self.lifecycle_filter
+            job["lifecycle_row_version"] = 2 if self.lifecycle_filter == "ARCHIVED" else 1
+        overview["jobs"] = jobs
+        payload["backup_overview"] = overview
+        return IpcResponse.accepted(payload)
+
+    def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        response = super().get_backup_job_detail(job_id=job_id)
+        payload = dict(response.payload)
+        detail = dict(payload["backup_job_detail"])
+        job = dict(detail["job"])
+        job["lifecycle_state"] = self.lifecycle_filter
+        job["lifecycle_row_version"] = 2 if self.lifecycle_filter == "ARCHIVED" else 1
+        job["archived_utc"] = (
+            "2026-08-01T10:00:00Z" if self.lifecycle_filter == "ARCHIVED" else None
+        )
+        detail["job"] = job
+        payload["backup_job_detail"] = detail
+        return IpcResponse.accepted(payload)
+
+    def get_activity_overview(
+        self,
+        *,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        del job_id, limit, offset
+        return IpcResponse.accepted(
+            {
+                "activity_overview": {
+                    "read_model_available": True,
+                    "has_more": False,
+                    "runs": [],
+                }
+            }
+        )
+
+    def archive_standard_backup_job(self, **_kwargs: object) -> IpcResponse:
+        self.lifecycle_commands.append("ARCHIVE")
+        return IpcResponse.accepted({"applied": True})
+
+    def reactivate_standard_backup_job(self, **_kwargs: object) -> IpcResponse:
+        self.lifecycle_commands.append("REACTIVATE")
+        return IpcResponse.accepted({"applied": True})
 
 
 class _FakeChangesDashboardEngineClient(_FakeDashboardEngineClient):
@@ -5684,11 +5816,13 @@ class _FakeMultiJobDashboardEngineClient(_FakeBackupStartDashboardEngineClient):
         self,
         *,
         draft_id: str | None = None,
+        lifecycle_state: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
         response = super().get_backup_overview(
             draft_id=draft_id,
+            lifecycle_state=lifecycle_state,
             limit=limit,
             offset=offset,
         )
@@ -5835,10 +5969,11 @@ class _FakePagedJobsEngineClient(_FakeDashboardEngineClient):
         self,
         *,
         draft_id: str | None = None,
+        lifecycle_state: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
-        del draft_id
+        del draft_id, lifecycle_state
         assert limit == 25
         page_offset = 0 if offset is None else offset
         self.calls.append("get_backup_overview")
@@ -5904,6 +6039,7 @@ class _BlockingPagedJobsEngineClient(_FakePagedJobsEngineClient):
         self,
         *,
         draft_id: str | None = None,
+        lifecycle_state: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
@@ -5916,6 +6052,7 @@ class _BlockingPagedJobsEngineClient(_FakePagedJobsEngineClient):
                 raise TimeoutError("test query release timed out")
             return super().get_backup_overview(
                 draft_id=draft_id,
+                lifecycle_state=lifecycle_state,
                 limit=limit,
                 offset=offset,
             )

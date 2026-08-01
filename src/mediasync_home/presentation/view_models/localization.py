@@ -186,6 +186,60 @@ class ShellText:
         )
 
     @property
+    def active_jobs(self) -> str:
+        return "Active" if self.language_tooltip_prefix == "Language" else "Aktive"
+
+    @property
+    def archived_jobs(self) -> str:
+        return "Archived" if self.language_tooltip_prefix == "Language" else "Arkiverte"
+
+    @property
+    def archive_job(self) -> str:
+        return "Archive job" if self.language_tooltip_prefix == "Language" else "Arkiver jobb"
+
+    @property
+    def reactivate_job(self) -> str:
+        return "Reactivate" if self.language_tooltip_prefix == "Language" else "Aktiver igjen"
+
+    @property
+    def archive_job_title(self) -> str:
+        return "Archive backup job?" if self.language_tooltip_prefix == "Language" else "Arkivere backupjobb?"
+
+    @property
+    def archive_job_confirmation(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return (
+                "Automation and retention cleanup will pause. Backup history and "
+                "files will be kept."
+            )
+        return (
+            "Automatikk og opprydding av versjoner settes på pause. "
+            "Backuphistorikk og filer beholdes."
+        )
+
+    @property
+    def reactivate_job_title(self) -> str:
+        return "Reactivate backup job?" if self.language_tooltip_prefix == "Language" else "Aktivere backupjobb igjen?"
+
+    @property
+    def reactivate_job_confirmation(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "A full check will be queued. Automation stays paused until enabled again."
+        return "En full kontroll legges i kø. Automatikk forblir pauset til den aktiveres igjen."
+
+    @property
+    def job_archived(self) -> str:
+        return "Job archived" if self.language_tooltip_prefix == "Language" else "Jobben er arkivert"
+
+    @property
+    def job_reactivated(self) -> str:
+        return "Job reactivated; full check queued" if self.language_tooltip_prefix == "Language" else "Jobben er aktivert; full kontroll er lagt i kø"
+
+    @property
+    def job_lifecycle_failed(self) -> str:
+        return "The job could not be changed" if self.language_tooltip_prefix == "Language" else "Jobben kunne ikke endres"
+
+    @property
     def pause_backup(self) -> str:
         return "Pause" if self.language_tooltip_prefix == "Language" else "Pause"
 

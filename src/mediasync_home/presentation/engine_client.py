@@ -9,6 +9,7 @@ from mediasync_home.application.backup_analysis import BackupAnalysisCommandName
 from mediasync_home.application.endpoint_takeover import EndpointTakeoverCommandName
 from mediasync_home.application.job_creation import JobCreationCommandName
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
+from mediasync_home.application.job_lifecycle import JobLifecycleCommandName
 from mediasync_home.application.runs import RunCommandName
 from mediasync_home.application.writable_endpoint_registration import (
     WritableEndpointRegistrationCommandName,
@@ -27,6 +28,7 @@ class StatusIpcClient(Protocol):
         self,
         *,
         draft_id: str | None = None,
+        lifecycle_state: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
@@ -162,12 +164,14 @@ class EngineClient:
         self,
         *,
         draft_id: str | None = None,
+        lifecycle_state: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
         return self._request_with_handshake_retry(
             lambda: self._ipc_client.query_backup_overview(
                 draft_id=draft_id,
+                lifecycle_state=lifecycle_state,
                 limit=limit,
                 offset=offset,
             )
@@ -407,6 +411,68 @@ class EngineClient:
         return self._request_with_handshake_retry(
             lambda: self._ipc_client.submit_command(
                 EndpointTakeoverCommandName.START_CONTROLLED_ENDPOINT_TAKEOVER.value,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                payload_hash=canonical_command_payload_hash(payload),
+            )
+        )
+
+    def archive_standard_backup_job(
+        self,
+        *,
+        job_id: str,
+        expected_job_revision_id: str,
+        expected_lifecycle_row_version: int,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        return self._change_standard_backup_job_lifecycle(
+            JobLifecycleCommandName.ARCHIVE_STANDARD_BACKUP_JOB,
+            job_id=job_id,
+            expected_job_revision_id=expected_job_revision_id,
+            expected_lifecycle_row_version=expected_lifecycle_row_version,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
+
+    def reactivate_standard_backup_job(
+        self,
+        *,
+        job_id: str,
+        expected_job_revision_id: str,
+        expected_lifecycle_row_version: int,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        return self._change_standard_backup_job_lifecycle(
+            JobLifecycleCommandName.REACTIVATE_STANDARD_BACKUP_JOB,
+            job_id=job_id,
+            expected_job_revision_id=expected_job_revision_id,
+            expected_lifecycle_row_version=expected_lifecycle_row_version,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
+
+    def _change_standard_backup_job_lifecycle(
+        self,
+        command_name: JobLifecycleCommandName,
+        *,
+        job_id: str,
+        expected_job_revision_id: str,
+        expected_lifecycle_row_version: int,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        payload: dict[str, object] = {
+            "job_id": job_id,
+            "expected_job_revision_id": expected_job_revision_id,
+            "expected_lifecycle_row_version": expected_lifecycle_row_version,
+            "explicit_confirmation": True,
+        }
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.submit_command(
+                command_name.value,
                 request_id=request_id,
                 idempotency_key=idempotency_key,
                 payload=payload,

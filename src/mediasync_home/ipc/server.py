@@ -74,6 +74,15 @@ from mediasync_home.application.job_endpoints import (
     StandardBackupJobEndpointRegistrar,
     StandardBackupJobEndpointSet,
 )
+from mediasync_home.application.job_lifecycle import (
+    ChangeJobLifecycleCommand,
+    JobLifecycleCommandName,
+    JobLifecyclePayloadError,
+    JobLifecycleState,
+    JobLifecycleStore,
+    JobLifecycleTransitionOutcome,
+    parse_change_job_lifecycle_command,
+)
 from mediasync_home.application.job_read_models import (
     BackupJobDetailQueryError,
     BackupOverviewQueryError,
@@ -293,6 +302,8 @@ class EngineHostIpcService:
     snapshot_issue_read_store: SnapshotIssueReadModelStore | None = None
     cataloged_file_read_store: CatalogedFileReadModelStore | None = None
     backup_analysis_request_store: BackupAnalysisRequestStore | None = None
+    job_lifecycle_store: JobLifecycleStore | None = None
+    job_lifecycle_utc_now: Callable[[], str] | None = None
     standard_backup_job_id_factory: StandardBackupJobIdFactory | None = None
     plan_store: PlanStore | None = None
     run_store: RunStore | None = None
@@ -370,6 +381,7 @@ class EngineHostIpcService:
         client_instance_id: str,
         *,
         draft_id: str | None = None,
+        lifecycle_state: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
@@ -381,6 +393,7 @@ class EngineHostIpcService:
                 job_read_store=self.standard_backup_job_read_store,
                 draft_store=self.job_draft_store,
                 draft_id=draft_id,
+                lifecycle_state=lifecycle_state,
                 limit=limit,
                 offset=offset,
             )
@@ -694,6 +707,11 @@ class EngineHostIpcService:
             return self._handle_controlled_endpoint_takeover(command, identity)
         if command.command_name == BackupAnalysisCommandName.CHECK_BACKUP.value:
             return self._handle_check_backup(command, identity)
+        if command.command_name in {
+            JobLifecycleCommandName.ARCHIVE_STANDARD_BACKUP_JOB.value,
+            JobLifecycleCommandName.REACTIVATE_STANDARD_BACKUP_JOB.value,
+        }:
+            return self._handle_job_lifecycle(command, identity)
         if command.command_name == RunCommandName.START_RUN.value:
             return self._handle_start_run(command, identity)
         if command.command_name in {
@@ -1214,6 +1232,21 @@ class EngineHostIpcService:
             self._add_receipt_payload(payload, envelope.idempotency_key)
             return IpcResponse.rejected(_receipt_rejection_reason(receipt), payload)
 
+        lifecycle = (
+            None
+            if self.job_lifecycle_store is None
+            else self.job_lifecycle_store.load_job_lifecycle(command.job_id)
+        )
+        if lifecycle is not None and lifecycle.state is JobLifecycleState.ARCHIVED:
+            return self._run_command_effect_transaction(
+                lambda: self._reject_writable_target_registration(
+                    envelope,
+                    command,
+                    validation_code="JOB_ARCHIVED",
+                    next_action="Reactivate the backup job before registering its targets.",
+                )
+            )
+
         try:
             report = self.writable_endpoint_registration.register_job_targets(
                 job_id=command.job_id,
@@ -1432,6 +1465,21 @@ class EngineHostIpcService:
             )
             self._add_receipt_payload(payload, envelope.idempotency_key)
             return IpcResponse.rejected(_receipt_rejection_reason(receipt), payload)
+
+        lifecycle = (
+            None
+            if self.job_lifecycle_store is None
+            else self.job_lifecycle_store.load_job_lifecycle(command.job_id)
+        )
+        if lifecycle is not None and lifecycle.state is JobLifecycleState.ARCHIVED:
+            return self._run_command_effect_transaction(
+                lambda: self._reject_controlled_endpoint_takeover(
+                    envelope,
+                    command,
+                    validation_code="JOB_ARCHIVED",
+                    next_action="Reactivate the backup job before taking over its endpoint.",
+                )
+            )
         try:
             report = self.endpoint_takeover.start_controlled_takeover(
                 command=command,
@@ -1661,8 +1709,20 @@ class EngineHostIpcService:
         job = self.standard_backup_job_detail_store.load_standard_backup_job_detail(
             command.job_id
         )
+        lifecycle = (
+            None
+            if self.job_lifecycle_store is None
+            else self.job_lifecycle_store.load_job_lifecycle(command.job_id)
+        )
         if (
             job is None
+            or (
+                self.job_lifecycle_store is not None
+                and (
+                    lifecycle is None
+                    or lifecycle.state is not JobLifecycleState.ACTIVE
+                )
+            )
             or self.run_store.load_active_run_for_job(command.job_id) is not None
         ):
             receipt = transition_command_receipt(
@@ -1681,6 +1741,10 @@ class EngineHostIpcService:
             payload["reason_code"] = (
                 "BACKUP_ANALYSIS_JOB_NOT_FOUND"
                 if job is None
+                or (self.job_lifecycle_store is not None and lifecycle is None)
+                else "BACKUP_ANALYSIS_JOB_ARCHIVED"
+                if lifecycle is not None
+                and lifecycle.state is JobLifecycleState.ARCHIVED
                 else "BACKUP_ANALYSIS_ACTIVE_RUN"
             )
             self._add_receipt_payload(payload, envelope.idempotency_key)
@@ -1745,6 +1809,196 @@ class EngineHostIpcService:
         self._add_receipt_payload(payload, envelope.idempotency_key)
         return IpcResponse.rejected(
             IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload
+        )
+
+    def _handle_job_lifecycle(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+    ) -> IpcResponse:
+        try:
+            command = parse_change_job_lifecycle_command(
+                request_id=envelope.request_id,
+                idempotency_key=envelope.idempotency_key,
+                payload=envelope.payload,
+            )
+        except JobLifecyclePayloadError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        if not self.status.mutations_enabled:
+            receipt_response = self._record_terminal_rejected_receipt(
+                envelope,
+                identity,
+                rejection_reason=IpcReason.MUTATING_COMMANDS_DISABLED.value,
+            )
+            if receipt_response is not None:
+                return receipt_response
+            payload = _job_lifecycle_response_payload(
+                envelope=envelope,
+                mutations_enabled=False,
+                outcome=None,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, payload)
+        return self._run_command_effect_transaction(
+            lambda: self._dispatch_job_lifecycle_in_transaction(
+                envelope,
+                identity,
+                command,
+            )
+        )
+
+    def _dispatch_job_lifecycle_in_transaction(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: ChangeJobLifecycleCommand,
+    ) -> IpcResponse:
+        if (
+            self.command_receipt_store is None
+            or self.job_lifecycle_store is None
+            or (
+                envelope.command_name
+                == JobLifecycleCommandName.REACTIVATE_STANDARD_BACKUP_JOB.value
+                and self.backup_analysis_request_store is None
+            )
+        ):
+            return self._reject_config_missing_job_lifecycle(
+                envelope,
+                identity,
+            )
+        receipt, conflict_response = self._record_received_receipt(envelope, identity)
+        if conflict_response is not None:
+            return conflict_response
+        if receipt is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+        if receipt.state is not CommandReceiptState.RECEIVED:
+            outcome = self._replay_job_lifecycle(envelope, command)
+            payload = _job_lifecycle_response_payload(
+                envelope=envelope,
+                mutations_enabled=True,
+                outcome=outcome,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            if receipt.state is CommandReceiptState.REJECTED:
+                return IpcResponse.rejected(_receipt_rejection_reason(receipt), payload)
+            return IpcResponse.accepted(payload)
+
+        receipt = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        occurred_utc = (
+            self.job_lifecycle_utc_now()
+            if self.job_lifecycle_utc_now is not None
+            else _system_utc_now()
+        )
+        if (
+            envelope.command_name
+            == JobLifecycleCommandName.ARCHIVE_STANDARD_BACKUP_JOB.value
+        ):
+            outcome = self.job_lifecycle_store.archive_standard_backup_job(
+                command=command,
+                occurred_utc=occurred_utc,
+            )
+        else:
+            outcome = self.job_lifecycle_store.reactivate_standard_backup_job(
+                command=command,
+                occurred_utc=occurred_utc,
+            )
+        if not outcome.applied or outcome.record is None:
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.REJECTED,
+                rejection_reason=IpcReason.COMMAND_PRECONDITION_FAILED.value,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+            payload = _job_lifecycle_response_payload(
+                envelope=envelope,
+                mutations_enabled=True,
+                outcome=outcome,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(IpcReason.COMMAND_PRECONDITION_FAILED, payload)
+
+        if (
+            envelope.command_name
+            == JobLifecycleCommandName.REACTIVATE_STANDARD_BACKUP_JOB.value
+        ):
+            assert self.backup_analysis_request_store is not None
+            self.backup_analysis_request_store.enqueue_backup_analysis(
+                BackupAnalysisRequest(
+                    request_id=envelope.request_id,
+                    command_idempotency_key=envelope.idempotency_key,
+                    job_id=outcome.record.job_id,
+                    job_revision_id=outcome.record.job_revision_id,
+                    state=BackupAnalysisRequestState.QUEUED,
+                    requested_utc=occurred_utc,
+                    start_when_safe=False,
+                )
+            )
+        receipt = transition_command_receipt(
+            receipt,
+            CommandReceiptState.EFFECT_PREPARED,
+            result_entity_type="job_lifecycle_event",
+            result_entity_id=envelope.request_id,
+        )
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.ACCEPTED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.SUCCEEDED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        self._enqueue_command_effect_outbox(receipt)
+        payload = _job_lifecycle_response_payload(
+            envelope=envelope,
+            mutations_enabled=True,
+            outcome=outcome,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.accepted(payload)
+
+    def _replay_job_lifecycle(
+        self,
+        envelope: IpcCommandEnvelope,
+        command: ChangeJobLifecycleCommand,
+    ) -> JobLifecycleTransitionOutcome:
+        assert self.job_lifecycle_store is not None
+        occurred_utc = (
+            self.job_lifecycle_utc_now()
+            if self.job_lifecycle_utc_now is not None
+            else _system_utc_now()
+        )
+        if (
+            envelope.command_name
+            == JobLifecycleCommandName.ARCHIVE_STANDARD_BACKUP_JOB.value
+        ):
+            return self.job_lifecycle_store.archive_standard_backup_job(
+                command=command,
+                occurred_utc=occurred_utc,
+            )
+        return self.job_lifecycle_store.reactivate_standard_backup_job(
+            command=command,
+            occurred_utc=occurred_utc,
+        )
+
+    def _reject_config_missing_job_lifecycle(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+    ) -> IpcResponse:
+        receipt_response = self._record_terminal_rejected_receipt(
+            envelope,
+            identity,
+            rejection_reason=IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED.value,
+        )
+        if receipt_response is not None:
+            return receipt_response
+        payload = _job_lifecycle_response_payload(
+            envelope=envelope,
+            mutations_enabled=True,
+            outcome=None,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.rejected(
+            IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED,
+            payload,
         )
 
     def _handle_run_control(
@@ -1958,6 +2212,7 @@ class EngineHostIpcService:
             runs=self.run_store,
             id_factory=self.run_id_factory,
             operation_audit_store=self.operation_audit_read_store,
+            job_lifecycle=self.job_lifecycle_store,
         )
         if outcome.run is None:
             receipt = transition_command_receipt(
@@ -2646,6 +2901,22 @@ def _backup_analysis_response_payload(
         "queued": request is not None,
         "analysis_request": None if request is None else request.to_dict(),
     }
+
+
+def _job_lifecycle_response_payload(
+    *,
+    envelope: IpcCommandEnvelope,
+    mutations_enabled: bool,
+    outcome: JobLifecycleTransitionOutcome | None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "command_name": envelope.command_name,
+        "recognized": True,
+        "mutations_enabled": mutations_enabled,
+    }
+    if outcome is not None:
+        payload.update(outcome.to_dict())
+    return payload
 
 
 def _start_run_response_payload(

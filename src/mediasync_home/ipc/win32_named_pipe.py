@@ -817,6 +817,7 @@ class Win32NamedPipeServer:
             return self.service.query_backup_overview(
                 str(request["client_instance_id"]),
                 draft_id=_optional_query_str(request.get("draft_id")),
+                lifecycle_state=_optional_query_str(request.get("lifecycle_state")),
                 limit=_optional_query_int(request.get("limit")),
                 offset=_optional_query_int(request.get("offset")),
             )
@@ -954,6 +955,7 @@ class Win32NamedPipeClient:
         self,
         *,
         draft_id: str | None = None,
+        lifecycle_state: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
@@ -963,6 +965,8 @@ class Win32NamedPipeClient:
         }
         if draft_id is not None:
             request["draft_id"] = draft_id
+        if lifecycle_state is not None:
+            request["lifecycle_state"] = lifecycle_state
         if limit is not None:
             request["limit"] = limit
         if offset is not None:

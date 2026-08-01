@@ -28,6 +28,7 @@ from mediasync_home.application.job_read_models import (
     StandardBackupJobSummary,
     StandardBackupTargetSummary,
 )
+from mediasync_home.application.job_lifecycle import JobLifecycleState
 
 
 class SqliteJobCatalogError(ValueError):
@@ -164,6 +165,9 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
             INNER JOIN job_heads AS heads
                 ON heads.job_id = details.job_id
                 AND heads.active_revision_id = details.job_revision_id
+            INNER JOIN jobs
+                ON jobs.id = details.job_id
+                AND jobs.lifecycle_state = 'ACTIVE'
             WHERE details.job_id = ?
             """,
             (job_id,),
@@ -191,6 +195,9 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
             INNER JOIN job_heads AS heads
                 ON heads.job_id = details.job_id
                 AND heads.active_revision_id = details.job_revision_id
+            INNER JOIN jobs
+                ON jobs.id = details.job_id
+                AND jobs.lifecycle_state = 'ACTIVE'
             ORDER BY details.job_id
             """,
             (),
@@ -223,9 +230,10 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
             (idempotency_key,),
         )
 
-    def list_active_standard_backup_job_summaries(
+    def list_standard_backup_job_summaries(
         self,
         *,
+        lifecycle_state: JobLifecycleState,
         limit: int,
         offset: int,
     ) -> tuple[StandardBackupJobSummary, ...]:
@@ -240,7 +248,10 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                 details.source_name,
                 details.source_path_label,
                 details.targets_json,
-                revisions.filter_set_version
+                revisions.filter_set_version,
+                jobs.lifecycle_state,
+                jobs.lifecycle_row_version,
+                jobs.archived_utc
             FROM standard_backup_job_revision_details AS details
             INNER JOIN job_revisions AS revisions
                 ON revisions.job_id = details.job_id
@@ -248,12 +259,26 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
             INNER JOIN job_heads AS heads
                 ON heads.job_id = details.job_id
                 AND heads.active_revision_id = details.job_revision_id
+            INNER JOIN jobs ON jobs.id = details.job_id
+            WHERE jobs.lifecycle_state = ?
             ORDER BY details.job_id
             LIMIT ? OFFSET ?
             """,
-            (limit, offset),
+            (lifecycle_state.value, limit, offset),
         ).fetchall()
         return tuple(_job_summary_from_row(row) for row in rows)
+
+    def list_active_standard_backup_job_summaries(
+        self,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[StandardBackupJobSummary, ...]:
+        return self.list_standard_backup_job_summaries(
+            lifecycle_state=JobLifecycleState.ACTIVE,
+            limit=limit,
+            offset=offset,
+        )
 
     def load_standard_backup_job_detail(
         self, job_id: str
@@ -268,7 +293,10 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                 details.source_path_label,
                 details.defaults_json,
                 details.targets_json,
-                revisions.filter_set_version
+                revisions.filter_set_version,
+                jobs.lifecycle_state,
+                jobs.lifecycle_row_version,
+                jobs.archived_utc
             FROM standard_backup_job_revision_details AS details
             INNER JOIN job_revisions AS revisions
                 ON revisions.job_id = details.job_id
@@ -276,6 +304,7 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
             INNER JOIN job_heads AS heads
                 ON heads.job_id = details.job_id
                 AND heads.active_revision_id = details.job_revision_id
+            INNER JOIN jobs ON jobs.id = details.job_id
             WHERE details.job_id = ?
             """,
             (job_id,),
@@ -480,6 +509,9 @@ def _job_summary_from_row(
             for target in _deserialize_targets(str(row[5]))
         ),
         filter_set_version=_required_int(row[6]),
+        lifecycle_state=JobLifecycleState(str(row[7])),
+        lifecycle_row_version=_required_int(row[8]),
+        archived_utc=_optional_str(row[9]),
     )
 
 
@@ -503,6 +535,9 @@ def _job_detail_from_row(
             for target in targets
         ),
         filter_set_version=_required_int(row[7]),
+        lifecycle_state=JobLifecycleState(str(row[8])),
+        lifecycle_row_version=_required_int(row[9]),
+        archived_utc=_optional_str(row[10]),
     )
 
 

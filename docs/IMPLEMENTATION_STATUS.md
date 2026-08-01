@@ -1,5 +1,18 @@
 # Implementeringsstatus
 
+Oppdatering 2026-08-01: Etablerte backupjobber kan nå arkiveres og reaktiveres
+trygt fra **Jobber**. Arkivering krever eksplisitt bekreftelse, avvises under
+aktiv kjøring eller uavklart recovery, deaktiverer alle triggere, skjuler jobben
+fra standardoversikten og pauser automatisk retensjonsopprydding uten å endre
+brukerfiler eller slette historikk. **Aktiv**/**Arkivert**-filteret og handlingen
+er lokalisert på norsk og engelsk. Reaktivering holder triggere avslått og køer
+alltid en ny full kontroll uten automatisk backupstart. Catalog migration 43
+lagrer optimistisk livssyklustilstand og immutable hendelsesbevis; start,
+kontroll, målregistrering, kontrollert takeover og analysearbeidere avviser
+arkiverte jobber. SQLite-/IPC-testene beviser restart, idempotent replay,
+historikkbevaring og filterisolasjon, mens Qt-testene dekker reell handling,
+språkbytte og null horisontal tekstklipping ved 900×560.
+
 Oppdatering 2026-08-01: Kontrollert overtakelse av et lokalt mål med gyldig
 fremmed eier er nå implementert. **Oversikt** og **Jobber** viser en eksplisitt
 lokalisert handling; dialogen viser gammel eier, eierskapsepoke, recovery-status,

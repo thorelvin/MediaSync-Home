@@ -88,6 +88,7 @@ def test_backup_overview_query_reports_unavailable_read_model_without_store() ->
         "requested_draft_id": None,
         "draft": None,
         "jobs": [],
+        "lifecycle_state": "ACTIVE",
     }
 
 
@@ -111,6 +112,9 @@ def test_backup_job_detail_query_returns_exact_job_revision_payload() -> None:
             "source_path_label": "C:/Data/job-a",
             "configured_target_count": 1,
             "independent_device_count": 1,
+            "lifecycle_state": "ACTIVE",
+            "lifecycle_row_version": 1,
+            "archived_utc": None,
                 "defaults": {
                 "behavior": "UPDATE_BACKUP",
                 "file_selection": "ALL_USER_FILES",

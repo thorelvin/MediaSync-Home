@@ -8,6 +8,7 @@ from mediasync_home.application.job_drafts import (
     StandardBackupDefaults,
     StandardBackupJobDraft,
 )
+from mediasync_home.application.job_lifecycle import JobLifecycleState
 
 
 DEFAULT_BACKUP_OVERVIEW_LIMIT = 10
@@ -69,6 +70,9 @@ class StandardBackupJobSummary:
     source_path_label: str
     targets: tuple[StandardBackupTargetSummary, ...]
     filter_set_version: int = 1
+    lifecycle_state: JobLifecycleState = JobLifecycleState.ACTIVE
+    lifecycle_row_version: int = 1
+    archived_utc: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         independent_device_ids = {
@@ -87,6 +91,9 @@ class StandardBackupJobSummary:
             "configured_target_count": len(self.targets),
             "independent_device_count": len(independent_device_ids),
             "targets": [target.to_dict() for target in self.targets],
+            "lifecycle_state": self.lifecycle_state.value,
+            "lifecycle_row_version": self.lifecycle_row_version,
+            "archived_utc": self.archived_utc,
         }
 
 
@@ -154,6 +161,9 @@ class StandardBackupJobDetail:
     filter_set_version: int = 1
     initial_plan: InitialBackupPlanSummary | None = None
     latest_analysis_request: BackupAnalysisRequestSummary | None = None
+    lifecycle_state: JobLifecycleState = JobLifecycleState.ACTIVE
+    lifecycle_row_version: int = 1
+    archived_utc: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         independent_device_ids = {
@@ -173,6 +183,9 @@ class StandardBackupJobDetail:
             "independent_device_count": len(independent_device_ids),
             "defaults": _defaults_to_dict(self.defaults),
             "targets": [target.to_dict() for target in self.targets],
+            "lifecycle_state": self.lifecycle_state.value,
+            "lifecycle_row_version": self.lifecycle_row_version,
+            "archived_utc": self.archived_utc,
         }
         payload["initial_plan"] = (
             None if self.initial_plan is None else self.initial_plan.to_dict()
@@ -194,10 +207,16 @@ class BackupOverviewPage:
     jobs: tuple[StandardBackupJobSummary, ...] = ()
     draft: StandardBackupJobDraft | None = None
     requested_draft_id: str | None = None
+    lifecycle_state: JobLifecycleState = JobLifecycleState.ACTIVE
 
     @classmethod
     def unavailable(
-        cls, *, limit: int, offset: int, draft_id: str | None
+        cls,
+        *,
+        limit: int,
+        offset: int,
+        draft_id: str | None,
+        lifecycle_state: JobLifecycleState = JobLifecycleState.ACTIVE,
     ) -> "BackupOverviewPage":
         return cls(
             limit=limit,
@@ -205,6 +224,7 @@ class BackupOverviewPage:
             has_more=False,
             read_model_available=False,
             requested_draft_id=draft_id,
+            lifecycle_state=lifecycle_state,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -216,6 +236,7 @@ class BackupOverviewPage:
             "requested_draft_id": self.requested_draft_id,
             "draft": None if self.draft is None else _draft_to_dict(self.draft),
             "jobs": [job.to_dict() for job in self.jobs],
+            "lifecycle_state": self.lifecycle_state.value,
         }
 
 
@@ -251,6 +272,14 @@ class StandardBackupJobReadModelStore(Protocol):
         offset: int,
     ) -> tuple[StandardBackupJobSummary, ...]: ...
 
+    def list_standard_backup_job_summaries(
+        self,
+        *,
+        lifecycle_state: JobLifecycleState,
+        limit: int,
+        offset: int,
+    ) -> tuple[StandardBackupJobSummary, ...]: ...
+
 
 class StandardBackupJobDetailReadModelStore(Protocol):
     def load_standard_backup_job_detail(
@@ -263,6 +292,7 @@ def query_backup_overview(
     job_read_store: StandardBackupJobReadModelStore | None,
     draft_store: JobDraftStore | None = None,
     draft_id: str | None = None,
+    lifecycle_state: str | None = None,
     limit: int | None = None,
     offset: int | None = None,
 ) -> BackupOverviewPage:
@@ -270,6 +300,7 @@ def query_backup_overview(
         limit=limit, offset=offset
     )
     normalized_draft_id = _normalized_draft_id(draft_id)
+    normalized_lifecycle_state = normalize_job_lifecycle_state(lifecycle_state)
     draft = (
         draft_store.load_standard_backup_draft(normalized_draft_id)
         if draft_store is not None and normalized_draft_id is not None
@@ -280,11 +311,20 @@ def query_backup_overview(
             limit=page_limit,
             offset=page_offset,
             draft_id=normalized_draft_id,
+            lifecycle_state=normalized_lifecycle_state,
         )
 
-    rows = job_read_store.list_active_standard_backup_job_summaries(
-        limit=page_limit + 1,
-        offset=page_offset,
+    rows = (
+        job_read_store.list_active_standard_backup_job_summaries(
+            limit=page_limit + 1,
+            offset=page_offset,
+        )
+        if normalized_lifecycle_state is JobLifecycleState.ACTIVE
+        else job_read_store.list_standard_backup_job_summaries(
+            lifecycle_state=normalized_lifecycle_state,
+            limit=page_limit + 1,
+            offset=page_offset,
+        )
     )
     return BackupOverviewPage(
         limit=page_limit,
@@ -294,6 +334,7 @@ def query_backup_overview(
         jobs=rows[:page_limit],
         draft=draft,
         requested_draft_id=normalized_draft_id,
+        lifecycle_state=normalized_lifecycle_state,
     )
 
 
@@ -320,6 +361,15 @@ def normalize_backup_job_detail_id(job_id: str) -> str:
     if not normalized:
         raise BackupJobDetailQueryError("BACKUP_JOB_DETAIL_REQUIRES_JOB_ID")
     return normalized
+
+
+def normalize_job_lifecycle_state(value: str | None) -> JobLifecycleState:
+    if value is None:
+        return JobLifecycleState.ACTIVE
+    try:
+        return JobLifecycleState(str(value).strip().upper())
+    except ValueError as exc:
+        raise BackupOverviewQueryError("BACKUP_OVERVIEW_LIFECYCLE_STATE_INVALID") from exc
 
 
 def normalize_backup_overview_bounds(

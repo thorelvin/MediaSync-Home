@@ -248,6 +248,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_controlled_endpoint_takeovers",
                 statements=CATALOG_CONTROLLED_ENDPOINT_TAKEOVERS,
             ),
+            SqliteMigration(
+                version=43,
+                name="catalog_job_lifecycle",
+                statements=CATALOG_JOB_LIFECYCLE,
+            ),
         ),
     )
 
@@ -2979,6 +2984,72 @@ CATALOG_CONTROLLED_ENDPOINT_TAKEOVERS = (
     BEFORE DELETE ON controlled_endpoint_takeovers
     BEGIN
         SELECT RAISE(ABORT, 'CONTROLLED_ENDPOINT_TAKEOVER_IMMUTABLE');
+    END
+    """,
+)
+
+
+CATALOG_JOB_LIFECYCLE = (
+    """
+    ALTER TABLE jobs
+        ADD COLUMN lifecycle_state TEXT NOT NULL DEFAULT 'ACTIVE'
+        CHECK (lifecycle_state IN ('ACTIVE', 'ARCHIVED'))
+    """,
+    """
+    ALTER TABLE jobs
+        ADD COLUMN archived_utc TEXT
+    """,
+    """
+    ALTER TABLE jobs
+        ADD COLUMN lifecycle_row_version INTEGER NOT NULL DEFAULT 1
+        CHECK (lifecycle_row_version >= 1)
+    """,
+    """
+    CREATE TABLE job_lifecycle_events (
+        event_id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        job_revision_id TEXT NOT NULL,
+        command_request_id TEXT NOT NULL,
+        command_idempotency_key TEXT NOT NULL UNIQUE,
+        transition_kind TEXT NOT NULL CHECK (
+            transition_kind IN ('ARCHIVE', 'REACTIVATE')
+        ),
+        previous_state TEXT NOT NULL CHECK (
+            previous_state IN ('ACTIVE', 'ARCHIVED')
+        ),
+        next_state TEXT NOT NULL CHECK (
+            next_state IN ('ACTIVE', 'ARCHIVED')
+        ),
+        occurred_utc TEXT NOT NULL,
+        lifecycle_row_version INTEGER NOT NULL CHECK (lifecycle_row_version >= 2),
+        disabled_schedule_count INTEGER NOT NULL DEFAULT 0
+            CHECK (disabled_schedule_count >= 0),
+        analysis_request_id TEXT,
+        FOREIGN KEY (job_id, job_revision_id)
+            REFERENCES job_revisions (job_id, id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_jobs_lifecycle_state_id
+        ON jobs (lifecycle_state, id)
+    """,
+    """
+    CREATE INDEX idx_job_lifecycle_events_job_occurred
+        ON job_lifecycle_events (job_id, occurred_utc, event_id)
+    """,
+    """
+    CREATE TRIGGER trg_job_lifecycle_events_no_update
+    BEFORE UPDATE ON job_lifecycle_events
+    BEGIN
+        SELECT RAISE(ABORT, 'JOB_LIFECYCLE_EVENT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_job_lifecycle_events_no_delete
+    BEFORE DELETE ON job_lifecycle_events
+    BEGIN
+        SELECT RAISE(ABORT, 'JOB_LIFECYCLE_EVENT_IMMUTABLE');
     END
     """,
 )

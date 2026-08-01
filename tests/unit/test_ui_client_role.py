@@ -53,6 +53,7 @@ def test_ui_pipe_action_queries_backup_overview_after_handshake() -> None:
     assert client.calls == ("connect", "query_backup_overview")
     assert client.overview_query == {
         "draft_id": "draft-a",
+        "lifecycle_state": None,
         "limit": 5,
         "offset": 10,
     }
@@ -636,12 +637,14 @@ class _FakeGuiIpcClient:
         self,
         *,
         draft_id: str | None = None,
+        lifecycle_state: str | None = None,
         limit: int | None = None,
         offset: int | None = None,
     ) -> IpcResponse:
         self.calls = (*self.calls, "query_backup_overview")
         self.overview_query = {
             "draft_id": draft_id,
+            "lifecycle_state": lifecycle_state,
             "limit": limit,
             "offset": offset,
         }

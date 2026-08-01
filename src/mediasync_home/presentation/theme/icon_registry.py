@@ -9,6 +9,7 @@ from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPen, QPixmap
 ICON_COLORS = {
     "activity": "#2563eb",
     "add-target": "#14b8a6",
+    "archive": "#64748b",
     "back": "#94a3b8",
     "dashboard": "#0f766e",
     "history": "#9a6a12",
@@ -71,6 +72,10 @@ class IconRegistry:
             painter.drawRect(4, 8, 16, 11)
             painter.drawLine(12, 12, 12, 17)
             painter.drawLine(9, 15, 15, 15)
+        elif name == "archive":
+            painter.drawRect(5, 8, 14, 11)
+            painter.drawRect(4, 5, 16, 4)
+            painter.drawLine(9, 12, 15, 12)
         elif name == "remove-target":
             painter.drawLine(7, 8, 17, 8)
             painter.drawLine(10, 5, 14, 5)

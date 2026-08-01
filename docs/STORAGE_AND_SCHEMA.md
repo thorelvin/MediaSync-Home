@@ -266,6 +266,15 @@ Stabil jobbidentitet og livssyklus.
 - `updated_utc TEXT NOT NULL`
 - `row_version INTEGER NOT NULL`
 
+0B-implementasjonsnote: Catalog migration 43 bruker den eksisterende stabile
+`jobs`-raden til `lifecycle_state` (`ACTIVE`/`ARCHIVED`), `archived_utc` og en
+egen optimistisk `lifecycle_row_version`. Hver vellykket overgang appender én
+immutable `job_lifecycle_events`-rad bundet til kommandoens request- og
+idempotency-ID, aktiv jobbrevisjon, gammel/ny tilstand, tidsstempel, deaktivert
+schedule-antall og eventuell reanalyse-ID. Arkivering deaktiverer schedules og
+blokkerer ventende analyse i samme catalogtransaksjon; reaktivering appender
+eventen og køer full reanalyse i samme catalogtransaksjon.
+
 #### `job_heads`
 
 - `job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE RESTRICT`
