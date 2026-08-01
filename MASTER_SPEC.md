@@ -3418,6 +3418,16 @@ GUI-et bruker denne kompatibilitetsbanen bare når en eldre Host-respons mangler
 det additive `next_cursor`-feltet. Offsetsetningen i read-model-noten over
 gjelder derfor nå Backup-/Activity-oversiktene og legacy History-klienter.
 
+`QUERY_RETAINED_VERSIONS` er en separat run-scoped History-query med
+`limit <= 25` og versjon-1-keysetcursor over synkende
+`(created_utc, version_object_id)`. Den returnerer bare katalogmetadata og aktiv
+holdstatus. Den bekreftede kommandoen
+`PROTECT_RETAINED_VERSION_FOR_RESTORE` bruker forventet object-row-version og
+samme Catalog-transaksjon for command receipt og `RESTORE_REQUESTED`-hold. Den
+kan derfor ikke skjult gjenopplive et objekt som allerede er tatt inn i en
+expiry-plan. Kommandoen endrer ingen endpointfiler; historisk restore får en
+egen lease- og recoveryoperasjon.
+
 Lokale GUI-preferanser følger en separat, ikke-autoritativ port i
 `application.user_preferences`. Composition kobler denne til en atomisk
 JSON-adapter under samme brukers lokale state-root og injiserer porten i
@@ -5399,8 +5409,17 @@ endpoint lease, validates the exact target-side manifest and payload, and then
 deletes only that pair. A crash after delete intent or filesystem deletion
 resumes from the durable item state without inventing a clean retained object.
 Recovery migration 11 supplies the exact job/policy/time/manifest binding used
-for the cross-store release check. Quarantine and general catalog retention stay
-outside this version-expiry branch.
+for the cross-store release check.
+
+The GUI lists these immutable roots with bounded keyset pagination scoped to
+one historical run. `PROTECT_RETAINED_VERSION_FOR_RESTORE` inserts one active
+`RESTORE_REQUESTED` hold only while the object is still `RETAINED` at the
+expected row version. The hold and the idempotent command receipt are committed
+in the same catalog transaction, so expiry-plan admission and restore
+protection cannot both win. The hold protects evidence only; it does not mutate
+the target and is released only by a later journaled restore/cancel workflow.
+Quarantine and general catalog retention stay outside this version-expiry
+branch.
 
 #### `run_metrics`
 

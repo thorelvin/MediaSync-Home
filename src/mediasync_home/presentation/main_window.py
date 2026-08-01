@@ -132,6 +132,12 @@ from mediasync_home.presentation.view_models.plan_endpoints import (
     empty_plan_endpoint_preview_state,
     plan_endpoint_preview_from_response,
 )
+from mediasync_home.presentation.view_models.retained_versions import (
+    RetainedVersionPageViewState,
+    RetainedVersionViewState,
+    empty_retained_version_page_state,
+    retained_version_page_from_response,
+)
 from mediasync_home.presentation.view_models.snapshot_health import (
     SnapshotHealthPreviewState,
     empty_snapshot_health_preview_state,
@@ -279,6 +285,27 @@ class HistoryTimelineProvider(Protocol):
         limit: int | None = None,
         after: dict[str, object] | None = None,
         offset: int | None = None,
+    ) -> IpcResponse: ...
+
+
+class RetainedVersionProvider(Protocol):
+    def get_retained_versions(
+        self,
+        *,
+        run_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse: ...
+
+
+class VersionRestoreProtectionProvider(Protocol):
+    def protect_retained_version_for_restore(
+        self,
+        *,
+        version_object_id: str,
+        expected_row_version: int,
+        request_id: str,
+        idempotency_key: str,
     ) -> IpcResponse: ...
 
 
@@ -579,6 +606,7 @@ class MediaSyncWindow(QMainWindow):
         self._snapshot_health_preview_state = empty_snapshot_health_preview_state()
         self._cataloged_files_preview_state = empty_cataloged_files_preview_state()
         self._history_timeline_state = empty_history_timeline_state()
+        self._retained_version_state = empty_retained_version_page_state()
         self._history_operation_page_state = empty_plan_operation_preview_state()
         self._history_operation_audit_state = empty_operation_audit_state()
         self._engine_status_state = initial_state
@@ -644,6 +672,17 @@ class MediaSyncWindow(QMainWindow):
         self._history_detail_values: dict[str, QLabel] = {}
         self._history_target_heading: QLabel | None = None
         self._history_target_rows: list[QLabel] = []
+        self._retained_version_run_id: str | None = None
+        self._retained_version_query_pending = False
+        self._retained_version_heading: QLabel | None = None
+        self._retained_version_list: BoundedVirtualTableView | None = None
+        self._retained_version_empty_label: QLabel | None = None
+        self._retained_version_protect_button: QPushButton | None = None
+        self._selected_retained_version_id: str | None = None
+        self._version_protection_command_pending = False
+        self._version_protection_command_key: tuple[str, int] | None = None
+        self._version_protection_request_id: str | None = None
+        self._version_protection_idempotency_key: str | None = None
         self._history_operation_activity_key: str | None = None
         self._history_operation_run_id: str | None = None
         self._history_operation_plan_id: str | None = None
@@ -954,6 +993,7 @@ class MediaSyncWindow(QMainWindow):
         self._apply_backup_job_detail_state(self._job_detail_state)
         self._apply_run_progress_state(self._run_progress_state)
         self._apply_history_operation_retry(self._history_operation_audit_state)
+        self._apply_retained_version_protect_action()
 
     def refresh_engine_status(self) -> None:
         if self._background_queries is not None and self._engine_client is not None:
@@ -2004,6 +2044,7 @@ class MediaSyncWindow(QMainWindow):
             for target_row in self._history_target_rows:
                 target_row.clear()
                 target_row.setVisible(False)
+            self._set_retained_version_activity(None)
             self._set_history_operation_activity(None)
             self._refresh_dashboard_geometry()
             return
@@ -2080,8 +2121,297 @@ class MediaSyncWindow(QMainWindow):
                 )
             target_row.setText(f"{target.endpoint_id} · {target_detail}")
             target_row.setVisible(True)
+        self._set_retained_version_activity(activity)
         self._set_history_operation_activity(activity)
         self._refresh_dashboard_geometry()
+
+    def _set_retained_version_activity(
+        self,
+        activity: HistoryActivityViewState | None,
+    ) -> None:
+        run_id = (
+            activity.run_id
+            if activity is not None and activity.activity_kind == "BACKUP"
+            else None
+        )
+        visible = run_id is not None
+        for widget in (
+            self._retained_version_heading,
+            self._retained_version_list,
+            self._retained_version_empty_label,
+            self._retained_version_protect_button,
+        ):
+            if widget is not None:
+                widget.setVisible(visible)
+        if run_id is None:
+            if self._background_queries is not None:
+                self._background_queries.cancel("retained-versions")
+            self._retained_version_run_id = None
+            self._retained_version_state = empty_retained_version_page_state()
+            self._selected_retained_version_id = None
+            self._apply_retained_version_state(self._retained_version_state)
+            return
+        if run_id == self._retained_version_run_id:
+            self._apply_retained_version_state(self._retained_version_state)
+            return
+        if self._background_queries is not None:
+            self._background_queries.cancel("retained-versions")
+        self._retained_version_run_id = run_id
+        self._retained_version_state = empty_retained_version_page_state()
+        self._selected_retained_version_id = None
+        if self._selected_navigation_index == 2:
+            self._refresh_retained_versions()
+        else:
+            self._apply_retained_version_state(self._retained_version_state)
+
+    def _refresh_retained_versions(self, *, background: bool = True) -> None:
+        run_id = self._retained_version_run_id
+        if (
+            run_id is None
+            or self._engine_client is None
+            or not hasattr(self._engine_client, "get_retained_versions")
+        ):
+            self._retained_version_query_pending = False
+            self._retained_version_state = empty_retained_version_page_state()
+            self._apply_retained_version_state(self._retained_version_state)
+            return
+
+        def query(client: object) -> object:
+            return cast(RetainedVersionProvider, client).get_retained_versions(
+                run_id=run_id,
+                limit=25,
+            )
+
+        def accept(response: object) -> None:
+            if run_id != self._retained_version_run_id:
+                return
+            self._retained_version_query_pending = False
+            state = retained_version_page_from_response(cast(IpcResponse, response))
+            if state.run_id != run_id:
+                state = empty_retained_version_page_state()
+            self._retained_version_state = state
+            self._apply_retained_version_state(state)
+
+        def reject(_error: Exception) -> None:
+            if run_id != self._retained_version_run_id:
+                return
+            self._retained_version_query_pending = False
+            self._retained_version_state = empty_retained_version_page_state()
+            self._apply_retained_version_state(self._retained_version_state)
+
+        self._retained_version_query_pending = True
+        self._apply_retained_version_state(self._retained_version_state)
+        if background and self._background_queries is not None:
+            self._background_queries.submit(
+                key="retained-versions",
+                operation=query,
+                on_result=accept,
+                on_error=reject,
+            )
+            return
+        try:
+            accept(query(self._engine_client))
+        except Exception as exc:
+            reject(exc)
+
+    def _apply_retained_version_state(
+        self,
+        state: RetainedVersionPageViewState,
+    ) -> None:
+        version_list = self._retained_version_list
+        if version_list is None:
+            return
+        texts = self._texts()
+        version_list.replace_headers(
+            (texts.path, texts.version_saved, texts.kept_until, texts.status)
+        )
+        rows = tuple(
+            VirtualTableRow(
+                row_id=version.version_object_id,
+                cells=(
+                    version.final_relative_path,
+                    self._format_history_timestamp(version.created_utc),
+                    self._format_history_timestamp(version.retention_until_utc),
+                    (
+                        texts.version_protected
+                        if version.protected_for_restore
+                        else localize_display_value(
+                            self._selected_language_code,
+                            version.state,
+                        )
+                    ),
+                ),
+                tooltip=version.final_relative_path,
+            )
+            for version in state.versions
+        )
+        self._selected_retained_version_id = version_list.replace_rows(
+            rows,
+            selected_row_id=self._selected_retained_version_id,
+        )
+        scope_visible = self._retained_version_run_id is not None
+        available = state.read_model_available and bool(state.versions)
+        if self._retained_version_heading is not None:
+            self._retained_version_heading.setVisible(scope_visible)
+        version_list.setVisible(scope_visible and available)
+        version_list.setEnabled(available and not self._retained_version_query_pending)
+        if self._retained_version_empty_label is not None:
+            self._retained_version_empty_label.setText(
+                texts.previous_versions_empty
+                if state.read_model_available
+                else texts.previous_versions_unavailable
+            )
+            self._retained_version_empty_label.setVisible(
+                scope_visible and not available
+            )
+        self._apply_retained_version_protect_action()
+        self._refresh_dashboard_geometry()
+
+    def _select_retained_version(self, version_object_id: str) -> None:
+        if not version_object_id:
+            return
+        self._selected_retained_version_id = version_object_id
+        self._apply_retained_version_protect_action()
+
+    def _selected_retained_version(self) -> RetainedVersionViewState | None:
+        return next(
+            (
+                version
+                for version in self._retained_version_state.versions
+                if version.version_object_id == self._selected_retained_version_id
+            ),
+            None,
+        )
+
+    def _apply_retained_version_protect_action(self) -> None:
+        button = self._retained_version_protect_button
+        if button is None:
+            return
+        version = self._selected_retained_version()
+        texts = self._texts()
+        protected = version is not None and version.protected_for_restore
+        button.setText(
+            texts.version_protected if protected else texts.protect_for_restore
+        )
+        button.setToolTip(texts.protect_for_restore_tooltip)
+        button.setAccessibleName(button.text())
+        button.setEnabled(
+            version is not None
+            and version.restorable
+            and not protected
+            and not self._version_protection_command_pending
+            and not self._command_worker_active()
+        )
+        button.setVisible(self._retained_version_run_id is not None)
+
+    def _confirm_retained_version_protection(self) -> None:
+        if self._selected_retained_version() is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            self._texts().protect_version_title,
+            self._texts().protect_version_confirmation,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._protect_selected_retained_version()
+
+    def _protect_selected_retained_version(self) -> None:
+        version = self._selected_retained_version()
+        if (
+            version is None
+            or not version.restorable
+            or version.protected_for_restore
+            or self._engine_client is None
+            or not hasattr(
+                self._engine_client,
+                "protect_retained_version_for_restore",
+            )
+            or self._version_protection_command_pending
+            or self._command_worker_active()
+        ):
+            return
+        command_key = (version.version_object_id, version.row_version)
+        if self._version_protection_command_key != command_key:
+            self._version_protection_command_key = command_key
+            self._version_protection_request_id = str(uuid4())
+            self._version_protection_idempotency_key = str(uuid4())
+        request_id = self._version_protection_request_id
+        idempotency_key = self._version_protection_idempotency_key
+        assert request_id is not None and idempotency_key is not None
+        self._version_protection_command_pending = True
+        self._apply_retained_version_protect_action()
+
+        def command(client: object) -> object:
+            return cast(
+                VersionRestoreProtectionProvider,
+                client,
+            ).protect_retained_version_for_restore(
+                version_object_id=version.version_object_id,
+                expected_row_version=version.row_version,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+            )
+
+        def accept(response: object) -> None:
+            self._version_protection_command_pending = False
+            ipc_response = cast(IpcResponse, response)
+            protection = ipc_response.payload.get("version_restore_protection")
+            if (
+                ipc_response.status is IpcStatus.ACCEPTED
+                and isinstance(protection, dict)
+                and protection.get("protected") is True
+            ):
+                self._version_protection_command_key = None
+                self._version_protection_request_id = None
+                self._version_protection_idempotency_key = None
+                self.apply_engine_status(
+                    replace(
+                        self._engine_status_state,
+                        detail=self._texts().version_protected,
+                        status_kind="ready",
+                    )
+                )
+                self._refresh_retained_versions()
+                return
+            reason = (
+                protection.get("validation_code")
+                if isinstance(protection, dict)
+                else None
+            )
+            self._version_protection_command_key = None
+            self._version_protection_request_id = None
+            self._version_protection_idempotency_key = None
+            self.apply_engine_status(
+                replace(
+                    self._engine_status_state,
+                    detail=(
+                        f"{self._texts().version_protection_failed}: {reason}"
+                        if isinstance(reason, str)
+                        else self._texts().version_protection_failed
+                    ),
+                    status_kind="warning",
+                )
+            )
+            self._refresh_retained_versions()
+
+        def reject(_error: Exception) -> None:
+            self._version_protection_command_pending = False
+            self._apply_command_transport_failure(
+                self._texts().version_protection_failed
+            )
+            self._apply_retained_version_protect_action()
+
+        submitted = self._submit_engine_command(
+            name="protect-retained-version",
+            operation=command,
+            on_result=accept,
+            on_error=reject,
+        )
+        if not submitted:
+            self._version_protection_command_pending = False
+            self._apply_retained_version_protect_action()
 
     def _set_history_operation_activity(
         self,
@@ -7759,6 +8089,49 @@ class MediaSyncWindow(QMainWindow):
             self._history_target_rows.append(target_row)
             layout.addWidget(target_row, 12 + index, 1, 1, 2)
 
+        version_heading = QLabel(texts.previous_versions)
+        version_heading.setObjectName("retainedVersionHeading")
+        version_heading.setVisible(False)
+        self._retained_version_heading = version_heading
+        layout.addWidget(version_heading, 16, 0, 1, 3)
+
+        version_list = BoundedVirtualTableView(
+            headers=(
+                texts.path,
+                texts.version_saved,
+                texts.kept_until,
+                texts.status,
+            ),
+            max_cached_rows=25,
+            column_weights=(28, 14, 14, 15),
+            compact_hidden_columns=(1, 2),
+            compact_width_threshold=560,
+        )
+        version_list.setObjectName("retainedVersionList")
+        version_list.setAccessibleName(texts.previous_versions)
+        version_list.setMinimumHeight(112)
+        version_list.setMaximumHeight(190)
+        version_list.setVisible(False)
+        version_list.rowSelected.connect(self._select_retained_version)
+        self._retained_version_list = version_list
+        layout.addWidget(version_list, 17, 0, 1, 3)
+
+        version_empty = QLabel(texts.previous_versions_unavailable)
+        version_empty.setObjectName("retainedVersionEmptyLabel")
+        _configure_responsive_label(version_empty)
+        version_empty.setVisible(False)
+        self._retained_version_empty_label = version_empty
+        layout.addWidget(version_empty, 18, 0, 1, 3)
+
+        protect_version = QPushButton(texts.protect_for_restore)
+        protect_version.setObjectName("protectRetainedVersionButton")
+        protect_version.setToolTip(texts.protect_for_restore_tooltip)
+        protect_version.setAccessibleName(texts.protect_for_restore)
+        protect_version.setVisible(False)
+        protect_version.clicked.connect(self._confirm_retained_version_protection)
+        self._retained_version_protect_button = protect_version
+        layout.addWidget(protect_version, 19, 0, 1, 3)
+
         operation_header = QWidget()
         operation_header_layout = QHBoxLayout(operation_header)
         operation_header_layout.setContentsMargins(0, 10, 0, 0)
@@ -7792,7 +8165,7 @@ class MediaSyncWindow(QMainWindow):
         self._history_operation_previous_button = operation_previous
         self._history_operation_page_label = operation_page_label
         self._history_operation_next_button = operation_next
-        layout.addWidget(operation_header, 16, 0, 1, 3)
+        layout.addWidget(operation_header, 20, 0, 1, 3)
 
         operation_list = BoundedVirtualTableView(
             headers=(
@@ -7812,19 +8185,19 @@ class MediaSyncWindow(QMainWindow):
         operation_list.setMaximumHeight(220)
         operation_list.rowSelected.connect(self._select_history_operation)
         self._history_operation_list = operation_list
-        layout.addWidget(operation_list, 17, 0, 1, 3)
+        layout.addWidget(operation_list, 21, 0, 1, 3)
 
         operation_empty = QLabel(texts.file_results_unavailable)
         operation_empty.setObjectName("historyOperationEmptyLabel")
         _configure_responsive_label(operation_empty)
         self._history_operation_empty_label = operation_empty
-        layout.addWidget(operation_empty, 18, 0, 1, 3)
+        layout.addWidget(operation_empty, 22, 0, 1, 3)
 
         operation_detail_title = QLabel(texts.file_results_unavailable)
         operation_detail_title.setObjectName("historyOperationDetailTitle")
         _configure_responsive_label(operation_detail_title, selectable=True)
         self._history_operation_detail_title = operation_detail_title
-        layout.addWidget(operation_detail_title, 19, 0, 1, 3)
+        layout.addWidget(operation_detail_title, 23, 0, 1, 3)
         operation_detail_rows = (
             ("result", texts.file_result),
             ("finished", texts.finished),
@@ -7836,7 +8209,7 @@ class MediaSyncWindow(QMainWindow):
         )
         for row_index, (key, label_text) in enumerate(
             operation_detail_rows,
-            start=20,
+            start=24,
         ):
             label, value = _add_labeled_text_value(
                 layout,
@@ -7858,12 +8231,12 @@ class MediaSyncWindow(QMainWindow):
         retry_operation.setVisible(False)
         retry_operation.clicked.connect(self._retry_selected_history_operation)
         self._history_retry_operation_button = retry_operation
-        layout.addWidget(retry_operation, 27, 2)
+        layout.addWidget(retry_operation, 31, 2)
 
         attempt_heading = QLabel(texts.file_attempts)
         attempt_heading.setObjectName("mutedLabel")
         self._history_attempt_heading = attempt_heading
-        layout.addWidget(attempt_heading, 28, 0, 1, 3)
+        layout.addWidget(attempt_heading, 32, 0, 1, 3)
         attempt_list = QListWidget()
         attempt_list.setObjectName("historyAttemptList")
         attempt_list.setAccessibleName(texts.file_attempts)
@@ -7873,7 +8246,7 @@ class MediaSyncWindow(QMainWindow):
         attempt_list.setMinimumHeight(112)
         attempt_list.setMaximumHeight(190)
         self._history_attempt_list = attempt_list
-        layout.addWidget(attempt_list, 29, 0, 1, 3)
+        layout.addWidget(attempt_list, 33, 0, 1, 3)
         layout.setColumnStretch(1, 1)
         return panel
 
@@ -9089,6 +9462,7 @@ class MediaSyncWindow(QMainWindow):
             (self._activity_title_label, texts.activity),
             (self._activity_empty_label, texts.no_active_runs),
             (self._history_target_heading, texts.activity_targets),
+            (self._retained_version_heading, texts.previous_versions),
             (self._history_operation_heading, texts.file_results),
             (self._history_attempt_heading, texts.file_attempts),
         ):
@@ -9136,6 +9510,9 @@ class MediaSyncWindow(QMainWindow):
                 changes_label.setText(text)
         if self._history_operation_list is not None:
             self._history_operation_list.setAccessibleName(texts.file_results)
+        if self._retained_version_list is not None:
+            self._retained_version_list.setAccessibleName(texts.previous_versions)
+        self._apply_retained_version_state(self._retained_version_state)
         if self._history_attempt_list is not None:
             self._history_attempt_list.setAccessibleName(texts.file_attempts)
         if self._workspace_heading is not None:

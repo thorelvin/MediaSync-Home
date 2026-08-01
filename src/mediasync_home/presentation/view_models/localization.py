@@ -612,6 +612,74 @@ class ShellText:
         )
 
     @property
+    def previous_versions(self) -> str:
+        return (
+            "Previous versions"
+            if self.language_tooltip_prefix == "Language"
+            else "Tidligere versjoner"
+        )
+
+    @property
+    def previous_versions_empty(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "This backup run did not preserve an earlier version."
+        return "Denne backupkjøringen bevarte ingen tidligere versjon."
+
+    @property
+    def previous_versions_unavailable(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Previous versions are not available."
+        return "Tidligere versjoner er ikke tilgjengelige."
+
+    @property
+    def version_saved(self) -> str:
+        return "Saved" if self.language_tooltip_prefix == "Language" else "Lagret"
+
+    @property
+    def kept_until(self) -> str:
+        return (
+            "Kept until"
+            if self.language_tooltip_prefix == "Language"
+            else "Beholdes til"
+        )
+
+    @property
+    def protect_for_restore(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Protect for restore"
+        return "Beskytt for gjenoppretting"
+
+    @property
+    def protect_for_restore_tooltip(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Keep the selected version from automatic expiry"
+        return "Unngå automatisk utløp for den valgte versjonen"
+
+    @property
+    def protect_version_title(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Protect this version?"
+        return "Beskytte denne versjonen?"
+
+    @property
+    def protect_version_confirmation(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Automatic expiry will pause for this version. No backup file changes yet."
+        return "Automatisk utløp pauses for denne versjonen. Ingen backupfiler endres ennå."
+
+    @property
+    def version_protected(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Protected for restore"
+        return "Beskyttet for gjenoppretting"
+
+    @property
+    def version_protection_failed(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "The version could not be protected"
+        return "Versjonen kunne ikke beskyttes"
+
+    @property
     def history_unavailable(self) -> str:
         return (
             "History is not available."

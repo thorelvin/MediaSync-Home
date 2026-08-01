@@ -5,7 +5,12 @@ import json
 import sqlite3
 from dataclasses import replace
 
-from mediasync_home.domain.capabilities import MutationPermit
+from mediasync_home.application.retained_version_history import (
+    ProtectRetainedVersionForRestoreCommand,
+    RetainedVersionCursor,
+    RetainedVersionSummary,
+    VersionRestoreProtectionOutcome,
+)
 from mediasync_home.application.version_retention import (
     RetainedVersionRecord,
     RetainedVersionState,
@@ -14,6 +19,7 @@ from mediasync_home.application.version_retention import (
     VersionRetentionPlan,
     VersionRetentionWorkItem,
 )
+from mediasync_home.domain.capabilities import MutationPermit
 
 
 class SqliteVersionRetentionStoreError(ValueError):
@@ -73,6 +79,218 @@ class SqliteVersionRetentionStore:
             (cutoff_utc, limit),
         ).fetchall()
         return tuple(_record_from_row(row) for row in rows)
+
+    def list_retained_versions_for_run(
+        self,
+        *,
+        run_id: str,
+        limit: int,
+        after: RetainedVersionCursor | None,
+    ) -> tuple[RetainedVersionSummary, ...]:
+        if limit < 1 or limit > 26:
+            raise SqliteVersionRetentionStoreError(
+                "RETAINED_VERSION_HISTORY_LIMIT_INVALID"
+            )
+        parameters: list[object] = [run_id]
+        cursor_clause = ""
+        if after is not None:
+            cursor_clause = """
+                AND (
+                    versions.created_utc < ?
+                    OR (
+                        versions.created_utc = ?
+                        AND versions.version_object_id < ?
+                    )
+                )
+            """
+            parameters.extend(
+                [after.created_utc, after.created_utc, after.version_object_id]
+            )
+        parameters.append(limit)
+        rows = self._connection.execute(
+            f"""
+            SELECT
+                versions.version_object_id,
+                versions.run_id,
+                versions.operation_id,
+                versions.job_id,
+                versions.target_endpoint_id,
+                versions.final_relative_path,
+                versions.created_utc,
+                versions.retention_until_utc,
+                versions.state,
+                versions.row_version,
+                holds.hold_id,
+                holds.reason,
+                holds.created_utc
+            FROM retained_version_objects AS versions
+            LEFT JOIN version_retention_holds AS holds
+                ON holds.version_object_id = versions.version_object_id
+                AND holds.released_utc IS NULL
+            WHERE versions.run_id = ?
+                {cursor_clause}
+            ORDER BY versions.created_utc DESC, versions.version_object_id DESC
+            LIMIT ?
+            """,
+            parameters,
+        ).fetchall()
+        return tuple(_summary_from_row(row) for row in rows)
+
+    def protect_retained_version_for_restore(
+        self,
+        *,
+        command: ProtectRetainedVersionForRestoreCommand,
+        created_utc: str,
+    ) -> VersionRestoreProtectionOutcome:
+        hold_id = f"restore:{command.idempotency_key}"
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            existing_hold = self._connection.execute(
+                """
+                SELECT version_object_id
+                FROM version_retention_holds
+                WHERE hold_id = ?
+                """,
+                (hold_id,),
+            ).fetchone()
+            if existing_hold is not None:
+                if str(existing_hold[0]) != command.version_object_id:
+                    raise SqliteVersionRetentionStoreError(
+                        "VERSION_RESTORE_PROTECTION_IDEMPOTENCY_CONFLICT"
+                    )
+                outcome = self._protected_outcome(
+                    command.version_object_id,
+                    idempotent_replay=True,
+                )
+                if not outer_transaction:
+                    self._connection.execute("COMMIT")
+                return outcome
+
+            current = self._load_version_summary(command.version_object_id)
+            if current is None:
+                outcome = VersionRestoreProtectionOutcome(
+                    protected=False,
+                    validation_code="VERSION_RESTORE_VERSION_NOT_FOUND",
+                    next_action="Refresh version history before trying again.",
+                )
+            elif current.state != "RETAINED":
+                outcome = VersionRestoreProtectionOutcome(
+                    protected=False,
+                    validation_code="VERSION_RESTORE_VERSION_NOT_RETAINED",
+                    next_action="Choose a retained version that has not entered expiry.",
+                    version=current,
+                )
+            elif current.row_version != command.expected_row_version:
+                outcome = VersionRestoreProtectionOutcome(
+                    protected=False,
+                    validation_code="VERSION_RESTORE_VERSION_CHANGED",
+                    next_action="Refresh version history before trying again.",
+                    version=current,
+                )
+            elif current.protected_for_restore:
+                outcome = VersionRestoreProtectionOutcome(
+                    protected=True,
+                    validation_code="VERSION_RESTORE_ALREADY_PROTECTED",
+                    next_action="The retained version is protected from automatic expiry.",
+                    version=current,
+                    idempotent_replay=True,
+                )
+            else:
+                self._connection.execute(
+                    """
+                    INSERT INTO version_retention_holds (
+                        hold_id,
+                        version_object_id,
+                        reason,
+                        created_utc
+                    )
+                    SELECT ?, version_object_id, 'RESTORE_REQUESTED', ?
+                    FROM retained_version_objects
+                    WHERE version_object_id = ?
+                        AND state = 'RETAINED'
+                        AND row_version = ?
+                    """,
+                    (
+                        hold_id,
+                        created_utc,
+                        command.version_object_id,
+                        command.expected_row_version,
+                    ),
+                )
+                outcome = self._protected_outcome(
+                    command.version_object_id,
+                    idempotent_replay=False,
+                )
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return outcome
+        except SqliteVersionRetentionStoreError:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        except sqlite3.IntegrityError as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise SqliteVersionRetentionStoreError(
+                "VERSION_RESTORE_PROTECTION_CONFLICT"
+            ) from exc
+        except sqlite3.Error as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise SqliteVersionRetentionStoreError(
+                "VERSION_RESTORE_PROTECTION_PERSISTENCE_FAILED"
+            ) from exc
+
+    def _protected_outcome(
+        self,
+        version_object_id: str,
+        *,
+        idempotent_replay: bool,
+    ) -> VersionRestoreProtectionOutcome:
+        version = self._load_version_summary(version_object_id)
+        if version is None or not version.protected_for_restore:
+            raise SqliteVersionRetentionStoreError(
+                "VERSION_RESTORE_PROTECTION_LOAD_FAILED"
+            )
+        return VersionRestoreProtectionOutcome(
+            protected=True,
+            validation_code="VERSION_RESTORE_PROTECTED",
+            next_action="The retained version is protected from automatic expiry.",
+            version=version,
+            idempotent_replay=idempotent_replay,
+        )
+
+    def _load_version_summary(
+        self,
+        version_object_id: str,
+    ) -> RetainedVersionSummary | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                versions.version_object_id,
+                versions.run_id,
+                versions.operation_id,
+                versions.job_id,
+                versions.target_endpoint_id,
+                versions.final_relative_path,
+                versions.created_utc,
+                versions.retention_until_utc,
+                versions.state,
+                versions.row_version,
+                holds.hold_id,
+                holds.reason,
+                holds.created_utc
+            FROM retained_version_objects AS versions
+            LEFT JOIN version_retention_holds AS holds
+                ON holds.version_object_id = versions.version_object_id
+                AND holds.released_utc IS NULL
+            WHERE versions.version_object_id = ?
+            """,
+            (version_object_id,),
+        ).fetchone()
+        return None if row is None else _summary_from_row(row)
 
     def create_version_retention_plan(
         self,
@@ -852,6 +1070,26 @@ def _record_from_row(row: sqlite3.Row | tuple[object, ...]) -> RetainedVersionRe
         manifest_hash=str(row[17]),
         state=RetainedVersionState(str(row[18])),
         row_version=_int_column(row[19]),
+    )
+
+
+def _summary_from_row(
+    row: sqlite3.Row | tuple[object, ...],
+) -> RetainedVersionSummary:
+    return RetainedVersionSummary(
+        version_object_id=str(row[0]),
+        run_id=str(row[1]),
+        operation_id=str(row[2]),
+        job_id=str(row[3]),
+        target_endpoint_id=str(row[4]),
+        final_relative_path=str(row[5]),
+        created_utc=str(row[6]),
+        retention_until_utc=str(row[7]),
+        state=str(row[8]),
+        row_version=_int_column(row[9]),
+        hold_id=None if row[10] is None else str(row[10]),
+        hold_reason=None if row[11] is None else str(row[11]),
+        hold_created_utc=None if row[12] is None else str(row[12]),
     )
 
 

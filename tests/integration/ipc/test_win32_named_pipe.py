@@ -172,6 +172,30 @@ def test_named_pipe_history_timeline_query_succeeds_after_handshake() -> None:
     assert timeline.payload["history_timeline"]["next_cursor"] is None
 
 
+def test_named_pipe_retained_version_query_succeeds_after_handshake() -> None:
+    server, client = _server_and_client()
+
+    handshake = _roundtrip(server, client.connect)
+    page = _roundtrip(
+        server,
+        lambda: client.query_retained_versions(
+            run_id="run-a",
+            limit=5,
+            after={
+                "cursor_version": 1,
+                "created_utc": "2026-07-20T12:00:00.000Z",
+                "version_object_id": "version-z",
+            },
+        ),
+    )
+
+    assert handshake.status is IpcStatus.ACCEPTED
+    assert page.status is IpcStatus.ACCEPTED
+    assert page.payload["retained_versions"]["read_model_available"] is False
+    assert page.payload["retained_versions"]["run_id"] == "run-a"
+    assert page.payload["retained_versions"]["next_cursor"] is None
+
+
 def test_named_pipe_run_progress_query_succeeds_after_handshake() -> None:
     server, client = _server_and_client()
 

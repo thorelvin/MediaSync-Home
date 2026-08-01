@@ -1155,8 +1155,17 @@ endpoint lease, validates the exact target-side manifest and payload, and then
 deletes only that pair. A crash after delete intent or filesystem deletion
 resumes from the durable item state without inventing a clean retained object.
 Recovery migration 11 supplies the exact job/policy/time/manifest binding used
-for the cross-store release check. Quarantine and general catalog retention stay
-outside this version-expiry branch.
+for the cross-store release check.
+
+The GUI lists these immutable roots with bounded keyset pagination scoped to
+one historical run. `PROTECT_RETAINED_VERSION_FOR_RESTORE` inserts one active
+`RESTORE_REQUESTED` hold only while the object is still `RETAINED` at the
+expected row version. The hold and the idempotent command receipt are committed
+in the same catalog transaction, so expiry-plan admission and restore
+protection cannot both win. The hold protects evidence only; it does not mutate
+the target and is released only by a later journaled restore/cancel workflow.
+Quarantine and general catalog retention stay outside this version-expiry
+branch.
 
 #### `run_metrics`
 

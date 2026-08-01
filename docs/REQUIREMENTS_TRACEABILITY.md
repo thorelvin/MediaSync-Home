@@ -313,6 +313,25 @@ tre vindusstørrelser. Bevis:
 `tests/integration/sqlite/test_sqlite_run_operation_planning.py` og
 `tests/gui/test_pyside_shell.py`.
 
+Oppdatering 2026-08-01 for `DB-004`, `REC-004`, `UX-002` og `PERF-001`:
+History kan nå lese bevarte gamle målversjoner gjennom en bounded run-scoped
+keysetquery og beskytte én valgt `RETAINED`-versjon med en bekreftet, durable og
+idempotent `RESTORE_REQUESTED`-hold. Hold og command receipt bruker samme
+Catalog-transaksjon og expected row-version, så expiry-planlegging og
+restorebeskyttelse avgjøres atomisk. Norsk/engelsk Qt-bevis ved 900x560 dekker
+lang sti, reell knapp, språkbytte og null horisontal klipping. Selve historiske
+filrestore-operasjonen med egen endpointlease/recoveryjournal gjenstår.
+Evidens: `src/mediasync_home/application/retained_version_history.py`,
+`src/mediasync_home/adapters/sqlite/version_retention.py`,
+`src/mediasync_home/ipc/server.py`,
+`src/mediasync_home/presentation/main_window.py`,
+`tests/unit/test_retained_version_history.py`,
+`tests/unit/test_retained_version_ipc.py`,
+`tests/unit/test_retained_version_view_model.py`,
+`tests/integration/sqlite/test_sqlite_version_retention.py` og
+`tests/integration/ipc/test_win32_named_pipe.py` og
+`tests/gui/test_pyside_shell.py`.
+
 Dette er den operative matrisen. Ingen krav kan markeres som implementert uten konkret ADR/design, kontrakt der relevant, kode og bevisende test/gate.
 
 | Krav | Kort krav | Kanonisk kilde | ADR/design | Kontrakt | Implementasjon | Test/gate | Status |

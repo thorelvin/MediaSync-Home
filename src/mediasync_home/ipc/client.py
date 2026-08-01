@@ -111,6 +111,22 @@ class InProcessIpcClient:
             )
         )
 
+    def query_retained_versions(
+        self,
+        *,
+        run_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        return self._correlated_response(
+            self.service.query_retained_versions(
+                self.client_instance_id,
+                run_id=run_id,
+                limit=limit,
+                after=after,
+            )
+        )
+
     def query_run_progress(
         self,
         *,

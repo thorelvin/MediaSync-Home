@@ -1,5 +1,18 @@
 # Implementeringsstatus
 
+Update 2026-08-01: History now exposes preserved old-target versions through a
+bounded, run-scoped `QUERY_RETAINED_VERSIONS` keyset read model. The Norwegian
+and English compact UI shows logical path, preservation time, retention due
+time and exact catalog state without reading SQLite on the GUI thread. A
+confirmed `PROTECT_RETAINED_VERSION_FOR_RESTORE` command creates a durable
+`RESTORE_REQUESTED` hold through the normal idempotent command receipt
+transaction. Expected row-version and `RETAINED` checks make the hold race
+atomically with expiry planning; an active hold removes the version from later
+retention plans. The protected-state action and long paths are proven without
+horizontal clipping at 900x560. Actual historical restore still requires its
+own endpoint lease, recovery operation and safe replacement choreography and
+remains the next restore slice.
+
 Update 2026-08-01: PATH-001 catalog-recorded cleanup now covers every managed
 staging object, not only created-directory markers and empty-directory
 quarantine. The executor keeps the live endpoint permit until cleanup validates

@@ -11,6 +11,7 @@ from mediasync_home.application.job_creation import JobCreationCommandName
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
 from mediasync_home.application.job_editing import JobEditingCommandName
 from mediasync_home.application.job_lifecycle import JobLifecycleCommandName
+from mediasync_home.application.retained_version_history import VersionRestoreCommandName
 from mediasync_home.application.runs import RunCommandName
 from mediasync_home.application.writable_endpoint_registration import (
     WritableEndpointRegistrationCommandName,
@@ -55,6 +56,15 @@ class StatusIpcClient(Protocol):
         limit: int | None = None,
         after: dict[str, object] | None = None,
         offset: int | None = None,
+    ) -> IpcResponse:
+        pass
+
+    def query_retained_versions(
+        self,
+        *,
+        run_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
     ) -> IpcResponse:
         pass
 
@@ -214,6 +224,21 @@ class EngineClient:
                 limit=limit,
                 after=after,
                 offset=offset,
+            )
+        )
+
+    def get_retained_versions(
+        self,
+        *,
+        run_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_retained_versions(
+                run_id=run_id,
+                limit=limit,
+                after=after,
             )
         )
 
@@ -556,6 +581,29 @@ class EngineClient:
         return self._request_with_handshake_retry(
             lambda: self._ipc_client.submit_command(
                 BackupAnalysisCommandName.CHECK_BACKUP.value,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                payload_hash=canonical_command_payload_hash(payload),
+            )
+        )
+
+    def protect_retained_version_for_restore(
+        self,
+        *,
+        version_object_id: str,
+        expected_row_version: int,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        payload: dict[str, object] = {
+            "version_object_id": version_object_id,
+            "expected_row_version": expected_row_version,
+            "explicit_confirmation": True,
+        }
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.submit_command(
+                VersionRestoreCommandName.PROTECT_RETAINED_VERSION_FOR_RESTORE.value,
                 request_id=request_id,
                 idempotency_key=idempotency_key,
                 payload=payload,

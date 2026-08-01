@@ -809,6 +809,16 @@ GUI-et bruker denne kompatibilitetsbanen bare når en eldre Host-respons mangler
 det additive `next_cursor`-feltet. Offsetsetningen i read-model-noten over
 gjelder derfor nå Backup-/Activity-oversiktene og legacy History-klienter.
 
+`QUERY_RETAINED_VERSIONS` er en separat run-scoped History-query med
+`limit <= 25` og versjon-1-keysetcursor over synkende
+`(created_utc, version_object_id)`. Den returnerer bare katalogmetadata og aktiv
+holdstatus. Den bekreftede kommandoen
+`PROTECT_RETAINED_VERSION_FOR_RESTORE` bruker forventet object-row-version og
+samme Catalog-transaksjon for command receipt og `RESTORE_REQUESTED`-hold. Den
+kan derfor ikke skjult gjenopplive et objekt som allerede er tatt inn i en
+expiry-plan. Kommandoen endrer ingen endpointfiler; historisk restore får en
+egen lease- og recoveryoperasjon.
+
 Lokale GUI-preferanser følger en separat, ikke-autoritativ port i
 `application.user_preferences`. Composition kobler denne til en atomisk
 JSON-adapter under samme brukers lokale state-root og injiserer porten i

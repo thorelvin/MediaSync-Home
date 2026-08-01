@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QLabel,
     QLineEdit,
     QListWidget,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -6610,6 +6611,164 @@ class _FakeHistoryEngineClient(_FakeDashboardEngineClient):
                 }
             }
         )
+
+
+class _FakeRetainedVersionHistoryEngineClient(_FakeHistoryEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.protected = False
+        self.version_queries: list[tuple[str, int]] = []
+        self.protection_commands: list[tuple[str, int, str, str]] = []
+
+    def get_retained_versions(
+        self,
+        *,
+        run_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        assert after is None
+        normalized_limit = limit or 25
+        self.version_queries.append((run_id, normalized_limit))
+        return IpcResponse.accepted(
+            {
+                "retained_versions": {
+                    "run_id": run_id,
+                    "limit": normalized_limit,
+                    "has_more": False,
+                    "read_model_available": True,
+                    "next_cursor": None,
+                    "versions": [
+                        {
+                            "version_object_id": "version-a",
+                            "run_id": run_id,
+                            "operation_id": "op-a",
+                            "job_id": "job-a",
+                            "target_endpoint_id": "target-a",
+                            "final_relative_path": (
+                                "Photos/Family/2026/"
+                                "AReallyLongPreviousVersionFilenameWithoutBreaks.jpg"
+                            ),
+                            "created_utc": "2026-07-20T12:00:01.000Z",
+                            "retention_until_utc": "2026-08-19T12:00:01.000Z",
+                            "state": "RETAINED",
+                            "row_version": 1,
+                            "restorable": True,
+                            "protected_for_restore": self.protected,
+                            "hold_id": "restore:key-a" if self.protected else None,
+                            "hold_reason": (
+                                "RESTORE_REQUESTED" if self.protected else None
+                            ),
+                            "hold_created_utc": (
+                                "2026-08-01T10:00:00.000Z"
+                                if self.protected
+                                else None
+                            ),
+                        }
+                    ],
+                }
+            }
+        )
+
+    def protect_retained_version_for_restore(
+        self,
+        *,
+        version_object_id: str,
+        expected_row_version: int,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        self.protection_commands.append(
+            (
+                version_object_id,
+                expected_row_version,
+                request_id,
+                idempotency_key,
+            )
+        )
+        self.protected = True
+        return IpcResponse.accepted(
+            {
+                "version_restore_protection": {
+                    "protected": True,
+                    "validation_code": "VERSION_RESTORE_PROTECTED",
+                    "next_action": "Protected.",
+                }
+            }
+        )
+
+
+def test_history_previous_version_can_be_protected_without_compact_clipping(
+    qapp,
+    monkeypatch,
+) -> None:
+    provider = _FakeRetainedVersionHistoryEngineClient()
+    window = build_main_window(
+        initial_state=_ready_state(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        qapp.processEvents()
+        nav = window.findChild(QListWidget, "navigationRail")
+        version_list = window.findChild(
+            BoundedVirtualTableView,
+            "retainedVersionList",
+        )
+        protect = window.findChild(QPushButton, "protectRetainedVersionButton")
+        heading = window.findChild(QLabel, "retainedVersionHeading")
+        history_scroll = window.findChild(QScrollArea, "historyScrollArea")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert nav is not None
+        assert version_list is not None
+        assert protect is not None
+        assert heading is not None
+        assert history_scroll is not None
+        assert language is not None and language.menu() is not None
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(2)).center(),
+        )
+        qapp.processEvents()
+
+        assert provider.version_queries[-1] == ("run-a", 25)
+        assert _virtual_row_count(version_list) == 1
+        assert version_list.horizontalScrollBar().maximum() == 0
+        assert history_scroll.horizontalScrollBar().maximum() == 0
+        _click_virtual_row(version_list, 0)
+        qapp.processEvents()
+        assert protect.isEnabled()
+        assert protect.text() == "Beskytt for gjenoppretting"
+
+        QTest.mouseClick(protect, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert len(provider.protection_commands) == 1
+        assert provider.protection_commands[0][:2] == ("version-a", 1)
+        assert protect.text() == "Beskyttet for gjenoppretting"
+        assert not protect.isEnabled()
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+        assert heading.text() == "Previous versions"
+        assert protect.text() == "Protected for restore"
+        assert history_scroll.horizontalScrollBar().maximum() == 0
+        assert (
+            protect.fontMetrics().horizontalAdvance(protect.text())
+            <= protect.contentsRect().width()
+        )
+    finally:
+        window.close()
+        window.deleteLater()
 
 
 class _BlockingHistoryAuditEngineClient(_FakeHistoryEngineClient):

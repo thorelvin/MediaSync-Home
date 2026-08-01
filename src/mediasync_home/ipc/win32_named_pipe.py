@@ -842,6 +842,13 @@ class Win32NamedPipeServer:
                 after=_optional_query_object(request.get("after")),
                 offset=_optional_query_int(request.get("offset")),
             )
+        if message_type == "QUERY_RETAINED_VERSIONS":
+            return self.service.query_retained_versions(
+                str(request["client_instance_id"]),
+                run_id=str(request["run_id"]),
+                limit=_optional_query_int(request.get("limit")),
+                after=_optional_query_object(request.get("after")),
+            )
         if message_type == "QUERY_RUN_PROGRESS":
             return self.service.query_run_progress(
                 str(request["client_instance_id"]),
@@ -1024,6 +1031,24 @@ class Win32NamedPipeClient:
             request["after"] = after
         if offset is not None:
             request["offset"] = offset
+        return self._roundtrip(request)
+
+    def query_retained_versions(
+        self,
+        *,
+        run_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        request: dict[str, Any] = {
+            "message_type": "QUERY_RETAINED_VERSIONS",
+            "client_instance_id": self.client_instance_id,
+            "run_id": run_id,
+        }
+        if limit is not None:
+            request["limit"] = limit
+        if after is not None:
+            request["after"] = after
         return self._roundtrip(request)
 
     def query_run_progress(

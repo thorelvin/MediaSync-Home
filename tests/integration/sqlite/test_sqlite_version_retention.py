@@ -34,6 +34,10 @@ from mediasync_home.application.catalog_handoff import (
     FinalFileCatalogHandoff,
     RetainedVersionCatalogHandoff,
 )
+from mediasync_home.application.retained_version_history import (
+    ProtectRetainedVersionForRestoreCommand,
+    RetainedVersionCursor,
+)
 from mediasync_home.application.version_retention import (
     RetainedVersionRecord,
     RetainedVersionState,
@@ -52,6 +56,133 @@ from mediasync_home.application.version_objects import (
     create_version_object_manifest,
 )
 from mediasync_home.domain.capabilities import MutationPermit, _issue_mutation_permit
+
+
+def test_sqlite_version_history_lists_run_versions_with_active_hold(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_catalog_connection(tmp_path)
+    try:
+        _insert_job(connection)
+        handoffs = SqliteFinalFileCatalogHandoffStore(connection)
+        handoffs.record_final_file_handoff(_handoff())
+        second = replace(
+            _handoff(),
+            handoff_id="final-file:run-a:operation-b",
+            operation_id="operation-b",
+            final_relative_path="Photos/second.jpg",
+            retained_version=replace(
+                _handoff().retained_version,
+                version_object_id="version-b",
+                created_utc="2026-08-02T00:00:00.000Z",
+                retention_until_utc="2026-09-01T00:00:00.000Z",
+                manifest_hash="e" * 64,
+            ),
+        )
+        handoffs.record_final_file_handoff(second)
+        store = SqliteVersionRetentionStore(connection)
+
+        first = store.list_retained_versions_for_run(
+            run_id="run-a",
+            limit=1,
+            after=None,
+        )
+        second_page = store.list_retained_versions_for_run(
+            run_id="run-a",
+            limit=2,
+            after=RetainedVersionCursor(
+                created_utc=first[0].created_utc,
+                version_object_id=first[0].version_object_id,
+            ),
+        )
+
+        assert [version.version_object_id for version in first] == ["version-b"]
+        assert [version.version_object_id for version in second_page] == ["version-a"]
+        assert first[0].protected_for_restore is False
+    finally:
+        connection.close()
+
+
+def test_sqlite_restore_protection_is_idempotent_and_blocks_expiry(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_catalog_connection(tmp_path)
+    try:
+        _insert_job(connection)
+        SqliteFinalFileCatalogHandoffStore(connection).record_final_file_handoff(
+            _handoff()
+        )
+        store = SqliteVersionRetentionStore(connection)
+        command = ProtectRetainedVersionForRestoreCommand(
+            request_id="request-a",
+            idempotency_key="key-a",
+            version_object_id="version-a",
+            expected_row_version=1,
+            explicit_confirmation=True,
+        )
+
+        first = store.protect_retained_version_for_restore(
+            command=command,
+            created_utc="2026-08-10T00:00:00.000Z",
+        )
+        replay = store.protect_retained_version_for_restore(
+            command=command,
+            created_utc="2026-08-10T00:00:01.000Z",
+        )
+
+        assert first.protected is True
+        assert first.idempotent_replay is False
+        assert first.version is not None and first.version.protected_for_restore
+        assert replay.protected is True and replay.idempotent_replay is True
+        assert connection.execute(
+            "SELECT count(*) FROM version_retention_holds"
+        ).fetchone() == (1,)
+        assert store.list_due_retained_versions(
+            cutoff_utc="2026-09-01T00:00:00.000Z",
+            limit=10,
+        ) == ()
+    finally:
+        connection.close()
+
+
+def test_sqlite_restore_protection_rejects_stale_or_expiring_version(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_catalog_connection(tmp_path)
+    try:
+        _insert_job(connection)
+        SqliteFinalFileCatalogHandoffStore(connection).record_final_file_handoff(
+            _handoff()
+        )
+        store = SqliteVersionRetentionStore(connection)
+        stale = store.protect_retained_version_for_restore(
+            command=ProtectRetainedVersionForRestoreCommand(
+                request_id="request-a",
+                idempotency_key="key-a",
+                version_object_id="version-a",
+                expected_row_version=2,
+                explicit_confirmation=True,
+            ),
+            created_utc="2026-08-10T00:00:00.000Z",
+        )
+        _create_due_plan(store)
+        expiring = store.protect_retained_version_for_restore(
+            command=ProtectRetainedVersionForRestoreCommand(
+                request_id="request-b",
+                idempotency_key="key-b",
+                version_object_id="version-a",
+                expected_row_version=2,
+                explicit_confirmation=True,
+            ),
+            created_utc="2026-09-01T00:00:02.000Z",
+        )
+
+        assert stale.protected is False
+        assert stale.validation_code == "VERSION_RESTORE_VERSION_CHANGED"
+        assert expiring.protected is False
+        assert expiring.validation_code == "VERSION_RESTORE_VERSION_NOT_RETAINED"
+    finally:
+        connection.close()
 
 
 def test_sqlite_due_versions_exclude_archived_jobs_and_active_holds(
