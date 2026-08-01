@@ -21,6 +21,7 @@ from mediasync_home.application.hash_evidence import (
     HashEvidenceKind,
 )
 from mediasync_home.application.endpoint_capabilities import (
+    DurabilityLevel,
     EndpointCapabilityEvidence,
     EndpointCapabilityEvidenceError,
     EndpointCapabilityProbeScope,
@@ -839,12 +840,22 @@ def _validated_capability_hash(
             profile_json=profile_json,
             capabilities_hash=capabilities_hash,
         )
-        evidence.validated_profile(expected_scope=expected_scope)
+        profile = evidence.validated_profile(expected_scope=expected_scope)
     except EndpointCapabilityEvidenceError as exc:
         raise InitialBackupPlanningError(
             "INITIAL_BACKUP_PLAN_ENDPOINT_CAPABILITIES_INVALID",
             "Refresh endpoint capability evidence before planning changes.",
         ) from exc
+    if expected_scope is EndpointCapabilityProbeScope.CONTROLLED_WRITABLE and (
+        not profile.supports_file_flush
+        or not profile.supports_write_through_move
+        or profile.durability_level
+        is not DurabilityLevel.FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED
+    ):
+        raise InitialBackupPlanningError(
+            "INITIAL_BACKUP_PLAN_TARGET_DURABILITY_UNSUPPORTED",
+            "Re-register the target to measure file flush and write-through move support.",
+        )
     return capabilities_hash
 
 

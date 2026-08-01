@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -46,6 +46,11 @@ from mediasync_home.adapters.writable_endpoint_registration import (
 )
 from mediasync_home.application.initial_backup_planning import (
     InitialBackupPlanIdFactory,
+)
+from mediasync_home.application.endpoint_capabilities import (
+    DurabilityLevel,
+    EndpointCapabilitiesProbe,
+    EndpointCapabilityEvidence,
 )
 from mediasync_home.application.plans import (
     PlanOperationType,
@@ -134,6 +139,38 @@ class _FixedCaseModeProbe:
         return DirectoryCaseContext(
             case_mode="CASE_INSENSITIVE",
             evidence="FIXED_TEST_CASE_MODE_V1",
+        )
+
+
+class _FileFlushOnlyCapabilitiesProbe(EndpointCapabilitiesProbe):
+    def __init__(self) -> None:
+        from mediasync_home.adapters.endpoint_capabilities import (
+            LocalWindowsEndpointCapabilitiesProbe,
+        )
+
+        self._inner = LocalWindowsEndpointCapabilitiesProbe()
+
+    def probe_read_only(self, root: Path) -> EndpointCapabilityEvidence:
+        return self._inner.probe_read_only(root)
+
+    def probe_controlled_writable(
+        self,
+        root: Path,
+        *,
+        probe_directory: Path,
+        probe_token: str,
+    ) -> EndpointCapabilityEvidence:
+        measured = self._inner.probe_controlled_writable(
+            root,
+            probe_directory=probe_directory,
+            probe_token=probe_token,
+        ).validated_profile()
+        return EndpointCapabilityEvidence.from_profile(
+            replace(
+                measured,
+                supports_write_through_move=False,
+                durability_level=DurabilityLevel.FILE_FLUSH_CONFIRMED,
+            )
         )
 
 
@@ -272,6 +309,36 @@ def test_initial_plan_materializer_blocks_tampered_capability_hash(
         assert report.blocked_job_count == 1
         assert report.results[0].reason_code == (
             "INITIAL_BACKUP_PLAN_ENDPOINT_CAPABILITIES_INVALID"
+        )
+
+
+def test_initial_plan_materializer_blocks_target_without_write_through_evidence(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    (source / "Readme.txt").write_text("source", encoding="utf-8")
+
+    with sqlite3.connect(database) as connection:
+        _prepare_registered_snapshots(
+            connection,
+            database=database,
+            source=source,
+            target=target,
+            capabilities_probe=_FileFlushOnlyCapabilitiesProbe(),
+        )
+        report = SqliteInitialBackupPlanMaterializer(
+            connection,
+            plans=SqlitePlanStore(connection),
+            id_factory=_FixedPlanIds(),
+        ).refresh_initial_backup_plans(observed_utc="2026-07-31T15:03:00Z")
+
+        assert report.blocked_job_count == 1
+        assert report.results[0].reason_code == (
+            "INITIAL_BACKUP_PLAN_TARGET_DURABILITY_UNSUPPORTED"
         )
 
 
@@ -528,6 +595,7 @@ def _prepare_registered_snapshots(
     source: Path,
     target: Path,
     additional_target: Path | None = None,
+    capabilities_probe: EndpointCapabilitiesProbe | None = None,
 ) -> None:
     _prepare_catalog(
         connection,
@@ -546,7 +614,9 @@ def _prepare_registered_snapshots(
     )
     WritableEndpointRegistrationCoordinator(
         store=SqliteWritableEndpointRegistrationStore(connection),
-        provisioner=LocalWritableEndpointControlAreaProvisioner(),
+        provisioner=LocalWritableEndpointControlAreaProvisioner(
+            capabilities_probe=capabilities_probe,
+        ),
         id_factory=_FixedRegistrationIds(),
         owner_installation_id=INSTALLATION_ID,
     ).register_job_targets(

@@ -19,6 +19,7 @@ from mediasync_home.application.endpoint_capabilities import (
     LockScope,
     SourceReadGuardLevel,
 )
+from mediasync_home.adapters.windows_durability import move_path_write_through
 
 
 _FILE_CASE_SENSITIVE_SEARCH = 0x00000001
@@ -49,13 +50,21 @@ class LocalWindowsEndpointCapabilitiesProbe:
         named_streams = False
         try:
             self._write_new(paths[0], b"rename-source\n")
-            os.rename(paths[0], paths[1])
+            move_path_write_through(
+                paths[0],
+                paths[1],
+                replace_existing=False,
+            )
             atomic_rename = paths[1].read_bytes() == b"rename-source\n"
 
             self._write_new(paths[2], b"no-overwrite-source\n")
             self._write_new(paths[3], b"no-overwrite-target\n")
             try:
-                os.rename(paths[2], paths[3])
+                move_path_write_through(
+                    paths[2],
+                    paths[3],
+                    replace_existing=False,
+                )
             except FileExistsError:
                 no_overwrite = paths[3].read_bytes() == b"no-overwrite-target\n"
             else:
@@ -63,7 +72,11 @@ class LocalWindowsEndpointCapabilitiesProbe:
 
             self._write_new(paths[4], b"replace-old\n")
             self._write_new(paths[5], b"replace-new\n")
-            os.replace(paths[5], paths[4])
+            move_path_write_through(
+                paths[5],
+                paths[4],
+                replace_existing=True,
+            )
             atomic_replace = paths[4].read_bytes() == b"replace-new\n"
 
             self._write_new(paths[6], b"stream-base\n")
@@ -93,7 +106,10 @@ class LocalWindowsEndpointCapabilitiesProbe:
                 supports_no_overwrite_insert=True,
                 supports_atomic_replace=True,
                 supports_file_flush=True,
-                durability_level=DurabilityLevel.FILE_FLUSH_CONFIRMED,
+                supports_write_through_move=True,
+                durability_level=(
+                    DurabilityLevel.FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED
+                ),
                 supports_named_streams=named_streams,
             )
         )

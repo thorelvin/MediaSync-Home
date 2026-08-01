@@ -833,10 +833,19 @@ def _validate_final_durability_invariant(invariant: dict[str, Any]) -> None:
     expected = {
         "requirement_id": "DUR-001",
         "receipt_default_state": "FINAL_DURABILITY_UNCONFIRMED",
-        "local_file_state": "LOCAL_FILE_FLUSH_CONFIRMED",
+        "local_file_state": (
+            "LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED"
+        ),
         "local_directory_state": (
+            "LOCAL_DIRECTORY_MARKER_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED"
+        ),
+        "local_directory_replay_state": (
             "LOCAL_DIRECTORY_MARKER_FLUSH_CONFIRMED_ENTRY_UNCONFIRMED"
         ),
+        "write_through_api": "MoveFileExW",
+        "write_through_flag": "MOVEFILE_WRITE_THROUGH",
+        "endpoint_profile_support_field": "supports_write_through_move",
+        "plan_requires_write_through_support": True,
         "synthetic_adapter_completion_forbidden": True,
         "recovery_phase": "FINAL_DURABLE",
         "recovery_metadata_column": "final_durability_state",

@@ -60,6 +60,7 @@ def test_local_registration_creates_verified_owned_control_area(tmp_path: Path) 
     assert profile.supports_no_overwrite_insert
     assert profile.supports_atomic_replace
     assert profile.supports_file_flush
+    assert profile.supports_write_through_move
 
     marker = json.loads((root / ".mediasync" / "endpoint.json").read_text(encoding="utf-8"))
     assert marker["control_schema_version"] == 4

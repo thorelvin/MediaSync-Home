@@ -492,7 +492,17 @@ Reparasjon av pre-migration-30 pending jobs er nå også levert gjennom den
 eksplisitte, revisjonsbundne **Registrer mål**-handlingen. Den senere
 oppdateringen øverst dekker også kontrollert lokal fremmed-overtakelse.
 
-Nyeste 0B-slice: `DUR-001` har nå eksplisitt og maskinvaliderbar
+Nyeste 0B-slice: `DUR-001` bruker nå `MoveFileExW` med
+`MOVEFILE_WRITE_THROUGH` for no-overwrite finalfil, replacement og
+katalogpublisering etter at target-side tempinnhold er flushet og verifisert.
+Finalfilen reåpnes og flushes før receipt. Den kontrollerte capability-proben
+måler samme API og lagrer `supports_write_through_move`; planforsegling blokkerer
+flush-only-profiler. Førstegangspublisering og idempotent katalogreplay har
+separate claims, slik at replay aldri arver en write-through-påstand den ikke
+utførte. Fysisk mediegaranti og writable SMB-evidens gjenstår, så kravet er
+fortsatt `in_progress` i det scope-reduserte produktet.
+
+Forrige 0B-slice: `DUR-001` fikk eksplisitt og maskinvaliderbar
 final-durability-evidence. Lokale filcommits reåpner og `fsync`-er den ferdige
 filen før `LOCAL_FILE_FLUSH_CONFIRMED`; katalogcommits flusher markørfilen, men
 oppgir ærlig at directory-entry durability er ubekreftet uten write-through.

@@ -45,6 +45,9 @@ class SourceReadGuardLevel(str, Enum):
 
 class DurabilityLevel(str, Enum):
     FILE_FLUSH_CONFIRMED = "file_flush_confirmed"
+    FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED = (
+        "file_flush_and_write_through_move_confirmed"
+    )
     REMOTE_ACK_ONLY = "remote_ack_only"
     BEST_EFFORT = "best_effort"
     UNKNOWN = "unknown"

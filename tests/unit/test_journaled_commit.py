@@ -118,9 +118,9 @@ def test_journaled_final_commit_wraps_lab_no_overwrite_adapter(tmp_path: Path) -
     assert receipt == CommitReceipt(
         operation_id="operation-a",
         final_relative_path=artifact.relative_path,
-        durability_state="LOCAL_FILE_FLUSH_CONFIRMED",
+        durability_state="LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED",
         file_flush_succeeded=True,
-        write_through_move_used=False,
+        write_through_move_used=True,
     )
     assert (target_root / "Photos" / "image.jpg").read_bytes() == payload
     assert store.operation is not None

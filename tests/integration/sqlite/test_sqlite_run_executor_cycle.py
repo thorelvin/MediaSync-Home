@@ -394,7 +394,7 @@ def test_sqlite_run_executor_cycle_advances_staged_operation_to_completed_run(
                     else "TRANSFERRED_TO_STAGING"
                 ),
                 "STAGING_HASH_MATCHES_POST_TRANSFER_SOURCE_HASH",
-                "LOCAL_FILE_FLUSH_CONFIRMED",
+                "LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED",
             ),
         ]
         audit_detail = query_operation_audit(

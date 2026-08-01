@@ -11,6 +11,7 @@ from uuid import uuid4
 from mediasync_home.adapters.endpoint_leases import EndpointLeaseUnavailable, EndpointRootResolver
 from mediasync_home.adapters.reparse_guard import LocalReparseGuard, ReparseGuardError
 from mediasync_home.adapters.system_clock import SystemClock
+from mediasync_home.adapters.windows_durability import move_path_write_through
 from mediasync_home.application.clocks import ClockPort
 from mediasync_home.application.ports import (
     CommitReceipt,
@@ -98,7 +99,11 @@ class LabNoOverwriteFinalCommitAdapter(FinalCommitPort):
             final_path=final_path,
             content_hash=artifact.content_hash,
         )
-        return _flushed_file_commit_receipt(artifact=artifact, final_path=final_path)
+        return _flushed_file_commit_receipt(
+            artifact=artifact,
+            final_path=final_path,
+            write_through_move_used=True,
+        )
 
 
 class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
@@ -503,13 +508,21 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
                 final_path=final_path,
                 content_hash=artifact.content_hash,
             )
-            return _flushed_file_commit_receipt(artifact=artifact, final_path=final_path)
+            return _flushed_file_commit_receipt(
+                artifact=artifact,
+                final_path=final_path,
+                write_through_move_used=True,
+            )
         _insert_replacement_payload_without_overwrite(
             staging_payload=staging_payload,
             final_path=final_path,
             content_hash=artifact.content_hash,
         )
-        return _flushed_file_commit_receipt(artifact=artifact, final_path=final_path)
+        return _flushed_file_commit_receipt(
+            artifact=artifact,
+            final_path=final_path,
+            write_through_move_used=True,
+        )
 
     def cleanup_recovery_objects(
         self,
@@ -567,7 +580,11 @@ def _insert_replacement_payload_without_overwrite(
                 "Restage and verify the artifact before attempting replacement.",
             )
         try:
-            os.link(temp_path, final_path)
+            move_path_write_through(
+                temp_path,
+                final_path,
+                replace_existing=False,
+            )
         except FileExistsError as exc:
             raise FinalCommitAdapterError(
                 "LOCAL_REPLACE_FINAL_COMMIT_TARGET_REAPPEARED",
@@ -575,8 +592,8 @@ def _insert_replacement_payload_without_overwrite(
             ) from exc
         except OSError as exc:
             raise FinalCommitAdapterError(
-                "LOCAL_REPLACE_FINAL_COMMIT_NO_OVERWRITE_UNSUPPORTED",
-                "Use an endpoint profile with proven same-volume no-overwrite insert support.",
+                "LOCAL_REPLACE_FINAL_COMMIT_WRITE_THROUGH_MOVE_FAILED",
+                "Keep recovery state and re-probe target write-through move support.",
             ) from exc
     finally:
         temp_path.unlink(missing_ok=True)
@@ -597,7 +614,11 @@ def _restore_version_payload_without_overwrite(
                 "Recover or reconcile the preserved old target payload before restore.",
             )
         try:
-            os.link(temp_path, final_path)
+            move_path_write_through(
+                temp_path,
+                final_path,
+                replace_existing=False,
+            )
         except FileExistsError as exc:
             raise FinalCommitAdapterError(
                 "LOCAL_REPLACE_OLD_TARGET_RESTORE_TARGET_REAPPEARED",
@@ -605,8 +626,8 @@ def _restore_version_payload_without_overwrite(
             ) from exc
         except OSError as exc:
             raise FinalCommitAdapterError(
-                "LOCAL_REPLACE_OLD_TARGET_RESTORE_NO_OVERWRITE_UNSUPPORTED",
-                "Use an endpoint profile with proven same-volume no-overwrite restore support.",
+                "LOCAL_REPLACE_OLD_TARGET_RESTORE_WRITE_THROUGH_MOVE_FAILED",
+                "Keep recovery state and re-probe target write-through move support.",
             ) from exc
     finally:
         temp_path.unlink(missing_ok=True)
@@ -777,7 +798,11 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
             final_path=final_path,
             content_hash=artifact.content_hash,
         )
-        return _flushed_file_commit_receipt(artifact=artifact, final_path=final_path)
+        return _flushed_file_commit_receipt(
+            artifact=artifact,
+            final_path=final_path,
+            write_through_move_used=True,
+        )
 
     def _commit_new_directory(
         self,
@@ -816,6 +841,7 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
                 return _flushed_directory_commit_receipt(
                     artifact=artifact,
                     final_path=final_path,
+                    write_through_move_used=False,
                 )
             raise FinalCommitAdapterError(
                 "LOCAL_DIRECTORY_COMMIT_TARGET_EXISTS",
@@ -834,7 +860,11 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
                 "Restage and verify the directory marker before final commit.",
             )
         try:
-            os.rename(staging_payload, final_path)
+            move_path_write_through(
+                staging_payload,
+                final_path,
+                replace_existing=False,
+            )
         except FileExistsError as exc:
             raise FinalCommitAdapterError(
                 "LOCAL_DIRECTORY_COMMIT_TARGET_REAPPEARED",
@@ -842,12 +872,13 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
             ) from exc
         except OSError as exc:
             raise FinalCommitAdapterError(
-                "LOCAL_DIRECTORY_COMMIT_RENAME_FAILED",
-                "Enter recovery and inspect the staged and final directory marker state.",
+                "LOCAL_DIRECTORY_COMMIT_WRITE_THROUGH_MOVE_FAILED",
+                "Keep recovery state and inspect the staged and final directory marker state.",
             ) from exc
         return _flushed_directory_commit_receipt(
             artifact=artifact,
             final_path=final_path,
+            write_through_move_used=True,
         )
 
     def _cleanup_created_directory_marker(
@@ -1485,7 +1516,11 @@ def _link_verified_payload_without_overwrite(
                 "Restage and verify the artifact before attempting final commit.",
             )
         try:
-            os.link(temp_path, final_path)
+            move_path_write_through(
+                temp_path,
+                final_path,
+                replace_existing=False,
+            )
         except FileExistsError as exc:
             raise FinalCommitAdapterError(
                 "LAB_FINAL_COMMIT_TARGET_EXISTS",
@@ -1493,8 +1528,8 @@ def _link_verified_payload_without_overwrite(
             ) from exc
         except OSError as exc:
             raise FinalCommitAdapterError(
-                "LAB_FINAL_COMMIT_NO_OVERWRITE_UNSUPPORTED",
-                "Use an endpoint profile with proven same-volume no-overwrite insert support.",
+                "LAB_FINAL_COMMIT_WRITE_THROUGH_MOVE_FAILED",
+                "Keep recovery state and re-probe target write-through move support.",
             ) from exc
     finally:
         temp_path.unlink(missing_ok=True)
@@ -1515,7 +1550,11 @@ def _link_local_payload_without_overwrite(
                 "Restage and verify the artifact before attempting final commit.",
             )
         try:
-            os.link(temp_path, final_path)
+            move_path_write_through(
+                temp_path,
+                final_path,
+                replace_existing=False,
+            )
         except FileExistsError as exc:
             raise FinalCommitAdapterError(
                 "LOCAL_FINAL_COMMIT_TARGET_EXISTS",
@@ -1523,8 +1562,8 @@ def _link_local_payload_without_overwrite(
             ) from exc
         except OSError as exc:
             raise FinalCommitAdapterError(
-                "LOCAL_FINAL_COMMIT_NO_OVERWRITE_UNSUPPORTED",
-                "Use an endpoint profile with proven same-volume no-overwrite insert support.",
+                "LOCAL_FINAL_COMMIT_WRITE_THROUGH_MOVE_FAILED",
+                "Keep recovery state and re-probe target write-through move support.",
             ) from exc
     finally:
         temp_path.unlink(missing_ok=True)
@@ -1545,11 +1584,15 @@ def _replace_with_verified_payload(
                 "Restage and verify the artifact before attempting replacement.",
             )
         try:
-            os.replace(temp_path, final_path)
+            move_path_write_through(
+                temp_path,
+                final_path,
+                replace_existing=True,
+            )
         except OSError as exc:
             raise FinalCommitAdapterError(
-                "LOCAL_REPLACE_FINAL_COMMIT_REPLACE_FAILED",
-                "Enter recovery and inspect final, staging and version-object postconditions.",
+                "LOCAL_REPLACE_FINAL_COMMIT_WRITE_THROUGH_MOVE_FAILED",
+                "Keep recovery state and inspect final, staging and version-object postconditions.",
             ) from exc
     finally:
         temp_path.unlink(missing_ok=True)
@@ -2135,14 +2178,19 @@ def _flushed_file_commit_receipt(
     *,
     artifact: VerifiedStagingArtifact,
     final_path: Path,
+    write_through_move_used: bool,
 ) -> CommitReceipt:
     _flush_committed_file(final_path)
     return CommitReceipt(
         operation_id=artifact.object_id,
         final_relative_path=artifact.relative_path,
-        durability_state="LOCAL_FILE_FLUSH_CONFIRMED",
+        durability_state=(
+            "LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED"
+            if write_through_move_used
+            else "LOCAL_FILE_FLUSH_CONFIRMED"
+        ),
         file_flush_succeeded=True,
-        write_through_move_used=False,
+        write_through_move_used=write_through_move_used,
     )
 
 
@@ -2150,16 +2198,19 @@ def _flushed_directory_commit_receipt(
     *,
     artifact: VerifiedStagingArtifact,
     final_path: Path,
+    write_through_move_used: bool,
 ) -> CommitReceipt:
     _flush_committed_file(final_path / DIRECTORY_MARKER_NAME)
     return CommitReceipt(
         operation_id=artifact.object_id,
         final_relative_path=artifact.relative_path,
         durability_state=(
-            "LOCAL_DIRECTORY_MARKER_FLUSH_CONFIRMED_ENTRY_UNCONFIRMED"
+            "LOCAL_DIRECTORY_MARKER_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED"
+            if write_through_move_used
+            else "LOCAL_DIRECTORY_MARKER_FLUSH_CONFIRMED_ENTRY_UNCONFIRMED"
         ),
         file_flush_succeeded=True,
-        write_through_move_used=False,
+        write_through_move_used=write_through_move_used,
     )
 
 

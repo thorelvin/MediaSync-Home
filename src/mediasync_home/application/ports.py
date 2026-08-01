@@ -35,9 +35,14 @@ class CommitReceipt:
         expected_flags = {
             "FINAL_DURABILITY_UNCONFIRMED": (None, None),
             "LOCAL_FILE_FLUSH_CONFIRMED": (True, False),
+            "LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED": (True, True),
             "LOCAL_DIRECTORY_MARKER_FLUSH_CONFIRMED_ENTRY_UNCONFIRMED": (
                 True,
                 False,
+            ),
+            "LOCAL_DIRECTORY_MARKER_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED": (
+                True,
+                True,
             ),
         }
         expected = expected_flags.get(self.durability_state)

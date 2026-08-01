@@ -48,9 +48,11 @@ def test_lab_final_commit_inserts_verified_staging_payload_without_overwrite(tmp
 
     assert receipt.operation_id == "object-a"
     assert receipt.final_relative_path == artifact.relative_path
-    assert receipt.durability_state == "LOCAL_FILE_FLUSH_CONFIRMED"
+    assert receipt.durability_state == (
+        "LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED"
+    )
     assert receipt.file_flush_succeeded is True
-    assert receipt.write_through_move_used is False
+    assert receipt.write_through_move_used is True
     assert (fixture.target_root / "Photos" / "image.jpg").read_bytes() == b"image"
     assert (fixture.staging_root / "object-a.payload").read_bytes() == b"image"
 
@@ -80,6 +82,45 @@ def test_lab_final_commit_flushes_copied_payload_and_final_file(
     )
 
     assert len(flushed_handles) == 2
+
+
+def test_lab_final_commit_stops_when_write_through_publication_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    artifact = fixture.stage(
+        object_id="object-a",
+        relative_path="Photos/image.jpg",
+        payload=b"image",
+    )
+
+    def failing_move(
+        _source: Path,
+        _destination: Path,
+        *,
+        replace_existing: bool,
+    ) -> None:
+        assert replace_existing is False
+        raise OSError("simulated write-through move failure")
+
+    monkeypatch.setattr(
+        final_commit_module,
+        "move_path_write_through",
+        failing_move,
+    )
+
+    with pytest.raises(FinalCommitAdapterError) as exc_info:
+        fixture.adapter.commit_verified_artifact(
+            fixture.lease.issue_mutation_permit(),
+            artifact,
+        )
+
+    assert exc_info.value.validation_code == (
+        "LAB_FINAL_COMMIT_WRITE_THROUGH_MOVE_FAILED"
+    )
+    assert not (fixture.target_root / "Photos" / "image.jpg").exists()
+    assert not tuple((fixture.target_root / "Photos").glob("*.mediasync-commit.tmp"))
 
 
 def test_lab_final_commit_reports_final_flush_failure_after_filesystem_apply(
@@ -627,12 +668,16 @@ def test_local_resolving_directory_commit_recognizes_retry_after_rename(
     first = adapter.commit_verified_artifact(permit, artifact)
     replay = adapter.commit_verified_artifact(permit, artifact)
 
-    assert first == replay
     assert first.durability_state == (
-        "LOCAL_DIRECTORY_MARKER_FLUSH_CONFIRMED_ENTRY_UNCONFIRMED"
+        "LOCAL_DIRECTORY_MARKER_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED"
     )
     assert first.file_flush_succeeded is True
-    assert first.write_through_move_used is False
+    assert first.write_through_move_used is True
+    assert replay.durability_state == (
+        "LOCAL_DIRECTORY_MARKER_FLUSH_CONFIRMED_ENTRY_UNCONFIRMED"
+    )
+    assert replay.file_flush_succeeded is True
+    assert replay.write_through_move_used is False
     assert not staged.exists()
     assert (fixture.target_root / relative_path / DIRECTORY_MARKER_NAME).read_bytes() == marker
 
