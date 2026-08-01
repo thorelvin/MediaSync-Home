@@ -434,6 +434,7 @@ class MediaSyncWindow(QMainWindow):
         self._history_next_button: QToolButton | None = None
         self._history_page_limit = 25
         self._history_page_offset = 0
+        self._history_query_pending = False
         self._history_activity_filter = "ALL"
         self._history_job_id: str | None = None
         self._selected_history_activity_id: str | None = None
@@ -878,26 +879,156 @@ class MediaSyncWindow(QMainWindow):
         self._selected_job_id = None
         self._refresh_backup_overview()
 
-    def _refresh_history_timeline(self) -> None:
+    def _refresh_history_timeline(self, *, background: bool = True) -> None:
         if self._engine_client is None or not hasattr(
             self._engine_client,
             "get_history_timeline",
         ):
+            self._cancel_background_history_query()
             self.apply_history_timeline(empty_history_timeline_state())
             return
+        activity_filter = self._history_activity_filter
+        job_id = self._history_job_id
+        page_limit = self._history_page_limit
+        page_offset = self._history_page_offset
+        if background and self._background_queries is not None:
+
+            def query(client: object) -> object:
+                provider = cast(HistoryTimelineProvider, client)
+                return provider.get_history_timeline(
+                    activity_filter=activity_filter,
+                    job_id=job_id,
+                    limit=page_limit,
+                    offset=page_offset,
+                )
+
+            def accept(response: object) -> None:
+                def apply(value: object) -> None:
+                    self._accept_background_history_response(
+                        response=cast(IpcResponse, value),
+                        activity_filter=activity_filter,
+                        job_id=job_id,
+                        page_offset=page_offset,
+                    )
+
+                if not self._ui_update_coalescer.submit(
+                    channel="history-timeline",
+                    value=response,
+                    apply=apply,
+                ):
+                    apply(response)
+
+            def reject(error: Exception) -> None:
+                self._reject_background_history_response(
+                    error=error,
+                    activity_filter=activity_filter,
+                    job_id=job_id,
+                    page_offset=page_offset,
+                )
+
+            submitted = self._background_queries.submit(
+                key="history-timeline",
+                operation=query,
+                on_result=accept,
+                on_error=reject,
+            )
+            if submitted:
+                self._set_history_query_pending(True)
+            else:
+                reject(RuntimeError("background history query was not accepted"))
+            return
+
         provider = cast(HistoryTimelineProvider, self._engine_client)
-        state = history_timeline_from_response(
+        self._apply_history_response(
             provider.get_history_timeline(
-                activity_filter=self._history_activity_filter,
-                job_id=self._history_job_id,
-                limit=self._history_page_limit,
-                offset=self._history_page_offset,
+                activity_filter=activity_filter,
+                job_id=job_id,
+                limit=page_limit,
+                offset=page_offset,
             )
         )
+
+    def _accept_background_history_response(
+        self,
+        *,
+        response: IpcResponse,
+        activity_filter: str,
+        job_id: str | None,
+        page_offset: int,
+    ) -> None:
+        if not self._history_query_context_matches(
+            activity_filter=activity_filter,
+            job_id=job_id,
+            page_offset=page_offset,
+        ):
+            return
+        self._set_history_query_pending(False)
+        self._apply_history_response(response)
+
+    def _reject_background_history_response(
+        self,
+        *,
+        error: Exception,
+        activity_filter: str,
+        job_id: str | None,
+        page_offset: int,
+    ) -> None:
+        del error
+        if not self._history_query_context_matches(
+            activity_filter=activity_filter,
+            job_id=job_id,
+            page_offset=page_offset,
+        ):
+            return
+        self._set_history_query_pending(False)
+        self.apply_engine_status(
+            replace(
+                self._engine_status_state,
+                detail=self._texts().history_unavailable,
+                status_kind="warning",
+            )
+        )
+
+    def _history_query_context_matches(
+        self,
+        *,
+        activity_filter: str,
+        job_id: str | None,
+        page_offset: int,
+    ) -> bool:
+        return (
+            self._history_activity_filter == activity_filter
+            and self._history_job_id == job_id
+            and self._history_page_offset == page_offset
+        )
+
+    def _apply_history_response(self, response: IpcResponse) -> None:
+        state = history_timeline_from_response(response)
         activity_ids = {activity.selection_key for activity in state.activities}
         if self._selected_history_activity_id not in activity_ids:
             self._selected_history_activity_id = state.selected_activity_id
         self.apply_history_timeline(state)
+
+    def _cancel_background_history_query(self) -> None:
+        if self._background_queries is not None:
+            self._background_queries.cancel("history-timeline")
+        self._ui_update_coalescer.cancel("history-timeline")
+        self._set_history_query_pending(False)
+
+    def _set_history_query_pending(self, pending: bool) -> None:
+        self._history_query_pending = pending
+        if self._history_previous_button is not None:
+            self._history_previous_button.setEnabled(
+                not pending and self._history_page_offset > 0
+            )
+        if self._history_next_button is not None:
+            self._history_next_button.setEnabled(
+                not pending and self._history_timeline_state.has_more
+            )
+        if self._history_list is not None:
+            self._history_list.setEnabled(
+                not pending and self._history_timeline_state.read_model_available
+            )
 
     def _apply_history_timeline_state(self, state: HistoryTimelineViewState) -> None:
         history_list = self._history_list
@@ -932,7 +1063,9 @@ class MediaSyncWindow(QMainWindow):
 
         has_activities = bool(state.activities)
         history_list.setVisible(state.read_model_available and has_activities)
-        history_list.setEnabled(state.read_model_available)
+        history_list.setEnabled(
+            state.read_model_available and not self._history_query_pending
+        )
         if self._history_empty_label is not None:
             self._history_empty_label.setText(
                 self._texts().history_empty
@@ -947,7 +1080,9 @@ class MediaSyncWindow(QMainWindow):
             last = state.offset + len(state.activities)
             self._history_page_label.setText(f"{first}-{last}")
         if self._history_previous_button is not None:
-            self._history_previous_button.setEnabled(state.offset > 0)
+            self._history_previous_button.setEnabled(
+                not self._history_query_pending and state.offset > 0
+            )
             self._history_previous_button.setToolTip(
                 self._texts().previous_page_tooltip
             )
@@ -955,7 +1090,9 @@ class MediaSyncWindow(QMainWindow):
                 self._texts().previous_page_tooltip
             )
         if self._history_next_button is not None:
-            self._history_next_button.setEnabled(state.has_more)
+            self._history_next_button.setEnabled(
+                not self._history_query_pending and state.has_more
+            )
             self._history_next_button.setToolTip(self._texts().next_page_tooltip)
             self._history_next_button.setAccessibleName(
                 self._texts().next_page_tooltip
@@ -1011,7 +1148,7 @@ class MediaSyncWindow(QMainWindow):
         self._refresh_history_timeline()
 
     def _show_previous_history_page(self) -> None:
-        if self._history_page_offset <= 0:
+        if self._history_query_pending or self._history_page_offset <= 0:
             return
         self._history_page_offset = max(
             0,
@@ -1021,7 +1158,7 @@ class MediaSyncWindow(QMainWindow):
         self._refresh_history_timeline()
 
     def _show_next_history_page(self) -> None:
-        if not self._history_timeline_state.has_more:
+        if self._history_query_pending or not self._history_timeline_state.has_more:
             return
         self._history_page_offset += self._history_page_limit
         self._selected_history_activity_id = None

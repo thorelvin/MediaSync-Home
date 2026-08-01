@@ -1,18 +1,20 @@
 # Kravsporbarhet
 
 Oppdatering 2026-07-31 for `UX-002`, `UX-004` og `PERF-001`: Interaktive
-filter- og sidequeryer i Jobber > Endringer kjører nå utenfor GUI-tråden når
-produktets Engine-client-factory er tilgjengelig. Kontrolleren har én aktiv
-worker, maksimalt fire ventende querynøkler, latest-wins-erstatning per nøkkel,
-eksplisitt overflowavvisning og logical cancellation ved plan-/vindusbytte.
-Stale resultater kan ikke overskrive nyere filterkontekst, sidepilene kan ikke
-dobbelklikkes mens en side er på vei, og en sen worker kan avslutte uten å
-oppdatere et lukket vindu. Den sentrale `UiUpdateCoalescer` har maksimalt 16
-rekonstruerbare kanaler og anvender bare siste verdi per kanal ved høyst 4 Hz.
-GUI-testen holder første query blokkert, navigerer med et reelt klikk, sender
-to nyere filtervalg og beviser én serialisert latest-query og bare siste side i
-900×560. Virtuelle tabeller og bredere initial-/oversiktsqueryer i bakgrunnen
-gjenstår. Bevis: `src/mediasync_home/presentation/background_queries.py`,
+filter- og sidequeryer i Jobber > Endringer og Historikk kjører nå utenfor
+GUI-tråden når produktets Engine-client-factory er tilgjengelig. Kontrolleren
+har én aktiv worker, maksimalt fire ventende querynøkler,
+latest-wins-erstatning per nøkkel, eksplisitt overflowavvisning og logical
+cancellation ved plan-/vindusbytte. Stale resultater kan ikke overskrive nyere
+filter- eller sidekontekst, sidepilene og resultatlisten kan ikke aktiveres mens
+en side er på vei, og en sen worker kan avslutte uten å oppdatere et lukket
+vindu. Filtre, språkvalg og navigasjon forblir responsive. Den sentrale
+`UiUpdateCoalescer` har maksimalt 16 rekonstruerbare kanaler og anvender bare
+siste verdi per kanal ved høyst 4 Hz. GUI-testene holder queryer blokkert,
+navigerer med reelle klikk, sender to nyere filtervalg og beviser én serialisert
+latest-query og bare siste side i 900×560 uten horisontal clipping. Virtuelle
+tabeller og bredere initial-/oversiktsqueryer i bakgrunnen gjenstår. Bevis:
+`src/mediasync_home/presentation/background_queries.py`,
 `src/mediasync_home/presentation/main_window.py`,
 `src/mediasync_home/presentation/view_models/localization.py` og
 `tests/gui/test_pyside_shell.py`.

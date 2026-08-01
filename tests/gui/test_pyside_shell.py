@@ -1780,6 +1780,129 @@ def test_history_workspace_pages_with_bounded_offsets(qapp) -> None:
         window.deleteLater()
 
 
+def test_history_query_stall_keeps_navigation_and_latest_filter_responsive(
+    qapp,
+) -> None:
+    provider = _FakePagedHistoryEngineClient()
+    worker_provider = _BlockingPagedHistoryEngineClient(block_call_no=2)
+    factory_calls: list[bool] = []
+
+    def worker_factory() -> _BlockingPagedHistoryEngineClient:
+        factory_calls.append(True)
+        return worker_provider
+
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=worker_factory,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window._refresh_history_timeline(background=False)
+        qapp.processEvents()
+        nav = window.findChild(QListWidget, "navigationRail")
+        history_list = window.findChild(QListWidget, "historyList")
+        history_scroll = window.findChild(QScrollArea, "historyScrollArea")
+        previous = window.findChild(QToolButton, "historyPreviousButton")
+        next_button = window.findChild(QToolButton, "historyNextButton")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+        controls = window._history_filter_buttons["CONTROLS"]
+        backups = window._history_filter_buttons["BACKUPS"]
+
+        assert nav is not None
+        assert history_list is not None
+        assert history_scroll is not None
+        assert previous is not None
+        assert next_button is not None
+        assert language is not None and language.menu() is not None
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(2)).center(),
+        )
+
+        assert window._background_queries is not None
+
+        def initial_query_settled() -> bool:
+            return (
+                len(worker_provider.history_queries) == 1
+                and not window._background_queries.active
+                and window._ui_update_coalescer.pending_count == 0
+            )
+
+        deadline = monotonic() + 3
+        while not initial_query_settled() and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        assert initial_query_settled()
+        assert next_button.isEnabled()
+
+        QTest.mouseClick(next_button, Qt.MouseButton.LeftButton)
+        assert worker_provider.started.wait(timeout=1)
+        qapp.processEvents()
+
+        assert not worker_provider.release.is_set()
+        assert not previous.isEnabled()
+        assert not next_button.isEnabled()
+        assert not history_list.isEnabled()
+        assert controls.isEnabled() and backups.isEnabled()
+
+        QTest.mouseClick(controls, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(backups, Qt.MouseButton.LeftButton)
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+
+        assert backups.text() == "Backup runs"
+        assert backups.isChecked()
+        assert history_scroll.horizontalScrollBar().maximum() == 0
+        assert window._background_queries.pending_count == 1
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(3)).center(),
+        )
+        qapp.processEvents()
+        assert nav.currentRow() == 3
+        assert not worker_provider.release.is_set()
+
+        worker_provider.release.set()
+
+        def latest_query_settled() -> bool:
+            return (
+                len(worker_provider.history_queries) == 3
+                and not window._background_queries.active
+                and window._ui_update_coalescer.pending_count == 0
+                and window._history_timeline_state.activity_filter == "BACKUPS"
+                and window._history_timeline_state.offset == 0
+            )
+
+        deadline = monotonic() + 3
+        while not latest_query_settled() and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        assert latest_query_settled()
+
+        assert worker_provider.max_active == 1
+        assert len(factory_calls) == 1
+        assert worker_provider.history_queries == [
+            ("ALL", None, 25, 0),
+            ("ALL", None, 25, 25),
+            ("BACKUPS", None, 25, 0),
+        ]
+        assert history_list.count() == 1
+        assert history_list.item(0).data(Qt.ItemDataRole.UserRole) == "BACKUP:run-a"
+        assert history_list.isEnabled()
+        assert not previous.isEnabled()
+        assert next_button.isEnabled()
+    finally:
+        worker_provider.release.set()
+        window.close()
+        window.deleteLater()
+
+
 def test_history_file_results_page_with_bounded_plan_cursors(qapp) -> None:
     provider = _FakePagedHistoryOperationsEngineClient()
     window = build_main_window(
@@ -3898,6 +4021,46 @@ class _FakePagedHistoryEngineClient(_FakeHistoryEngineClient):
                 }
             }
         )
+
+
+class _BlockingPagedHistoryEngineClient(_FakePagedHistoryEngineClient):
+    def __init__(self, *, block_call_no: int) -> None:
+        super().__init__()
+        self.block_call_no = block_call_no
+        self.started = Event()
+        self.release = Event()
+        self._worker_lock = Lock()
+        self._started_calls = 0
+        self._active_calls = 0
+        self.max_active = 0
+
+    def get_history_timeline(
+        self,
+        *,
+        activity_filter: str | None = None,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        with self._worker_lock:
+            self._started_calls += 1
+            call_no = self._started_calls
+            self._active_calls += 1
+            self.max_active = max(self.max_active, self._active_calls)
+        try:
+            if call_no == self.block_call_no:
+                self.started.set()
+                if not self.release.wait(timeout=5):
+                    raise TimeoutError("test query release timed out")
+            return super().get_history_timeline(
+                activity_filter=activity_filter,
+                job_id=job_id,
+                limit=limit,
+                offset=offset,
+            )
+        finally:
+            with self._worker_lock:
+                self._active_calls -= 1
 
 
 class _FakePagedHistoryOperationsEngineClient(_FakeHistoryEngineClient):
