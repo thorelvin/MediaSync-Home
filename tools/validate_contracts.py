@@ -763,6 +763,41 @@ def _validate_source_file_precondition_invariant(
         fail(f"SRC-001 source-file precondition contract drifted: {drifted}")
 
 
+def _validate_retained_version_expiry_invariant(invariant: dict[str, Any]) -> None:
+    if invariant.get("requirement_id") != "DB-004":
+        fail("retained-version expiry invariant must reference DB-004")
+    expected_tables = {
+        "root_table": "retained_version_objects",
+        "plan_table": "version_retention_plans",
+        "item_table": "version_retention_items",
+        "hold_table": "version_retention_holds",
+        "event_table": "version_retention_events",
+    }
+    if any(invariant.get(key) != value for key, value in expected_tables.items()):
+        fail("DB-004 retained-version expiry table boundary drifted")
+    required_guards = (
+        "immutable_root_bindings",
+        "immutable_plan_manifest",
+        "immutable_plan_items",
+        "append_only_events",
+        "requires_active_job",
+        "excludes_active_holds",
+        "requires_exact_cleaned_recovery_reference",
+        "rechecks_before_delete_intent",
+        "filesystem_delete_requires_fresh_mutation_permit",
+        "manifest_and_payload_verified_before_delete",
+    )
+    if any(invariant.get(key) is not True for key in required_guards):
+        fail("DB-004 retained-version expiry safety guard drifted")
+    if invariant.get("delete_root_rows") is not False:
+        fail("DB-004 retained-version roots must remain as terminal evidence")
+    if _column_tuple(
+        invariant.get("crash_resume_states"),
+        "DB-004 crash_resume_states",
+    ) != ("DELETE_INTENT_RECORDED", "FILESYSTEM_DELETED"):
+        fail("DB-004 retained-version crash resume states drifted")
+
+
 def validate_state_machines(document: dict[str, Any]) -> int:
     if document.get("schema_version") != 1:
         fail("state-machines.yaml schema_version must be 1")
@@ -840,6 +875,7 @@ def validate_database_contract(document: dict[str, Any]) -> int:
         "ARC-005_IMMUTABLE_REVISION_GUARDS",
         "CTRL-001_WRITABLE_ENDPOINT_REGISTRATION",
         "DB-001_FILE_ENTRIES_COMPARISON_KEY_IS_NON_UNIQUE",
+        "DB-004_RETAINED_VERSION_EXPIRY",
         "DB-006_ENDPOINT_HEADS_ARE_SEPARATE",
         "DB-006_JOB_HEADS_ARE_SEPARATE",
         "DB-007_PARENT_SCOPE_COMPOSITE_KEYS",
@@ -884,6 +920,9 @@ def validate_database_contract(document: dict[str, Any]) -> int:
     )
     _validate_source_file_precondition_invariant(
         invariant_by_id["SRC-001_SOURCE_FILE_PRECONDITION"]
+    )
+    _validate_retained_version_expiry_invariant(
+        invariant_by_id["DB-004_RETAINED_VERSION_EXPIRY"]
     )
     _validate_parent_scope_invariant(invariant_by_id["DB-007_PARENT_SCOPE_COMPOSITE_KEYS"])
     return len(invariants)

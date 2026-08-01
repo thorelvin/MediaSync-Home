@@ -212,6 +212,9 @@ def _operation() -> RecoveryOperation:
         fencing_token=1,
         final_relative_path="Photos/image.jpg",
         target_precondition_kind=RecoveryTargetPreconditionKind.ABSENT,
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        retention_policy="THIRTY_DAYS",
     )
 
 

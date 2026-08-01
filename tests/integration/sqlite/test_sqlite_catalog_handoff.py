@@ -27,6 +27,7 @@ from mediasync_home.adapters.sqlite.recovery_operations import SqliteRecoveryOpe
 from mediasync_home.application.catalog_handoff import (
     CatalogHandoffReconciliationStatus,
     FinalFileCatalogHandoff,
+    RetainedVersionCatalogHandoff,
     reconcile_catalog_handoffs_after_startup,
     record_catalog_handoff_after_final_verification,
 )
@@ -54,6 +55,65 @@ def test_sqlite_final_file_catalog_handoff_store_is_idempotent(
         assert _row_count(connection, "final_file_catalog_handoffs") == 1
         with pytest.raises(SqliteCatalogHandoffStoreError, match="IDEMPOTENCY_CONFLICT"):
             store.record_final_file_handoff(replace(handoff, content_hash="b" * 64))
+    finally:
+        connection.close()
+
+
+def test_sqlite_catalog_handoff_atomically_registers_retained_version(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_catalog_connection(tmp_path)
+    try:
+        store = SqliteFinalFileCatalogHandoffStore(connection)
+        handoff = _versioned_handoff()
+
+        recorded = store.record_final_file_handoff(handoff)
+
+        assert recorded == handoff
+        assert store.load_final_file_handoff(handoff.handoff_id) == handoff
+        row = connection.execute(
+            """
+            SELECT state, retention_until_utc, manifest_hash, row_version
+            FROM retained_version_objects
+            WHERE version_object_id = ?
+            """,
+            ("operation-a",),
+        ).fetchone()
+        assert row == ("RETAINED", "2026-08-31T10:00:00.000Z", "d" * 64, 1)
+
+        with pytest.raises(sqlite3.IntegrityError, match="RETAINED_VERSION_BINDING_IMMUTABLE"):
+            connection.execute(
+                """
+                UPDATE retained_version_objects
+                SET manifest_hash = ?
+                WHERE version_object_id = ?
+                """,
+                ("e" * 64, "operation-a"),
+            )
+    finally:
+        connection.close()
+
+
+def test_sqlite_retained_version_conflict_rolls_back_final_handoff(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_catalog_connection(tmp_path)
+    try:
+        store = SqliteFinalFileCatalogHandoffStore(connection)
+        store.record_final_file_handoff(_versioned_handoff())
+        conflicting = replace(
+            _versioned_handoff(),
+            handoff_id="final-file:run-a:operation-b",
+            operation_id="operation-b",
+            final_relative_path="Photos/other.jpg",
+        )
+
+        with pytest.raises(SqliteCatalogHandoffStoreError, match="PERSISTENCE_CONFLICT"):
+            store.record_final_file_handoff(conflicting)
+
+        assert store.load_final_file_handoff(conflicting.handoff_id) is None
+        assert _row_count(connection, "final_file_catalog_handoffs") == 1
+        assert _row_count(connection, "retained_version_objects") == 1
     finally:
         connection.close()
 
@@ -356,6 +416,25 @@ def _handoff() -> FinalFileCatalogHandoff:
         content_hash="a" * 64,
         lease_id="lease-a",
         fencing_token=1,
+    )
+
+
+def _versioned_handoff() -> FinalFileCatalogHandoff:
+    return replace(
+        _handoff(),
+        retained_version=RetainedVersionCatalogHandoff(
+            version_object_id="operation-a",
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            endpoint_generation=2,
+            owner_installation_id="owner-a",
+            ownership_epoch=3,
+            original_fingerprint_json='{"byte_count":9,"content_hash":"' + ("b" * 64) + '"}',
+            created_utc="2026-08-01T10:00:00.000Z",
+            retention_policy="THIRTY_DAYS",
+            retention_until_utc="2026-08-31T10:00:00.000Z",
+            manifest_hash="d" * 64,
+        ),
     )
 
 

@@ -88,10 +88,20 @@ class JournaledFinalCommitPort(FinalCommitPort):
                     "fingerprint_json": preservation_receipt.fingerprint_json,
                     "quarantine_object_id": preservation_receipt.quarantine_object_id,
                     "version_object_id": preservation_receipt.version_object_id,
+                    "version_created_utc": preservation_receipt.version_created_utc,
+                    "version_retention_until_utc": (
+                        preservation_receipt.version_retention_until_utc
+                    ),
+                    "version_manifest_hash": preservation_receipt.version_manifest_hash,
                 },
                 operation_metadata=RecoveryOperationMetadata(
                     quarantine_object_id=preservation_receipt.quarantine_object_id,
                     version_object_id=preservation_receipt.version_object_id,
+                    version_created_utc=preservation_receipt.version_created_utc,
+                    version_retention_until_utc=(
+                        preservation_receipt.version_retention_until_utc
+                    ),
+                    version_manifest_hash=preservation_receipt.version_manifest_hash,
                 ),
             )
         try:
@@ -298,6 +308,18 @@ def _validate_preservation_receipt(
         raise JournaledFinalCommitError(
             "RECOVERY_COMMIT_PRESERVATION_REQUIRES_OBJECT_ID",
             "Record the preserved old target as a version or quarantine object before replacement.",
+        )
+    if receipt.version_object_id is not None and not all(
+        isinstance(value, str) and bool(value.strip())
+        for value in (
+            receipt.version_created_utc,
+            receipt.version_retention_until_utc,
+            receipt.version_manifest_hash,
+        )
+    ):
+        raise JournaledFinalCommitError(
+            "RECOVERY_COMMIT_PRESERVATION_REQUIRES_VERSION_METADATA",
+            "Record the version creation time, retention boundary and manifest hash before replacement.",
         )
 
 

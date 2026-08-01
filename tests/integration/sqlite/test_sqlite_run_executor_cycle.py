@@ -895,6 +895,9 @@ def test_sqlite_run_executor_cycle_replaces_existing_target_from_match_fingerpri
         assert operation.phase is RecoveryOperationPhase.CLEANED
         assert operation.target_precondition_kind is RecoveryTargetPreconditionKind.MATCH_FINGERPRINT
         assert operation.version_object_id == "op-a"
+        assert operation.version_created_utc is not None
+        assert operation.version_retention_until_utc is not None
+        assert operation.version_manifest_hash is not None
         assert operation.expected_target_fingerprint_json == json.dumps(
             {
                 "byte_count": len(old_payload),
@@ -910,6 +913,14 @@ def test_sqlite_run_executor_cycle_replaces_existing_target_from_match_fingerpri
         assert json.loads(version_manifest.read_text(encoding="utf-8"))["object_role"] == "OLD_TARGET_VERSION"
         assert handoff is not None
         assert handoff.content_hash == content_hash
+        assert handoff.retained_version is not None
+        assert handoff.retained_version.version_object_id == "op-a"
+        assert handoff.retained_version.job_id == "job-a"
+        assert handoff.retained_version.job_revision_id == "job-rev-a"
+        assert handoff.retained_version.manifest_hash == operation.version_manifest_hash
+        assert catalog_connection.execute(
+            "SELECT state FROM retained_version_objects WHERE version_object_id = 'op-a'"
+        ).fetchone() == ("RETAINED",)
     finally:
         catalog_connection.close()
         recovery_connection.close()

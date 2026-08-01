@@ -210,6 +210,12 @@ def test_local_versioned_replace_preserves_old_target_then_replaces_with_verifie
     manifest = json.loads(version_manifest.read_text(encoding="utf-8"))
     assert manifest["object_role"] == "OLD_TARGET_VERSION"
     assert manifest["operation_id"] == "operation-a"
+    assert manifest["job_id"] == "job-a"
+    assert manifest["job_revision_id"] == "job-rev-a"
+    assert manifest["retention_policy"] == "THIRTY_DAYS"
+    assert preservation.version_created_utc == manifest["created_utc"]
+    assert preservation.version_retention_until_utc == manifest["retention_until_utc"]
+    assert preservation.version_manifest_hash == manifest["manifest_hash"]
     assert manifest["fingerprint"] == {
         "byte_count": len(b"old-image"),
         "content_hash": _sha256(b"old-image"),
@@ -957,6 +963,9 @@ def _replace_operation(
             fencing_token=fixture.lease.fencing_token,
             final_relative_path="Photos/image.jpg",
             target_precondition_kind=RecoveryTargetPreconditionKind.MATCH_FINGERPRINT,
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            retention_policy="THIRTY_DAYS",
         ),
         phase=RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
         intent_segment_id="segment-a",

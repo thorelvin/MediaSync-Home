@@ -5380,6 +5380,28 @@ Read model/audit for objectbaserte versions-/quarantine-/recoveryartefakter ette
 
 Fysisk path skal være kort og ID-basert. `original_relative_path` er metadata og brukes ikke til å konstruere kontrollstien.
 
+#### `retained_version_objects` and `version_retention_*`
+
+Catalog migrations 44-45 implement the first executable reference-driven
+retention branch for preserved old target files. `retained_version_objects`
+stores immutable job/run/operation, endpoint revision/generation, owner/epoch,
+logical path, fingerprint, policy, due time and manifest-hash bindings. Rows are
+never deleted; their state advances through `RETAINED`, `DELETE_PENDING` and
+`DELETED`, or is held for reconciliation.
+
+`version_retention_plans` and `version_retention_items` bind a canonical
+self-hashed candidate set before any filesystem delete. `version_retention_holds`
+removes active holds from planning, and append-only `version_retention_events`
+records plan creation, delete intent, filesystem completion and catalog
+completion. Planning excludes archived jobs and recovery-protected versions.
+Application rechecks those conditions before delete intent, acquires a fresh
+endpoint lease, validates the exact target-side manifest and payload, and then
+deletes only that pair. A crash after delete intent or filesystem deletion
+resumes from the durable item state without inventing a clean retained object.
+Recovery migration 11 supplies the exact job/policy/time/manifest binding used
+for the cross-store release check. Quarantine and general catalog retention stay
+outside this version-expiry branch.
+
 #### `run_metrics`
 
 - `run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE RESTRICT`
@@ -7342,6 +7364,20 @@ Regler:
 - restore løser original relative path fra manifestet, kjører full SafePath-/owner-/preconditionkontroll og bruker egen recoveryoperasjon;
 - retention kan ikke fjerne objekt som refereres av aktiv recovery, unresolved outcome eller hold;
 - rydding kjører som separat command/run-target med egen lease, plan, audit og diskplasskontroll.
+
+0B implementation note: preserved versions now carry a canonical SHA-256
+self-hashed manifest bound to job/revision, run/target/operation, endpoint
+revision/generation, owner/epoch, original fingerprint, creation time and exact
+30-day expiry. Catalog migration 44 registers that immutable root atomically
+with final-file handoff. Migration 45 creates immutable expiry plans/items,
+holds and append-only events. The maintenance worker first resumes any existing
+delete journal, otherwise plans due roots, proves the matching recovery
+operation is exactly `CLEANED`, rechecks active-job/hold state, acquires a fresh
+endpoint permit, verifies the manifest/payload pair and records delete intent
+before removing bytes. `FILESYSTEM_DELETED` completes idempotently after a
+crash; a partial deletion keeps its intent journal for reconciliation. Archived
+jobs, active holds, active/mismatched recovery references, manifest drift and
+payload drift all fail closed.
 
 ### 17.5 Karantene som opaque managed objects og compare-and-swap
 

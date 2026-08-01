@@ -625,6 +625,9 @@ def _planned_operation():
         fencing_token=1,
         final_relative_path="Pictures/A.jpg",
         target_precondition_kind=RecoveryTargetPreconditionKind.ABSENT,
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        retention_policy="THIRTY_DAYS",
     )
 
 
@@ -863,7 +866,12 @@ def _record_old_target_preserved_operation(
         expected_phase=operation.phase,
         next_phase=RecoveryOperationPhase.OLD_TARGET_PRESERVED,
         process_instance_id="host-a",
-        operation_metadata=RecoveryOperationMetadata(version_object_id="version-a"),
+        operation_metadata=RecoveryOperationMetadata(
+            version_object_id="version-a",
+            version_created_utc="2026-08-01T00:00:00.000Z",
+            version_retention_until_utc="2026-08-31T00:00:00.000Z",
+            version_manifest_hash="c" * 64,
+        ),
     )
     assert updated is not None
     return updated
@@ -878,6 +886,16 @@ def _catalog_resume_operation(
         _planned_operation(),
         target_precondition_kind=target_precondition_kind,
         staging_object_id="op-a",
+        expected_target_fingerprint_json=(
+            json.dumps(
+                {"byte_count": 128, "content_hash": content_hash},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if target_precondition_kind
+            is RecoveryTargetPreconditionKind.MATCH_FINGERPRINT
+            else None
+        ),
         expected_final_fingerprint_json=json.dumps(
             {"byte_count": 128, "content_hash": content_hash},
             sort_keys=True,

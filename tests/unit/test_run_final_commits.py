@@ -393,6 +393,9 @@ class _FakeOldTargetPreservationPort:
             final_relative_path=RelativePath(operation.final_relative_path),
             version_object_id="version-a",
             fingerprint_json='{"content_hash":"' + ("b" * 64) + '"}',
+            version_created_utc="2026-08-01T00:00:00.000Z",
+            version_retention_until_utc="2026-08-31T00:00:00.000Z",
+            version_manifest_hash="c" * 64,
         )
 
 
@@ -419,6 +422,9 @@ def _operation(*, lease_id: str = "lease-a") -> RecoveryOperation:
             fencing_token=1,
             final_relative_path="Pictures/A.jpg",
             target_precondition_kind=RecoveryTargetPreconditionKind.ABSENT,
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            retention_policy="THIRTY_DAYS",
         ),
         phase=RecoveryOperationPhase.COMMIT_INTENT_RECORDED,
         staging_object_id="op-a",

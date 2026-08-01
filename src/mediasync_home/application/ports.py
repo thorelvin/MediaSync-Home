@@ -36,6 +36,9 @@ class OldTargetPreservationReceipt:
     version_object_id: str | None = None
     quarantine_object_id: str | None = None
     fingerprint_json: str | None = None
+    version_created_utc: str | None = None
+    version_retention_until_utc: str | None = None
+    version_manifest_hash: str | None = None
 
 
 @dataclass(frozen=True)

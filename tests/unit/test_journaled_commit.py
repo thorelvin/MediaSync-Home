@@ -511,6 +511,9 @@ class _FakeOldTargetPreservationPort:
             final_relative_path=RelativePath(operation.final_relative_path),
             version_object_id="version-a",
             fingerprint_json='{"byte_count":5,"content_hash":"' + ("b" * 64) + '"}',
+            version_created_utc="2026-08-01T10:00:00.000Z",
+            version_retention_until_utc="2026-08-31T10:00:00.000Z",
+            version_manifest_hash="c" * 64,
         )
 
 

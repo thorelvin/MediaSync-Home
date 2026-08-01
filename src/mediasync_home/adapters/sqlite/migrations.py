@@ -253,6 +253,16 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_job_lifecycle",
                 statements=CATALOG_JOB_LIFECYCLE,
             ),
+            SqliteMigration(
+                version=44,
+                name="catalog_retained_version_objects",
+                statements=CATALOG_RETAINED_VERSION_OBJECTS,
+            ),
+            SqliteMigration(
+                version=45,
+                name="catalog_version_retention_plans",
+                statements=CATALOG_VERSION_RETENTION_PLANS,
+            ),
         ),
     )
 
@@ -310,6 +320,11 @@ def recovery_migration_plan() -> SqliteMigrationPlan:
                 version=10,
                 name="recovery_staging_retry_timing",
                 statements=RECOVERY_STAGING_RETRY_TIMING,
+            ),
+            SqliteMigration(
+                version=11,
+                name="recovery_version_retention_metadata",
+                statements=RECOVERY_VERSION_RETENTION_METADATA,
             ),
         ),
     )
@@ -3054,6 +3069,239 @@ CATALOG_JOB_LIFECYCLE = (
     """,
 )
 
+CATALOG_RETAINED_VERSION_OBJECTS = (
+    """
+    CREATE TABLE retained_version_objects (
+        version_object_id TEXT PRIMARY KEY,
+        handoff_id TEXT NOT NULL UNIQUE,
+        run_id TEXT NOT NULL,
+        run_target_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        job_id TEXT NOT NULL,
+        job_revision_id TEXT NOT NULL,
+        target_endpoint_id TEXT NOT NULL,
+        target_endpoint_revision_id TEXT NOT NULL,
+        endpoint_generation INTEGER NOT NULL CHECK (endpoint_generation >= 1),
+        owner_installation_id TEXT NOT NULL,
+        ownership_epoch INTEGER NOT NULL CHECK (ownership_epoch >= 1),
+        final_relative_path TEXT NOT NULL,
+        original_fingerprint_json TEXT NOT NULL,
+        created_utc TEXT NOT NULL,
+        retention_policy TEXT NOT NULL CHECK (retention_policy = 'THIRTY_DAYS'),
+        retention_until_utc TEXT NOT NULL,
+        manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+        state TEXT NOT NULL DEFAULT 'RETAINED' CHECK (
+            state IN ('RETAINED', 'DELETE_PENDING', 'DELETED', 'BLOCKED')
+        ),
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+        deletion_plan_id TEXT,
+        deleted_utc TEXT,
+        last_validation_code TEXT,
+        FOREIGN KEY (handoff_id)
+            REFERENCES final_file_catalog_handoffs (handoff_id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_retained_version_objects_due
+        ON retained_version_objects (state, retention_until_utc, version_object_id)
+    """,
+    """
+    CREATE INDEX idx_retained_version_objects_job_state
+        ON retained_version_objects (job_id, state, version_object_id)
+    """,
+    """
+    CREATE INDEX idx_retained_version_objects_endpoint_state
+        ON retained_version_objects (
+            target_endpoint_id,
+            target_endpoint_revision_id,
+            state,
+            version_object_id
+        )
+    """,
+    """
+    CREATE TRIGGER trg_retained_version_objects_immutable_binding
+    BEFORE UPDATE ON retained_version_objects
+    WHEN
+        NEW.version_object_id IS NOT OLD.version_object_id
+        OR NEW.handoff_id IS NOT OLD.handoff_id
+        OR NEW.run_id IS NOT OLD.run_id
+        OR NEW.run_target_id IS NOT OLD.run_target_id
+        OR NEW.operation_id IS NOT OLD.operation_id
+        OR NEW.job_id IS NOT OLD.job_id
+        OR NEW.job_revision_id IS NOT OLD.job_revision_id
+        OR NEW.target_endpoint_id IS NOT OLD.target_endpoint_id
+        OR NEW.target_endpoint_revision_id IS NOT OLD.target_endpoint_revision_id
+        OR NEW.endpoint_generation IS NOT OLD.endpoint_generation
+        OR NEW.owner_installation_id IS NOT OLD.owner_installation_id
+        OR NEW.ownership_epoch IS NOT OLD.ownership_epoch
+        OR NEW.final_relative_path IS NOT OLD.final_relative_path
+        OR NEW.original_fingerprint_json IS NOT OLD.original_fingerprint_json
+        OR NEW.created_utc IS NOT OLD.created_utc
+        OR NEW.retention_policy IS NOT OLD.retention_policy
+        OR NEW.retention_until_utc IS NOT OLD.retention_until_utc
+        OR NEW.manifest_hash IS NOT OLD.manifest_hash
+    BEGIN
+        SELECT RAISE(ABORT, 'RETAINED_VERSION_BINDING_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_retained_version_objects_no_delete
+    BEFORE DELETE ON retained_version_objects
+    BEGIN
+        SELECT RAISE(ABORT, 'RETAINED_VERSION_RECORD_REQUIRED');
+    END
+    """,
+)
+
+CATALOG_VERSION_RETENTION_PLANS = (
+    """
+    CREATE TABLE version_retention_holds (
+        hold_id TEXT PRIMARY KEY,
+        version_object_id TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        created_utc TEXT NOT NULL,
+        expires_utc TEXT,
+        released_utc TEXT,
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+        FOREIGN KEY (version_object_id)
+            REFERENCES retained_version_objects (version_object_id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX uq_version_retention_holds_active_object
+        ON version_retention_holds (version_object_id)
+        WHERE released_utc IS NULL
+    """,
+    """
+    CREATE TABLE version_retention_plans (
+        plan_id TEXT PRIMARY KEY,
+        cutoff_utc TEXT NOT NULL,
+        created_utc TEXT NOT NULL,
+        candidate_count INTEGER NOT NULL CHECK (candidate_count >= 1),
+        manifest_json TEXT NOT NULL,
+        manifest_hash TEXT NOT NULL CHECK (length(manifest_hash) = 64),
+        state TEXT NOT NULL CHECK (
+            state IN ('PLANNED', 'APPLYING', 'COMPLETED', 'BLOCKED')
+        ),
+        completed_utc TEXT,
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1)
+    )
+    """,
+    """
+    CREATE TABLE version_retention_items (
+        plan_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        version_object_id TEXT NOT NULL,
+        expected_object_row_version INTEGER NOT NULL CHECK (
+            expected_object_row_version >= 2
+        ),
+        expected_manifest_hash TEXT NOT NULL CHECK (length(expected_manifest_hash) = 64),
+        target_endpoint_id TEXT NOT NULL,
+        target_endpoint_revision_id TEXT NOT NULL,
+        endpoint_generation INTEGER NOT NULL CHECK (endpoint_generation >= 1),
+        owner_installation_id TEXT NOT NULL,
+        ownership_epoch INTEGER NOT NULL CHECK (ownership_epoch >= 1),
+        final_relative_path TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (
+            state IN (
+                'PLANNED',
+                'DELETE_INTENT_RECORDED',
+                'FILESYSTEM_DELETED',
+                'DELETED',
+                'BLOCKED'
+            )
+        ),
+        delete_lease_id TEXT,
+        delete_fencing_token INTEGER CHECK (
+            delete_fencing_token IS NULL OR delete_fencing_token >= 1
+        ),
+        delete_intent_utc TEXT,
+        filesystem_deleted_utc TEXT,
+        deleted_utc TEXT,
+        last_validation_code TEXT,
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+        PRIMARY KEY (plan_id, ordinal),
+        UNIQUE (plan_id, version_object_id),
+        FOREIGN KEY (plan_id)
+            REFERENCES version_retention_plans (plan_id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (version_object_id)
+            REFERENCES retained_version_objects (version_object_id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_version_retention_items_plan_state
+        ON version_retention_items (plan_id, state, ordinal)
+    """,
+    """
+    CREATE TABLE version_retention_events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plan_id TEXT NOT NULL,
+        plan_sequence INTEGER NOT NULL CHECK (plan_sequence >= 0),
+        version_object_id TEXT,
+        event_kind TEXT NOT NULL,
+        event_utc TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        previous_event_hash TEXT,
+        event_hash TEXT NOT NULL CHECK (length(event_hash) = 64),
+        UNIQUE (plan_id, plan_sequence),
+        FOREIGN KEY (plan_id)
+            REFERENCES version_retention_plans (plan_id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TRIGGER trg_version_retention_plans_immutable_manifest
+    BEFORE UPDATE ON version_retention_plans
+    WHEN
+        NEW.plan_id IS NOT OLD.plan_id
+        OR NEW.cutoff_utc IS NOT OLD.cutoff_utc
+        OR NEW.created_utc IS NOT OLD.created_utc
+        OR NEW.candidate_count IS NOT OLD.candidate_count
+        OR NEW.manifest_json IS NOT OLD.manifest_json
+        OR NEW.manifest_hash IS NOT OLD.manifest_hash
+    BEGIN
+        SELECT RAISE(ABORT, 'VERSION_RETENTION_PLAN_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_version_retention_items_immutable_binding
+    BEFORE UPDATE ON version_retention_items
+    WHEN
+        NEW.plan_id IS NOT OLD.plan_id
+        OR NEW.ordinal IS NOT OLD.ordinal
+        OR NEW.version_object_id IS NOT OLD.version_object_id
+        OR NEW.expected_object_row_version IS NOT OLD.expected_object_row_version
+        OR NEW.expected_manifest_hash IS NOT OLD.expected_manifest_hash
+        OR NEW.target_endpoint_id IS NOT OLD.target_endpoint_id
+        OR NEW.target_endpoint_revision_id IS NOT OLD.target_endpoint_revision_id
+        OR NEW.endpoint_generation IS NOT OLD.endpoint_generation
+        OR NEW.owner_installation_id IS NOT OLD.owner_installation_id
+        OR NEW.ownership_epoch IS NOT OLD.ownership_epoch
+        OR NEW.final_relative_path IS NOT OLD.final_relative_path
+    BEGIN
+        SELECT RAISE(ABORT, 'VERSION_RETENTION_ITEM_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_version_retention_events_no_update
+    BEFORE UPDATE ON version_retention_events
+    BEGIN
+        SELECT RAISE(ABORT, 'VERSION_RETENTION_EVENT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_version_retention_events_no_delete
+    BEFORE DELETE ON version_retention_events
+    BEGIN
+        SELECT RAISE(ABORT, 'VERSION_RETENTION_EVENT_IMMUTABLE');
+    END
+    """,
+)
+
 CATALOG_INITIAL_BACKUP_PLAN_MATERIALIZATIONS = (
     """
     CREATE TABLE initial_backup_plan_materializations (
@@ -4100,5 +4348,34 @@ RECOVERY_STAGING_RETRY_TIMING = (
                     AND substr(staging_retry_not_before_utc, -1, 1) = 'Z'
                 )
             )
+    """,
+)
+
+RECOVERY_VERSION_RETENTION_METADATA = (
+    """
+    ALTER TABLE recovery_operations
+        ADD COLUMN job_id TEXT
+    """,
+    """
+    ALTER TABLE recovery_operations
+        ADD COLUMN job_revision_id TEXT
+    """,
+    """
+    ALTER TABLE recovery_operations
+        ADD COLUMN retention_policy TEXT
+            CHECK (retention_policy IS NULL OR retention_policy = 'THIRTY_DAYS')
+    """,
+    """
+    ALTER TABLE recovery_operations
+        ADD COLUMN version_created_utc TEXT
+    """,
+    """
+    ALTER TABLE recovery_operations
+        ADD COLUMN version_retention_until_utc TEXT
+    """,
+    """
+    ALTER TABLE recovery_operations
+        ADD COLUMN version_manifest_hash TEXT
+            CHECK (version_manifest_hash IS NULL OR length(version_manifest_hash) = 64)
     """,
 )

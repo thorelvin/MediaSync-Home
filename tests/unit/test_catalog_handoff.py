@@ -51,6 +51,60 @@ def test_catalog_handoff_records_catalog_before_recovery_catalog_recorded() -> N
     ]
 
 
+def test_catalog_handoff_carries_journaled_retained_version_root() -> None:
+    operation = replace(
+        _final_verified_operation(),
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        retention_policy="THIRTY_DAYS",
+        version_object_id="operation-a",
+        version_created_utc="2026-08-01T10:00:00.000Z",
+        version_retention_until_utc="2026-08-31T10:00:00.000Z",
+        version_manifest_hash="d" * 64,
+        expected_target_fingerprint_json=(
+            '{"byte_count":9,"content_hash":"' + ("b" * 64) + '"}'
+        ),
+    )
+    recovery = _FakeRecoveryOperationStore(operation)
+    catalog = _FakeCatalogHandoffStore()
+
+    outcome = record_catalog_handoff_after_final_verification(
+        run_id=operation.run_id,
+        operation_id=operation.operation_id,
+        content_hash="a" * 64,
+        recovery_operations=recovery,
+        catalog_handoffs=catalog,
+        process_instance_id="host-a",
+    )
+
+    retained = outcome.handoff.retained_version
+    assert retained is not None
+    assert retained.version_object_id == "operation-a"
+    assert retained.job_revision_id == "job-rev-a"
+    assert retained.retention_until_utc == "2026-08-31T10:00:00.000Z"
+    assert retained.manifest_hash == "d" * 64
+
+
+def test_catalog_handoff_refuses_version_without_manifest_evidence() -> None:
+    operation = replace(
+        _final_verified_operation(),
+        version_object_id="operation-a",
+    )
+    recovery = _FakeRecoveryOperationStore(operation)
+
+    with pytest.raises(CatalogHandoffError) as exc_info:
+        record_catalog_handoff_after_final_verification(
+            run_id=operation.run_id,
+            operation_id=operation.operation_id,
+            content_hash="a" * 64,
+            recovery_operations=recovery,
+            catalog_handoffs=_FakeCatalogHandoffStore(),
+            process_instance_id="host-a",
+        )
+
+    assert exc_info.value.validation_code == "CATALOG_HANDOFF_RETAINED_VERSION_METADATA_MISSING"
+
+
 def test_catalog_handoff_requires_final_verified_operation() -> None:
     recovery = _FakeRecoveryOperationStore(
         replace(_final_verified_operation(), phase=RecoveryOperationPhase.FILESYSTEM_APPLIED)

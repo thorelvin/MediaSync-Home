@@ -369,6 +369,20 @@ Regler:
 - retention kan ikke fjerne objekt som refereres av aktiv recovery, unresolved outcome eller hold;
 - rydding kjører som separat command/run-target med egen lease, plan, audit og diskplasskontroll.
 
+0B implementation note: preserved versions now carry a canonical SHA-256
+self-hashed manifest bound to job/revision, run/target/operation, endpoint
+revision/generation, owner/epoch, original fingerprint, creation time and exact
+30-day expiry. Catalog migration 44 registers that immutable root atomically
+with final-file handoff. Migration 45 creates immutable expiry plans/items,
+holds and append-only events. The maintenance worker first resumes any existing
+delete journal, otherwise plans due roots, proves the matching recovery
+operation is exactly `CLEANED`, rechecks active-job/hold state, acquires a fresh
+endpoint permit, verifies the manifest/payload pair and records delete intent
+before removing bytes. `FILESYSTEM_DELETED` completes idempotently after a
+crash; a partial deletion keeps its intent journal for reconciliation. Archived
+jobs, active holds, active/mismatched recovery references, manifest drift and
+payload drift all fail closed.
+
 ### 17.5 Karantene som opaque managed objects og compare-and-swap
 
 All speil-«sletting» bevares i objektstore med `logical_role=QUARANTINE`:

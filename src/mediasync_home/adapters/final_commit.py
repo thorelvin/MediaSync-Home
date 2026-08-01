@@ -10,6 +10,8 @@ from uuid import uuid4
 
 from mediasync_home.adapters.endpoint_leases import EndpointLeaseUnavailable, EndpointRootResolver
 from mediasync_home.adapters.reparse_guard import LocalReparseGuard, ReparseGuardError
+from mediasync_home.adapters.system_clock import SystemClock
+from mediasync_home.application.clocks import ClockPort
 from mediasync_home.application.ports import (
     CommitReceipt,
     FinalCommitPort,
@@ -35,6 +37,13 @@ from mediasync_home.application.staging_objects import (
     StagingObjectManifestError,
     parse_staging_object_manifest,
     require_staging_object_manifest_binding,
+)
+from mediasync_home.application.version_objects import (
+    VersionObjectManifest,
+    VersionObjectManifestError,
+    parse_version_object_manifest,
+    require_version_object_manifest_binding,
+    version_object_manifest_from_operation,
 )
 from mediasync_home.domain.capabilities import MutationPermit
 
@@ -100,10 +109,12 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
         target_root: Path,
         staging_root: Path,
         permit_validator: MutationPermitValidator,
+        clock: ClockPort | None = None,
     ) -> None:
         self._target_root = Path(target_root)
         self._staging_root = Path(staging_root)
         self._permit_validator = permit_validator
+        self._clock = clock or SystemClock()
 
     def preserve_old_target(
         self,
@@ -154,31 +165,42 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
             target_root=self._target_root,
             version_object_id=version_object_id,
         )
+        if version_manifest.exists():
+            manifest = _load_version_manifest(
+                manifest_path=version_manifest,
+                operation=operation,
+            )
+            manifest_fingerprint = _version_manifest_fingerprint(manifest)
+            if manifest_fingerprint != expected:
+                raise FinalCommitAdapterError(
+                    "LOCAL_REPLACE_FINAL_COMMIT_VERSION_MANIFEST_MISMATCH",
+                    "Enter recovery because the preserved version manifest differs from the target.",
+                )
+            _require_version_payload_matches_manifest(
+                version_payload=version_payload,
+                fingerprint=manifest_fingerprint,
+            )
+            return _version_preservation_receipt(operation=operation, manifest=manifest)
         _preserve_version_payload(
             source=final_path,
             destination=version_payload,
             expected_fingerprint=expected,
         )
-        fingerprint_json = _canonical_json(expected)
+        try:
+            manifest = version_object_manifest_from_operation(
+                operation,
+                created_utc=self._clock.utc_now(),
+            )
+        except VersionObjectManifestError as exc:
+            raise FinalCommitAdapterError(
+                exc.validation_code,
+                "Refresh the sealed job retention binding before preserving an old target.",
+            ) from exc
         _write_version_manifest(
             manifest_path=version_manifest,
-            manifest={
-                "schema_version": 1,
-                "object_role": "OLD_TARGET_VERSION",
-                "version_object_id": version_object_id,
-                "operation_id": operation.operation_id,
-                "run_id": operation.run_id,
-                "run_target_id": operation.run_target_id,
-                "final_relative_path": _relative_path(operation.final_relative_path),
-                "fingerprint": expected,
-            },
+            canonical_manifest=manifest.canonical_json,
         )
-        return OldTargetPreservationReceipt(
-            operation_id=operation.operation_id,
-            final_relative_path=RelativePath(operation.final_relative_path),
-            version_object_id=version_object_id,
-            fingerprint_json=fingerprint_json,
-        )
+        return _version_preservation_receipt(operation=operation, manifest=manifest)
 
     def _preserve_empty_directory_target(
         self,
@@ -279,14 +301,9 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
         )
         manifest = _load_version_manifest(
             manifest_path=version_manifest,
-            expected_operation_id=operation.operation_id,
-            expected_final_relative_path=operation.final_relative_path,
+            operation=operation,
         )
-        expected_old = _manifest_fingerprint(
-            manifest,
-            validation_code="LOCAL_REPLACE_OLD_TARGET_RESTORE_VERSION_MANIFEST_INVALID",
-            next_action="Reload recovery state before restoring the old target.",
-        )
+        expected_old = _version_manifest_fingerprint(manifest)
         if not version_payload.is_file() or version_payload.is_symlink():
             raise FinalCommitAdapterError(
                 "LOCAL_REPLACE_OLD_TARGET_RESTORE_VERSION_PAYLOAD_MISSING",
@@ -443,13 +460,9 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
             manifest_path=version_manifest,
             expected_operation_id=artifact.object_id,
             expected_final_relative_path=artifact.relative_path.value,
+            permit=permit,
         )
-        expected_old = manifest.get("fingerprint")
-        if not isinstance(expected_old, dict):
-            raise FinalCommitAdapterError(
-                "LOCAL_REPLACE_FINAL_COMMIT_VERSION_MANIFEST_INVALID",
-                "Reload recovery state before retrying replacement.",
-            )
+        expected_old = _version_manifest_fingerprint(manifest)
         if not version_payload.is_file() or version_payload.is_symlink():
             raise FinalCommitAdapterError(
                 "LOCAL_REPLACE_FINAL_COMMIT_VERSION_PAYLOAD_MISSING",
@@ -603,10 +616,12 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
         root_resolver: EndpointRootResolver,
         permit_validator: MutationPermitValidator,
         staging_root: Path | None = None,
+        clock: ClockPort | None = None,
     ) -> None:
         self._root_resolver = root_resolver
         self._permit_validator = permit_validator
         self._staging_root = None if staging_root is None else Path(staging_root)
+        self._clock = clock or SystemClock()
 
     def preserve_old_target(
         self,
@@ -890,6 +905,7 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
             target_root=target_root,
             staging_root=self._staging_root_for(target_root),
             permit_validator=self._permit_validator,
+            clock=self._clock,
         )
 
     def _staging_root_for(self, target_root: Path) -> Path:
@@ -1950,8 +1966,49 @@ def _preserve_version_payload(
         temp_path.unlink(missing_ok=True)
 
 
-def _write_version_manifest(*, manifest_path: Path, manifest: dict[str, object]) -> None:
-    payload = _canonical_json(manifest)
+def _version_manifest_fingerprint(
+    manifest: VersionObjectManifest,
+) -> dict[str, object]:
+    return {
+        "byte_count": manifest.fingerprint_byte_count,
+        "content_hash": manifest.fingerprint_content_hash,
+    }
+
+
+def _require_version_payload_matches_manifest(
+    *,
+    version_payload: Path,
+    fingerprint: dict[str, object],
+) -> None:
+    if not version_payload.is_file() or version_payload.is_symlink():
+        raise FinalCommitAdapterError(
+            "LOCAL_REPLACE_FINAL_COMMIT_VERSION_PAYLOAD_MISSING",
+            "Enter recovery because the preserved old target payload is missing.",
+        )
+    if _fingerprint_file(version_payload) != fingerprint:
+        raise FinalCommitAdapterError(
+            "LOCAL_REPLACE_FINAL_COMMIT_VERSION_PAYLOAD_MISMATCH",
+            "Enter recovery because the preserved old target no longer matches its manifest.",
+        )
+
+
+def _version_preservation_receipt(
+    *,
+    operation: RecoveryOperation,
+    manifest: VersionObjectManifest,
+) -> OldTargetPreservationReceipt:
+    return OldTargetPreservationReceipt(
+        operation_id=operation.operation_id,
+        final_relative_path=RelativePath(operation.final_relative_path),
+        version_object_id=manifest.version_object_id,
+        fingerprint_json=_canonical_json(_version_manifest_fingerprint(manifest)),
+        version_created_utc=manifest.created_utc,
+        version_retention_until_utc=manifest.retention_until_utc,
+        version_manifest_hash=manifest.manifest_hash,
+    )
+
+
+def _write_version_manifest(*, manifest_path: Path, canonical_manifest: str) -> None:
     if manifest_path.exists():
         try:
             existing = manifest_path.read_text(encoding="utf-8")
@@ -1960,7 +2017,7 @@ def _write_version_manifest(*, manifest_path: Path, manifest: dict[str, object])
                 "LOCAL_REPLACE_FINAL_COMMIT_VERSION_MANIFEST_INVALID",
                 "Enter recovery because the version manifest cannot be read.",
             ) from exc
-        if existing != payload:
+        if existing != canonical_manifest:
             raise FinalCommitAdapterError(
                 "LOCAL_REPLACE_FINAL_COMMIT_VERSION_MANIFEST_CONFLICT",
                 "Enter recovery because the existing version manifest differs from this operation.",
@@ -1969,7 +2026,7 @@ def _write_version_manifest(*, manifest_path: Path, manifest: dict[str, object])
     temp_path = manifest_path.with_name(f".{manifest_path.name}.{uuid4().hex}.tmp")
     try:
         with temp_path.open("x", encoding="utf-8") as handle:
-            handle.write(payload)
+            handle.write(canonical_manifest)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, manifest_path)
@@ -1980,24 +2037,35 @@ def _write_version_manifest(*, manifest_path: Path, manifest: dict[str, object])
 def _load_version_manifest(
     *,
     manifest_path: Path,
-    expected_operation_id: str,
-    expected_final_relative_path: str,
-) -> dict[str, object]:
+    operation: RecoveryOperation | None = None,
+    expected_operation_id: str | None = None,
+    expected_final_relative_path: str | None = None,
+    permit: MutationPermit | None = None,
+) -> VersionObjectManifest:
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        raw_manifest = manifest_path.read_text(encoding="utf-8")
+        manifest = parse_version_object_manifest(raw_manifest)
+        if operation is not None:
+            require_version_object_manifest_binding(manifest, operation=operation)
+    except (OSError, VersionObjectManifestError) as exc:
         raise FinalCommitAdapterError(
             "LOCAL_REPLACE_FINAL_COMMIT_VERSION_MANIFEST_MISSING",
             "Preserve the old target before replacing the final file.",
         ) from exc
-    if not isinstance(manifest, dict):
-        raise FinalCommitAdapterError(
-            "LOCAL_REPLACE_FINAL_COMMIT_VERSION_MANIFEST_INVALID",
-            "Enter recovery because the version manifest is invalid.",
-        )
-    if (
-        manifest.get("operation_id") != expected_operation_id
-        or manifest.get("final_relative_path") != _relative_path(expected_final_relative_path)
+    if operation is None and (
+        expected_operation_id is None
+        or expected_final_relative_path is None
+        or permit is None
+        or manifest.version_object_id != expected_operation_id
+        or manifest.operation_id != expected_operation_id
+        or manifest.run_id != permit.run_id
+        or manifest.run_target_id != permit.run_target_id
+        or manifest.target_endpoint_id != permit.endpoint_id
+        or manifest.target_endpoint_revision_id != permit.endpoint_revision_id
+        or manifest.endpoint_generation != permit.endpoint_generation
+        or manifest.owner_installation_id != permit.owner_installation_id
+        or manifest.ownership_epoch != permit.ownership_epoch
+        or manifest.final_relative_path != _relative_path(expected_final_relative_path)
     ):
         raise FinalCommitAdapterError(
             "LOCAL_REPLACE_FINAL_COMMIT_VERSION_MANIFEST_MISMATCH",

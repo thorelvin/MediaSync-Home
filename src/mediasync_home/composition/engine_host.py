@@ -38,6 +38,9 @@ from mediasync_home.adapters.task_scheduler import (
     Pywin32TaskSchedulerGateway,
     WindowsTaskSchedulerRegistry,
 )
+from mediasync_home.adapters.version_retention import (
+    LocalVersionRetentionDeletionAdapter,
+)
 from mediasync_home.adapters.writable_endpoint_registration import (
     LocalWritableEndpointControlAreaProvisioner,
 )
@@ -132,6 +135,7 @@ from mediasync_home.adapters.sqlite.trigger_occurrences import (
     SqliteTriggerOccurrenceStore,
 )
 from mediasync_home.adapters.sqlite.transactions import SqliteImmediateTransactionRunner
+from mediasync_home.adapters.sqlite.version_retention import SqliteVersionRetentionStore
 from mediasync_home.adapters.sqlite.writable_endpoint_registrations import (
     SqliteWritableEndpointRegistrationStore,
 )
@@ -244,6 +248,12 @@ from mediasync_home.application.task_scheduler import (
     reconcile_next_pending_task_scheduler_resource,
     reconcile_task_scheduler_resources_bounded,
     stage_task_scheduler_desired_resource_page,
+)
+from mediasync_home.application.version_retention import (
+    VersionRetentionDeletionPort,
+    VersionRetentionMaintenanceOutcome,
+    VersionRetentionRecoveryReferencePort,
+    maintain_version_retention,
 )
 from mediasync_home.application.writable_endpoint_registration import (
     WritableEndpointRegistrationCandidate,
@@ -439,6 +449,12 @@ class EngineHostRuntime:
     run_executor_old_target_preservation_port: OldTargetPreservationPort | None = None
     run_executor_recovery_object_cleanup_port: RecoveryObjectCleanupPort | None = None
     run_executor_process_instance_id: str | None = None
+    version_retention_store: SqliteVersionRetentionStore | None = None
+    version_retention_recovery_references: (
+        VersionRetentionRecoveryReferencePort | None
+    ) = None
+    version_retention_lease_authority: EndpointLeaseAuthority | None = None
+    version_retention_deletion_port: VersionRetentionDeletionPort | None = None
     backup_analysis_request_store: BackupAnalysisRequestStore | None = None
     backup_analysis_endpoint_refresher: SqliteEndpointClassificationRefresher | None = (
         None
@@ -807,6 +823,29 @@ class EngineHostRuntime:
             self.run_executor_lease_registry.release_all()
             return _capacity_blocked_run_executor_outcome(report)
 
+    def run_version_retention_cycle(
+        self,
+        *,
+        limit: int = 100,
+    ) -> VersionRetentionMaintenanceOutcome:
+        if (
+            self.version_retention_store is None
+            or self.version_retention_recovery_references is None
+            or self.version_retention_lease_authority is None
+            or self.version_retention_deletion_port is None
+        ):
+            raise RuntimeError("VERSION_RETENTION_RUNTIME_NOT_CONFIGURED")
+        event_utc = self.clock.utc_now()
+        return maintain_version_retention(
+            plan_id=f"version-retention-{uuid4().hex}",
+            event_utc=event_utc,
+            versions=self.version_retention_store,
+            recovery_references=self.version_retention_recovery_references,
+            leases=self.version_retention_lease_authority,
+            deletion=self.version_retention_deletion_port,
+            limit=limit,
+        )
+
     def _run_capacity_block(self) -> RunExecutorCyclePumpOutcome | None:
         if self.state_capacity_gate is None:
             return None
@@ -891,6 +930,7 @@ class ExecutorMaintenanceLoop:
                 try:
                     _run_backup_analysis_cycle_if_configured(runtime)
                     outcome = runtime.run_executor_cycle(max_steps=self._max_steps)
+                    _run_version_retention_cycle_if_configured(runtime)
                 except Exception as exc:
                     next_interval_ms = self._backed_off_interval(next_interval_ms)
                     _emit_run_executor_cycle_failed_event(
@@ -1710,6 +1750,7 @@ def build_engine_host_runtime(
         )
         recovery_intent_segments = SqliteRecoveryIntentSegmentStore(recovery_connection)
         endpoint_root_resolver = SqliteEndpointRootResolver(catalog_connection)
+        version_retention_store = SqliteVersionRetentionStore(catalog_connection)
         run_executor_lease_authority = LocalResolvingEndpointLeaseAuthority(
             root_resolver=endpoint_root_resolver,
             resource_lease_store=resource_leases,
@@ -1725,6 +1766,9 @@ def build_engine_host_runtime(
         run_executor_final_commit_port = LocalResolvingFinalCommitAdapter(
             root_resolver=endpoint_root_resolver,
             permit_validator=run_executor_permit_validator,
+        )
+        version_retention_deletion_port = LocalVersionRetentionDeletionAdapter(
+            root_resolver=endpoint_root_resolver,
         )
         final_artifact_verifier = LocalFinalArtifactVerificationAdapter(
             root_resolver=endpoint_root_resolver,
@@ -1858,6 +1902,10 @@ def build_engine_host_runtime(
         run_executor_old_target_preservation_port=run_executor_final_commit_port,
         run_executor_recovery_object_cleanup_port=run_executor_final_commit_port,
         run_executor_process_instance_id=reconciler_instance_id,
+        version_retention_store=version_retention_store,
+        version_retention_recovery_references=recovery_operations,
+        version_retention_lease_authority=run_executor_lease_authority,
+        version_retention_deletion_port=version_retention_deletion_port,
         backup_analysis_request_store=backup_analysis_requests,
         backup_analysis_endpoint_refresher=endpoint_classification_refresher,
         backup_analysis_snapshot_refresher=job_snapshot_materializer,
@@ -2023,6 +2071,12 @@ def _build_after_request_executor_cycle(
 
 def _run_backup_analysis_cycle_if_configured(runtime: EngineHostRuntime) -> None:
     cycle = getattr(runtime, "run_backup_analysis_cycle", None)
+    if callable(cycle):
+        cycle()
+
+
+def _run_version_retention_cycle_if_configured(runtime: EngineHostRuntime) -> None:
+    cycle = getattr(runtime, "run_version_retention_cycle", None)
     if callable(cycle):
         cycle()
 

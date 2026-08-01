@@ -30,6 +30,7 @@ from mediasync_home.application.staging_retry import (
     StagingRetryViolation,
     staging_retry_backoff_ms,
 )
+from mediasync_home.application.version_retention import RetainedVersionRecord
 
 
 class SqliteRecoveryOperationStoreError(ValueError):
@@ -53,6 +54,33 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
             staging_retry_scheduler
             or MonotonicStagingRetryScheduler(clock or SystemClock())
         )
+
+    def released_reference_validation_code(
+        self,
+        record: RetainedVersionRecord,
+    ) -> str | None:
+        operation = self.load_operation(
+            run_id=record.run_id,
+            operation_id=record.operation_id,
+        )
+        if operation is None:
+            return "VERSION_RETENTION_RECOVERY_REFERENCE_MISSING"
+        if (
+            operation.run_target_id != record.run_target_id
+            or operation.version_object_id != record.version_object_id
+            or operation.version_manifest_hash != record.manifest_hash
+            or operation.job_id != record.job_id
+            or operation.job_revision_id != record.job_revision_id
+            or operation.target_endpoint_id != record.target_endpoint_id
+            or operation.target_endpoint_revision_id != record.target_endpoint_revision_id
+            or operation.endpoint_generation != record.endpoint_generation
+            or operation.owner_installation_id != record.owner_installation_id
+            or operation.ownership_epoch != record.ownership_epoch
+        ):
+            return "VERSION_RETENTION_RECOVERY_REFERENCE_MISMATCH"
+        if operation.phase is not RecoveryOperationPhase.CLEANED:
+            return "VERSION_RETENTION_RECOVERY_REFERENCE_ACTIVE"
+        return None
 
     def record_planned_operation(
         self,
@@ -171,6 +199,9 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                     source_hash_evidence_kind = ?,
                     staging_object_id = ?,
                     version_object_id = ?,
+                    version_created_utc = ?,
+                    version_retention_until_utc = ?,
+                    version_manifest_hash = ?,
                     quarantine_object_id = ?,
                     intent_segment_id = ?,
                     intent_ordinal = ?,
@@ -198,6 +229,9 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                     updated.source_hash_evidence_kind,
                     updated.staging_object_id,
                     updated.version_object_id,
+                    updated.version_created_utc,
+                    updated.version_retention_until_utc,
+                    updated.version_manifest_hash,
                     updated.quarantine_object_id,
                     updated.intent_segment_id,
                     updated.intent_ordinal,
@@ -1315,6 +1349,12 @@ RECOVERY_OPERATION_COLUMN_NAMES = (
     "staging_failure_count",
     "staging_retry_backoff_ms",
     "staging_retry_not_before_utc",
+    "job_id",
+    "job_revision_id",
+    "retention_policy",
+    "version_created_utc",
+    "version_retention_until_utc",
+    "version_manifest_hash",
 )
 RECOVERY_OPERATION_COLUMNS = ", ".join(RECOVERY_OPERATION_COLUMN_NAMES)
 RECOVERY_OPERATION_PLACEHOLDERS = ", ".join(
@@ -1372,6 +1412,12 @@ def _operation_values(operation: RecoveryOperation) -> tuple[object, ...]:
         operation.staging_failure_count,
         operation.staging_retry_backoff_ms,
         operation.staging_retry_not_before_utc,
+        operation.job_id,
+        operation.job_revision_id,
+        operation.retention_policy,
+        operation.version_created_utc,
+        operation.version_retention_until_utc,
+        operation.version_manifest_hash,
     )
 
 
@@ -1425,6 +1471,12 @@ def _operation_from_row(row: sqlite3.Row | tuple[Any, ...]) -> RecoveryOperation
         staging_failure_count=int(row[45]),
         staging_retry_backoff_ms=None if row[46] is None else int(row[46]),
         staging_retry_not_before_utc=None if row[47] is None else str(row[47]),
+        job_id=None if row[48] is None else str(row[48]),
+        job_revision_id=None if row[49] is None else str(row[49]),
+        retention_policy=None if row[50] is None else str(row[50]),
+        version_created_utc=None if row[51] is None else str(row[51]),
+        version_retention_until_utc=None if row[52] is None else str(row[52]),
+        version_manifest_hash=None if row[53] is None else str(row[53]),
     )
 
 
@@ -1451,6 +1503,15 @@ def _apply_operation_metadata(
         version_object_id=metadata.version_object_id
         if metadata.version_object_id is not None
         else operation.version_object_id,
+        version_created_utc=metadata.version_created_utc
+        if metadata.version_created_utc is not None
+        else operation.version_created_utc,
+        version_retention_until_utc=metadata.version_retention_until_utc
+        if metadata.version_retention_until_utc is not None
+        else operation.version_retention_until_utc,
+        version_manifest_hash=metadata.version_manifest_hash
+        if metadata.version_manifest_hash is not None
+        else operation.version_manifest_hash,
         quarantine_object_id=metadata.quarantine_object_id
         if metadata.quarantine_object_id is not None
         else operation.quarantine_object_id,

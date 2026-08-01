@@ -185,6 +185,32 @@ invariants:
     precondition_schema_version: 1
     checksum_bound: true
     before_and_after_transfer_validation: true
+  - id: DB-004_RETAINED_VERSION_EXPIRY
+    requirement_id: DB-004
+    assertion: >
+      A preserved old target version is cataloged only with a canonical
+      self-hashed manifest, and time-based expiry uses an immutable plan plus
+      append-only events before deleting the exact payload/manifest pair under
+      a fresh endpoint mutation permit.
+    root_table: retained_version_objects
+    plan_table: version_retention_plans
+    item_table: version_retention_items
+    hold_table: version_retention_holds
+    event_table: version_retention_events
+    immutable_root_bindings: true
+    immutable_plan_manifest: true
+    immutable_plan_items: true
+    append_only_events: true
+    delete_root_rows: false
+    requires_active_job: true
+    excludes_active_holds: true
+    requires_exact_cleaned_recovery_reference: true
+    rechecks_before_delete_intent: true
+    filesystem_delete_requires_fresh_mutation_permit: true
+    manifest_and_payload_verified_before_delete: true
+    crash_resume_states:
+      - DELETE_INTENT_RECORDED
+      - FILESYSTEM_DELETED
   - id: TIME-001_ENDPOINT_RETRY_TIMING
     requirement_id: TIME-001
     table: run_target_endpoint_wait_events

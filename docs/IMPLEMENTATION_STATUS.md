@@ -8,8 +8,12 @@ directory marker, removes the short staging payload and manifest, and journals
 `CLEANED`. Missing/tampered evidence fails closed; an already-removed pair is an
 idempotent retry. Version payloads and manifests remain intact for retention,
 while quarantine and created-directory recovery markers keep their existing
-post-catalog cleanup. Time-based version expiration and non-local endpoint
-evidence remain pending.
+post-catalog cleanup. Time-based local version expiration is now implemented
+through catalog migrations 44-45 and recovery migration 11: canonical version
+manifests, immutable due plans, recovery/hold/archive checks, fresh endpoint
+permits, append-only delete events and crash-safe resume. Non-local endpoint
+evidence, quarantine retention and the broader catalog-retention graph remain
+pending.
 
 Update 2026-08-01: PATH-001 production final publication now requires the
 canonical short-object staging manifest before any new file/directory publish

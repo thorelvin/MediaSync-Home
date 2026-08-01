@@ -58,6 +58,9 @@ class RecoveryOperation:
     operation_kind: RecoveryOperationKind = RecoveryOperationKind.COPY_NEW
     plan_sequence_no: int = 0
     planned_bytes: int = 0
+    job_id: str | None = None
+    job_revision_id: str | None = None
+    retention_policy: str | None = None
     source_endpoint_id: str | None = None
     source_endpoint_revision_id: str | None = None
     source_relative_path: str | None = None
@@ -69,6 +72,9 @@ class RecoveryOperation:
     source_case_context_hash: str | None = None
     staging_object_id: str | None = None
     version_object_id: str | None = None
+    version_created_utc: str | None = None
+    version_retention_until_utc: str | None = None
+    version_manifest_hash: str | None = None
     quarantine_object_id: str | None = None
     intent_segment_id: str | None = None
     intent_ordinal: int | None = None
@@ -98,6 +104,9 @@ class RecoveryOperationMetadata:
     source_hash_evidence_kind: str | None = None
     staging_object_id: str | None = None
     version_object_id: str | None = None
+    version_created_utc: str | None = None
+    version_retention_until_utc: str | None = None
+    version_manifest_hash: str | None = None
     quarantine_object_id: str | None = None
     expected_source_fingerprint_json: str | None = None
     expected_target_fingerprint_json: str | None = None
@@ -271,6 +280,9 @@ def planned_recovery_operation(
     operation_kind: RecoveryOperationKind = RecoveryOperationKind.COPY_NEW,
     plan_sequence_no: int = 0,
     planned_bytes: int = 0,
+    job_id: str | None = None,
+    job_revision_id: str | None = None,
+    retention_policy: str | None = None,
     source_endpoint_id: str | None = None,
     source_endpoint_revision_id: str | None = None,
     source_relative_path: str | None = None,
@@ -294,6 +306,9 @@ def planned_recovery_operation(
         operation_kind=operation_kind,
         plan_sequence_no=plan_sequence_no,
         planned_bytes=planned_bytes,
+        job_id=job_id,
+        job_revision_id=job_revision_id,
+        retention_policy=retention_policy,
         source_endpoint_id=source_endpoint_id,
         source_endpoint_revision_id=source_endpoint_revision_id,
         source_relative_path=source_relative_path,
@@ -329,6 +344,32 @@ def validate_recovery_operation(operation: RecoveryOperation) -> None:
         raise RecoveryOperationViolation(
             "RECOVERY_OPERATION_REQUIRES_NONNEGATIVE_PLANNED_BYTES"
         )
+    job_binding = (
+        operation.job_id,
+        operation.job_revision_id,
+        operation.retention_policy,
+    )
+    if any(value is not None for value in job_binding) and not all(
+        isinstance(value, str) and bool(value.strip()) for value in job_binding
+    ):
+        raise RecoveryOperationViolation("RECOVERY_OPERATION_JOB_RETENTION_BINDING_INVALID")
+    if operation.retention_policy not in {None, "THIRTY_DAYS"}:
+        raise RecoveryOperationViolation("RECOVERY_OPERATION_RETENTION_POLICY_INVALID")
+    version_metadata = (
+        operation.version_created_utc,
+        operation.version_retention_until_utc,
+        operation.version_manifest_hash,
+    )
+    if any(value is not None for value in version_metadata):
+        if (
+            operation.version_object_id is None
+            or not operation.version_object_id.strip()
+            or not all(isinstance(value, str) and bool(value.strip()) for value in version_metadata)
+            or operation.job_id is None
+        ):
+            raise RecoveryOperationViolation("RECOVERY_OPERATION_VERSION_METADATA_INVALID")
+        if HASH_PATTERN.fullmatch(operation.version_manifest_hash or "") is None:
+            raise RecoveryOperationViolation("RECOVERY_OPERATION_VERSION_MANIFEST_HASH_INVALID")
     if operation.staging_failure_count < 0:
         raise RecoveryOperationViolation(
             "RECOVERY_OPERATION_REQUIRES_NONNEGATIVE_FAILURE_COUNT"

@@ -12,6 +12,7 @@ from mediasync_home.application.plans import (
     SealedPlan,
     verify_plan_checksum,
 )
+from mediasync_home.application.job_drafts import RetentionPreset
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
     RecoveryOperationKind,
@@ -174,6 +175,7 @@ def plan_run_target_recovery_operations(
             )
         recovery_operation = _planned_recovery_operation(
             permit=permit,
+            run=run,
             target=target,
             endpoint=endpoint,
             operation=operation,
@@ -220,6 +222,7 @@ def plan_run_target_recovery_operations(
 def _planned_recovery_operation(
     *,
     permit: MutationPermit,
+    run: StartedRun,
     target: StartedRunTarget,
     endpoint: PlanEndpoint,
     operation: PlanOperation,
@@ -270,6 +273,9 @@ def _planned_recovery_operation(
         operation_kind=RecoveryOperationKind(operation.operation_type.value),
         plan_sequence_no=operation.sequence_no,
         planned_bytes=operation.planned_bytes,
+        job_id=run.job_id,
+        job_revision_id=run.job_revision_id,
+        retention_policy=RetentionPreset.THIRTY_DAYS.value,
         source_endpoint_id=source_endpoint_id,
         source_endpoint_revision_id=source_endpoint_revision_id,
         source_relative_path=source_relative_path,

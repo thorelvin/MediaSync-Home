@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -25,6 +26,21 @@ class CatalogHandoffError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class RetainedVersionCatalogHandoff:
+    version_object_id: str
+    job_id: str
+    job_revision_id: str
+    endpoint_generation: int
+    owner_installation_id: str
+    ownership_epoch: int
+    original_fingerprint_json: str
+    created_utc: str
+    retention_policy: str
+    retention_until_utc: str
+    manifest_hash: str
+
+
+@dataclass(frozen=True)
 class FinalFileCatalogHandoff:
     handoff_id: str
     run_id: str
@@ -37,6 +53,7 @@ class FinalFileCatalogHandoff:
     lease_id: str
     fencing_token: int
     effect_kind: str = "COPY_NEW_FINAL_FILE"
+    retained_version: RetainedVersionCatalogHandoff | None = None
 
 
 @dataclass(frozen=True)
@@ -266,6 +283,8 @@ def validate_final_file_catalog_handoff(handoff: FinalFileCatalogHandoff) -> Non
             "CATALOG_HANDOFF_REQUIRES_RELATIVE_FINAL_PATH",
             "Record only endpoint-relative final paths in the catalog handoff.",
         )
+    if handoff.retained_version is not None:
+        _validate_retained_version_handoff(handoff.retained_version)
 
 
 def _handoff_from_recorded_operation(
@@ -303,6 +322,7 @@ def _handoff_from_operation(
         lease_id=operation.lease_id,
         fencing_token=operation.fencing_token,
         effect_kind=_effect_kind(operation),
+        retained_version=_retained_version_from_operation(operation),
     )
     validate_final_file_catalog_handoff(handoff)
     return handoff
@@ -329,7 +349,127 @@ def _handoff_payload(handoff: FinalFileCatalogHandoff) -> Mapping[str, object]:
         "catalog_handoff_id": handoff.handoff_id,
         "content_hash": handoff.content_hash,
         "final_relative_path": handoff.final_relative_path,
+        "retained_version_manifest_hash": (
+            None
+            if handoff.retained_version is None
+            else handoff.retained_version.manifest_hash
+        ),
+        "retained_version_object_id": (
+            None
+            if handoff.retained_version is None
+            else handoff.retained_version.version_object_id
+        ),
     }
+
+
+def _retained_version_from_operation(
+    operation: RecoveryOperation,
+) -> RetainedVersionCatalogHandoff | None:
+    if operation.version_object_id is None:
+        return None
+    required = (
+        operation.job_id,
+        operation.job_revision_id,
+        operation.expected_target_fingerprint_json,
+        operation.version_created_utc,
+        operation.retention_policy,
+        operation.version_retention_until_utc,
+        operation.version_manifest_hash,
+    )
+    if not all(isinstance(value, str) and bool(value.strip()) for value in required):
+        raise CatalogHandoffError(
+            "CATALOG_HANDOFF_RETAINED_VERSION_METADATA_MISSING",
+            "Reconcile the preserved version manifest evidence before catalog handoff.",
+        )
+    fingerprint_json = _canonical_fingerprint_json(
+        operation.expected_target_fingerprint_json or ""
+    )
+    retained = RetainedVersionCatalogHandoff(
+        version_object_id=operation.version_object_id,
+        job_id=operation.job_id or "",
+        job_revision_id=operation.job_revision_id or "",
+        endpoint_generation=operation.endpoint_generation,
+        owner_installation_id=operation.owner_installation_id,
+        ownership_epoch=operation.ownership_epoch,
+        original_fingerprint_json=fingerprint_json,
+        created_utc=operation.version_created_utc or "",
+        retention_policy=operation.retention_policy or "",
+        retention_until_utc=operation.version_retention_until_utc or "",
+        manifest_hash=operation.version_manifest_hash or "",
+    )
+    _validate_retained_version_handoff(retained)
+    return retained
+
+
+def _validate_retained_version_handoff(
+    retained: RetainedVersionCatalogHandoff,
+) -> None:
+    if not _non_empty(
+        retained.version_object_id,
+        retained.job_id,
+        retained.job_revision_id,
+        retained.owner_installation_id,
+        retained.created_utc,
+        retained.retention_until_utc,
+    ):
+        raise CatalogHandoffError(
+            "CATALOG_HANDOFF_RETAINED_VERSION_IDENTIFIERS_MISSING",
+            "Record all immutable retained-version identifiers in the catalog handoff.",
+        )
+    if retained.endpoint_generation < 1 or retained.ownership_epoch < 1:
+        raise CatalogHandoffError(
+            "CATALOG_HANDOFF_RETAINED_VERSION_NUMBERS_INVALID",
+            "Record positive endpoint generation and ownership epoch for the retained version.",
+        )
+    if retained.retention_policy != "THIRTY_DAYS":
+        raise CatalogHandoffError(
+            "CATALOG_HANDOFF_RETAINED_VERSION_POLICY_INVALID",
+            "Use the sealed supported retention policy for the retained version.",
+        )
+    if HASH_PATTERN.fullmatch(retained.manifest_hash) is None:
+        raise CatalogHandoffError(
+            "CATALOG_HANDOFF_RETAINED_VERSION_MANIFEST_HASH_INVALID",
+            "Record the canonical version manifest hash before catalog handoff.",
+        )
+    _canonical_fingerprint_json(retained.original_fingerprint_json)
+
+
+def _canonical_fingerprint_json(raw_fingerprint: str) -> str:
+    try:
+        fingerprint = json.loads(raw_fingerprint)
+    except json.JSONDecodeError as exc:
+        raise CatalogHandoffError(
+            "CATALOG_HANDOFF_RETAINED_VERSION_FINGERPRINT_INVALID",
+            "Record a canonical original fingerprint for the retained version.",
+        ) from exc
+    if not isinstance(fingerprint, dict) or set(fingerprint) != {
+        "byte_count",
+        "content_hash",
+    }:
+        raise CatalogHandoffError(
+            "CATALOG_HANDOFF_RETAINED_VERSION_FINGERPRINT_INVALID",
+            "Record a canonical original fingerprint for the retained version.",
+        )
+    byte_count = fingerprint.get("byte_count")
+    content_hash = fingerprint.get("content_hash")
+    if (
+        not isinstance(byte_count, int)
+        or isinstance(byte_count, bool)
+        or byte_count < 0
+        or not isinstance(content_hash, str)
+        or HASH_PATTERN.fullmatch(content_hash) is None
+    ):
+        raise CatalogHandoffError(
+            "CATALOG_HANDOFF_RETAINED_VERSION_FINGERPRINT_INVALID",
+            "Record a canonical original fingerprint for the retained version.",
+        )
+    canonical = json.dumps(fingerprint, sort_keys=True, separators=(",", ":"))
+    if canonical != raw_fingerprint:
+        raise CatalogHandoffError(
+            "CATALOG_HANDOFF_RETAINED_VERSION_FINGERPRINT_NOT_CANONICAL",
+            "Record the canonical original fingerprint for the retained version.",
+        )
+    return canonical
 
 
 def _catalog_handoff_reconciliation_mismatch(

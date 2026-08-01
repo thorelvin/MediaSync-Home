@@ -141,6 +141,9 @@ def test_sqlite_run_final_commit_bridge_resumes_preserved_replacement(
             process_instance_id="host-a",
             operation_metadata=RecoveryOperationMetadata(
                 version_object_id=preservation.version_object_id,
+                version_created_utc=preservation.version_created_utc,
+                version_retention_until_utc=preservation.version_retention_until_utc,
+                version_manifest_hash=preservation.version_manifest_hash,
             ),
         )
         assert preserved is not None
@@ -223,6 +226,9 @@ def test_sqlite_run_final_commit_bridge_completes_preserved_replacement_when_fin
             process_instance_id="host-a",
             operation_metadata=RecoveryOperationMetadata(
                 version_object_id=preservation.version_object_id,
+                version_created_utc=preservation.version_created_utc,
+                version_retention_until_utc=preservation.version_retention_until_utc,
+                version_manifest_hash=preservation.version_manifest_hash,
             ),
         )
         assert preserved is not None
@@ -304,6 +310,9 @@ def test_sqlite_run_final_commit_bridge_marks_preserved_drift_user_decision(
             process_instance_id="host-a",
             operation_metadata=RecoveryOperationMetadata(
                 version_object_id=preservation.version_object_id,
+                version_created_utc=preservation.version_created_utc,
+                version_retention_until_utc=preservation.version_retention_until_utc,
+                version_manifest_hash=preservation.version_manifest_hash,
             ),
         )
         assert preserved is not None
@@ -382,6 +391,9 @@ def test_sqlite_preserved_old_target_restore_records_cancelled_operation(
             process_instance_id="host-a",
             operation_metadata=RecoveryOperationMetadata(
                 version_object_id=preservation.version_object_id,
+                version_created_utc=preservation.version_created_utc,
+                version_retention_until_utc=preservation.version_retention_until_utc,
+                version_manifest_hash=preservation.version_manifest_hash,
             ),
         )
         assert preserved is not None
@@ -571,6 +583,9 @@ def _operation(
             fencing_token=1,
             final_relative_path="Pictures/A.jpg",
             target_precondition_kind=target_precondition_kind,
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            retention_policy="THIRTY_DAYS",
         ),
         staging_object_id="op-a",
         expected_target_fingerprint_json=_target_fingerprint_json(

@@ -6,6 +6,7 @@ from mediasync_home.application.catalog_read_models import CatalogedFileReadMode
 from mediasync_home.application.catalog_handoff import (
     FinalFileCatalogHandoff,
     FinalFileCatalogHandoffStore,
+    RetainedVersionCatalogHandoff,
     validate_final_file_catalog_handoff,
 )
 
@@ -67,6 +68,8 @@ class SqliteFinalFileCatalogHandoffStore(FinalFileCatalogHandoffStore):
                     handoff.effect_kind,
                 ),
             )
+            if handoff.retained_version is not None:
+                self._record_retained_version(handoff)
             recorded = self.load_final_file_handoff(handoff.handoff_id)
             if recorded is None:
                 raise SqliteCatalogHandoffStoreError("CATALOG_HANDOFF_LOAD_FAILED")
@@ -108,6 +111,7 @@ class SqliteFinalFileCatalogHandoffStore(FinalFileCatalogHandoffStore):
         ).fetchone()
         if row is None:
             return None
+        retained_version = self._load_retained_version(handoff_id)
         return FinalFileCatalogHandoff(
             handoff_id=str(row[0]),
             run_id=str(row[1]),
@@ -120,6 +124,96 @@ class SqliteFinalFileCatalogHandoffStore(FinalFileCatalogHandoffStore):
             lease_id=str(row[8]),
             fencing_token=int(row[9]),
             effect_kind=str(row[10]),
+            retained_version=retained_version,
+        )
+
+    def _record_retained_version(self, handoff: FinalFileCatalogHandoff) -> None:
+        retained = handoff.retained_version
+        if retained is None:
+            return
+        self._connection.execute(
+            """
+            INSERT INTO retained_version_objects (
+                version_object_id,
+                handoff_id,
+                run_id,
+                run_target_id,
+                operation_id,
+                job_id,
+                job_revision_id,
+                target_endpoint_id,
+                target_endpoint_revision_id,
+                endpoint_generation,
+                owner_installation_id,
+                ownership_epoch,
+                final_relative_path,
+                original_fingerprint_json,
+                created_utc,
+                retention_policy,
+                retention_until_utc,
+                manifest_hash
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                retained.version_object_id,
+                handoff.handoff_id,
+                handoff.run_id,
+                handoff.run_target_id,
+                handoff.operation_id,
+                retained.job_id,
+                retained.job_revision_id,
+                handoff.target_endpoint_id,
+                handoff.target_endpoint_revision_id,
+                retained.endpoint_generation,
+                retained.owner_installation_id,
+                retained.ownership_epoch,
+                handoff.final_relative_path,
+                retained.original_fingerprint_json,
+                retained.created_utc,
+                retained.retention_policy,
+                retained.retention_until_utc,
+                retained.manifest_hash,
+            ),
+        )
+
+    def _load_retained_version(
+        self,
+        handoff_id: str,
+    ) -> RetainedVersionCatalogHandoff | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                version_object_id,
+                job_id,
+                job_revision_id,
+                endpoint_generation,
+                owner_installation_id,
+                ownership_epoch,
+                original_fingerprint_json,
+                created_utc,
+                retention_policy,
+                retention_until_utc,
+                manifest_hash
+            FROM retained_version_objects
+            WHERE handoff_id = ?
+            """,
+            (handoff_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return RetainedVersionCatalogHandoff(
+            version_object_id=str(row[0]),
+            job_id=str(row[1]),
+            job_revision_id=str(row[2]),
+            endpoint_generation=int(row[3]),
+            owner_installation_id=str(row[4]),
+            ownership_epoch=int(row[5]),
+            original_fingerprint_json=str(row[6]),
+            created_utc=str(row[7]),
+            retention_policy=str(row[8]),
+            retention_until_utc=str(row[9]),
+            manifest_hash=str(row[10]),
         )
 
     def list_recent_cataloged_files(
