@@ -64,6 +64,7 @@ FILE_CS_FLAG_CASE_SENSITIVE_DIR = 0x00000001
 INVALID_HANDLE_VALUE = int(wintypes.HANDLE(-1).value or -1)
 MAX_LOCAL_SNAPSHOT_ENTRIES = 100_000
 MAX_LOCAL_SNAPSHOT_DIRECTORIES = 25_000
+MAX_VOLATILE_DIRECTORY_RESCANS = 2
 
 
 class LocalSnapshotScanError(RuntimeError):
@@ -78,6 +79,7 @@ class _QueuedDirectory:
     path: Path
     relative_path: str
     comparison_key: str
+    rescan_attempt: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,9 +152,12 @@ class LocalFilesystemSnapshotScanner:
         ] = FileFilterSession,
         max_entries: int = MAX_LOCAL_SNAPSHOT_ENTRIES,
         max_directories: int = MAX_LOCAL_SNAPSHOT_DIRECTORIES,
+        max_volatile_rescans: int = MAX_VOLATILE_DIRECTORY_RESCANS,
     ) -> None:
         if max_entries < 1 or max_directories < 1:
             raise ValueError("snapshot scanner limits must be positive")
+        if max_volatile_rescans < 0:
+            raise ValueError("volatile directory rescan limit must be non-negative")
         self._path_probe = path_probe or LocalFilesystemReparsePathProbe()
         self._case_mode_probe = case_mode_probe or LocalDirectoryCaseModeProbe()
         self._named_stream_probe = named_stream_probe or (
@@ -162,6 +167,7 @@ class LocalFilesystemSnapshotScanner:
         self._filter_session_factory = filter_session_factory
         self._max_entries = max_entries
         self._max_directories = max_directories
+        self._max_volatile_rescans = max_volatile_rescans
 
     def scan(
         self,
@@ -186,6 +192,7 @@ class LocalFilesystemSnapshotScanner:
         scanned_directories = 0
         examined_entries = 0
         control_area_excluded = False
+        rescan_attempt_count = 0
 
         while queue:
             queued = queue.popleft()
@@ -247,6 +254,15 @@ class LocalFilesystemSnapshotScanner:
                     )
                 )
                 continue
+            entries_checkpoint = len(entries)
+            coverage_checkpoint = len(coverage)
+            issues_checkpoint = len(issues)
+            filter_decisions_checkpoint = len(filter_decisions)
+            queue_checkpoint = len(queue)
+            examined_entries_checkpoint = examined_entries
+            control_area_excluded_checkpoint = control_area_excluded
+            reported_filter_errors_checkpoint = reported_filter_errors.copy()
+            attempt_directory_subjects: list[str] = []
             self._append_named_stream_issue(
                 issues,
                 path=queued.path,
@@ -438,6 +454,7 @@ class LocalFilesystemSnapshotScanner:
                         continue
                 if object_type == "directory":
                     directory_filter_subjects[relative_path] = filter_subject
+                    attempt_directory_subjects.append(relative_path)
                 if is_reparse:
                     entries.append(
                         _entry(
@@ -581,6 +598,30 @@ class LocalFilesystemSnapshotScanner:
                 after != before
                 or _inspection_changed(before_inspection, after_inspection)
             ):
+                if queued.rescan_attempt < self._max_volatile_rescans:
+                    del entries[entries_checkpoint:]
+                    del coverage[coverage_checkpoint:]
+                    del issues[issues_checkpoint:]
+                    del filter_decisions[filter_decisions_checkpoint:]
+                    while len(queue) > queue_checkpoint:
+                        queue.pop()
+                    for relative_path in attempt_directory_subjects:
+                        directory_filter_subjects.pop(relative_path, None)
+                    reported_filter_errors.clear()
+                    reported_filter_errors.update(
+                        reported_filter_errors_checkpoint
+                    )
+                    examined_entries = examined_entries_checkpoint
+                    control_area_excluded = control_area_excluded_checkpoint
+                    scanned_directories -= 1
+                    rescan_attempt_count += 1
+                    queue.appendleft(
+                        replace(
+                            queued,
+                            rescan_attempt=queued.rescan_attempt + 1,
+                        )
+                    )
+                    continue
                 coverage_state = "VOLATILE"
                 issues.append(
                     _issue(
@@ -616,6 +657,7 @@ class LocalFilesystemSnapshotScanner:
             issues=tuple(issues),
             control_area_excluded=control_area_excluded,
             filter_decisions=tuple(filter_decisions),
+            rescan_attempt_count=rescan_attempt_count,
         )
 
     def _validate_root(self, root: Path) -> None:

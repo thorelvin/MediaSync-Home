@@ -8,6 +8,7 @@ import pytest
 
 from mediasync_home.adapters.file_identity import file_birthtime_ns, stable_file_identity_hash
 from mediasync_home.adapters import file_identity
+from mediasync_home.adapters import local_snapshot_scanner
 from mediasync_home.adapters.local_snapshot_scanner import (
     LocalFilesystemSnapshotScanner,
 )
@@ -214,6 +215,81 @@ def test_local_snapshot_scanner_records_entry_limit_as_blocking(
     assert [item.coverage_state for item in scan.coverage] == ["CANCELLED"]
     assert [issue.error_code for issue in scan.issues] == [
         "SNAPSHOT_ENTRY_LIMIT_EXCEEDED"
+    ]
+
+
+def test_local_snapshot_scanner_retries_a_volatile_directory_without_duplicates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "source"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    (nested / "photo.jpg").write_bytes(b"photo")
+    root_signature_calls = 0
+    stable_root_signature = object()
+    stable_nested_signature = object()
+
+    def signature(path: Path) -> object:
+        nonlocal root_signature_calls
+        if path == root:
+            root_signature_calls += 1
+            if root_signature_calls <= 2:
+                return object()
+            return stable_root_signature
+        return stable_nested_signature
+
+    monkeypatch.setattr(local_snapshot_scanner, "_directory_signature", signature)
+
+    scan = LocalFilesystemSnapshotScanner(
+        case_mode_probe=_FixedCaseModeProbe(),
+    ).scan(
+        root,
+        snapshot_id="snapshot-volatile-once",
+        exclude_control_area=False,
+    )
+
+    assert scan.complete is True
+    assert scan.rescan_attempt_count == 1
+    assert [entry.relative_path for entry in scan.entries] == [
+        "nested",
+        "nested/photo.jpg",
+    ]
+    assert [item.relative_path for item in scan.coverage] == [".", "nested"]
+    assert scan.issues == ()
+
+
+def test_local_snapshot_scanner_blocks_after_bounded_volatile_rescans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "photo.jpg").write_bytes(b"photo")
+
+    monkeypatch.setattr(
+        local_snapshot_scanner,
+        "_directory_signature",
+        lambda path: object(),
+    )
+
+    scan = LocalFilesystemSnapshotScanner(
+        case_mode_probe=_FixedCaseModeProbe(),
+        max_entries=1,
+        max_directories=1,
+        max_volatile_rescans=2,
+    ).scan(
+        root,
+        snapshot_id="snapshot-always-volatile",
+        exclude_control_area=False,
+    )
+
+    assert scan.complete is False
+    assert scan.rescan_attempt_count == 2
+    assert [entry.relative_path for entry in scan.entries] == ["photo.jpg"]
+    assert [item.coverage_state for item in scan.coverage] == ["VOLATILE"]
+    assert [issue.error_code for issue in scan.issues] == [
+        "SNAPSHOT_DIRECTORY_VOLATILE"
     ]
 
 

@@ -1,5 +1,18 @@
 # Kravsporbarhet
 
+Update 2026-08-02 for `DB-003`: `LocalFilesystemSnapshotScanner` now gives
+each volatile directory a fixed two-retry budget. Before retry it truncates the
+discarded attempt's entries, coverage, issues and filter decisions, removes
+newly queued descendants, restores logical entry/directory accounting and
+filter-error state, and then revalidates the directory identity from the start.
+Stable retry output is emitted once; exhausted retries retain one final view and
+blocking `VOLATILE` evidence. This is covered by
+`tests/unit/test_local_snapshot_scanner.py`,
+`tests/integration/sqlite/test_job_snapshot_materializations.py`,
+`tests/integration/sqlite/test_sqlite_snapshots.py`, and
+`tests/unit/test_engine_host_pipe_loop.py`. Streaming the complete scan without
+whole-scan materialization and planner large-dataset gates remain pending.
+
 Update 2026-08-01 for `FILTER-001`: source and target snapshot materialization
 now parse and hash-check the exact immutable filter version bound to the active
 job revision before snapshot reuse or scanning. The canonical schema supports

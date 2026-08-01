@@ -30,6 +30,7 @@ class FilesystemSnapshotScan:
     issues: tuple[SnapshotIssue, ...]
     control_area_excluded: bool
     filter_decisions: tuple[SnapshotFilterDecision, ...] = ()
+    rescan_attempt_count: int = 0
 
     @property
     def complete(self) -> bool:

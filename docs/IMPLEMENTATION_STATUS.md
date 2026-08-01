@@ -1,5 +1,18 @@
 # Implementeringsstatus
 
+Update 2026-08-02: `DB-003` scanner stability now includes bounded volatile-
+directory rescans. The local scanner retries an identity or metadata change at
+most twice and rolls back every entry, coverage row, issue, filter decision,
+queued child directory and filter-error accounting from the discarded attempt.
+A directory that stabilizes is emitted exactly once; one that remains unstable
+is persisted as blocking `VOLATILE` coverage with
+`SNAPSHOT_DIRECTORY_VOLATILE`. Entry and directory limits continue to apply to
+the accepted logical scan while the fixed retry count bounds extra filesystem
+work. Unit tests cover child-queue deduplication, successful stabilization and
+retry exhaustion; snapshot persistence and Engine Host integration suites pass.
+Whole-scan materialization and planner-scale benchmarks remain open `DB-003`
+work.
+
 Update 2026-08-01: `FILTER-001` has a production bounded filter evaluator,
 exact active-revision binding and file-level explanation. Canonical schema 1/2
 JSON and SHA-256 are validated before sealed snapshot reuse. One immutable
