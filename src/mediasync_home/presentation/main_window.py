@@ -57,6 +57,7 @@ from mediasync_home.application.user_preferences import (
 )
 from mediasync_home.presentation.background_queries import (
     BackgroundQueryController,
+    CommandSubmissionController,
     UiUpdateCoalescer,
 )
 from mediasync_home.presentation.theme.icon_registry import IconRegistry
@@ -171,6 +172,13 @@ class _PendingRetry:
 class _StatusQueryResult:
     response: IpcResponse
     connected: bool
+
+
+@dataclass(frozen=True)
+class _CommandConnectResult:
+    response: IpcResponse
+    connected: bool
+    command_submitted: bool
 
 
 @dataclass(frozen=True)
@@ -379,6 +387,14 @@ class MediaSyncWindow(QMainWindow):
             if engine_client_factory is not None
             else None
         )
+        self._command_submissions = (
+            CommandSubmissionController(
+                client_factory=engine_client_factory,
+                parent=self,
+            )
+            if engine_client_factory is not None
+            else None
+        )
         self._ui_update_coalescer = UiUpdateCoalescer(
             interval_ms=250,
             max_channels=16,
@@ -396,8 +412,15 @@ class MediaSyncWindow(QMainWindow):
         self._setup_draft_id: str | None = None
         self._setup_request_id: str | None = None
         self._setup_idempotency_key: str | None = None
+        self._setup_command_pending = False
+        self._setup_registration_retry_required = False
         self._start_request_id: str | None = None
         self._start_idempotency_key: str | None = None
+        self._start_command_pending = False
+        self._analysis_command_request_id: str | None = None
+        self._analysis_command_job_id: str | None = None
+        self._analysis_command_start_when_safe: bool | None = None
+        self._analysis_command_pending = False
         self._analysis_request_id: str | None = None
         self._analysis_idempotency_key: str | None = None
         self._analysis_query_pending = False
@@ -410,6 +433,10 @@ class MediaSyncWindow(QMainWindow):
         self._run_progress_query_pending = False
         self._run_progress_query_run_id: str | None = None
         self._run_control_pending = False
+        self._run_control_action: str | None = None
+        self._run_control_run_id: str | None = None
+        self._run_control_request_id: str | None = None
+        self._run_control_idempotency_key: str | None = None
         self._run_progress_state = empty_run_progress_state()
         self._setup_state = build_standard_backup_setup_state(self._setup_draft)
         self._backup_overview_state = empty_backup_overview_state()
@@ -678,6 +705,8 @@ class MediaSyncWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._background_queries is not None:
             self._background_queries.close()
+        if self._command_submissions is not None:
+            self._command_submissions.close()
         self._ui_update_coalescer.cancel_all()
         super().closeEvent(event)
 
@@ -686,6 +715,50 @@ class MediaSyncWindow(QMainWindow):
 
     def _display(self, value: str) -> str:
         return localize_display_value(self._selected_language_code, value)
+
+    def _command_worker_active(self) -> bool:
+        return self._command_submissions is not None and self._command_submissions.active
+
+    def _submit_engine_command(
+        self,
+        *,
+        name: str,
+        operation: Callable[[object], object],
+        on_result: Callable[[object], None],
+        on_error: Callable[[Exception], None],
+    ) -> bool:
+        if self._command_submissions is not None:
+            submitted = self._command_submissions.submit(
+                name=name,
+                operation=operation,
+                on_result=on_result,
+                on_error=on_error,
+            )
+            if submitted:
+                self._refresh_command_buttons()
+            return submitted
+        if self._engine_client is None:
+            return False
+        try:
+            on_result(operation(self._engine_client))
+        except Exception as exc:
+            on_error(exc)
+        return True
+
+    def _apply_command_transport_failure(self, detail: str) -> None:
+        self.apply_engine_status(
+            replace(
+                self._engine_status_state,
+                detail=self._display(detail),
+                status_kind="warning",
+            )
+        )
+
+    def _refresh_command_buttons(self) -> None:
+        self._apply_backup_setup_state(self._setup_state)
+        self._apply_backup_job_detail_state(self._job_detail_state)
+        self._apply_run_progress_state(self._run_progress_state)
+        self._apply_history_operation_retry(self._history_operation_audit_state)
 
     def refresh_engine_status(self) -> None:
         if self._background_queries is not None and self._engine_client is not None:
@@ -1163,11 +1236,12 @@ class MediaSyncWindow(QMainWindow):
             self._start_request_id = None
             self._start_idempotency_key = None
             self._analysis_request_id = None
-            self._analysis_idempotency_key = None
+            self._clear_analysis_command_identity()
             self._retry_after_analysis = None
             self._analysis_timer.stop()
             self._cancel_background_analysis_query()
             self._active_run_id = None
+            self._clear_run_control_identity()
             self._run_progress_timer.stop()
             self._cancel_background_run_progress_query()
             self._run_progress_state = empty_run_progress_state()
@@ -2224,8 +2298,10 @@ class MediaSyncWindow(QMainWindow):
         button.setEnabled(
             visible
             and not self._history_audit_query_pending
+            and not self._analysis_command_pending
             and self._analysis_request_id is None
             and self._retry_after_analysis is None
+            and not self._command_worker_active()
             and self._engine_client is not None
             and hasattr(self._engine_client, "check_backup")
             and hasattr(self._engine_client, "start_backup")
@@ -2270,23 +2346,15 @@ class MediaSyncWindow(QMainWindow):
         self._start_request_id = None
         self._start_idempotency_key = None
         self._selected_job_id = activity.job_id
-        detail = self._refresh_backup_job_detail(
-            activity.job_id,
-            background=False,
-        )
-        if (
-            detail is None
-            or not detail.found
-            or self._analysis_request_id is not None
-        ):
-            return
         self._retry_after_analysis = _PendingRetry(
             source_run_id=activity.run_id,
             target_endpoint_ids=(row.target_endpoint_id,),
             source_operation_ids=(row.operation_id,),
         )
-        self._check_selected_backup(start_when_safe=False)
-        if self._analysis_request_id is None:
+        if not self._check_selected_backup(
+            start_when_safe=False,
+            job_id=activity.job_id,
+        ):
             self._retry_after_analysis = None
         self._apply_history_operation_retry(state)
 
@@ -3087,6 +3155,7 @@ class MediaSyncWindow(QMainWindow):
             self._jobs_pause_button.setEnabled(
                 pausable
                 and not self._run_control_pending
+                and not self._command_worker_active()
                 and self._engine_client is not None
                 and hasattr(self._engine_client, "pause_backup")
             )
@@ -3097,6 +3166,7 @@ class MediaSyncWindow(QMainWindow):
             self._jobs_resume_button.setEnabled(
                 resumable
                 and not self._run_control_pending
+                and not self._command_worker_active()
                 and self._engine_client is not None
                 and hasattr(self._engine_client, "resume_backup")
             )
@@ -3114,6 +3184,7 @@ class MediaSyncWindow(QMainWindow):
                 stoppable
                 and not state.stop_requested
                 and not self._run_control_pending
+                and not self._command_worker_active()
                 and self._engine_client is not None
                 and hasattr(self._engine_client, "stop_backup_after_active_file")
             )
@@ -3163,8 +3234,10 @@ class MediaSyncWindow(QMainWindow):
         button.setEnabled(
             visible
             and not self._job_detail_query_pending
+            and not self._analysis_command_pending
             and self._analysis_request_id is None
             and self._retry_after_analysis is None
+            and not self._command_worker_active()
             and self._engine_client is not None
             and hasattr(self._engine_client, "check_backup")
             and hasattr(self._engine_client, "start_backup")
@@ -3251,32 +3324,83 @@ class MediaSyncWindow(QMainWindow):
             or self._engine_client is None
             or not hasattr(self._engine_client, method_name)
             or self._run_control_pending
+            or self._command_worker_active()
         ):
             return
+        if self._run_control_action != action or self._run_control_run_id != run_id:
+            self._run_control_action = action
+            self._run_control_run_id = run_id
+            self._run_control_request_id = str(uuid4())
+            self._run_control_idempotency_key = str(uuid4())
+        request_id = self._run_control_request_id
+        idempotency_key = self._run_control_idempotency_key
+        assert request_id is not None
+        assert idempotency_key is not None
         self._run_control_pending = True
         self._apply_run_progress_state(self._run_progress_state)
-        provider = cast(RunControlProvider, self._engine_client)
-        request_id = str(uuid4())
-        idempotency_key = str(uuid4())
-        if action == "pause":
-            response = provider.pause_backup(
+
+        def command(client: object) -> object:
+            provider = cast(RunControlProvider, client)
+            if action == "pause":
+                return provider.pause_backup(
+                    run_id=run_id,
+                    request_id=request_id,
+                    idempotency_key=idempotency_key,
+                )
+            if action == "resume":
+                return provider.resume_backup(
+                    run_id=run_id,
+                    request_id=request_id,
+                    idempotency_key=idempotency_key,
+                )
+            return provider.stop_backup_after_active_file(
                 run_id=run_id,
                 request_id=request_id,
                 idempotency_key=idempotency_key,
             )
-        elif action == "resume":
-            response = provider.resume_backup(
+
+        def accept(value: object) -> None:
+            self._run_control_pending = False
+            if (
+                self._run_control_action == action
+                and self._run_control_run_id == run_id
+                and self._run_control_request_id == request_id
+                and self._run_control_idempotency_key == idempotency_key
+            ):
+                self._clear_run_control_identity()
+            self._apply_run_control_response(
+                cast(IpcResponse, value),
                 run_id=run_id,
-                request_id=request_id,
-                idempotency_key=idempotency_key,
             )
-        else:
-            response = provider.stop_backup_after_active_file(
-                run_id=run_id,
-                request_id=request_id,
-                idempotency_key=idempotency_key,
+
+        def reject(_error: Exception) -> None:
+            self._run_control_pending = False
+            self._apply_command_transport_failure(
+                "Run control could not be submitted. Retry the action."
             )
-        self._run_control_pending = False
+            self._apply_run_progress_state(self._run_progress_state)
+
+        if not self._submit_engine_command(
+            name=f"run-{action}",
+            operation=command,
+            on_result=accept,
+            on_error=reject,
+        ):
+            self._run_control_pending = False
+            self._apply_run_progress_state(self._run_progress_state)
+
+    def _clear_run_control_identity(self) -> None:
+        self._run_control_action = None
+        self._run_control_run_id = None
+        self._run_control_request_id = None
+        self._run_control_idempotency_key = None
+
+    def _apply_run_control_response(
+        self,
+        response: IpcResponse,
+        *,
+        run_id: str,
+    ) -> None:
         if response.status is IpcStatus.REJECTED:
             codes = response.payload.get("validation_codes")
             reason = (
@@ -3295,8 +3419,14 @@ class MediaSyncWindow(QMainWindow):
             )
             self._apply_run_progress_state(self._run_progress_state)
             return
-        self._set_active_run(run_id)
-        self._poll_active_run_progress()
+        if (
+            self._active_run_id == run_id
+            or self._run_progress_state.run_id == run_id
+        ):
+            self._set_active_run(run_id)
+            self._poll_active_run_progress()
+        else:
+            self._refresh_activity_overview()
 
     def _refresh_plan_previews(
         self,
@@ -4037,11 +4167,12 @@ class MediaSyncWindow(QMainWindow):
             self._setup_back_button.setToolTip(self._texts().back_tooltip)
             self._setup_back_button.setAccessibleName(self._texts().back_tooltip)
         if self._setup_primary_button is not None:
-            action_label = (
-                "Choose source folder"
-                if state.current_step is BackupSetupStep.SOURCE
-                else state.primary_action_label
-            )
+            if state.current_step is BackupSetupStep.SOURCE:
+                action_label = "Choose source folder"
+            elif self._setup_registration_retry_required:
+                action_label = "Prøv målregistrering igjen"
+            else:
+                action_label = state.primary_action_label
             self._setup_primary_button.setText(self._display(action_label))
             self._setup_primary_button.setEnabled(self._setup_primary_enabled(state))
             self._setup_primary_button.setToolTip(self._setup_primary_tooltip(state))
@@ -4049,6 +4180,8 @@ class MediaSyncWindow(QMainWindow):
         QTimer.singleShot(0, self._refresh_dashboard_geometry)
 
     def _setup_primary_enabled(self, state: StandardBackupSetupViewState) -> bool:
+        if self._setup_command_pending or self._command_worker_active():
+            return False
         if state.current_step is BackupSetupStep.SOURCE:
             return True
         return state.can_continue
@@ -4056,6 +4189,7 @@ class MediaSyncWindow(QMainWindow):
     def _setup_can_go_back(self, state: StandardBackupSetupViewState) -> bool:
         return (
             state.current_step is not BackupSetupStep.SOURCE
+            and not self._setup_command_pending
             and self._setup_request_id is None
             and self._setup_draft.source_path_label == state.source_label
             and len(self._setup_draft.targets) == state.configured_targets
@@ -4193,7 +4327,9 @@ class MediaSyncWindow(QMainWindow):
         controls.setVisible(editing_targets)
         add_button.setVisible(editing_targets)
         add_button.setEnabled(
-            editing_targets and state.configured_targets < state.max_targets
+            editing_targets
+            and state.configured_targets < state.max_targets
+            and not self._command_worker_active()
         )
         add_button.setToolTip(self._texts().add_target_tooltip)
         add_button.setAccessibleName(self._texts().add_target_tooltip)
@@ -4225,22 +4361,23 @@ class MediaSyncWindow(QMainWindow):
         controls.updateGeometry()
 
     def _create_standard_backup_job(self) -> None:
-        if self._engine_client is None:
+        if (
+            self._engine_client is None
+            or self._setup_command_pending
+            or self._command_worker_active()
+        ):
             return
         source_name = self._setup_draft.source_name
         source_path_label = self._setup_draft.source_path_label
         if source_name is None or source_path_label is None:
             return
-        if not self._connected:
-            handshake = self._engine_client.connect()
-            if handshake.reason is not None:
-                self.apply_engine_status(engine_status_from_response(handshake))
-                return
-            self._connected = True
-
         self._setup_draft_id = self._setup_draft_id or str(uuid4())
         self._setup_request_id = self._setup_request_id or str(uuid4())
         self._setup_idempotency_key = self._setup_idempotency_key or str(uuid4())
+        request_id = self._setup_request_id
+        idempotency_key = self._setup_idempotency_key
+        assert request_id is not None
+        assert idempotency_key is not None
         if self._setup_back_button is not None:
             self._setup_back_button.hide()
         draft = StandardBackupJobDraft(
@@ -4256,12 +4393,60 @@ class MediaSyncWindow(QMainWindow):
                 for target in self._setup_draft.targets
             ),
         )
-        provider = cast(BackupJobCreationProvider, self._engine_client)
-        response = provider.create_standard_backup_job(
-            draft=draft,
-            request_id=self._setup_request_id,
-            idempotency_key=self._setup_idempotency_key,
-        )
+        needs_connect = not self._connected
+        self._setup_command_pending = True
+        self._apply_backup_setup_state(self._setup_state)
+
+        def command(client: object) -> object:
+            if needs_connect:
+                handshake = cast(EngineStatusProvider, client).connect()
+                if handshake.reason is not None:
+                    return _CommandConnectResult(
+                        response=handshake,
+                        connected=False,
+                        command_submitted=False,
+                    )
+            response = cast(
+                BackupJobCreationProvider,
+                client,
+            ).create_standard_backup_job(
+                draft=draft,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+            )
+            return _CommandConnectResult(
+                response=response,
+                connected=True,
+                command_submitted=True,
+            )
+
+        def accept(value: object) -> None:
+            self._setup_command_pending = False
+            result = cast(_CommandConnectResult, value)
+            self._connected = result.connected
+            if not result.command_submitted:
+                self.apply_engine_status(engine_status_from_response(result.response))
+                self._apply_backup_setup_state(self._setup_state)
+                return
+            self._apply_create_backup_response(result.response)
+
+        def reject(_error: Exception) -> None:
+            self._setup_command_pending = False
+            self._apply_command_transport_failure(
+                "Backup creation could not be submitted. Retry to reuse the same request."
+            )
+            self._apply_backup_setup_state(self._setup_state)
+
+        if not self._submit_engine_command(
+            name="create-backup-job",
+            operation=command,
+            on_result=accept,
+            on_error=reject,
+        ):
+            self._setup_command_pending = False
+            self._apply_backup_setup_state(self._setup_state)
+
+    def _apply_create_backup_response(self, response: IpcResponse) -> None:
         if response.status is IpcStatus.REJECTED:
             reason = response.reason.value if response.reason is not None else "UNKNOWN"
             self.apply_engine_status(
@@ -4271,6 +4456,7 @@ class MediaSyncWindow(QMainWindow):
                     status_kind="warning",
                 )
             )
+            self._apply_backup_setup_state(self._setup_state)
             return
 
         registration = response.payload.get("writable_endpoint_registration")
@@ -4278,6 +4464,7 @@ class MediaSyncWindow(QMainWindow):
             isinstance(registration, dict)
             and registration.get("completed") is not True
         )
+        self._setup_registration_retry_required = registration_incomplete
         success_detail = "Backup job and writable target registration were saved."
         success_kind = "ready"
         if registration_incomplete:
@@ -4307,12 +4494,14 @@ class MediaSyncWindow(QMainWindow):
         if registration_incomplete:
             self._refresh_backup_job_detail_from_response(response)
             self._refresh_activity_overview()
+            self._apply_backup_setup_state(self._setup_state)
             self._refresh_dashboard_geometry()
             return
         self._setup_draft = BackupSetupDraft.empty()
         self._setup_draft_id = None
         self._setup_request_id = None
         self._setup_idempotency_key = None
+        self._setup_registration_retry_required = False
         self._selected_job_id = None
         self._jobs_page_offset = 0
         self._refresh_backup_overview()
@@ -4352,6 +4541,8 @@ class MediaSyncWindow(QMainWindow):
         *,
         reveal_action: bool = True,
     ) -> None:
+        if step is not BackupSetupStep.REVIEW:
+            self._setup_registration_retry_required = False
         self._setup_state = build_standard_backup_setup_state(
             self._setup_draft,
             current_step=step,
@@ -4496,9 +4687,12 @@ class MediaSyncWindow(QMainWindow):
             )
             start_button.setEnabled(
                 not self._job_detail_query_pending
+                and not self._analysis_command_pending
+                and not self._start_command_pending
                 and not analysis_pending
                 and not queued
                 and not active_for_job
+                and not self._command_worker_active()
                 and self._engine_client is not None
                 and (
                     hasattr(self._engine_client, "check_backup")
@@ -4548,25 +4742,91 @@ class MediaSyncWindow(QMainWindow):
             return
         self._start_selected_backup()
 
-    def _check_selected_backup(self, *, start_when_safe: bool = True) -> None:
+    def _check_selected_backup(
+        self,
+        *,
+        start_when_safe: bool = True,
+        job_id: str | None = None,
+    ) -> bool:
         state = self._job_detail_state
+        selected_job_id = job_id or state.job_id
         if (
             self._engine_client is None
             or not hasattr(self._engine_client, "check_backup")
-            or state.job_id is None
-            or self._job_detail_query_pending
+            or selected_job_id is None
+            or (job_id is None and self._job_detail_query_pending)
+            or self._analysis_command_pending
             or self._analysis_request_id is not None
+            or self._command_worker_active()
         ):
-            return
-        request_id = str(uuid4())
-        idempotency_key = str(uuid4())
-        provider = cast(BackupCheckProvider, self._engine_client)
-        response = provider.check_backup(
-            job_id=state.job_id,
-            request_id=request_id,
-            idempotency_key=idempotency_key,
-            start_when_safe=start_when_safe,
+            return False
+        if (
+            self._analysis_command_job_id != selected_job_id
+            or self._analysis_command_start_when_safe != start_when_safe
+            or self._analysis_command_request_id is None
+            or self._analysis_idempotency_key is None
+        ):
+            self._analysis_command_job_id = selected_job_id
+            self._analysis_command_start_when_safe = start_when_safe
+            self._analysis_command_request_id = str(uuid4())
+            self._analysis_idempotency_key = str(uuid4())
+        request_id = self._analysis_command_request_id
+        idempotency_key = self._analysis_idempotency_key
+        assert request_id is not None
+        assert idempotency_key is not None
+        pending_retry = self._retry_after_analysis
+        self._analysis_command_pending = True
+        self._refresh_command_buttons()
+
+        def command(client: object) -> object:
+            return cast(BackupCheckProvider, client).check_backup(
+                job_id=selected_job_id,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                start_when_safe=start_when_safe,
+            )
+
+        def accept(value: object) -> None:
+            self._analysis_command_pending = False
+            self._apply_backup_check_response(
+                cast(IpcResponse, value),
+                job_id=selected_job_id,
+                pending_retry=pending_retry,
+            )
+
+        def reject(_error: Exception) -> None:
+            self._analysis_command_pending = False
+            if self._retry_after_analysis == pending_retry:
+                self._retry_after_analysis = None
+            self._apply_command_transport_failure(
+                "Backup check could not be submitted. Retry to reuse the same request."
+            )
+            self._refresh_command_buttons()
+
+        submitted = self._submit_engine_command(
+            name="check-backup",
+            operation=command,
+            on_result=accept,
+            on_error=reject,
         )
+        if not submitted:
+            self._analysis_command_pending = False
+            self._refresh_command_buttons()
+        return submitted
+
+    def _clear_analysis_command_identity(self) -> None:
+        self._analysis_command_job_id = None
+        self._analysis_command_start_when_safe = None
+        self._analysis_command_request_id = None
+        self._analysis_idempotency_key = None
+
+    def _apply_backup_check_response(
+        self,
+        response: IpcResponse,
+        *,
+        job_id: str,
+        pending_retry: _PendingRetry | None,
+    ) -> None:
         if response.status is IpcStatus.REJECTED:
             reason = (
                 str(response.payload.get("reason_code"))
@@ -4582,6 +4842,10 @@ class MediaSyncWindow(QMainWindow):
                     status_kind="warning",
                 )
             )
+            self._clear_analysis_command_identity()
+            if self._retry_after_analysis == pending_retry:
+                self._retry_after_analysis = None
+            self._refresh_command_buttons()
             return
         request_payload = response.payload.get("analysis_request")
         accepted_request_id = (
@@ -4590,15 +4854,30 @@ class MediaSyncWindow(QMainWindow):
             else None
         )
         if not isinstance(accepted_request_id, str) or not accepted_request_id:
+            self._clear_analysis_command_identity()
+            if self._retry_after_analysis == pending_retry:
+                self._retry_after_analysis = None
+            self._apply_command_transport_failure(
+                "The Engine Host accepted the backup check without a request identity."
+            )
+            self._refresh_command_buttons()
             return
+        self._clear_analysis_command_identity()
+        if self._selected_job_id != job_id:
+            self._refresh_backup_overview()
+            self._refresh_activity_overview()
+            self._refresh_history_timeline()
+            self._refresh_command_buttons()
+            return
+        self._selected_job_id = job_id
         self._analysis_request_id = accepted_request_id
-        self._analysis_idempotency_key = idempotency_key
-        self._job_detail_state = replace(
-            state,
-            analysis_request_id=accepted_request_id,
-            analysis_request_state="QUEUED",
-        )
-        self._apply_backup_job_detail_state(self._job_detail_state)
+        if self._job_detail_state.job_id == job_id:
+            self._job_detail_state = replace(
+                self._job_detail_state,
+                analysis_request_id=accepted_request_id,
+                analysis_request_state="QUEUED",
+            )
+            self._apply_backup_job_detail_state(self._job_detail_state)
         self.apply_engine_status(
             replace(
                 self._engine_status_state,
@@ -4607,6 +4886,7 @@ class MediaSyncWindow(QMainWindow):
             )
         )
         self._analysis_timer.start()
+        self._refresh_command_buttons()
 
     def _poll_backup_analysis(self) -> None:
         request_id = self._analysis_request_id
@@ -4784,20 +5064,69 @@ class MediaSyncWindow(QMainWindow):
             or state.plan_checksum is None
             or not state.plan_runnable
             or self._job_detail_query_pending
+            or self._start_command_pending
+            or self._command_worker_active()
         ):
             return
         self._start_request_id = self._start_request_id or str(uuid4())
         self._start_idempotency_key = self._start_idempotency_key or str(uuid4())
-        provider = cast(BackupStartProvider, self._engine_client)
-        response = provider.start_backup(
-            plan_id=state.plan_id,
-            plan_checksum=state.plan_checksum,
-            request_id=self._start_request_id,
-            idempotency_key=self._start_idempotency_key,
-            target_endpoint_ids=target_endpoint_ids,
-            resumed_from_run_id=resumed_from_run_id,
-            source_operation_ids=source_operation_ids,
-        )
+        request_id = self._start_request_id
+        idempotency_key = self._start_idempotency_key
+        job_id = state.job_id
+        plan_id = state.plan_id
+        plan_checksum = state.plan_checksum
+        assert request_id is not None
+        assert idempotency_key is not None
+        assert job_id is not None
+        assert plan_id is not None
+        assert plan_checksum is not None
+        self._start_command_pending = True
+        self._refresh_command_buttons()
+
+        def command(client: object) -> object:
+            return cast(BackupStartProvider, client).start_backup(
+                plan_id=plan_id,
+                plan_checksum=plan_checksum,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                target_endpoint_ids=target_endpoint_ids,
+                resumed_from_run_id=resumed_from_run_id,
+                source_operation_ids=source_operation_ids,
+            )
+
+        def accept(value: object) -> None:
+            self._start_command_pending = False
+            self._apply_start_backup_response(
+                cast(IpcResponse, value),
+                job_id=job_id,
+                plan_id=plan_id,
+                submitted_state=state,
+            )
+
+        def reject(_error: Exception) -> None:
+            self._start_command_pending = False
+            self._apply_command_transport_failure(
+                "Backup start could not be submitted. Retry to reuse the same request."
+            )
+            self._refresh_command_buttons()
+
+        if not self._submit_engine_command(
+            name="start-backup",
+            operation=command,
+            on_result=accept,
+            on_error=reject,
+        ):
+            self._start_command_pending = False
+            self._refresh_command_buttons()
+
+    def _apply_start_backup_response(
+        self,
+        response: IpcResponse,
+        *,
+        job_id: str,
+        plan_id: str,
+        submitted_state: BackupJobDetailViewState,
+    ) -> None:
         if response.status is IpcStatus.REJECTED:
             readiness = response.payload.get("readiness")
             codes = readiness.get("validation_codes") if isinstance(readiness, dict) else None
@@ -4815,14 +5144,16 @@ class MediaSyncWindow(QMainWindow):
                     status_kind="warning",
                 )
             )
+            self._refresh_command_buttons()
             return
+
         run_payload = response.payload.get("run")
         run_id = (
             run_payload.get("run_id")
             if isinstance(run_payload, dict)
             else None
         )
-        self._queued_backup_job_ids.add(state.job_id)
+        self._queued_backup_job_ids.add(job_id)
         self._start_request_id = None
         self._start_idempotency_key = None
         self.apply_engine_status(
@@ -4832,11 +5163,17 @@ class MediaSyncWindow(QMainWindow):
                 status_kind="ready",
             )
         )
-        self._apply_backup_job_detail_state(state)
+        if self._selected_job_id == job_id and self._job_detail_state.plan_id == plan_id:
+            self._apply_backup_job_detail_state(submitted_state)
         self._refresh_activity_overview()
-        if isinstance(run_id, str) and run_id:
+        if (
+            self._selected_job_id == job_id
+            and isinstance(run_id, str)
+            and run_id
+        ):
             self._set_active_run(run_id)
             self._poll_active_run_progress()
+        self._refresh_command_buttons()
 
     def _retry_selected_target(self) -> None:
         combo = self._jobs_retry_target_combo
@@ -4859,8 +5196,7 @@ class MediaSyncWindow(QMainWindow):
             source_run_id=source_run_id,
             target_endpoint_ids=(endpoint_id,),
         )
-        self._check_selected_backup(start_when_safe=False)
-        if self._analysis_request_id is None:
+        if not self._check_selected_backup(start_when_safe=False):
             self._retry_after_analysis = None
         self._apply_run_progress_state(self._run_progress_state)
 

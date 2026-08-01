@@ -1,5 +1,26 @@
 # Kravsporbarhet
 
+Oppdatering 2026-08-01 for `UX-002`, `UX-004`, `ARC-004` og `PERF-001`:
+Alle muterende GUI-submissions bruker nå en dedikert, serialisert command-worker
+med separat gjenbrukt Engine-client. Oppretting/målregistrering, `CHECK_BACKUP`,
+`START_RUN` og pause/fortsett/stopp har én aktiv submission, ingen erstattbar
+eller droppbar kommandokø og UI-sideguards mot dobbeltklikk. Request- og
+idempotency-identitet bindes før workerstart og gjenbrukes etter usikkert
+transportutfall. Resultatcallback kjøres først etter at workerplassen er ledig,
+slik at en autoritativt avhengig neste kommando kan starte uten parallellitet.
+Et sent resultat oppdaterer ikke feil jobb/run etter brukerens jobbskifte, men
+utløser fortsatt nødvendig autoritativ refresh for den utførte effekten.
+Window-close lar en startet submission fullføre uten å anvende en sen
+UI-callback. Historikkens filretry utfører heller ikke lenger en synkron
+jobbdetaljspørring før kontrollkommandoen; Engine Host er autoritet for
+valideringen. GUI-bevis blokkerer hver kommandofamilie, prøver duplikatklikk,
+navigerer, bytter språk og jobb ved 900×560, og verifiserer workertråd,
+stale-result-sperre og eksakt ID-gjenbruk etter timeout. Bevis:
+`src/mediasync_home/presentation/background_queries.py`,
+`src/mediasync_home/presentation/main_window.py`,
+`src/mediasync_home/presentation/view_models/localization.py` og
+`tests/gui/test_pyside_shell.py`.
+
 Oppdatering 2026-08-01 for `UX-002`, `UX-004` og `PERF-001`: Produktvinduet
 vises før første live read. Status, Jobber-oversikt/-detalj, Aktivitet,
 Endringer, Historikkens tidslinje/filresultater/operasjonsaudit,
@@ -16,7 +37,7 @@ sentrale `UiUpdateCoalescer` har maksimalt 16 rekonstruerbare kanaler og anvende
 bare siste verdi per kanal ved høyst 4 Hz. GUI-testene blokkerer hver queryklasse,
 navigerer med reelle klikk, bytter språk og jobb/filvalg og beviser én
 serialisert latest-query i 900×560 uten horisontal clipping. Virtuelle tabeller
-og en garantert worker for ikke-rekonstruerbare command-submissions gjenstår.
+gjenstår.
 Bevis:
 `src/mediasync_home/presentation/background_queries.py`,
 `src/mediasync_home/presentation/app.py`,

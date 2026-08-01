@@ -826,6 +826,21 @@ _EN_TO_NB.update(
         "Backup job was saved, but target registration needs attention.": (
             "Backupjobben ble lagret, men målregistreringen trenger oppfølging."
         ),
+        "Backup creation could not be submitted. Retry to reuse the same request.": (
+            "Backupopprettingen kunne ikke sendes. Prøv igjen for å bruke samme forespørsel."
+        ),
+        "Backup check could not be submitted. Retry to reuse the same request.": (
+            "Backupkontrollen kunne ikke sendes. Prøv igjen for å bruke samme forespørsel."
+        ),
+        "Backup start could not be submitted. Retry to reuse the same request.": (
+            "Backupstarten kunne ikke sendes. Prøv igjen for å bruke samme forespørsel."
+        ),
+        "Run control could not be submitted. Retry the action.": (
+            "Kjøringshandlingen kunne ikke sendes. Prøv handlingen igjen."
+        ),
+        "The Engine Host accepted the backup check without a request identity.": (
+            "Engine Host godtok backupkontrollen uten en forespørselsidentitet."
+        ),
         "Connected Engine Host does not support backup creation.": (
             "Tilkoblet Engine Host stÃ¸tter ikke oppretting av backup."
         ),

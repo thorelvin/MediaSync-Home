@@ -202,6 +202,96 @@ class BackgroundQueryController(QObject):
                 return
 
 
+class CommandSubmissionController(QObject):
+    """Runs one non-reconstructible GUI command on a dedicated worker."""
+
+    def __init__(
+        self,
+        *,
+        client_factory: BackgroundClientFactory,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._client_state = _WorkerClientState(client_factory)
+        self._next_token = 1
+        self._active: _QueuedQuery | None = None
+        self._closed = False
+
+    @property
+    def active(self) -> bool:
+        return self._active is not None
+
+    def submit(
+        self,
+        *,
+        name: str,
+        operation: BackgroundOperation,
+        on_result: BackgroundResultHandler,
+        on_error: BackgroundErrorHandler | None = None,
+    ) -> bool:
+        normalized_name = name.strip()
+        if self._closed or self._active is not None or not normalized_name:
+            return False
+        token = self._next_token
+        self._next_token += 1
+        command = _QueuedQuery(
+            key=normalized_name,
+            token=token,
+            operation=operation,
+            on_result=on_result,
+            on_error=on_error,
+        )
+        self._active = command
+        self._start(command)
+        return True
+
+    def close(self) -> None:
+        self._closed = True
+
+    def _start(self, command: _QueuedQuery) -> None:
+        signals = _WorkerSignals()
+        signals.finished.connect(
+            self._on_worker_finished,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        client_state = self._client_state
+
+        def execute() -> None:
+            result: object = None
+            error: Exception | None = None
+            client: object | None = None
+            try:
+                client = client_state.get()
+                result = command.operation(client)
+            except Exception as exc:
+                client_state.discard(client)
+                error = exc
+            signals.finished.emit(command.token, result, error)
+
+        Thread(
+            target=execute,
+            name=f"mediasync-gui-command-{command.key}",
+            daemon=True,
+        ).start()
+
+    @Slot(int, object, object)
+    def _on_worker_finished(
+        self,
+        token: int,
+        result: object,
+        error: object,
+    ) -> None:
+        command = self._active
+        self._active = None
+        if self._closed or command is None or command.token != token:
+            return
+        if isinstance(error, Exception):
+            if command.on_error is not None:
+                command.on_error(error)
+            return
+        command.on_result(result)
+
+
 class UiUpdateCoalescer(QObject):
     """Applies only the latest reconstructible update per bounded channel."""
 

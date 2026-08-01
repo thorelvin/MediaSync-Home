@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import replace
-from threading import Event, Lock
+from threading import Event, Lock, get_ident
 from time import monotonic
 
 import pytest
@@ -45,6 +45,7 @@ from mediasync_home.ipc.protocol import IpcResponse  # noqa: E402
 from mediasync_home.presentation.app import build_main_window, ensure_qapplication  # noqa: E402
 from mediasync_home.presentation.background_queries import (  # noqa: E402
     BackgroundQueryController,
+    CommandSubmissionController,
     UiUpdateCoalescer,
 )
 from mediasync_home.presentation.theme.icon_registry import IconRegistry  # noqa: E402
@@ -1778,6 +1779,106 @@ def test_background_query_close_discards_late_worker_result(qapp) -> None:
     controller.deleteLater()
 
 
+def test_command_worker_is_dedicated_serial_and_reuses_its_client(qapp) -> None:
+    started = Event()
+    release = Event()
+    factory_calls: list[object] = []
+    executed: list[tuple[str, object, int]] = []
+    applied: list[str] = []
+    worker_client = object()
+    ui_thread_id = get_ident()
+
+    def client_factory() -> object:
+        factory_calls.append(worker_client)
+        return worker_client
+
+    controller = CommandSubmissionController(client_factory=client_factory)
+
+    def first(client: object) -> object:
+        executed.append(("first", client, get_ident()))
+        started.set()
+        if not release.wait(timeout=2):
+            raise TimeoutError("test command release timed out")
+        return "first"
+
+    def second(client: object) -> object:
+        executed.append(("second", client, get_ident()))
+        return "second"
+
+    def accept_first(value: object) -> None:
+        applied.append(str(value))
+        assert controller.submit(
+            name="second",
+            operation=second,
+            on_result=lambda result: applied.append(str(result)),
+        )
+
+    assert controller.submit(
+        name="first",
+        operation=first,
+        on_result=accept_first,
+    )
+    assert started.wait(timeout=1)
+    assert not controller.submit(
+        name="must-not-queue",
+        operation=second,
+        on_result=lambda value: applied.append(str(value)),
+    )
+    release.set()
+    deadline = monotonic() + 2
+    while (controller.active or len(applied) < 2) and monotonic() < deadline:
+        qapp.processEvents()
+        QTest.qWait(10)
+
+    assert applied == ["first", "second"]
+    assert [name for name, _client, _thread_id in executed] == ["first", "second"]
+    assert all(client is worker_client for _name, client, _thread_id in executed)
+    assert all(thread_id != ui_thread_id for _name, _client, thread_id in executed)
+    assert factory_calls == [worker_client]
+    assert not controller.active
+    controller.close()
+    controller.deleteLater()
+
+
+def test_command_worker_close_discards_late_result_without_cancelling_execution(qapp) -> None:
+    started = Event()
+    release = Event()
+    completed = Event()
+    applied: list[str] = []
+    controller = CommandSubmissionController(client_factory=lambda: object())
+
+    def command(client: object) -> object:
+        del client
+        started.set()
+        if not release.wait(timeout=2):
+            raise TimeoutError("test command release timed out")
+        completed.set()
+        return "late"
+
+    assert controller.submit(
+        name="durable-command",
+        operation=command,
+        on_result=lambda value: applied.append(str(value)),
+    )
+    assert started.wait(timeout=1)
+    controller.close()
+    assert not controller.submit(
+        name="after-close",
+        operation=command,
+        on_result=lambda value: applied.append(str(value)),
+    )
+    release.set()
+    deadline = monotonic() + 2
+    while controller.active and monotonic() < deadline:
+        qapp.processEvents()
+        QTest.qWait(10)
+
+    assert completed.is_set()
+    assert not controller.active
+    assert applied == []
+    controller.deleteLater()
+
+
 def test_background_query_callback_chain_stays_serial_and_replaces_pending_key(
     qapp,
 ) -> None:
@@ -2457,6 +2558,310 @@ def test_start_backup_button_submits_sealed_plan_once(qapp) -> None:
         window.deleteLater()
 
 
+def test_stalled_create_command_keeps_shell_responsive_and_submits_once(qapp) -> None:
+    provider = _FakeBackupCreationEngineClient()
+    worker_provider = _BlockingBackupCreationEngineClient()
+    factory_calls: list[bool] = []
+
+    def worker_factory() -> _BlockingBackupCreationEngineClient:
+        factory_calls.append(True)
+        return worker_provider
+
+    window = build_main_window(
+        initial_state=_ready_state(),
+        engine_client=provider,
+        engine_client_factory=worker_factory,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        qapp.processEvents()
+        choices = ["C:/Users/Ada/Pictures", "E:/MediaSyncBackup"]
+        window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
+        create = window.findChild(QPushButton, "createBackupButton")
+        add_target = window.findChild(QToolButton, "addTargetButton")
+        nav = window.findChild(QListWidget, "navigationRail")
+        heading = window.findChild(QLabel, "workspaceHeading")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert create is not None
+        assert add_target is not None
+        assert nav is not None
+        assert heading is not None
+        assert language is not None and language.menu() is not None
+        QTest.mouseClick(create, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(add_target, Qt.MouseButton.LeftButton)
+        for _ in range(3):
+            QTest.mouseClick(create, Qt.MouseButton.LeftButton)
+            qapp.processEvents()
+        assert worker_provider.started.wait(timeout=1)
+        assert not create.isEnabled()
+        QTest.mouseClick(create, Qt.MouseButton.LeftButton)
+
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(3)).center(),
+        )
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+
+        assert nav.currentRow() == 3
+        assert heading.text() == "Settings"
+        assert worker_provider.attempted_calls == 1
+        assert worker_provider.worker_thread_id != get_ident()
+        assert not worker_provider.release.is_set()
+        worker_provider.release.set()
+        assert window._command_submissions is not None
+        deadline = monotonic() + 3
+        while window._command_submissions.active and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+
+        assert not window._command_submissions.active
+        assert worker_provider.calls.count("create_standard_backup_job") == 1
+        assert provider.calls == []
+        assert factory_calls == [True]
+        assert nav.currentRow() == 3
+    finally:
+        worker_provider.release.set()
+        window.close()
+        window.deleteLater()
+
+
+def test_stalled_check_command_keeps_navigation_language_and_duplicate_guard(qapp) -> None:
+    provider = _FakeTargetRetryDashboardEngineClient()
+    worker_provider = _BlockingCheckCommandEngineClient()
+
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=lambda: worker_provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window._refresh_engine_status_now()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+        retry = window.findChild(QPushButton, "jobsRetryTargetButton")
+        nav = window.findChild(QListWidget, "navigationRail")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert retry is not None and retry.isVisible() and retry.isEnabled()
+        assert nav is not None
+        assert language is not None and language.menu() is not None
+        QTest.mouseClick(retry, Qt.MouseButton.LeftButton)
+        assert worker_provider.started.wait(timeout=1)
+        qapp.processEvents()
+        assert not retry.isEnabled()
+        QTest.mouseClick(retry, Qt.MouseButton.LeftButton)
+
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(3)).center(),
+        )
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+
+        assert nav.currentRow() == 3
+        assert worker_provider.attempted_calls == 1
+        assert worker_provider.worker_thread_id != get_ident()
+        worker_provider.release.set()
+        deadline = monotonic() + 3
+        while window._analysis_request_id is None and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+
+        window._analysis_timer.stop()
+        assert window._analysis_request_id == "analysis-retry"
+        assert worker_provider.check_start_policies == [False]
+        assert provider.check_start_policies == []
+        assert nav.currentRow() == 3
+    finally:
+        worker_provider.release.set()
+        window.close()
+        window.deleteLater()
+
+
+def test_stalled_start_result_does_not_replace_newly_selected_job(qapp) -> None:
+    provider = _FakeMultiJobDashboardEngineClient()
+    worker_provider = _BlockingStartMultiJobEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=lambda: worker_provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window._refresh_engine_status_now()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+        jobs = window.findChild(QListWidget, "jobsList")
+        start = window.findChild(QPushButton, "jobsStartBackupButton")
+        nav = window.findChild(QListWidget, "navigationRail")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert jobs is not None and jobs.count() == 2
+        assert start is not None and start.isVisible() and start.isEnabled()
+        assert nav is not None
+        assert language is not None and language.menu() is not None
+        QTest.mouseClick(start, Qt.MouseButton.LeftButton)
+        assert worker_provider.started.wait(timeout=1)
+        qapp.processEvents()
+        assert not start.isEnabled()
+        QTest.mouseClick(start, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(
+            jobs.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=jobs.visualItemRect(jobs.item(1)).center(),
+        )
+        deadline = monotonic() + 3
+        while window._job_detail_state.job_id != "job-b" and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        assert window._job_detail_state.job_id == "job-b"
+
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(3)).center(),
+        )
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+        assert nav.currentRow() == 3
+        worker_provider.release.set()
+        assert window._command_submissions is not None
+        deadline = monotonic() + 3
+        while window._command_submissions.active and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+
+        assert worker_provider.attempted_calls == 1
+        assert worker_provider.worker_thread_id != get_ident()
+        assert worker_provider.started_plan == ("plan-a", "a" * 64)
+        assert window._selected_job_id == "job-b"
+        assert window._job_detail_state.job_id == "job-b"
+        assert window._active_run_id != "run-a"
+        assert "job-a" in window._queued_backup_job_ids
+        assert "job-b" not in window._queued_backup_job_ids
+        assert nav.currentRow() == 3
+    finally:
+        worker_provider.release.set()
+        window.close()
+        window.deleteLater()
+
+
+def test_start_transport_retry_reuses_exact_command_identity(qapp) -> None:
+    provider = _FakeBackupStartDashboardEngineClient()
+    worker_provider = _FailOnceStartCommandEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=lambda: worker_provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.show()
+        window._refresh_engine_status_now()
+        qapp.processEvents()
+        start = window.findChild(QPushButton, "startBackupButton")
+        assert start is not None and start.isVisible() and start.isEnabled()
+        assert window._command_submissions is not None
+
+        QTest.mouseClick(start, Qt.MouseButton.LeftButton)
+        deadline = monotonic() + 3
+        while window._command_submissions.active and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        qapp.processEvents()
+
+        assert len(worker_provider.attempts) == 1
+        assert start.isEnabled()
+        first_identity = worker_provider.attempts[0][2:4]
+        QTest.mouseClick(start, Qt.MouseButton.LeftButton)
+        deadline = monotonic() + 3
+        while "job-a" not in window._queued_backup_job_ids and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+
+        assert len(worker_provider.attempts) == 2
+        assert worker_provider.attempts[1][2:4] == first_identity
+        assert worker_provider.started_plan == ("plan-a", "a" * 64)
+        assert provider.started_plan is None
+        assert "job-a" in window._queued_backup_job_ids
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_stalled_run_control_keeps_shell_responsive_and_submits_once(qapp) -> None:
+    provider = _FakeRunControlDashboardEngineClient()
+    worker_provider = _BlockingRunControlCommandEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=lambda: worker_provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window._refresh_engine_status_now()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+        pause = window.findChild(QPushButton, "jobsPauseBackupButton")
+        stop = window.findChild(QPushButton, "jobsStopBackupButton")
+        nav = window.findChild(QListWidget, "navigationRail")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert pause is not None and pause.isVisible() and pause.isEnabled()
+        assert stop is not None and stop.isVisible() and stop.isEnabled()
+        assert nav is not None
+        assert language is not None and language.menu() is not None
+        QTest.mouseClick(pause, Qt.MouseButton.LeftButton)
+        assert worker_provider.started.wait(timeout=1)
+        qapp.processEvents()
+        assert not pause.isEnabled()
+        assert not stop.isEnabled()
+        QTest.mouseClick(pause, Qt.MouseButton.LeftButton)
+
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(3)).center(),
+        )
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+        assert nav.currentRow() == 3
+        assert not worker_provider.release.is_set()
+        worker_provider.release.set()
+        assert window._command_submissions is not None
+        deadline = monotonic() + 3
+        while window._command_submissions.active and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+
+        assert worker_provider.controls == ["pause"]
+        assert worker_provider.attempted_calls == 1
+        assert worker_provider.worker_thread_id != get_ident()
+        assert nav.currentRow() == 3
+    finally:
+        worker_provider.release.set()
+        window.close()
+        window.deleteLater()
+
+
 def test_jobs_page_shows_live_progress_and_run_controls(qapp) -> None:
     provider = _FakeRunControlDashboardEngineClient()
     window = build_main_window(
@@ -2628,6 +3033,11 @@ def test_background_analysis_poll_does_not_queue_or_block_navigation(qapp) -> No
 
         assert nav is not None
         assert language is not None and language.menu() is not None
+        assert window._command_submissions is not None
+        deadline = monotonic() + 2
+        while window._analysis_request_id is None and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
         assert window._analysis_request_id == "analysis-retry"
         window._poll_backup_analysis()
         assert worker_provider.started.wait(timeout=1)
@@ -2666,7 +3076,7 @@ def test_background_analysis_poll_does_not_queue_or_block_navigation(qapp) -> No
             QTest.qWait(10)
         assert analysis_settled()
 
-        assert len(factory_calls) == 1
+        assert len(factory_calls) == 2
         assert worker_provider.max_active == 1
         assert nav.currentRow() == 3
     finally:
@@ -3078,6 +3488,33 @@ class _FakeFailedRegistrationEngineClient(_FakeBackupCreationEngineClient):
             "validation_codes": ["WRITABLE_ENDPOINT_PROBE_FAILED"],
         }
         return IpcResponse.accepted(payload)
+
+
+class _BlockingBackupCreationEngineClient(_FakeBackupCreationEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+        self.release = Event()
+        self.attempted_calls = 0
+        self.worker_thread_id: int | None = None
+
+    def create_standard_backup_job(
+        self,
+        *,
+        draft: StandardBackupJobDraft,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        self.attempted_calls += 1
+        self.worker_thread_id = get_ident()
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise TimeoutError("test create command release timed out")
+        return super().create_standard_backup_job(
+            draft=draft,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
 
 
 class _FakeDashboardEngineClient(_FakeEngineClient):
@@ -3697,6 +4134,38 @@ class _FakeBackupStartDashboardEngineClient(_FakeDashboardEngineClient):
         return IpcResponse.accepted({"created": True, "run": {"run_id": "run-a"}})
 
 
+class _FailOnceStartCommandEngineClient(_FakeBackupStartDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts: list[tuple[str, str, str, str]] = []
+
+    def start_backup(
+        self,
+        *,
+        plan_id: str,
+        plan_checksum: str,
+        request_id: str,
+        idempotency_key: str,
+        target_endpoint_ids: tuple[str, ...] = (),
+        resumed_from_run_id: str | None = None,
+        source_operation_ids: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        self.attempts.append(
+            (plan_id, plan_checksum, request_id, idempotency_key)
+        )
+        if len(self.attempts) == 1:
+            raise TimeoutError("simulated uncertain command transport outcome")
+        return super().start_backup(
+            plan_id=plan_id,
+            plan_checksum=plan_checksum,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+            target_endpoint_ids=target_endpoint_ids,
+            resumed_from_run_id=resumed_from_run_id,
+            source_operation_ids=source_operation_ids,
+        )
+
+
 class _FakeRunControlDashboardEngineClient(_FakeBackupStartDashboardEngineClient):
     def __init__(self) -> None:
         super().__init__()
@@ -3854,6 +4323,33 @@ class _FakeRunControlDashboardEngineClient(_FakeBackupStartDashboardEngineClient
         self.sequence_no += 1
         return IpcResponse.accepted(
             {"applied": True, "run": {"run_id": run_id, "state": "EXECUTING"}}
+        )
+
+
+class _BlockingRunControlCommandEngineClient(_FakeRunControlDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+        self.release = Event()
+        self.attempted_calls = 0
+        self.worker_thread_id: int | None = None
+
+    def pause_backup(
+        self,
+        *,
+        run_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        self.attempted_calls += 1
+        self.worker_thread_id = get_ident()
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise TimeoutError("test run-control command release timed out")
+        return super().pause_backup(
+            run_id=run_id,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
         )
 
 
@@ -4124,6 +4620,35 @@ class _FakeTargetRetryDashboardEngineClient(_FakeTerminalRunDashboardEngineClien
         return IpcResponse.accepted(payload)
 
 
+class _BlockingCheckCommandEngineClient(_FakeTargetRetryDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+        self.release = Event()
+        self.attempted_calls = 0
+        self.worker_thread_id: int | None = None
+
+    def check_backup(
+        self,
+        *,
+        job_id: str,
+        request_id: str,
+        idempotency_key: str,
+        start_when_safe: bool = True,
+    ) -> IpcResponse:
+        self.attempted_calls += 1
+        self.worker_thread_id = get_ident()
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise TimeoutError("test check command release timed out")
+        return super().check_backup(
+            job_id=job_id,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+            start_when_safe=start_when_safe,
+        )
+
+
 class _BlockingAnalysisPollEngineClient(_FakeTargetRetryDashboardEngineClient):
     def __init__(self) -> None:
         super().__init__()
@@ -4281,6 +4806,41 @@ class _FakeMultiJobDashboardEngineClient(_FakeBackupStartDashboardEngineClient):
         detail["job"] = job
         payload["backup_job_detail"] = detail
         return IpcResponse.accepted(payload)
+
+
+class _BlockingStartMultiJobEngineClient(_FakeMultiJobDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+        self.release = Event()
+        self.attempted_calls = 0
+        self.worker_thread_id: int | None = None
+
+    def start_backup(
+        self,
+        *,
+        plan_id: str,
+        plan_checksum: str,
+        request_id: str,
+        idempotency_key: str,
+        target_endpoint_ids: tuple[str, ...] = (),
+        resumed_from_run_id: str | None = None,
+        source_operation_ids: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        self.attempted_calls += 1
+        self.worker_thread_id = get_ident()
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise TimeoutError("test start command release timed out")
+        return super().start_backup(
+            plan_id=plan_id,
+            plan_checksum=plan_checksum,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+            target_endpoint_ids=target_endpoint_ids,
+            resumed_from_run_id=resumed_from_run_id,
+            source_operation_ids=source_operation_ids,
+        )
 
 
 class _BlockingMultiJobDashboardEngineClient(_FakeMultiJobDashboardEngineClient):

@@ -1,5 +1,21 @@
 # Implementeringsstatus
 
+Oppdatering 2026-08-01: Alle ikke-rekonstruerbare GUI-kommandoer kjører nå på
+en egen serialisert command-worker med en separat, gjenbrukt Engine-client.
+Oppretting/målregistrering, ny kontroll, run-start og pause/fortsett/stopp har
+høyst én in-flight submission og ingen lossy ventekø; en ny handling avvises i
+GUI-et til den aktive kommandoen har et resultat. Request- og idempotency-ID
+opprettes før workerstart og beholdes ved et usikkert transportutfall, slik at
+eksakt samme handling kan prøves på nytt uten duplikateffekter. Et definitivt
+resultat brukes til autoritativ refresh selv om brukeren har navigert eller
+valgt en annen jobb, men resultatet kan ikke male gammel jobb/run inn i den nye
+konteksten. Lukking av vinduet kansellerer ikke en allerede sendt mutasjon, men
+forkaster sen UI-callback. Filretryens tidligere synkrone jobbdetalj-read er
+fjernet; Engine Host validerer jobben og retry-scope autoritativt. Adversarial
+Qt-bevis blokkerer hver kommandofamilie, dobbeltklikker, bytter side, språk og
+jobb og verifiserer off-UI-tråd, én submission, stale-result-sperre og eksakt
+idempotency-gjenbruk etter simulert timeout.
+
 Oppdatering 2026-08-01: Produktvinduet vises nå før første live Engine-read, og
 alle rutinemessige rekonstruerbare GUI-reads kjører utenfor GUI-tråden når
 Engine-client-factory er tilgjengelig. Dette omfatter status, Jobber-oversikt og
@@ -18,8 +34,7 @@ holder maksimalt 16 kanaler og anvender bare siste snapshot per kanal ved høyst
 analyse, Endringer, Historikk og filaudit med vilje, utfører reelle klikk mens de
 venter og verifiserer latest-wins, én aktiv worker, én client-factory-resolusjon,
 close-cancellation, bounded overflow, norsk/engelsk og 900×560 uten horisontal
-clipping. Virtuelle millionradstabeller og flytting av ikke-rekonstruerbare
-command-submissions til en egen garantert command-worker gjenstår.
+clipping. Virtuelle millionradstabeller gjenstår.
 
 Oppdatering 2026-07-31: **Historikk** kan nå prøve én valgt uferdig fil på
 nytt fra den bounded, paginerte filresultatvisningen. Handlingen vises bare
