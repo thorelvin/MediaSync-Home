@@ -213,6 +213,8 @@ invariants:
       - FILESYSTEM_DELETED
     restore_operation_table: retained_version_restore_operations
     restore_event_table: retained_version_restore_events
+    restore_rollback_lifecycle_table: retained_version_restore_rollbacks
+    restore_rollback_event_table: retained_version_restore_rollback_events
     restore_requires_active_hold: true
     restore_immutable_binding: true
     restore_append_only_events: true
@@ -220,11 +222,28 @@ invariants:
     restore_preserves_current_before_replace: true
     restore_verifies_source_rollback_and_final: true
     restore_releases_hold_only_after_final_verification: true
+    restore_rollback_immutable_binding: true
+    restore_rollback_append_only_events: true
+    restore_undo_requires_completed_restore: true
+    restore_undo_requires_explicit_confirmation: true
+    restore_undo_requires_fresh_mutation_permit: true
+    restore_undo_requires_unchanged_restored_final: true
+    restore_undo_full_hash_verifies_final: true
+    restore_rollback_kept_after_undo_until_expiry: true
+    restore_rollback_expiry_verifies_pair_before_intent: true
+    restore_rollback_expiry_records_intent_before_delete: true
+    restore_rollback_expiry_is_crash_resumable: true
     restore_crash_resume_states:
       - INTENT_RECORDED
       - CURRENT_FINAL_PRESERVED
       - HISTORICAL_APPLIED
       - FINAL_VERIFIED
+    restore_undo_crash_resume_states:
+      - UNDO_INTENT_RECORDED
+      - UNDO_APPLIED
+      - UNDO_VERIFIED
+    restore_rollback_expiry_crash_resume_states:
+      - EXPIRY_INTENT_RECORDED
   - id: TIME-001_ENDPOINT_RETRY_TIMING
     requirement_id: TIME-001
     table: run_target_endpoint_wait_events

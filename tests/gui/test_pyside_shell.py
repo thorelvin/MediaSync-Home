@@ -6618,10 +6618,13 @@ class _FakeRetainedVersionHistoryEngineClient(_FakeHistoryEngineClient):
         super().__init__()
         self.protected = False
         self.restore_state: str | None = None
+        self.rollback_state: str | None = None
         self.pending_restore_queries_before_completion: int | None = None
+        self.pending_undo_queries_before_completion: int | None = None
         self.version_queries: list[tuple[str, int]] = []
         self.protection_commands: list[tuple[str, int, str, str]] = []
         self.restore_commands: list[tuple[str, int, str, str]] = []
+        self.undo_commands: list[tuple[str, str, int, str, str]] = []
 
     def get_retained_versions(
         self,
@@ -6639,9 +6642,18 @@ class _FakeRetainedVersionHistoryEngineClient(_FakeHistoryEngineClient):
         ):
             if self.pending_restore_queries_before_completion == 0:
                 self.restore_state = "COMPLETED"
+                self.rollback_state = "AVAILABLE"
                 self.protected = False
             else:
                 self.pending_restore_queries_before_completion -= 1
+        if (
+            self.rollback_state == "UNDO_REQUESTED"
+            and self.pending_undo_queries_before_completion is not None
+        ):
+            if self.pending_undo_queries_before_completion == 0:
+                self.rollback_state = "UNDONE"
+            else:
+                self.pending_undo_queries_before_completion -= 1
         return IpcResponse.accepted(
             {
                 "retained_versions": {
@@ -6673,6 +6685,20 @@ class _FakeRetainedVersionHistoryEngineClient(_FakeHistoryEngineClient):
                             "restore_state": self.restore_state,
                             "restore_pending": self.restore_state == "REQUESTED",
                             "restore_validation_code": None,
+                            "rollback_state": self.rollback_state,
+                            "rollback_retention_until_utc": (
+                                "2026-09-09T12:00:01.000Z"
+                                if self.rollback_state is not None
+                                else None
+                            ),
+                            "rollback_validation_code": None,
+                            "restore_undo_available": (
+                                self.restore_state == "COMPLETED"
+                                and self.rollback_state == "AVAILABLE"
+                            ),
+                            "restore_undo_pending": (
+                                self.rollback_state == "UNDO_REQUESTED"
+                            ),
                             "hold_id": "restore:key-a" if self.protected else None,
                             "hold_reason": (
                                 "RESTORE_REQUESTED" if self.protected else None
@@ -6711,6 +6737,37 @@ class _FakeRetainedVersionHistoryEngineClient(_FakeHistoryEngineClient):
                     "protected": True,
                     "validation_code": "VERSION_RESTORE_PROTECTED",
                     "next_action": "Protected.",
+                }
+            }
+        )
+
+    def undo_retained_version_restore(
+        self,
+        *,
+        restore_id: str,
+        version_object_id: str,
+        expected_row_version: int,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        self.undo_commands.append(
+            (
+                restore_id,
+                version_object_id,
+                expected_row_version,
+                request_id,
+                idempotency_key,
+            )
+        )
+        self.rollback_state = "UNDO_REQUESTED"
+        return IpcResponse.accepted(
+            {
+                "version_restore_undo_request": {
+                    "scheduled": True,
+                    "validation_code": "VERSION_RESTORE_UNDO_SCHEDULED",
+                    "next_action": "Scheduled.",
+                    "restore_id": restore_id,
+                    "state": "UNDO_REQUESTED",
                 }
             }
         )
@@ -6825,9 +6882,24 @@ def test_history_previous_version_can_schedule_restore_without_compact_clipping(
         QTest.qWait(1_200)
         qapp.processEvents()
         assert "Restored" in _virtual_row_text(version_list, 0)
+        assert protect.text() == "Undo restore"
+        assert protect.isEnabled()
+        provider.pending_undo_queries_before_completion = 1
+        QTest.mouseClick(protect, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert provider.undo_commands[0][:3] == (
+            "restore-a",
+            "version-a",
+            1,
+        )
+        assert protect.text() == "Undo in progress"
+        assert not protect.isEnabled()
+        QTest.qWait(1_200)
+        qapp.processEvents()
+        assert "Restore undone" in _virtual_row_text(version_list, 0)
         assert protect.text() == "Protect for restore"
         assert protect.isEnabled()
-        assert len(provider.version_queries) >= 4
+        assert len(provider.version_queries) >= 6
     finally:
         window.close()
         window.deleteLater()

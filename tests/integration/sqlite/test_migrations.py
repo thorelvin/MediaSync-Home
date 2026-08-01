@@ -38,7 +38,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 46
+        assert current_schema_version(connection, plan.store) == 47
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -79,6 +79,8 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "version_retention_events",
             "retained_version_restore_operations",
             "retained_version_restore_events",
+            "retained_version_restore_rollbacks",
+            "retained_version_restore_rollback_events",
             "job_revision_filter_bindings",
             "runs",
             "run_targets",
@@ -92,7 +94,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "schema_migrations",
             "store_identity",
         }
-        assert _row_count(connection, "schema_migrations") == 46
+        assert _row_count(connection, "schema_migrations") == 47
         assert {
             "idx_initial_backup_materializations_history",
             "idx_initial_backup_materializations_job_history",
@@ -164,6 +166,10 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "trg_operation_attempts_no_delete",
             "trg_operation_outcomes_no_update",
             "trg_operation_outcomes_no_delete",
+            "trg_retained_version_restore_rollback_binding_immutable",
+            "trg_retained_version_restore_rollback_no_delete",
+            "trg_retained_version_restore_rollback_events_no_update",
+            "trg_retained_version_restore_rollback_events_no_delete",
         } <= _trigger_names(connection)
         assert _foreign_key(
             connection,
@@ -1052,7 +1058,7 @@ def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> N
                 name,
                 migration_checksum
             )
-                    VALUES ('catalog', 47, 'future_migration', ?)
+                    VALUES ('catalog', 48, 'future_migration', ?)
             """,
             ("f" * 64,),
         )
@@ -1165,8 +1171,8 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
         preflight = inspect_sqlite_migration_state(connection, plan)
 
         assert preflight.initialized
-        assert preflight.current_version == 46
-        assert preflight.target_version == 46
+        assert preflight.current_version == 47
+        assert preflight.target_version == 47
         assert preflight.checksum_backfill_required
         assert "migration_checksum" not in _column_names(
             connection,

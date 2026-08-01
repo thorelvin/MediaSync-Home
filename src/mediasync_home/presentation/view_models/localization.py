@@ -738,6 +738,69 @@ class ShellText:
         return "Versjonen kunne ikke gjenopprettes"
 
     @property
+    def undo_version_restore(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Undo restore"
+        return "Angre gjenoppretting"
+
+    @property
+    def undo_version_restore_tooltip(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Put back the live file that was preserved before restore"
+        return "Legg tilbake den aktive filen som ble bevart f\u00f8r gjenoppretting"
+
+    @property
+    def undo_version_restore_title(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Undo this restore?"
+        return "Angre denne gjenopprettingen?"
+
+    @property
+    def undo_version_restore_confirmation(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "The live file preserved before restore will replace the restored version."
+        return (
+            "Den aktive filen som ble bevart f\u00f8r gjenoppretting, erstatter "
+            "den gjenopprettede versjonen."
+        )
+
+    @property
+    def version_restore_undo_scheduled(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Restore undo queued"
+        return "Angring av gjenoppretting er lagt i k\u00f8"
+
+    @property
+    def version_restore_undo_in_progress(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Undo in progress"
+        return "Angring p\u00e5g\u00e5r"
+
+    @property
+    def version_restore_undone(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Restore undone"
+        return "Gjenoppretting angret"
+
+    @property
+    def version_restore_undo_expired(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Restored; undo expired"
+        return "Gjenopprettet; angrefristen er utl\u00f8pt"
+
+    @property
+    def version_restore_undo_needs_attention(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Undo needs attention"
+        return "Angring krever oppmerksomhet"
+
+    @property
+    def version_restore_undo_failed(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "The restore could not be undone"
+        return "Gjenopprettingen kunne ikke angres"
+
+    @property
     def history_unavailable(self) -> str:
         return (
             "History is not available."

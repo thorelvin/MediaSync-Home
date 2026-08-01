@@ -28,6 +28,14 @@ from mediasync_home.application.version_restore import (
     VersionRestoreState,
     canonical_fingerprint_json,
 )
+from mediasync_home.application.version_restore_rollback import (
+    VersionRestoreRollbackDeleteReceipt,
+    VersionRestoreRollbackOperation,
+    VersionRestoreRollbackPermitValidator,
+    VersionRestoreRollbackState,
+    VersionRestoreUndoApplyReceipt,
+    VersionRestoreUndoInspectionReceipt,
+)
 from mediasync_home.domain.capabilities import MutationPermit
 
 
@@ -223,39 +231,290 @@ class LocalRetainedVersionRestoreAdapter:
             historical_fingerprint_json=_fingerprint_json(historical)
         )
 
+    def inspect_restore_undo(
+        self,
+        *,
+        permit_validator: VersionRestoreRollbackPermitValidator,
+        permit: MutationPermit,
+        operation: VersionRestoreRollbackOperation,
+    ) -> VersionRestoreUndoInspectionReceipt:
+        permit_validator.assert_mutation_permit_current(permit)
+        _require_rollback_lifecycle_permit_binding(
+            operation=operation,
+            permit=permit,
+            action="undo",
+            journaled=False,
+        )
+        root, final_path = self._root_and_final_path(
+            operation=operation.restore,
+            permit=permit,
+        )
+        rollback = _fingerprint_from_json(
+            operation.rollback_fingerprint_json,
+            "VERSION_RESTORE_UNDO_ROLLBACK_FINGERPRINT_INVALID",
+        )
+        expected_final = _fingerprint_from_json(
+            operation.expected_restored_final_fingerprint_json,
+            "VERSION_RESTORE_UNDO_EXPECTED_FINAL_FINGERPRINT_INVALID",
+        )
+        self._require_rollback_object(
+            root=root,
+            operation=operation.restore,
+            expected=rollback,
+        )
+        observed = _require_regular_file_fingerprint(
+            final_path,
+            missing_code="VERSION_RESTORE_UNDO_FINAL_MISSING",
+            invalid_code="VERSION_RESTORE_UNDO_FINAL_TYPE_INVALID",
+            read_code="VERSION_RESTORE_UNDO_FINAL_READ_FAILED",
+        )
+        if observed not in (expected_final, rollback):
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_UNDO_FINAL_CHANGED",
+                "Keep the rollback object and review the final file before undoing.",
+            )
+        return VersionRestoreUndoInspectionReceipt(
+            current_final_fingerprint_json=_fingerprint_json(observed),
+            rollback_fingerprint_json=_fingerprint_json(rollback),
+            already_undone=observed == rollback,
+        )
+
+    def apply_restore_undo(
+        self,
+        *,
+        permit_validator: VersionRestoreRollbackPermitValidator,
+        permit: MutationPermit,
+        operation: VersionRestoreRollbackOperation,
+    ) -> VersionRestoreUndoApplyReceipt:
+        permit_validator.assert_mutation_permit_current(permit)
+        _require_rollback_lifecycle_permit_binding(
+            operation=operation,
+            permit=permit,
+            action="undo",
+            journaled=True,
+        )
+        if operation.state is not VersionRestoreRollbackState.UNDO_INTENT_RECORDED:
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_UNDO_APPLY_STATE_INVALID",
+                "Reload the rollback lifecycle before applying undo.",
+            )
+        root, final_path = self._root_and_final_path(
+            operation=operation.restore,
+            permit=permit,
+        )
+        rollback = _fingerprint_from_json(
+            operation.rollback_fingerprint_json,
+            "VERSION_RESTORE_UNDO_ROLLBACK_FINGERPRINT_INVALID",
+        )
+        expected_final = _fingerprint_from_json(
+            operation.expected_restored_final_fingerprint_json,
+            "VERSION_RESTORE_UNDO_EXPECTED_FINAL_FINGERPRINT_INVALID",
+        )
+        self._require_rollback_object(
+            root=root,
+            operation=operation.restore,
+            expected=rollback,
+        )
+        observed = _require_regular_file_fingerprint(
+            final_path,
+            missing_code="VERSION_RESTORE_UNDO_FINAL_MISSING",
+            invalid_code="VERSION_RESTORE_UNDO_FINAL_TYPE_INVALID",
+            read_code="VERSION_RESTORE_UNDO_FINAL_READ_FAILED",
+        )
+        if observed != rollback:
+            if observed != expected_final:
+                raise VersionRestoreFilesystemError(
+                    "VERSION_RESTORE_UNDO_FINAL_CHANGED_BEFORE_APPLY",
+                    "Keep the rollback object and review the changed final file.",
+                )
+            rollback_payload, _ = self._rollback_paths(
+                root=root,
+                operation=operation.restore,
+                create=False,
+            )
+            _replace_with_verified_payload(
+                source=rollback_payload,
+                final_path=final_path,
+                expected=rollback,
+            )
+        return VersionRestoreUndoApplyReceipt(
+            rollback_fingerprint_json=_fingerprint_json(rollback)
+        )
+
+    def verify_restore_undo(
+        self,
+        *,
+        permit_validator: VersionRestoreRollbackPermitValidator,
+        permit: MutationPermit,
+        operation: VersionRestoreRollbackOperation,
+    ) -> VersionRestoreUndoApplyReceipt:
+        permit_validator.assert_mutation_permit_current(permit)
+        _require_rollback_lifecycle_permit_binding(
+            operation=operation,
+            permit=permit,
+            action="undo",
+            journaled=True,
+        )
+        if operation.state is not VersionRestoreRollbackState.UNDO_APPLIED:
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_UNDO_VERIFY_STATE_INVALID",
+                "Reload the rollback lifecycle before verifying undo.",
+            )
+        _, final_path = self._root_and_final_path(
+            operation=operation.restore,
+            permit=permit,
+        )
+        rollback = _fingerprint_from_json(
+            operation.rollback_fingerprint_json,
+            "VERSION_RESTORE_UNDO_ROLLBACK_FINGERPRINT_INVALID",
+        )
+        observed = _require_regular_file_fingerprint(
+            final_path,
+            missing_code="VERSION_RESTORE_UNDO_FINAL_MISSING_AFTER_APPLY",
+            invalid_code="VERSION_RESTORE_UNDO_FINAL_TYPE_INVALID_AFTER_APPLY",
+            read_code="VERSION_RESTORE_UNDO_FINAL_READ_FAILED_AFTER_APPLY",
+        )
+        if observed != rollback:
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_UNDO_FINAL_FINGERPRINT_MISMATCH",
+                "Keep the rollback evidence and review the final file.",
+            )
+        return VersionRestoreUndoApplyReceipt(
+            rollback_fingerprint_json=_fingerprint_json(rollback)
+        )
+
+    def verify_restore_rollback_for_expiry(
+        self,
+        *,
+        permit_validator: VersionRestoreRollbackPermitValidator,
+        permit: MutationPermit,
+        operation: VersionRestoreRollbackOperation,
+    ) -> None:
+        permit_validator.assert_mutation_permit_current(permit)
+        _require_rollback_lifecycle_permit_binding(
+            operation=operation,
+            permit=permit,
+            action="expiry",
+            journaled=False,
+        )
+        root = self._root_for_operation(
+            operation=operation.restore,
+            permit=permit,
+        )
+        rollback = _fingerprint_from_json(
+            operation.rollback_fingerprint_json,
+            "VERSION_RESTORE_ROLLBACK_FINGERPRINT_INVALID",
+        )
+        self._require_rollback_object(
+            root=root,
+            operation=operation.restore,
+            expected=rollback,
+        )
+
+    def delete_restore_rollback(
+        self,
+        *,
+        permit_validator: VersionRestoreRollbackPermitValidator,
+        permit: MutationPermit,
+        operation: VersionRestoreRollbackOperation,
+        resuming_delete_intent: bool,
+    ) -> VersionRestoreRollbackDeleteReceipt:
+        permit_validator.assert_mutation_permit_current(permit)
+        _require_rollback_lifecycle_permit_binding(
+            operation=operation,
+            permit=permit,
+            action="expiry",
+            journaled=True,
+        )
+        if operation.state is not VersionRestoreRollbackState.EXPIRY_INTENT_RECORDED:
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_ROLLBACK_DELETE_STATE_INVALID",
+                "Reload the rollback lifecycle before deleting expired evidence.",
+            )
+        root = self._root_for_operation(
+            operation=operation.restore,
+            permit=permit,
+        )
+        payload_path, manifest_path = self._rollback_paths(
+            root=root,
+            operation=operation.restore,
+            create=False,
+        )
+        payload_exists = payload_path.exists() or payload_path.is_symlink()
+        manifest_exists = manifest_path.exists() or manifest_path.is_symlink()
+        if not payload_exists and not manifest_exists:
+            if not resuming_delete_intent:
+                raise VersionRestoreFilesystemError(
+                    "VERSION_RESTORE_ROLLBACK_PAIR_MISSING_BEFORE_INTENT",
+                    "Review the rollback lifecycle before recording expiry.",
+                )
+            return _rollback_delete_receipt(operation)
+        if not payload_exists and manifest_exists and resuming_delete_intent:
+            rollback = _fingerprint_from_json(
+                operation.rollback_fingerprint_json,
+                "VERSION_RESTORE_ROLLBACK_FINGERPRINT_INVALID",
+            )
+            self._require_rollback_manifest(
+                manifest_path=manifest_path,
+                operation=operation.restore,
+                expected=rollback,
+            )
+            try:
+                manifest_path.unlink()
+            except OSError as exc:
+                raise VersionRestoreFilesystemError(
+                    "VERSION_RESTORE_ROLLBACK_DELETE_FAILED",
+                    "Retry expiry after checking endpoint permissions.",
+                    retryable=True,
+                ) from exc
+            if manifest_path.exists() or manifest_path.is_symlink():
+                raise VersionRestoreFilesystemError(
+                    "VERSION_RESTORE_ROLLBACK_DELETE_POSTCONDITION_FAILED",
+                    "Review the rollback object because expiry was incomplete.",
+                )
+            return _rollback_delete_receipt(operation)
+        if not payload_exists or not manifest_exists:
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_ROLLBACK_PAIR_PARTIAL",
+                "Keep expiry blocked and review the partial rollback object.",
+            )
+        rollback = _fingerprint_from_json(
+            operation.rollback_fingerprint_json,
+            "VERSION_RESTORE_ROLLBACK_FINGERPRINT_INVALID",
+        )
+        self._require_rollback_object(
+            root=root,
+            operation=operation.restore,
+            expected=rollback,
+        )
+        try:
+            payload_path.unlink()
+            manifest_path.unlink()
+        except OSError as exc:
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_ROLLBACK_DELETE_FAILED",
+                "Retry expiry after checking endpoint permissions.",
+                retryable=True,
+            ) from exc
+        if payload_path.exists() or manifest_path.exists():
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_ROLLBACK_DELETE_POSTCONDITION_FAILED",
+                "Review the rollback object because expiry was incomplete.",
+            )
+        return _rollback_delete_receipt(operation)
+
     def _root_and_final_path(
         self,
         *,
         operation: VersionRestoreOperation,
         permit: MutationPermit,
     ) -> tuple[Path, Path]:
-        try:
-            root = self._root_resolver.resolve_endpoint_root(
-                resource_key=permit.resource_key,
-                endpoint_id=operation.record.target_endpoint_id,
-                endpoint_revision_id=operation.record.target_endpoint_revision_id,
-            )
-        except EndpointLeaseUnavailable as exc:
-            raise VersionRestoreFilesystemError(
-                exc.validation_code,
-                exc.next_action,
-                retryable=True,
-            ) from exc
-        if root is None:
-            raise VersionRestoreFilesystemError(
-                "VERSION_RESTORE_ENDPOINT_ROOT_MISSING",
-                "Reconnect the exact endpoint revision before restoring.",
-                retryable=True,
-            )
+        resolved_root = self._root_for_operation(
+            operation=operation,
+            permit=permit,
+        )
         try:
             relative = parse_endpoint_relative_path(operation.record.final_relative_path)
-            resolved_root = self._reparse_guard.resolve_existing_root(
-                Path(root),
-                missing_code="VERSION_RESTORE_ENDPOINT_ROOT_MISSING",
-                missing_next_action="Reconnect the endpoint before restoring.",
-                reparse_code="VERSION_RESTORE_ENDPOINT_ROOT_REPARSE_UNSUPPORTED",
-                reparse_next_action="Revalidate the endpoint root before restoring.",
-            )
             self._reparse_guard.reject_reparse_chain(
                 root=resolved_root,
                 relative_parts=relative.parts,
@@ -276,6 +535,45 @@ class LocalRetainedVersionRestoreAdapter:
                 retryable=exc.validation_code.endswith("_MISSING"),
             ) from exc
         return resolved_root, resolved_root.joinpath(*relative.parts)
+
+    def _root_for_operation(
+        self,
+        *,
+        operation: VersionRestoreOperation,
+        permit: MutationPermit,
+    ) -> Path:
+        try:
+            root = self._root_resolver.resolve_endpoint_root(
+                resource_key=permit.resource_key,
+                endpoint_id=operation.record.target_endpoint_id,
+                endpoint_revision_id=operation.record.target_endpoint_revision_id,
+            )
+        except EndpointLeaseUnavailable as exc:
+            raise VersionRestoreFilesystemError(
+                exc.validation_code,
+                exc.next_action,
+                retryable=True,
+            ) from exc
+        if root is None:
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_ENDPOINT_ROOT_MISSING",
+                "Reconnect the exact endpoint revision before restoring.",
+                retryable=True,
+            )
+        try:
+            return self._reparse_guard.resolve_existing_root(
+                Path(root),
+                missing_code="VERSION_RESTORE_ENDPOINT_ROOT_MISSING",
+                missing_next_action="Reconnect the endpoint before restoring.",
+                reparse_code="VERSION_RESTORE_ENDPOINT_ROOT_REPARSE_UNSUPPORTED",
+                reparse_next_action="Revalidate the endpoint root before restoring.",
+            )
+        except ReparseGuardError as exc:
+            raise VersionRestoreFilesystemError(
+                exc.validation_code,
+                exc.next_action,
+                retryable=exc.validation_code.endswith("_MISSING"),
+            ) from exc
 
     def _load_historical_version(
         self,
@@ -381,6 +679,31 @@ class LocalRetainedVersionRestoreAdapter:
             operation=operation,
             create=False,
         )
+        self._require_rollback_manifest(
+            manifest_path=manifest_path,
+            operation=operation,
+            expected=expected,
+        )
+
+        observed = _require_regular_file_fingerprint(
+            payload_path,
+            missing_code="VERSION_RESTORE_ROLLBACK_PAYLOAD_MISSING",
+            invalid_code="VERSION_RESTORE_ROLLBACK_PAYLOAD_TYPE_INVALID",
+            read_code="VERSION_RESTORE_ROLLBACK_PAYLOAD_READ_FAILED",
+        )
+        if observed != expected:
+            raise VersionRestoreFilesystemError(
+                "VERSION_RESTORE_ROLLBACK_PAYLOAD_MISMATCH",
+                "Keep the restore blocked and review the rollback payload.",
+            )
+
+    @staticmethod
+    def _require_rollback_manifest(
+        *,
+        manifest_path: Path,
+        operation: VersionRestoreOperation,
+        expected: dict[str, object],
+    ) -> None:
         manifest = _load_rollback_manifest(
             manifest_path=manifest_path,
             operation=operation,
@@ -394,17 +717,6 @@ class LocalRetainedVersionRestoreAdapter:
             raise VersionRestoreFilesystemError(
                 "VERSION_RESTORE_ROLLBACK_MANIFEST_FINGERPRINT_MISMATCH",
                 "Keep the restore blocked and review the rollback manifest.",
-            )
-        observed = _require_regular_file_fingerprint(
-            payload_path,
-            missing_code="VERSION_RESTORE_ROLLBACK_PAYLOAD_MISSING",
-            invalid_code="VERSION_RESTORE_ROLLBACK_PAYLOAD_TYPE_INVALID",
-            read_code="VERSION_RESTORE_ROLLBACK_PAYLOAD_READ_FAILED",
-        )
-        if observed != expected:
-            raise VersionRestoreFilesystemError(
-                "VERSION_RESTORE_ROLLBACK_PAYLOAD_MISMATCH",
-                "Keep the restore blocked and review the rollback payload.",
             )
 
 
@@ -442,6 +754,39 @@ def _require_journaled_permit_binding(
         raise VersionRestoreFilesystemError(
             "VERSION_RESTORE_JOURNALED_PERMIT_MISMATCH",
             "Refresh restore intent under the current endpoint lease.",
+        )
+
+
+def _require_rollback_lifecycle_permit_binding(
+    *,
+    operation: VersionRestoreRollbackOperation,
+    permit: MutationPermit,
+    action: str,
+    journaled: bool,
+) -> None:
+    record = operation.restore.record
+    if (
+        permit.run_id != f"version-restore-{action}:{operation.restore_id}"
+        or permit.run_target_id
+        != f"version-restore-{action}:{operation.restore_id}"
+        or permit.endpoint_id != record.target_endpoint_id
+        or permit.endpoint_revision_id != record.target_endpoint_revision_id
+        or permit.endpoint_generation != record.endpoint_generation
+        or permit.owner_installation_id != record.owner_installation_id
+        or permit.ownership_epoch != record.ownership_epoch
+        or permit.resource_key != f"endpoint:{record.target_endpoint_id}"
+    ):
+        raise VersionRestoreFilesystemError(
+            "VERSION_RESTORE_ROLLBACK_PERMIT_MISMATCH",
+            "Reacquire the exact endpoint lease for the rollback lifecycle.",
+        )
+    if journaled and (
+        operation.lease_id != permit.lease_id
+        or operation.fencing_token != permit.fencing_token
+    ):
+        raise VersionRestoreFilesystemError(
+            "VERSION_RESTORE_ROLLBACK_JOURNALED_PERMIT_MISMATCH",
+            "Refresh the rollback lifecycle under the current endpoint lease.",
         )
 
 
@@ -763,3 +1108,13 @@ def _fingerprint_json(fingerprint: Mapping[str, object]) -> str:
 
 def _canonical_json(value: Mapping[str, object]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _rollback_delete_receipt(
+    operation: VersionRestoreRollbackOperation,
+) -> VersionRestoreRollbackDeleteReceipt:
+    return VersionRestoreRollbackDeleteReceipt(
+        restore_id=operation.restore_id,
+        rollback_object_id=operation.rollback_object_id,
+        manifest_hash=operation.rollback_manifest_hash,
+    )

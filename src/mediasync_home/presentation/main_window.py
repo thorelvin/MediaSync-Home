@@ -320,6 +320,18 @@ class VersionRestoreRequestProvider(Protocol):
     ) -> IpcResponse: ...
 
 
+class VersionRestoreUndoRequestProvider(Protocol):
+    def undo_retained_version_restore(
+        self,
+        *,
+        restore_id: str,
+        version_object_id: str,
+        expected_row_version: int,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse: ...
+
+
 class OperationAuditProvider(Protocol):
     def get_operation_audit(
         self,
@@ -698,6 +710,10 @@ class MediaSyncWindow(QMainWindow):
         self._version_restore_command_key: tuple[str, int] | None = None
         self._version_restore_request_id: str | None = None
         self._version_restore_idempotency_key: str | None = None
+        self._version_restore_undo_command_pending = False
+        self._version_restore_undo_command_key: tuple[str, str, int] | None = None
+        self._version_restore_undo_request_id: str | None = None
+        self._version_restore_undo_idempotency_key: str | None = None
         self._version_restore_poll_scheduled = False
         self._history_operation_activity_key: str | None = None
         self._history_operation_run_id: str | None = None
@@ -2283,7 +2299,10 @@ class MediaSyncWindow(QMainWindow):
     ) -> None:
         if (
             self._version_restore_poll_scheduled
-            or not any(version.restore_pending for version in state.versions)
+            or not any(
+                version.restore_pending or version.restore_undo_pending
+                for version in state.versions
+            )
             or self._retained_version_run_id is None
         ):
             return
@@ -2296,7 +2315,7 @@ class MediaSyncWindow(QMainWindow):
                 self.isVisible()
                 and self._retained_version_run_id == run_id
                 and any(
-                    version.restore_pending
+                    version.restore_pending or version.restore_undo_pending
                     for version in self._retained_version_state.versions
                 )
             ):
@@ -2325,12 +2344,20 @@ class MediaSyncWindow(QMainWindow):
         version: RetainedVersionViewState,
     ) -> str:
         texts = self._texts()
-        if version.restore_state == "COMPLETED":
-            return texts.version_restored
+        if version.restore_undo_pending:
+            return texts.version_restore_undo_in_progress
+        if version.rollback_state == "UNDONE":
+            return texts.version_restore_undone
+        if version.rollback_state == "EXPIRED":
+            return texts.version_restore_undo_expired
+        if version.rollback_state == "FAILED_BLOCKED":
+            return texts.version_restore_undo_needs_attention
         if version.restore_state == "FAILED_BLOCKED":
             return texts.version_restore_needs_attention
         if version.restore_pending:
             return texts.version_restore_in_progress
+        if version.restore_state == "COMPLETED":
+            return texts.version_restored
         if version.protected_for_restore:
             return texts.version_protected
         return localize_display_value(
@@ -2345,13 +2372,17 @@ class MediaSyncWindow(QMainWindow):
         version = self._selected_retained_version()
         texts = self._texts()
         protected = version is not None and version.protected_for_restore
-        restore_state = None if version is None else version.restore_state
-        action_restore_state = (
-            None if restore_state == "COMPLETED" and not protected else restore_state
+        rollback_failed = (
+            version is not None and version.rollback_state == "FAILED_BLOCKED"
         )
-        if action_restore_state == "COMPLETED":
-            button.setText(texts.version_restored)
-        elif action_restore_state == "FAILED_BLOCKED":
+        undo_available = version is not None and version.restore_undo_available
+        if version is not None and version.restore_undo_pending:
+            button.setText(texts.version_restore_undo_in_progress)
+        elif rollback_failed:
+            button.setText(texts.version_restore_undo_needs_attention)
+        elif undo_available:
+            button.setText(texts.undo_version_restore)
+        elif version is not None and version.restore_state == "FAILED_BLOCKED":
             button.setText(texts.version_restore_needs_attention)
         elif version is not None and version.restore_pending:
             button.setText(texts.version_restore_in_progress)
@@ -2360,7 +2391,9 @@ class MediaSyncWindow(QMainWindow):
         else:
             button.setText(texts.protect_for_restore)
         button.setToolTip(
-            texts.restore_selected_version_tooltip
+            texts.undo_version_restore_tooltip
+            if undo_available
+            else texts.restore_selected_version_tooltip
             if protected
             else texts.protect_for_restore_tooltip
         )
@@ -2368,11 +2401,20 @@ class MediaSyncWindow(QMainWindow):
         button.setEnabled(
             version is not None
             and version.restorable
-            and (not protected or action_restore_state is None)
-            and action_restore_state not in {"COMPLETED", "FAILED_BLOCKED"}
+            and (
+                undo_available
+                or (protected and version.restore_state is None)
+                or (
+                    not protected
+                    and version.rollback_state in {None, "UNDONE", "EXPIRED"}
+                )
+            )
+            and not rollback_failed
             and not version.restore_pending
+            and not version.restore_undo_pending
             and not self._version_protection_command_pending
             and not self._version_restore_command_pending
+            and not self._version_restore_undo_command_pending
             and not self._command_worker_active()
         )
         button.setVisible(self._retained_version_run_id is not None)
@@ -2381,16 +2423,21 @@ class MediaSyncWindow(QMainWindow):
         version = self._selected_retained_version()
         if version is None:
             return
-        restoring = version.protected_for_restore
+        undoing = version.restore_undo_available
+        restoring = version.protected_for_restore and not undoing
         answer = QMessageBox.question(
             self,
             (
-                self._texts().restore_version_title
+                self._texts().undo_version_restore_title
+                if undoing
+                else self._texts().restore_version_title
                 if restoring
                 else self._texts().protect_version_title
             ),
             (
-                self._texts().restore_version_confirmation
+                self._texts().undo_version_restore_confirmation
+                if undoing
+                else self._texts().restore_version_confirmation
                 if restoring
                 else self._texts().protect_version_confirmation
             ),
@@ -2398,7 +2445,9 @@ class MediaSyncWindow(QMainWindow):
             QMessageBox.StandardButton.Cancel,
         )
         if answer == QMessageBox.StandardButton.Yes:
-            if restoring:
+            if undoing:
+                self._undo_selected_retained_version_restore()
+            elif restoring:
                 self._restore_selected_retained_version()
             else:
                 self._protect_selected_retained_version()
@@ -2582,6 +2631,97 @@ class MediaSyncWindow(QMainWindow):
         )
         if not submitted:
             self._version_restore_command_pending = False
+            self._apply_retained_version_protect_action()
+
+    def _undo_selected_retained_version_restore(self) -> None:
+        version = self._selected_retained_version()
+        if (
+            version is None
+            or version.restore_id is None
+            or not version.restore_undo_available
+            or self._engine_client is None
+            or not hasattr(self._engine_client, "undo_retained_version_restore")
+            or self._version_restore_undo_command_pending
+            or self._command_worker_active()
+        ):
+            return
+        command_key = (
+            version.restore_id,
+            version.version_object_id,
+            version.row_version,
+        )
+        if self._version_restore_undo_command_key != command_key:
+            self._version_restore_undo_command_key = command_key
+            self._version_restore_undo_request_id = str(uuid4())
+            self._version_restore_undo_idempotency_key = str(uuid4())
+        request_id = self._version_restore_undo_request_id
+        idempotency_key = self._version_restore_undo_idempotency_key
+        assert request_id is not None and idempotency_key is not None
+        self._version_restore_undo_command_pending = True
+        self._apply_retained_version_protect_action()
+
+        def command(client: object) -> object:
+            return cast(
+                VersionRestoreUndoRequestProvider,
+                client,
+            ).undo_retained_version_restore(
+                restore_id=version.restore_id or "",
+                version_object_id=version.version_object_id,
+                expected_row_version=version.row_version,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+            )
+
+        def accept(response: object) -> None:
+            self._version_restore_undo_command_pending = False
+            ipc_response = cast(IpcResponse, response)
+            request = ipc_response.payload.get("version_restore_undo_request")
+            self._version_restore_undo_command_key = None
+            self._version_restore_undo_request_id = None
+            self._version_restore_undo_idempotency_key = None
+            if (
+                ipc_response.status is IpcStatus.ACCEPTED
+                and isinstance(request, dict)
+                and request.get("scheduled") is True
+            ):
+                self.apply_engine_status(
+                    replace(
+                        self._engine_status_state,
+                        detail=self._texts().version_restore_undo_scheduled,
+                        status_kind="ready",
+                    )
+                )
+                self._refresh_retained_versions()
+                return
+            reason = request.get("validation_code") if isinstance(request, dict) else None
+            self.apply_engine_status(
+                replace(
+                    self._engine_status_state,
+                    detail=(
+                        f"{self._texts().version_restore_undo_failed}: {reason}"
+                        if isinstance(reason, str)
+                        else self._texts().version_restore_undo_failed
+                    ),
+                    status_kind="warning",
+                )
+            )
+            self._refresh_retained_versions()
+
+        def reject(_error: Exception) -> None:
+            self._version_restore_undo_command_pending = False
+            self._apply_command_transport_failure(
+                self._texts().version_restore_undo_failed
+            )
+            self._apply_retained_version_protect_action()
+
+        submitted = self._submit_engine_command(
+            name="undo-retained-version-restore",
+            operation=command,
+            on_result=accept,
+            on_error=reject,
+        )
+        if not submitted:
+            self._version_restore_undo_command_pending = False
             self._apply_retained_version_protect_action()
 
     def _set_history_operation_activity(

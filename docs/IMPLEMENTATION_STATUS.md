@@ -15,7 +15,16 @@ drift, path/reparse mismatch, stale permit or changed final bytes fail closed;
 the live file and hold remain untouched/protected. The hold is released only
 after terminal final verification. Compact GUI tests cover both confirmed
 actions, language switching and no horizontal clipping at 900x560. Automated
-expiry and user-visible undo for restore rollback objects remain later work.
+expiry and user-visible undo are now implemented by catalog migration 47.
+`UNDO_RETAINED_VERSION_RESTORE` uses the normal durable command receipt,
+requires explicit confirmation and a fresh endpoint lease, and replaces the
+restored final only while its full fingerprint still matches the completed
+restore. The rollback object remains available until its original 30-day due
+time even after undo. Expiry verifies the exact payload/manifest pair, records
+intent before deletion and resumes after either full or payload-only deletion.
+The History action and lifecycle status are localized in Norwegian and English;
+compact GUI coverage includes restore, undo, language switching and bounded
+text/path rendering at 900x560.
 
 Update 2026-08-01: PATH-001 catalog-recorded cleanup now covers every managed
 staging object, not only created-directory markers and empty-directory

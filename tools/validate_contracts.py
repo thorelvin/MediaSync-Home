@@ -774,6 +774,8 @@ def _validate_retained_version_expiry_invariant(invariant: dict[str, Any]) -> No
         "event_table": "version_retention_events",
         "restore_operation_table": "retained_version_restore_operations",
         "restore_event_table": "retained_version_restore_events",
+        "restore_rollback_lifecycle_table": "retained_version_restore_rollbacks",
+        "restore_rollback_event_table": "retained_version_restore_rollback_events",
     }
     if any(invariant.get(key) != value for key, value in expected_tables.items()):
         fail("DB-004 retained-version expiry table boundary drifted")
@@ -795,6 +797,17 @@ def _validate_retained_version_expiry_invariant(invariant: dict[str, Any]) -> No
         "restore_preserves_current_before_replace",
         "restore_verifies_source_rollback_and_final",
         "restore_releases_hold_only_after_final_verification",
+        "restore_rollback_immutable_binding",
+        "restore_rollback_append_only_events",
+        "restore_undo_requires_completed_restore",
+        "restore_undo_requires_explicit_confirmation",
+        "restore_undo_requires_fresh_mutation_permit",
+        "restore_undo_requires_unchanged_restored_final",
+        "restore_undo_full_hash_verifies_final",
+        "restore_rollback_kept_after_undo_until_expiry",
+        "restore_rollback_expiry_verifies_pair_before_intent",
+        "restore_rollback_expiry_records_intent_before_delete",
+        "restore_rollback_expiry_is_crash_resumable",
     )
     if any(invariant.get(key) is not True for key in required_guards):
         fail("DB-004 retained-version expiry safety guard drifted")
@@ -815,6 +828,16 @@ def _validate_retained_version_expiry_invariant(invariant: dict[str, Any]) -> No
         "FINAL_VERIFIED",
     ):
         fail("DB-004 retained-version restore crash resume states drifted")
+    if _column_tuple(
+        invariant.get("restore_undo_crash_resume_states"),
+        "DB-004 restore_undo_crash_resume_states",
+    ) != ("UNDO_INTENT_RECORDED", "UNDO_APPLIED", "UNDO_VERIFIED"):
+        fail("DB-004 restore undo crash resume states drifted")
+    if _column_tuple(
+        invariant.get("restore_rollback_expiry_crash_resume_states"),
+        "DB-004 restore_rollback_expiry_crash_resume_states",
+    ) != ("EXPIRY_INTENT_RECORDED",):
+        fail("DB-004 restore rollback expiry crash resume states drifted")
 
 
 def validate_state_machines(document: dict[str, Any]) -> int:

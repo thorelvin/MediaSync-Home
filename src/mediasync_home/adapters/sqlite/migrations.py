@@ -268,6 +268,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_retained_version_restore_operations",
                 statements=CATALOG_RETAINED_VERSION_RESTORE_OPERATIONS,
             ),
+            SqliteMigration(
+                version=47,
+                name="catalog_retained_version_restore_rollback_lifecycle",
+                statements=CATALOG_RETAINED_VERSION_RESTORE_ROLLBACK_LIFECYCLE,
+            ),
         ),
     )
 
@@ -3415,6 +3420,140 @@ CATALOG_RETAINED_VERSION_RESTORE_OPERATIONS = (
     BEFORE DELETE ON retained_version_restore_events
     BEGIN
         SELECT RAISE(ABORT, 'RETAINED_VERSION_RESTORE_EVENT_IMMUTABLE');
+    END
+    """,
+)
+
+CATALOG_RETAINED_VERSION_RESTORE_ROLLBACK_LIFECYCLE = (
+    """
+    CREATE TABLE retained_version_restore_rollbacks (
+        restore_id TEXT PRIMARY KEY,
+        rollback_object_id TEXT NOT NULL UNIQUE,
+        expected_restored_final_fingerprint_json TEXT NOT NULL,
+        rollback_fingerprint_json TEXT NOT NULL,
+        rollback_manifest_hash TEXT NOT NULL CHECK (
+            length(rollback_manifest_hash) = 64
+        ),
+        retention_until_utc TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (
+            state IN (
+                'AVAILABLE',
+                'UNDO_REQUESTED',
+                'UNDO_INTENT_RECORDED',
+                'UNDO_APPLIED',
+                'UNDO_VERIFIED',
+                'UNDONE',
+                'EXPIRY_INTENT_RECORDED',
+                'EXPIRED',
+                'FAILED_BLOCKED'
+            )
+        ),
+        undo_request_id TEXT,
+        undo_idempotency_key TEXT UNIQUE,
+        lease_id TEXT,
+        fencing_token INTEGER CHECK (fencing_token IS NULL OR fencing_token >= 1),
+        last_validation_code TEXT,
+        created_utc TEXT NOT NULL,
+        updated_utc TEXT NOT NULL,
+        completed_utc TEXT,
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+        CHECK (
+            (undo_request_id IS NULL AND undo_idempotency_key IS NULL)
+            OR (undo_request_id IS NOT NULL AND undo_idempotency_key IS NOT NULL)
+        ),
+        FOREIGN KEY (restore_id)
+            REFERENCES retained_version_restore_operations (restore_id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_retained_version_restore_rollbacks_work
+        ON retained_version_restore_rollbacks (state, retention_until_utc, restore_id)
+    """,
+    """
+    CREATE TABLE retained_version_restore_rollback_events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        restore_id TEXT NOT NULL,
+        lifecycle_sequence INTEGER NOT NULL CHECK (lifecycle_sequence >= 0),
+        from_state TEXT,
+        to_state TEXT NOT NULL,
+        event_kind TEXT NOT NULL,
+        event_utc TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        previous_event_hash TEXT CHECK (
+            previous_event_hash IS NULL OR length(previous_event_hash) = 64
+        ),
+        event_hash TEXT NOT NULL CHECK (length(event_hash) = 64),
+        UNIQUE (restore_id, lifecycle_sequence),
+        FOREIGN KEY (restore_id)
+            REFERENCES retained_version_restore_rollbacks (restore_id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    INSERT INTO retained_version_restore_rollbacks (
+        restore_id,
+        rollback_object_id,
+        expected_restored_final_fingerprint_json,
+        rollback_fingerprint_json,
+        rollback_manifest_hash,
+        retention_until_utc,
+        state,
+        created_utc,
+        updated_utc
+    )
+    SELECT
+        restores.restore_id,
+        restores.rollback_object_id,
+        versions.original_fingerprint_json,
+        restores.current_final_fingerprint_json,
+        restores.rollback_manifest_hash,
+        restores.rollback_retention_until_utc,
+        'AVAILABLE',
+        COALESCE(restores.completed_utc, restores.updated_utc),
+        restores.updated_utc
+    FROM retained_version_restore_operations AS restores
+    INNER JOIN retained_version_objects AS versions
+        ON versions.version_object_id = restores.version_object_id
+    WHERE restores.state = 'COMPLETED'
+        AND restores.current_final_fingerprint_json IS NOT NULL
+        AND restores.rollback_manifest_hash IS NOT NULL
+    """,
+    """
+    CREATE TRIGGER trg_retained_version_restore_rollback_binding_immutable
+    BEFORE UPDATE ON retained_version_restore_rollbacks
+    WHEN
+        NEW.restore_id IS NOT OLD.restore_id
+        OR NEW.rollback_object_id IS NOT OLD.rollback_object_id
+        OR NEW.expected_restored_final_fingerprint_json
+            IS NOT OLD.expected_restored_final_fingerprint_json
+        OR NEW.rollback_fingerprint_json IS NOT OLD.rollback_fingerprint_json
+        OR NEW.rollback_manifest_hash IS NOT OLD.rollback_manifest_hash
+        OR NEW.retention_until_utc IS NOT OLD.retention_until_utc
+        OR NEW.created_utc IS NOT OLD.created_utc
+    BEGIN
+        SELECT RAISE(ABORT, 'RETAINED_VERSION_RESTORE_ROLLBACK_BINDING_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_retained_version_restore_rollback_no_delete
+    BEFORE DELETE ON retained_version_restore_rollbacks
+    BEGIN
+        SELECT RAISE(ABORT, 'RETAINED_VERSION_RESTORE_ROLLBACK_RECORD_REQUIRED');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_retained_version_restore_rollback_events_no_update
+    BEFORE UPDATE ON retained_version_restore_rollback_events
+    BEGIN
+        SELECT RAISE(ABORT, 'RETAINED_VERSION_RESTORE_ROLLBACK_EVENT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_retained_version_restore_rollback_events_no_delete
+    BEFORE DELETE ON retained_version_restore_rollback_events
+    BEGIN
+        SELECT RAISE(ABORT, 'RETAINED_VERSION_RESTORE_ROLLBACK_EVENT_IMMUTABLE');
     END
     """,
 )

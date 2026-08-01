@@ -22,6 +22,11 @@ class RetainedVersionViewState:
     restore_state: str | None = None
     restore_pending: bool = False
     restore_validation_code: str | None = None
+    rollback_state: str | None = None
+    rollback_retention_until_utc: str | None = None
+    rollback_validation_code: str | None = None
+    restore_undo_available: bool = False
+    restore_undo_pending: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +114,15 @@ def _version_from_payload(value: object) -> RetainedVersionViewState | None:
         restore_validation_code=_optional_text(
             value.get("restore_validation_code")
         ),
+        rollback_state=_optional_text(value.get("rollback_state")),
+        rollback_retention_until_utc=_optional_text(
+            value.get("rollback_retention_until_utc")
+        ),
+        rollback_validation_code=_optional_text(
+            value.get("rollback_validation_code")
+        ),
+        restore_undo_available=value.get("restore_undo_available") is True,
+        restore_undo_pending=value.get("restore_undo_pending") is True,
     )
 
 

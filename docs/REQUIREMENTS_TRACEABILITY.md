@@ -324,8 +324,16 @@ atomisk replace og full-hash-verifiserer final før holdet frigis. Begge
 filesystem-before-journal-krasjvinduer gjenopptas idempotent; drift blokkerer med
 live fil og hold intakt. Norsk/engelsk Qt-bevis ved 900x560 dekker begge reelle
 handlinger, lang sti, språkbytte og null horisontal klipping.
+Migration 47 adds an immutable rollback binding and append-only lifecycle
+events. Confirmed undo requires the unchanged restored final, original deadline
+and a fresh lease, then full-hash verifies the pre-restore bytes after replace.
+Rollback evidence remains after undo until crash-safe expiry, which journals
+intent before payload/manifest deletion and can resume a payload-deleted,
+manifest-preserved intermediate step. History displays and polls the localized
+undo status and action at 900x560.
 Evidens: `src/mediasync_home/application/retained_version_history.py`,
 `src/mediasync_home/application/version_restore.py`,
+`src/mediasync_home/application/version_restore_rollback.py`,
 `src/mediasync_home/adapters/version_restore.py`,
 `src/mediasync_home/adapters/sqlite/version_retention.py`,
 `src/mediasync_home/ipc/server.py`,

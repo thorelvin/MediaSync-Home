@@ -2611,6 +2611,16 @@ For flere elementer, ny plassering eller navnekollisjon brukes en eksplisitt gje
 
 Permanent tømming er en separat farehandling og viser antall, byte, lagringsområde og at handlingen ikke kan angres.
 
+The 0B implementation shows previous file versions directly in the run detail.
+The user first protects a selected version and then confirms restore. After a
+completed restore, the same action offers `Undo restore` until the bound rollback
+object expires. Undo requires separate confirmation and is disabled while work
+is active or when the live file changed. Restore, undo, expiry and blocked states
+are shown in Norwegian and English. At compact sizes, long source and target
+paths use middle elision with the full path in a tooltip, text areas reserve
+their required height, and the workspace scrolls vertically without hiding the
+action after folder selection.
+
 ### 8.14 Innstillinger og diagnostikk
 
 Globale innstillinger skal være korte og forståelige. Jobbspesifikke valg redigeres på den aktuelle jobben; tekniske detaljer ligger i en separat diagnostikkflate.
@@ -3439,6 +3449,16 @@ Både rollback- og historisk payload verifiseres mot canonical manifest, og
 atomisk replace godtas bare mens finalfilen fortsatt matcher journalført
 fingerprint. Krasj mellom filsystemeffekt og faseoppdatering gjenopptas ved å
 bevise postcondition; avvik ender `FAILED_BLOCKED` med aktivt hold.
+
+Catalog migration 47 keeps the completed restore journal immutable and adds a
+separate rollback lifecycle. `UNDO_RETAINED_VERSION_RESTORE` requires explicit
+confirmation, the original 30-day deadline and a fresh exclusive endpoint
+lease. The worker proves the live final is still exactly the historical
+fingerprint produced by restore, journals intent, puts back the checksummed
+pre-restore object and full-hash verifies the final. Changed live bytes block
+without overwrite. The rollback object remains after undo until its deadline;
+expiry verifies the pair before intent and can resume both a fully completed
+delete and a payload-deleted, manifest-preserved intermediate step.
 
 Lokale GUI-preferanser følger en separat, ikke-autoritativ port i
 `application.user_preferences`. Composition kobler denne til en atomisk
@@ -5441,8 +5461,21 @@ preservation, historical apply, final verification and completion. The worker
 stores current bytes in `.mediasync/objects/restores` before atomic replacement;
 the rollback manifest is bound to restore/source/endpoint/owner/path and a
 30-day due time. The source hold is released only in the transaction that marks
-the verified restore `COMPLETED`; blocked work keeps the hold. Automated expiry
-and user-visible undo of completed rollback objects are not yet implemented.
+the verified restore `COMPLETED`; blocked work keeps the hold.
+
+Catalog migration 47 adds the companion
+`retained_version_restore_rollbacks` lifecycle and append-only
+`retained_version_restore_rollback_events`. It preserves the completed restore
+record while binding the expected restored-final fingerprint, pre-restore
+rollback fingerprint, rollback manifest hash and original due time. Explicit
+undo is admitted only for the exact completed restore before that due time. A
+fresh endpoint lease records undo intent before replacement; changed final bytes
+block the operation without consuming rollback evidence, while apply and
+full-hash verification are independently restartable. `UNDONE` keeps the
+rollback pair until normal expiry. Expiry verifies the exact pair before intent,
+then deletes payload before manifest. Restart can prove and finish either a
+fully deleted pair or a payload-deleted, still-bound manifest without repeating
+an unsafe effect. Lifecycle roots are retained as terminal catalog evidence.
 
 Quarantine and general catalog retention stay outside this version-expiry
 branch.
@@ -7434,6 +7467,17 @@ hold. Existing matching rollback/final postconditions make crashes after
 preserve or replace resumable without repeating an unsafe effect. A changed
 final, invalid manifest/payload, stale permit, unsafe path or reparse boundary
 blocks the operation and keeps protected evidence.
+
+Migration 47 journals the completed restore's rollback lifecycle separately so
+undo never rewrites the original restore evidence. Confirmed undo is allowed
+only before the bound due time and only while the live final still full-hash
+matches the completed restore output. It records `UNDO_INTENT_RECORDED` before
+replacement and resumes through `UNDO_APPLIED` and `UNDO_VERIFIED` under a fresh
+lease. The rollback pair remains until expiry even after `UNDONE`. Expiry first
+verifies the exact pair, records `EXPIRY_INTENT_RECORDED`, then removes payload
+before manifest. Restart treats both-missing as completed and can validate and
+remove a lone manifest after payload deletion; a payload without its ownership
+manifest or any binding drift remains blocked.
 
 ### 17.5 Karantene som opaque managed objects og compare-and-swap
 

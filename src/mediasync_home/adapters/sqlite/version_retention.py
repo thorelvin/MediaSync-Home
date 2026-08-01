@@ -11,8 +11,10 @@ from mediasync_home.application.retained_version_history import (
     RetainedVersionCursor,
     RetainedVersionSummary,
     RestoreRetainedVersionCommand,
+    UndoRetainedVersionRestoreCommand,
     VersionRestoreProtectionOutcome,
     VersionRestoreRequestOutcome,
+    VersionRestoreUndoRequestOutcome,
 )
 from mediasync_home.application.version_restore import (
     VersionRestoreApplyReceipt,
@@ -20,6 +22,12 @@ from mediasync_home.application.version_restore import (
     VersionRestoreRollbackReceipt,
     VersionRestoreState,
     canonical_fingerprint_json,
+)
+from mediasync_home.application.version_restore_rollback import (
+    VersionRestoreRollbackDeleteReceipt,
+    VersionRestoreRollbackOperation,
+    VersionRestoreRollbackState,
+    VersionRestoreUndoApplyReceipt,
 )
 from mediasync_home.application.version_retention import (
     RetainedVersionRecord,
@@ -137,7 +145,10 @@ class SqliteVersionRetentionStore:
                 restores.state,
                 restores.last_validation_code,
                 restores.created_utc,
-                restores.completed_utc
+                restores.completed_utc,
+                rollbacks.state,
+                rollbacks.retention_until_utc,
+                rollbacks.last_validation_code
             FROM retained_version_objects AS versions
             LEFT JOIN version_retention_holds AS holds
                 ON holds.version_object_id = versions.version_object_id
@@ -154,6 +165,8 @@ class SqliteVersionRetentionStore:
                     ORDER BY candidate.created_utc DESC, candidate.restore_id DESC
                     LIMIT 1
                 )
+            LEFT JOIN retained_version_restore_rollbacks AS rollbacks
+                ON rollbacks.restore_id = restores.restore_id
             WHERE versions.run_id = ?
                 {cursor_clause}
             ORDER BY versions.created_utc DESC, versions.version_object_id DESC
@@ -313,7 +326,10 @@ class SqliteVersionRetentionStore:
                 restores.state,
                 restores.last_validation_code,
                 restores.created_utc,
-                restores.completed_utc
+                restores.completed_utc,
+                rollbacks.state,
+                rollbacks.retention_until_utc,
+                rollbacks.last_validation_code
             FROM retained_version_objects AS versions
             LEFT JOIN version_retention_holds AS holds
                 ON holds.version_object_id = versions.version_object_id
@@ -330,6 +346,8 @@ class SqliteVersionRetentionStore:
                     ORDER BY candidate.created_utc DESC, candidate.restore_id DESC
                     LIMIT 1
                 )
+            LEFT JOIN retained_version_restore_rollbacks AS rollbacks
+                ON rollbacks.restore_id = restores.restore_id
             WHERE versions.version_object_id = ?
             """,
             (version_object_id,),
@@ -510,6 +528,165 @@ class SqliteVersionRetentionStore:
                 "VERSION_RESTORE_REQUEST_PERSISTENCE_FAILED"
             ) from exc
 
+    def request_retained_version_restore_undo(
+        self,
+        *,
+        command: UndoRetainedVersionRestoreCommand,
+        created_utc: str,
+    ) -> VersionRestoreUndoRequestOutcome:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            existing = self._connection.execute(
+                """
+                SELECT
+                    rollbacks.restore_id,
+                    restores.version_object_id,
+                    rollbacks.state
+                FROM retained_version_restore_rollbacks AS rollbacks
+                INNER JOIN retained_version_restore_operations AS restores
+                    ON restores.restore_id = rollbacks.restore_id
+                WHERE rollbacks.undo_idempotency_key = ?
+                """,
+                (command.idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing[0]) != command.restore_id
+                    or str(existing[1]) != command.version_object_id
+                ):
+                    raise SqliteVersionRetentionStoreError(
+                        "VERSION_RESTORE_UNDO_IDEMPOTENCY_CONFLICT"
+                    )
+                outcome = VersionRestoreUndoRequestOutcome(
+                    scheduled=True,
+                    validation_code="VERSION_RESTORE_UNDO_ALREADY_SCHEDULED",
+                    next_action="The restore undo is already scheduled.",
+                    restore_id=command.restore_id,
+                    state=str(existing[2]),
+                    version=self._load_version_summary(command.version_object_id),
+                    idempotent_replay=True,
+                )
+                if not outer_transaction:
+                    self._connection.execute("COMMIT")
+                return outcome
+
+            row = self._connection.execute(
+                """
+                SELECT
+                    restores.version_object_id,
+                    restores.state,
+                    rollbacks.state,
+                    rollbacks.retention_until_utc,
+                    versions.row_version
+                FROM retained_version_restore_rollbacks AS rollbacks
+                INNER JOIN retained_version_restore_operations AS restores
+                    ON restores.restore_id = rollbacks.restore_id
+                INNER JOIN retained_version_objects AS versions
+                    ON versions.version_object_id = restores.version_object_id
+                WHERE rollbacks.restore_id = ?
+                """,
+                (command.restore_id,),
+            ).fetchone()
+            version = self._load_version_summary(command.version_object_id)
+            if row is None or str(row[0]) != command.version_object_id:
+                outcome = _restore_undo_request_rejected(
+                    "VERSION_RESTORE_UNDO_NOT_FOUND",
+                    "Refresh version history before undoing the restore.",
+                    version=version,
+                )
+            elif str(row[1]) != VersionRestoreState.COMPLETED.value:
+                outcome = _restore_undo_request_rejected(
+                    "VERSION_RESTORE_UNDO_SOURCE_NOT_COMPLETED",
+                    "Only a completed protected-version restore can be undone.",
+                    version=version,
+                )
+            elif _int_column(row[4]) != command.expected_row_version:
+                outcome = _restore_undo_request_rejected(
+                    "VERSION_RESTORE_UNDO_VERSION_CHANGED",
+                    "Refresh version history before undoing the restore.",
+                    version=version,
+                )
+            elif str(row[2]) != VersionRestoreRollbackState.AVAILABLE.value:
+                outcome = _restore_undo_request_rejected(
+                    "VERSION_RESTORE_UNDO_NOT_AVAILABLE",
+                    "Review the rollback status before undoing this restore.",
+                    version=version,
+                )
+            elif str(row[3]) <= created_utc:
+                outcome = _restore_undo_request_rejected(
+                    "VERSION_RESTORE_UNDO_WINDOW_EXPIRED",
+                    "The 30-day restore undo window has expired.",
+                    version=version,
+                )
+            else:
+                cursor = self._connection.execute(
+                    """
+                    UPDATE retained_version_restore_rollbacks
+                    SET
+                        state = 'UNDO_REQUESTED',
+                        undo_request_id = ?,
+                        undo_idempotency_key = ?,
+                        updated_utc = ?,
+                        last_validation_code = NULL,
+                        row_version = row_version + 1
+                    WHERE restore_id = ?
+                        AND state = 'AVAILABLE'
+                        AND retention_until_utc > ?
+                        AND row_version >= 1
+                    """,
+                    (
+                        command.request_id,
+                        command.idempotency_key,
+                        created_utc,
+                        command.restore_id,
+                        created_utc,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise SqliteVersionRetentionStoreError(
+                        "VERSION_RESTORE_UNDO_REQUEST_REVALIDATION_FAILED"
+                    )
+                self._append_restore_rollback_event(
+                    restore_id=command.restore_id,
+                    from_state=VersionRestoreRollbackState.AVAILABLE,
+                    to_state=VersionRestoreRollbackState.UNDO_REQUESTED,
+                    event_kind="RESTORE_UNDO_REQUESTED",
+                    event_utc=created_utc,
+                    payload={
+                        "expected_source_row_version": command.expected_row_version,
+                        "version_object_id": command.version_object_id,
+                    },
+                )
+                outcome = VersionRestoreUndoRequestOutcome(
+                    scheduled=True,
+                    validation_code="VERSION_RESTORE_UNDO_SCHEDULED",
+                    next_action="Undo will run under the endpoint mutation lease.",
+                    restore_id=command.restore_id,
+                    state=VersionRestoreRollbackState.UNDO_REQUESTED.value,
+                    version=version,
+                )
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return outcome
+        except SqliteVersionRetentionStoreError:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        except sqlite3.IntegrityError as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise SqliteVersionRetentionStoreError(
+                "VERSION_RESTORE_UNDO_REQUEST_CONFLICT"
+            ) from exc
+        except sqlite3.Error as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise SqliteVersionRetentionStoreError(
+                "VERSION_RESTORE_UNDO_REQUEST_PERSISTENCE_FAILED"
+            ) from exc
+
     def load_next_version_restore_operation(self) -> VersionRestoreOperation | None:
         row = self._connection.execute(
             f"""
@@ -686,19 +863,95 @@ class SqliteVersionRetentionStore:
             if already_current
             else VersionRestoreState.FINAL_VERIFIED
         )
-        completed = self._transition_restore_operation(
-            operation=operation,
-            expected_states=(expected,),
-            next_state=VersionRestoreState.COMPLETED,
-            event_kind=(
-                "RESTORE_ALREADY_CURRENT" if already_current else "RESTORE_COMPLETED"
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            completed = self._transition_restore_operation(
+                operation=operation,
+                expected_states=(expected,),
+                next_state=VersionRestoreState.COMPLETED,
+                event_kind=(
+                    "RESTORE_ALREADY_CURRENT"
+                    if already_current
+                    else "RESTORE_COMPLETED"
+                ),
+                event_utc=event_utc,
+                assignments={"completed_utc": event_utc, "last_validation_code": None},
+                payload={"already_current": already_current},
+                release_hold=True,
+            )
+            if not already_current:
+                self._create_completed_restore_rollback(
+                    operation=completed,
+                    event_utc=event_utc,
+                )
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return completed
+        except SqliteVersionRetentionStoreError:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        except sqlite3.Error as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise SqliteVersionRetentionStoreError(
+                "VERSION_RESTORE_COMPLETION_PERSISTENCE_FAILED"
+            ) from exc
+
+    def _create_completed_restore_rollback(
+        self,
+        *,
+        operation: VersionRestoreOperation,
+        event_utc: str,
+    ) -> None:
+        rollback_fingerprint = operation.current_final_fingerprint_json
+        manifest_hash = operation.rollback_manifest_hash
+        if rollback_fingerprint is None or manifest_hash is None:
+            raise SqliteVersionRetentionStoreError(
+                "VERSION_RESTORE_COMPLETION_ROLLBACK_BINDING_MISSING"
+            )
+        self._connection.execute(
+            """
+            INSERT INTO retained_version_restore_rollbacks (
+                restore_id,
+                rollback_object_id,
+                expected_restored_final_fingerprint_json,
+                rollback_fingerprint_json,
+                rollback_manifest_hash,
+                retention_until_utc,
+                state,
+                created_utc,
+                updated_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'AVAILABLE', ?, ?)
+            """,
+            (
+                operation.restore_id,
+                operation.rollback_object_id,
+                canonical_fingerprint_json(
+                    operation.record.original_fingerprint_json
+                ),
+                canonical_fingerprint_json(rollback_fingerprint),
+                manifest_hash,
+                operation.rollback_retention_until_utc,
+                event_utc,
+                event_utc,
             ),
-            event_utc=event_utc,
-            assignments={"completed_utc": event_utc, "last_validation_code": None},
-            payload={"already_current": already_current},
-            release_hold=True,
         )
-        return completed
+        self._append_restore_rollback_event(
+            restore_id=operation.restore_id,
+            from_state=None,
+            to_state=VersionRestoreRollbackState.AVAILABLE,
+            event_kind="RESTORE_ROLLBACK_AVAILABLE",
+            event_utc=event_utc,
+            payload={
+                "rollback_manifest_hash": manifest_hash,
+                "rollback_object_id": operation.rollback_object_id,
+                "retention_until_utc": operation.rollback_retention_until_utc,
+            },
+        )
 
     def record_version_restore_failure(
         self,
@@ -727,6 +980,459 @@ class SqliteVersionRetentionStore:
                 "retryable": retryable,
                 "validation_code": validation_code,
             },
+        )
+
+    def load_next_version_restore_undo_operation(
+        self,
+    ) -> VersionRestoreRollbackOperation | None:
+        row = self._connection.execute(
+            f"""
+            {_RESTORE_ROLLBACK_OPERATION_SELECT}
+            WHERE rollbacks.state IN (
+                'UNDO_REQUESTED',
+                'UNDO_INTENT_RECORDED',
+                'UNDO_APPLIED',
+                'UNDO_VERIFIED'
+            )
+            ORDER BY rollbacks.updated_utc, rollbacks.restore_id
+            LIMIT 1
+            """
+        ).fetchone()
+        return None if row is None else _restore_rollback_operation_from_row(row)
+
+    def load_next_due_version_restore_rollback(
+        self,
+        *,
+        event_utc: str,
+    ) -> VersionRestoreRollbackOperation | None:
+        row = self._connection.execute(
+            f"""
+            {_RESTORE_ROLLBACK_OPERATION_SELECT}
+            WHERE (
+                rollbacks.state = 'EXPIRY_INTENT_RECORDED'
+                OR (
+                    rollbacks.state IN ('AVAILABLE', 'UNDONE')
+                    AND rollbacks.retention_until_utc <= ?
+                )
+            )
+            ORDER BY
+                CASE
+                    WHEN rollbacks.state = 'EXPIRY_INTENT_RECORDED' THEN 0
+                    ELSE 1
+                END,
+                rollbacks.retention_until_utc,
+                rollbacks.restore_id
+            LIMIT 1
+            """,
+            (event_utc,),
+        ).fetchone()
+        return None if row is None else _restore_rollback_operation_from_row(row)
+
+    def record_version_restore_undo_intent(
+        self,
+        *,
+        operation: VersionRestoreRollbackOperation,
+        permit: MutationPermit,
+        event_utc: str,
+    ) -> VersionRestoreRollbackOperation:
+        _require_restore_rollback_endpoint_permit_binding(
+            operation=operation,
+            permit=permit,
+            action="undo",
+        )
+        if operation.state not in {
+            VersionRestoreRollbackState.UNDO_REQUESTED,
+            VersionRestoreRollbackState.UNDO_INTENT_RECORDED,
+            VersionRestoreRollbackState.UNDO_APPLIED,
+        }:
+            raise SqliteVersionRetentionStoreError(
+                "VERSION_RESTORE_UNDO_INTENT_STATE_INVALID"
+            )
+        next_state = (
+            VersionRestoreRollbackState.UNDO_APPLIED
+            if operation.state is VersionRestoreRollbackState.UNDO_APPLIED
+            else VersionRestoreRollbackState.UNDO_INTENT_RECORDED
+        )
+        return self._transition_restore_rollback(
+            operation=operation,
+            expected_states=(operation.state,),
+            next_state=next_state,
+            event_kind=(
+                "RESTORE_UNDO_LEASE_REFRESHED"
+                if operation.state
+                in {
+                    VersionRestoreRollbackState.UNDO_INTENT_RECORDED,
+                    VersionRestoreRollbackState.UNDO_APPLIED,
+                }
+                else "RESTORE_UNDO_INTENT_RECORDED"
+            ),
+            event_utc=event_utc,
+            assignments={
+                "lease_id": permit.lease_id,
+                "fencing_token": permit.fencing_token,
+                "last_validation_code": None,
+            },
+            payload={
+                "fencing_token": permit.fencing_token,
+                "lease_id": permit.lease_id,
+            },
+        )
+
+    def record_version_restore_undo_applied(
+        self,
+        *,
+        operation: VersionRestoreRollbackOperation,
+        permit: MutationPermit,
+        receipt: VersionRestoreUndoApplyReceipt,
+        event_utc: str,
+    ) -> VersionRestoreRollbackOperation:
+        _require_restore_rollback_journaled_permit_binding(
+            operation=operation,
+            permit=permit,
+            action="undo",
+        )
+        if (
+            canonical_fingerprint_json(receipt.rollback_fingerprint_json)
+            != operation.rollback_fingerprint_json
+        ):
+            raise SqliteVersionRetentionStoreError(
+                "VERSION_RESTORE_UNDO_APPLY_RECEIPT_MISMATCH"
+            )
+        return self._transition_restore_rollback(
+            operation=operation,
+            expected_states=(VersionRestoreRollbackState.UNDO_INTENT_RECORDED,),
+            next_state=VersionRestoreRollbackState.UNDO_APPLIED,
+            event_kind="RESTORE_UNDO_APPLIED",
+            event_utc=event_utc,
+            assignments={},
+            payload={"rollback_fingerprint_json": receipt.rollback_fingerprint_json},
+        )
+
+    def record_version_restore_undo_verified(
+        self,
+        *,
+        operation: VersionRestoreRollbackOperation,
+        permit: MutationPermit,
+        receipt: VersionRestoreUndoApplyReceipt,
+        event_utc: str,
+    ) -> VersionRestoreRollbackOperation:
+        _require_restore_rollback_journaled_permit_binding(
+            operation=operation,
+            permit=permit,
+            action="undo",
+        )
+        if (
+            canonical_fingerprint_json(receipt.rollback_fingerprint_json)
+            != operation.rollback_fingerprint_json
+        ):
+            raise SqliteVersionRetentionStoreError(
+                "VERSION_RESTORE_UNDO_VERIFY_RECEIPT_MISMATCH"
+            )
+        return self._transition_restore_rollback(
+            operation=operation,
+            expected_states=(VersionRestoreRollbackState.UNDO_APPLIED,),
+            next_state=VersionRestoreRollbackState.UNDO_VERIFIED,
+            event_kind="RESTORE_UNDO_VERIFIED",
+            event_utc=event_utc,
+            assignments={},
+            payload={"rollback_fingerprint_json": receipt.rollback_fingerprint_json},
+        )
+
+    def complete_version_restore_undo(
+        self,
+        *,
+        operation: VersionRestoreRollbackOperation,
+        event_utc: str,
+        already_undone: bool = False,
+    ) -> VersionRestoreRollbackOperation:
+        if already_undone:
+            raise SqliteVersionRetentionStoreError(
+                "VERSION_RESTORE_UNDO_UNJOURNALED_COMPLETION_FORBIDDEN"
+            )
+        return self._transition_restore_rollback(
+            operation=operation,
+            expected_states=(VersionRestoreRollbackState.UNDO_VERIFIED,),
+            next_state=VersionRestoreRollbackState.UNDONE,
+            event_kind="RESTORE_UNDO_COMPLETED",
+            event_utc=event_utc,
+            assignments={"completed_utc": event_utc, "last_validation_code": None},
+            payload={},
+        )
+
+    def record_version_restore_rollback_expiry_intent(
+        self,
+        *,
+        operation: VersionRestoreRollbackOperation,
+        permit: MutationPermit,
+        event_utc: str,
+    ) -> VersionRestoreRollbackOperation:
+        _require_restore_rollback_endpoint_permit_binding(
+            operation=operation,
+            permit=permit,
+            action="expiry",
+        )
+        if operation.state not in {
+            VersionRestoreRollbackState.AVAILABLE,
+            VersionRestoreRollbackState.UNDONE,
+            VersionRestoreRollbackState.EXPIRY_INTENT_RECORDED,
+        }:
+            raise SqliteVersionRetentionStoreError(
+                "VERSION_RESTORE_ROLLBACK_EXPIRY_INTENT_STATE_INVALID"
+            )
+        return self._transition_restore_rollback(
+            operation=operation,
+            expected_states=(operation.state,),
+            next_state=VersionRestoreRollbackState.EXPIRY_INTENT_RECORDED,
+            event_kind=(
+                "RESTORE_ROLLBACK_EXPIRY_INTENT_REFRESHED"
+                if operation.state
+                is VersionRestoreRollbackState.EXPIRY_INTENT_RECORDED
+                else "RESTORE_ROLLBACK_EXPIRY_INTENT_RECORDED"
+            ),
+            event_utc=event_utc,
+            assignments={
+                "lease_id": permit.lease_id,
+                "fencing_token": permit.fencing_token,
+                "last_validation_code": None,
+            },
+            payload={
+                "fencing_token": permit.fencing_token,
+                "lease_id": permit.lease_id,
+            },
+        )
+
+    def complete_version_restore_rollback_expiry(
+        self,
+        *,
+        operation: VersionRestoreRollbackOperation,
+        permit: MutationPermit,
+        receipt: VersionRestoreRollbackDeleteReceipt,
+        event_utc: str,
+    ) -> VersionRestoreRollbackOperation:
+        _require_restore_rollback_journaled_permit_binding(
+            operation=operation,
+            permit=permit,
+            action="expiry",
+        )
+        if (
+            receipt.restore_id != operation.restore_id
+            or receipt.rollback_object_id != operation.rollback_object_id
+            or receipt.manifest_hash != operation.rollback_manifest_hash
+        ):
+            raise SqliteVersionRetentionStoreError(
+                "VERSION_RESTORE_ROLLBACK_DELETE_RECEIPT_MISMATCH"
+            )
+        return self._transition_restore_rollback(
+            operation=operation,
+            expected_states=(
+                VersionRestoreRollbackState.EXPIRY_INTENT_RECORDED,
+            ),
+            next_state=VersionRestoreRollbackState.EXPIRED,
+            event_kind="RESTORE_ROLLBACK_EXPIRED",
+            event_utc=event_utc,
+            assignments={"completed_utc": event_utc, "last_validation_code": None},
+            payload={
+                "rollback_manifest_hash": receipt.manifest_hash,
+                "rollback_object_id": receipt.rollback_object_id,
+            },
+        )
+
+    def record_version_restore_rollback_failure(
+        self,
+        *,
+        operation: VersionRestoreRollbackOperation,
+        validation_code: str,
+        retryable: bool,
+        event_utc: str,
+    ) -> VersionRestoreRollbackOperation:
+        if not validation_code.strip():
+            raise SqliteVersionRetentionStoreError(
+                "VERSION_RESTORE_ROLLBACK_FAILURE_CODE_MISSING"
+            )
+        return self._transition_restore_rollback(
+            operation=operation,
+            expected_states=(operation.state,),
+            next_state=(
+                operation.state
+                if retryable
+                else VersionRestoreRollbackState.FAILED_BLOCKED
+            ),
+            event_kind=(
+                "RESTORE_ROLLBACK_RETRYABLE_FAILURE"
+                if retryable
+                else "RESTORE_ROLLBACK_BLOCKED"
+            ),
+            event_utc=event_utc,
+            assignments={"last_validation_code": validation_code},
+            payload={
+                "retryable": retryable,
+                "validation_code": validation_code,
+            },
+        )
+
+    def _transition_restore_rollback(
+        self,
+        *,
+        operation: VersionRestoreRollbackOperation,
+        expected_states: tuple[VersionRestoreRollbackState, ...],
+        next_state: VersionRestoreRollbackState,
+        event_kind: str,
+        event_utc: str,
+        assignments: dict[str, object],
+        payload: dict[str, object],
+    ) -> VersionRestoreRollbackOperation:
+        allowed_columns = {
+            "completed_utc",
+            "fencing_token",
+            "last_validation_code",
+            "lease_id",
+        }
+        if not set(assignments) <= allowed_columns:
+            raise SqliteVersionRetentionStoreError(
+                "VERSION_RESTORE_ROLLBACK_TRANSITION_ASSIGNMENT_INVALID"
+            )
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            state_placeholders = ", ".join("?" for _ in expected_states)
+            set_parts = ["state = ?", "row_version = row_version + 1", "updated_utc = ?"]
+            parameters: list[object] = [next_state.value, event_utc]
+            for column, value in assignments.items():
+                set_parts.append(f"{column} = ?")
+                parameters.append(value)
+            parameters.extend(
+                [
+                    operation.restore_id,
+                    operation.row_version,
+                    *(state.value for state in expected_states),
+                    operation.restore_id,
+                    operation.rollback_object_id,
+                ]
+            )
+            cursor = self._connection.execute(
+                f"""
+                UPDATE retained_version_restore_rollbacks
+                SET {', '.join(set_parts)}
+                WHERE restore_id = ?
+                    AND row_version = ?
+                    AND state IN ({state_placeholders})
+                    AND EXISTS (
+                        SELECT 1
+                        FROM retained_version_restore_operations AS restores
+                        WHERE restores.restore_id = ?
+                            AND restores.rollback_object_id = ?
+                            AND restores.state = 'COMPLETED'
+                    )
+                """,
+                parameters,
+            )
+            if cursor.rowcount != 1:
+                raise SqliteVersionRetentionStoreError(
+                    "VERSION_RESTORE_ROLLBACK_TRANSITION_CONFLICT"
+                )
+            self._append_restore_rollback_event(
+                restore_id=operation.restore_id,
+                from_state=operation.state,
+                to_state=next_state,
+                event_kind=event_kind,
+                event_utc=event_utc,
+                payload=payload,
+            )
+            loaded = self._load_restore_rollback_operation(operation.restore_id)
+            if loaded is None:
+                raise SqliteVersionRetentionStoreError(
+                    "VERSION_RESTORE_ROLLBACK_LOAD_FAILED"
+                )
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return loaded
+        except SqliteVersionRetentionStoreError:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        except sqlite3.Error as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise SqliteVersionRetentionStoreError(
+                "VERSION_RESTORE_ROLLBACK_TRANSITION_PERSISTENCE_FAILED"
+            ) from exc
+
+    def _load_restore_rollback_operation(
+        self,
+        restore_id: str,
+    ) -> VersionRestoreRollbackOperation | None:
+        row = self._connection.execute(
+            f"""
+            {_RESTORE_ROLLBACK_OPERATION_SELECT}
+            WHERE rollbacks.restore_id = ?
+            """,
+            (restore_id,),
+        ).fetchone()
+        return None if row is None else _restore_rollback_operation_from_row(row)
+
+    def _append_restore_rollback_event(
+        self,
+        *,
+        restore_id: str,
+        from_state: VersionRestoreRollbackState | None,
+        to_state: VersionRestoreRollbackState,
+        event_kind: str,
+        event_utc: str,
+        payload: dict[str, object],
+    ) -> None:
+        previous = self._connection.execute(
+            """
+            SELECT lifecycle_sequence, event_hash
+            FROM retained_version_restore_rollback_events
+            WHERE restore_id = ?
+            ORDER BY lifecycle_sequence DESC
+            LIMIT 1
+            """,
+            (restore_id,),
+        ).fetchone()
+        sequence = 0 if previous is None else _int_column(previous[0]) + 1
+        previous_hash = None if previous is None else str(previous[1])
+        payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        body = {
+            "event_kind": event_kind,
+            "event_utc": event_utc,
+            "from_state": None if from_state is None else from_state.value,
+            "lifecycle_sequence": sequence,
+            "payload_json": payload_json,
+            "previous_event_hash": previous_hash,
+            "restore_id": restore_id,
+            "to_state": to_state.value,
+        }
+        event_hash = hashlib.sha256(
+            json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        self._connection.execute(
+            """
+            INSERT INTO retained_version_restore_rollback_events (
+                restore_id,
+                lifecycle_sequence,
+                from_state,
+                to_state,
+                event_kind,
+                event_utc,
+                payload_json,
+                previous_event_hash,
+                event_hash
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                restore_id,
+                sequence,
+                None if from_state is None else from_state.value,
+                to_state.value,
+                event_kind,
+                event_utc,
+                payload_json,
+                previous_hash,
+                event_hash,
+            ),
         )
 
     def _transition_restore_operation(
@@ -1712,6 +2418,61 @@ _RESTORE_OPERATION_SELECT = """
         ON versions.version_object_id = restores.version_object_id
 """
 
+_RESTORE_ROLLBACK_OPERATION_SELECT = """
+    SELECT
+        rollbacks.state,
+        rollbacks.expected_restored_final_fingerprint_json,
+        rollbacks.rollback_fingerprint_json,
+        rollbacks.rollback_manifest_hash,
+        rollbacks.retention_until_utc,
+        rollbacks.undo_request_id,
+        rollbacks.undo_idempotency_key,
+        rollbacks.lease_id,
+        rollbacks.fencing_token,
+        rollbacks.completed_utc,
+        rollbacks.last_validation_code,
+        rollbacks.row_version,
+        restores.restore_id,
+        restores.hold_id,
+        restores.rollback_object_id,
+        restores.expected_source_row_version,
+        restores.created_utc,
+        restores.rollback_retention_until_utc,
+        restores.state,
+        restores.current_final_fingerprint_json,
+        restores.rollback_manifest_hash,
+        restores.lease_id,
+        restores.fencing_token,
+        restores.completed_utc,
+        restores.last_validation_code,
+        restores.row_version,
+        versions.version_object_id,
+        versions.handoff_id,
+        versions.run_id,
+        versions.run_target_id,
+        versions.operation_id,
+        versions.job_id,
+        versions.job_revision_id,
+        versions.target_endpoint_id,
+        versions.target_endpoint_revision_id,
+        versions.endpoint_generation,
+        versions.owner_installation_id,
+        versions.ownership_epoch,
+        versions.final_relative_path,
+        versions.original_fingerprint_json,
+        versions.created_utc,
+        versions.retention_policy,
+        versions.retention_until_utc,
+        versions.manifest_hash,
+        versions.state,
+        versions.row_version
+    FROM retained_version_restore_rollbacks AS rollbacks
+    INNER JOIN retained_version_restore_operations AS restores
+        ON restores.restore_id = rollbacks.restore_id
+    INNER JOIN retained_version_objects AS versions
+        ON versions.version_object_id = restores.version_object_id
+"""
+
 
 def _restore_operation_from_row(
     row: sqlite3.Row | tuple[object, ...],
@@ -1737,6 +2498,26 @@ def _restore_operation_from_row(
     )
 
 
+def _restore_rollback_operation_from_row(
+    row: sqlite3.Row | tuple[object, ...],
+) -> VersionRestoreRollbackOperation:
+    return VersionRestoreRollbackOperation(
+        state=VersionRestoreRollbackState(str(row[0])),
+        expected_restored_final_fingerprint_json=str(row[1]),
+        rollback_fingerprint_json=str(row[2]),
+        rollback_manifest_hash=str(row[3]),
+        retention_until_utc=str(row[4]),
+        undo_request_id=None if row[5] is None else str(row[5]),
+        undo_idempotency_key=None if row[6] is None else str(row[6]),
+        lease_id=None if row[7] is None else str(row[7]),
+        fencing_token=None if row[8] is None else _int_column(row[8]),
+        completed_utc=None if row[9] is None else str(row[9]),
+        last_validation_code=None if row[10] is None else str(row[10]),
+        row_version=_int_column(row[11]),
+        restore=_restore_operation_from_row(tuple(row[12:46])),
+    )
+
+
 def _restore_request_rejected(
     validation_code: str,
     next_action: str,
@@ -1744,6 +2525,20 @@ def _restore_request_rejected(
     version: RetainedVersionSummary | None = None,
 ) -> VersionRestoreRequestOutcome:
     return VersionRestoreRequestOutcome(
+        scheduled=False,
+        validation_code=validation_code,
+        next_action=next_action,
+        version=version,
+    )
+
+
+def _restore_undo_request_rejected(
+    validation_code: str,
+    next_action: str,
+    *,
+    version: RetainedVersionSummary | None = None,
+) -> VersionRestoreUndoRequestOutcome:
+    return VersionRestoreUndoRequestOutcome(
         scheduled=False,
         validation_code=validation_code,
         next_action=next_action,
@@ -1812,6 +2607,49 @@ def _require_restore_journaled_permit_binding(
         )
 
 
+def _require_restore_rollback_endpoint_permit_binding(
+    *,
+    operation: VersionRestoreRollbackOperation,
+    permit: MutationPermit,
+    action: str,
+) -> None:
+    record = operation.restore.record
+    if (
+        permit.run_id != f"version-restore-{action}:{operation.restore_id}"
+        or permit.run_target_id
+        != f"version-restore-{action}:{operation.restore_id}"
+        or permit.endpoint_id != record.target_endpoint_id
+        or permit.endpoint_revision_id != record.target_endpoint_revision_id
+        or permit.endpoint_generation != record.endpoint_generation
+        or permit.owner_installation_id != record.owner_installation_id
+        or permit.ownership_epoch != record.ownership_epoch
+        or permit.resource_key != f"endpoint:{record.target_endpoint_id}"
+    ):
+        raise SqliteVersionRetentionStoreError(
+            "VERSION_RESTORE_ROLLBACK_PERMIT_MISMATCH"
+        )
+
+
+def _require_restore_rollback_journaled_permit_binding(
+    *,
+    operation: VersionRestoreRollbackOperation,
+    permit: MutationPermit,
+    action: str,
+) -> None:
+    _require_restore_rollback_endpoint_permit_binding(
+        operation=operation,
+        permit=permit,
+        action=action,
+    )
+    if (
+        operation.lease_id != permit.lease_id
+        or operation.fencing_token != permit.fencing_token
+    ):
+        raise SqliteVersionRetentionStoreError(
+            "VERSION_RESTORE_ROLLBACK_JOURNALED_PERMIT_MISMATCH"
+        )
+
+
 def _record_from_row(row: sqlite3.Row | tuple[object, ...]) -> RetainedVersionRecord:
     return RetainedVersionRecord(
         version_object_id=str(row[0]),
@@ -1859,6 +2697,11 @@ def _summary_from_row(
         restore_validation_code=None if row[15] is None else str(row[15]),
         restore_created_utc=None if row[16] is None else str(row[16]),
         restore_completed_utc=None if row[17] is None else str(row[17]),
+        rollback_state=None if row[18] is None else str(row[18]),
+        rollback_retention_until_utc=(
+            None if row[19] is None else str(row[19])
+        ),
+        rollback_validation_code=None if row[20] is None else str(row[20]),
     )
 
 

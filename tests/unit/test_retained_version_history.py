@@ -8,6 +8,7 @@ from mediasync_home.application.retained_version_history import (
     RetainedVersionSummary,
     parse_protect_retained_version_for_restore_command,
     parse_restore_retained_version_command,
+    parse_undo_retained_version_restore_command,
     query_retained_versions,
 )
 
@@ -118,6 +119,37 @@ def test_restore_command_requires_confirmation_and_exact_row_version() -> None:
             request_id="request-a",
             idempotency_key="key-a",
             payload={
+                "version_object_id": "version-a",
+                "expected_row_version": 2,
+                "explicit_confirmation": False,
+            },
+        )
+
+
+def test_restore_undo_command_requires_restore_binding_and_confirmation() -> None:
+    command = parse_undo_retained_version_restore_command(
+        request_id="request-a",
+        idempotency_key="key-a",
+        payload={
+            "restore_id": "restore-a",
+            "version_object_id": "version-a",
+            "expected_row_version": 2,
+            "explicit_confirmation": True,
+        },
+    )
+
+    assert command.restore_id == "restore-a"
+    assert command.version_object_id == "version-a"
+    assert command.expected_row_version == 2
+    with pytest.raises(
+        RetainedVersionHistoryError,
+        match="VERSION_RESTORE_UNDO_CONFIRMATION_REQUIRED",
+    ):
+        parse_undo_retained_version_restore_command(
+            request_id="request-a",
+            idempotency_key="key-a",
+            payload={
+                "restore_id": "restore-a",
                 "version_object_id": "version-a",
                 "expected_row_version": 2,
                 "explicit_confirmation": False,

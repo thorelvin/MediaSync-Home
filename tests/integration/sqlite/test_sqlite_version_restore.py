@@ -29,6 +29,7 @@ from mediasync_home.application.catalog_handoff import (
 from mediasync_home.application.retained_version_history import (
     ProtectRetainedVersionForRestoreCommand,
     RestoreRetainedVersionCommand,
+    UndoRetainedVersionRestoreCommand,
 )
 from mediasync_home.application.runs import (
     EndpointLeaseAttempt,
@@ -41,6 +42,11 @@ from mediasync_home.application.version_objects import (
 from mediasync_home.application.version_restore import (
     VersionRestoreFilesystemPort,
     apply_next_version_restore,
+)
+from mediasync_home.application.version_restore_rollback import (
+    VersionRestoreRollbackFilesystemPort,
+    apply_next_version_restore_rollback_expiry,
+    apply_next_version_restore_undo,
 )
 from mediasync_home.domain.capabilities import MutationPermit, _issue_mutation_permit
 
@@ -313,6 +319,254 @@ def test_completed_restore_can_be_protected_and_scheduled_again(
         connection.close()
 
 
+def test_completed_restore_can_be_undone_and_rollback_expires_when_due(
+    tmp_path: Path,
+) -> None:
+    connection, target_root = _prepared_restore(tmp_path)
+    try:
+        store = SqliteVersionRetentionStore(connection)
+        _complete_restore(store, target_root=target_root)
+        _schedule_undo(store)
+        adapter = LocalRetainedVersionRestoreAdapter(
+            root_resolver=_RootResolver(target_root)
+        )
+
+        undone = apply_next_version_restore_undo(
+            rollbacks=store,
+            leases=_LeaseAuthority(),
+            filesystem=adapter,
+            event_utc="2026-08-11T00:00:00.000Z",
+        )
+
+        assert undone.completed is True
+        assert undone.action == "undo"
+        assert (target_root / "Photos/image.jpg").read_bytes() == b"current-image"
+        assert connection.execute(
+            "SELECT state FROM retained_version_restore_rollbacks"
+        ).fetchone() == ("UNDONE",)
+        assert [
+            str(row[0])
+            for row in connection.execute(
+                """
+                SELECT event_kind
+                FROM retained_version_restore_rollback_events
+                ORDER BY lifecycle_sequence
+                """
+            ).fetchall()
+        ] == [
+            "RESTORE_ROLLBACK_AVAILABLE",
+            "RESTORE_UNDO_REQUESTED",
+            "RESTORE_UNDO_INTENT_RECORDED",
+            "RESTORE_UNDO_APPLIED",
+            "RESTORE_UNDO_LEASE_REFRESHED",
+            "RESTORE_UNDO_VERIFIED",
+            "RESTORE_UNDO_COMPLETED",
+        ]
+
+        expired = apply_next_version_restore_rollback_expiry(
+            rollbacks=store,
+            leases=_LeaseAuthority(),
+            filesystem=adapter,
+            event_utc="2026-09-10T00:00:00.000Z",
+        )
+
+        assert expired.completed is True
+        assert expired.action == "expiry"
+        assert connection.execute(
+            "SELECT state FROM retained_version_restore_rollbacks"
+        ).fetchone() == ("EXPIRED",)
+        assert not next(
+            (target_root / ".mediasync/objects/restores").glob("*.payload"),
+            None,
+        )
+        assert not next(
+            (target_root / ".mediasync/objects/restores").glob("*.manifest.json"),
+            None,
+        )
+    finally:
+        connection.close()
+
+
+def test_restore_undo_blocks_when_final_changed_after_restore(
+    tmp_path: Path,
+) -> None:
+    connection, target_root = _prepared_restore(tmp_path)
+    try:
+        store = SqliteVersionRetentionStore(connection)
+        _complete_restore(store, target_root=target_root)
+        _schedule_undo(store)
+        final_path = target_root / "Photos/image.jpg"
+        final_path.write_bytes(b"new-work-after-restore")
+
+        outcome = apply_next_version_restore_undo(
+            rollbacks=store,
+            leases=_LeaseAuthority(),
+            filesystem=LocalRetainedVersionRestoreAdapter(
+                root_resolver=_RootResolver(target_root)
+            ),
+            event_utc="2026-08-11T00:00:00.000Z",
+        )
+
+        assert outcome.completed is False
+        assert outcome.validation_codes == ("VERSION_RESTORE_UNDO_FINAL_CHANGED",)
+        assert final_path.read_bytes() == b"new-work-after-restore"
+        assert connection.execute(
+            "SELECT state FROM retained_version_restore_rollbacks"
+        ).fetchone() == ("FAILED_BLOCKED",)
+        assert next(
+            (target_root / ".mediasync/objects/restores").glob("*.payload")
+        ).read_bytes() == b"current-image"
+    finally:
+        connection.close()
+
+
+def test_restore_undo_resumes_after_apply_before_journal_crash(
+    tmp_path: Path,
+) -> None:
+    connection, target_root = _prepared_restore(tmp_path)
+    try:
+        store = SqliteVersionRetentionStore(connection)
+        _complete_restore(store, target_root=target_root)
+        _schedule_undo(store)
+        adapter = LocalRetainedVersionRestoreAdapter(
+            root_resolver=_RootResolver(target_root)
+        )
+        crashing = _CrashRollbackLifecycleAfterEffect(
+            adapter,
+            failure_stage="undo",
+        )
+
+        first = apply_next_version_restore_undo(
+            rollbacks=store,
+            leases=_LeaseAuthority(),
+            filesystem=crashing,
+            event_utc="2026-08-11T00:00:00.000Z",
+        )
+        resumed = apply_next_version_restore_undo(
+            rollbacks=store,
+            leases=_LeaseAuthority(),
+            filesystem=adapter,
+            event_utc="2026-08-11T00:00:01.000Z",
+        )
+
+        assert first.completed is False
+        assert first.validation_codes == ("TEST_ROLLBACK_LIFECYCLE_INTERRUPTED",)
+        assert resumed.completed is True
+        assert (target_root / "Photos/image.jpg").read_bytes() == b"current-image"
+        assert connection.execute(
+            "SELECT state FROM retained_version_restore_rollbacks"
+        ).fetchone() == ("UNDONE",)
+    finally:
+        connection.close()
+
+
+def test_restore_rollback_expiry_resumes_after_delete_before_journal_crash(
+    tmp_path: Path,
+) -> None:
+    connection, target_root = _prepared_restore(tmp_path)
+    try:
+        store = SqliteVersionRetentionStore(connection)
+        _complete_restore(store, target_root=target_root)
+        adapter = LocalRetainedVersionRestoreAdapter(
+            root_resolver=_RootResolver(target_root)
+        )
+        crashing = _CrashRollbackLifecycleAfterEffect(
+            adapter,
+            failure_stage="expiry",
+        )
+
+        first = apply_next_version_restore_rollback_expiry(
+            rollbacks=store,
+            leases=_LeaseAuthority(),
+            filesystem=crashing,
+            event_utc="2026-09-10T00:00:00.000Z",
+        )
+        resumed = apply_next_version_restore_rollback_expiry(
+            rollbacks=store,
+            leases=_LeaseAuthority(),
+            filesystem=adapter,
+            event_utc="2026-09-10T00:00:01.000Z",
+        )
+
+        assert first.completed is False
+        assert first.validation_codes == ("TEST_ROLLBACK_LIFECYCLE_INTERRUPTED",)
+        assert resumed.completed is True
+        assert connection.execute(
+            "SELECT state FROM retained_version_restore_rollbacks"
+        ).fetchone() == ("EXPIRED",)
+    finally:
+        connection.close()
+
+
+def test_restore_rollback_expiry_resumes_after_payload_delete_before_manifest(
+    tmp_path: Path,
+) -> None:
+    connection, target_root = _prepared_restore(tmp_path)
+    try:
+        store = SqliteVersionRetentionStore(connection)
+        _complete_restore(store, target_root=target_root)
+        adapter = LocalRetainedVersionRestoreAdapter(
+            root_resolver=_RootResolver(target_root)
+        )
+        crashing = _CrashAfterRollbackPayloadDelete(
+            adapter,
+            target_root=target_root,
+        )
+
+        first = apply_next_version_restore_rollback_expiry(
+            rollbacks=store,
+            leases=_LeaseAuthority(),
+            filesystem=crashing,
+            event_utc="2026-09-10T00:00:00.000Z",
+        )
+        object_root = target_root / ".mediasync/objects/restores"
+        assert first.completed is False
+        assert first.validation_codes == ("TEST_INTERRUPTED_BETWEEN_PAIR_DELETES",)
+        assert not next(object_root.glob("*.payload"), None)
+        assert next(object_root.glob("*.manifest.json"), None) is not None
+
+        resumed = apply_next_version_restore_rollback_expiry(
+            rollbacks=store,
+            leases=_LeaseAuthority(),
+            filesystem=adapter,
+            event_utc="2026-09-10T00:00:01.000Z",
+        )
+
+        assert resumed.completed is True
+        assert not next(object_root.glob("*.manifest.json"), None)
+        assert connection.execute(
+            "SELECT state FROM retained_version_restore_rollbacks"
+        ).fetchone() == ("EXPIRED",)
+    finally:
+        connection.close()
+
+
+def test_restore_undo_request_rejects_expired_window(
+    tmp_path: Path,
+) -> None:
+    connection, target_root = _prepared_restore(tmp_path)
+    try:
+        store = SqliteVersionRetentionStore(connection)
+        _complete_restore(store, target_root=target_root)
+
+        outcome = store.request_retained_version_restore_undo(
+            command=UndoRetainedVersionRestoreCommand(
+                request_id="request-undo",
+                idempotency_key="undo-key",
+                restore_id=_restore_id_for_test(),
+                version_object_id="version-a",
+                expected_row_version=1,
+                explicit_confirmation=True,
+            ),
+            created_utc="2026-09-10T00:00:00.000Z",
+        )
+
+        assert outcome.scheduled is False
+        assert outcome.validation_code == "VERSION_RESTORE_UNDO_WINDOW_EXPIRED"
+    finally:
+        connection.close()
+
+
 def _prepared_restore(
     tmp_path: Path,
     *,
@@ -362,6 +616,42 @@ def _schedule_restore(store: SqliteVersionRetentionStore) -> None:
         created_utc="2026-08-10T00:00:00.000Z",
     )
     assert outcome.scheduled
+
+
+def _complete_restore(
+    store: SqliteVersionRetentionStore,
+    *,
+    target_root: Path,
+) -> None:
+    _schedule_restore(store)
+    outcome = apply_next_version_restore(
+        restores=store,
+        leases=_LeaseAuthority(),
+        filesystem=LocalRetainedVersionRestoreAdapter(
+            root_resolver=_RootResolver(target_root)
+        ),
+        event_utc="2026-08-10T00:00:01.000Z",
+    )
+    assert outcome.completed
+
+
+def _schedule_undo(store: SqliteVersionRetentionStore) -> None:
+    outcome = store.request_retained_version_restore_undo(
+        command=UndoRetainedVersionRestoreCommand(
+            request_id="request-undo",
+            idempotency_key="undo-key",
+            restore_id=_restore_id_for_test(),
+            version_object_id="version-a",
+            expected_row_version=1,
+            explicit_confirmation=True,
+        ),
+        created_utc="2026-08-11T00:00:00.000Z",
+    )
+    assert outcome.scheduled
+
+
+def _restore_id_for_test() -> str:
+    return f"restore-{hashlib.sha256(b'restore-key').hexdigest()[:32]}"
 
 
 def _write_version_object(target_root: Path) -> VersionObjectManifest:
@@ -554,3 +844,81 @@ class _ChangeFinalBeforePreserve:
 
     def verify_restored_final(self, **kwargs):
         return self._delegate.verify_restored_final(**kwargs)
+
+
+class _CrashRollbackLifecycleAfterEffect:
+    def __init__(
+        self,
+        delegate: VersionRestoreRollbackFilesystemPort,
+        *,
+        failure_stage: str,
+    ) -> None:
+        self._delegate = delegate
+        self._failure_stage = failure_stage
+        self._raised = False
+
+    def inspect_restore_undo(self, **kwargs):
+        return self._delegate.inspect_restore_undo(**kwargs)
+
+    def apply_restore_undo(self, **kwargs):
+        receipt = self._delegate.apply_restore_undo(**kwargs)
+        self._raise_once("undo")
+        return receipt
+
+    def verify_restore_undo(self, **kwargs):
+        return self._delegate.verify_restore_undo(**kwargs)
+
+    def verify_restore_rollback_for_expiry(self, **kwargs):
+        return self._delegate.verify_restore_rollback_for_expiry(**kwargs)
+
+    def delete_restore_rollback(self, **kwargs):
+        receipt = self._delegate.delete_restore_rollback(**kwargs)
+        self._raise_once("expiry")
+        return receipt
+
+    def _raise_once(self, stage: str) -> None:
+        if self._raised or stage != self._failure_stage:
+            return
+        self._raised = True
+        raise VersionRestoreFilesystemError(
+            "TEST_ROLLBACK_LIFECYCLE_INTERRUPTED",
+            "resume",
+            retryable=True,
+        )
+
+
+class _CrashAfterRollbackPayloadDelete:
+    def __init__(
+        self,
+        delegate: VersionRestoreRollbackFilesystemPort,
+        *,
+        target_root: Path,
+    ) -> None:
+        self._delegate = delegate
+        self._target_root = target_root
+
+    def inspect_restore_undo(self, **kwargs):
+        return self._delegate.inspect_restore_undo(**kwargs)
+
+    def apply_restore_undo(self, **kwargs):
+        return self._delegate.apply_restore_undo(**kwargs)
+
+    def verify_restore_undo(self, **kwargs):
+        return self._delegate.verify_restore_undo(**kwargs)
+
+    def verify_restore_rollback_for_expiry(self, **kwargs):
+        return self._delegate.verify_restore_rollback_for_expiry(**kwargs)
+
+    def delete_restore_rollback(self, **kwargs):
+        operation = kwargs["operation"]
+        payload_path = (
+            self._target_root
+            / ".mediasync/objects/restores"
+            / f"{operation.rollback_object_id}.payload"
+        )
+        payload_path.unlink()
+        raise VersionRestoreFilesystemError(
+            "TEST_INTERRUPTED_BETWEEN_PAIR_DELETES",
+            "resume",
+            retryable=True,
+        )

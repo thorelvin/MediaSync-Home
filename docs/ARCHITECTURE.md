@@ -831,6 +831,16 @@ atomisk replace godtas bare mens finalfilen fortsatt matcher journalført
 fingerprint. Krasj mellom filsystemeffekt og faseoppdatering gjenopptas ved å
 bevise postcondition; avvik ender `FAILED_BLOCKED` med aktivt hold.
 
+Catalog migration 47 keeps the completed restore journal immutable and adds a
+separate rollback lifecycle. `UNDO_RETAINED_VERSION_RESTORE` requires explicit
+confirmation, the original 30-day deadline and a fresh exclusive endpoint
+lease. The worker proves the live final is still exactly the historical
+fingerprint produced by restore, journals intent, puts back the checksummed
+pre-restore object and full-hash verifies the final. Changed live bytes block
+without overwrite. The rollback object remains after undo until its deadline;
+expiry verifies the pair before intent and can resume both a fully completed
+delete and a payload-deleted, manifest-preserved intermediate step.
+
 Lokale GUI-preferanser følger en separat, ikke-autoritativ port i
 `application.user_preferences`. Composition kobler denne til en atomisk
 JSON-adapter under samme brukers lokale state-root og injiserer porten i

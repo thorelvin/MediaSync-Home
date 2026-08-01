@@ -19,6 +19,7 @@ class RetainedVersionHistoryError(ValueError):
 class VersionRestoreCommandName(str, Enum):
     PROTECT_RETAINED_VERSION_FOR_RESTORE = "PROTECT_RETAINED_VERSION_FOR_RESTORE"
     RESTORE_RETAINED_VERSION = "RESTORE_RETAINED_VERSION"
+    UNDO_RETAINED_VERSION_RESTORE = "UNDO_RETAINED_VERSION_RESTORE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +62,9 @@ class RetainedVersionSummary:
     restore_validation_code: str | None = None
     restore_created_utc: str | None = None
     restore_completed_utc: str | None = None
+    rollback_state: str | None = None
+    rollback_retention_until_utc: str | None = None
+    rollback_validation_code: str | None = None
 
     @property
     def protected_for_restore(self) -> bool:
@@ -78,6 +82,19 @@ class RetainedVersionSummary:
             "CURRENT_FINAL_PRESERVED",
             "HISTORICAL_APPLIED",
             "FINAL_VERIFIED",
+        }
+
+    @property
+    def restore_undo_available(self) -> bool:
+        return self.restore_state == "COMPLETED" and self.rollback_state == "AVAILABLE"
+
+    @property
+    def restore_undo_pending(self) -> bool:
+        return self.rollback_state in {
+            "UNDO_REQUESTED",
+            "UNDO_INTENT_RECORDED",
+            "UNDO_APPLIED",
+            "UNDO_VERIFIED",
         }
 
     def to_dict(self) -> dict[str, object]:
@@ -103,6 +120,11 @@ class RetainedVersionSummary:
             "restore_validation_code": self.restore_validation_code,
             "restore_created_utc": self.restore_created_utc,
             "restore_completed_utc": self.restore_completed_utc,
+            "rollback_state": self.rollback_state,
+            "rollback_retention_until_utc": self.rollback_retention_until_utc,
+            "rollback_validation_code": self.rollback_validation_code,
+            "restore_undo_available": self.restore_undo_available,
+            "restore_undo_pending": self.restore_undo_pending,
         }
 
 
@@ -229,6 +251,51 @@ class VersionRestoreRequestStore(Protocol):
     ) -> VersionRestoreRequestOutcome: ...
 
 
+@dataclass(frozen=True, slots=True)
+class UndoRetainedVersionRestoreCommand:
+    request_id: str
+    idempotency_key: str
+    restore_id: str
+    version_object_id: str
+    expected_row_version: int
+    explicit_confirmation: bool
+
+
+@dataclass(frozen=True, slots=True)
+class VersionRestoreUndoRequestOutcome:
+    scheduled: bool
+    validation_code: str
+    next_action: str
+    restore_id: str | None = None
+    state: str | None = None
+    version: RetainedVersionSummary | None = None
+    idempotent_replay: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "scheduled": self.scheduled,
+            "validation_code": self.validation_code,
+            "next_action": self.next_action,
+            "idempotent_replay": self.idempotent_replay,
+        }
+        if self.restore_id is not None:
+            payload["restore_id"] = self.restore_id
+        if self.state is not None:
+            payload["state"] = self.state
+        if self.version is not None:
+            payload["version"] = self.version.to_dict()
+        return payload
+
+
+class VersionRestoreUndoRequestStore(Protocol):
+    def request_retained_version_restore_undo(
+        self,
+        *,
+        command: UndoRetainedVersionRestoreCommand,
+        created_utc: str,
+    ) -> VersionRestoreUndoRequestOutcome: ...
+
+
 def query_retained_versions(
     *,
     version_store: RetainedVersionReadModelStore | None,
@@ -325,6 +392,41 @@ def parse_restore_retained_version_command(
     return RestoreRetainedVersionCommand(
         request_id=request_id,
         idempotency_key=idempotency_key,
+        version_object_id=version_object_id,
+        expected_row_version=row_version,
+        explicit_confirmation=True,
+    )
+
+
+def parse_undo_retained_version_restore_command(
+    *,
+    request_id: str,
+    idempotency_key: str,
+    payload: dict[str, object],
+) -> UndoRetainedVersionRestoreCommand:
+    if set(payload) != {
+        "restore_id",
+        "version_object_id",
+        "expected_row_version",
+        "explicit_confirmation",
+    }:
+        raise RetainedVersionHistoryError("VERSION_RESTORE_UNDO_PAYLOAD_INVALID")
+    restore_id = _required_identifier(payload.get("restore_id"), "RESTORE_ID")
+    version_object_id = _required_identifier(
+        payload.get("version_object_id"),
+        "VERSION_OBJECT_ID",
+    )
+    row_version = payload.get("expected_row_version")
+    if isinstance(row_version, bool) or not isinstance(row_version, int) or row_version < 1:
+        raise RetainedVersionHistoryError("VERSION_RESTORE_UNDO_ROW_VERSION_INVALID")
+    if payload.get("explicit_confirmation") is not True:
+        raise RetainedVersionHistoryError(
+            "VERSION_RESTORE_UNDO_CONFIRMATION_REQUIRED"
+        )
+    return UndoRetainedVersionRestoreCommand(
+        request_id=request_id,
+        idempotency_key=idempotency_key,
+        restore_id=restore_id,
         version_object_id=version_object_id,
         expected_row_version=row_version,
         explicit_confirmation=True,

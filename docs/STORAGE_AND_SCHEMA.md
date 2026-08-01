@@ -1175,8 +1175,21 @@ preservation, historical apply, final verification and completion. The worker
 stores current bytes in `.mediasync/objects/restores` before atomic replacement;
 the rollback manifest is bound to restore/source/endpoint/owner/path and a
 30-day due time. The source hold is released only in the transaction that marks
-the verified restore `COMPLETED`; blocked work keeps the hold. Automated expiry
-and user-visible undo of completed rollback objects are not yet implemented.
+the verified restore `COMPLETED`; blocked work keeps the hold.
+
+Catalog migration 47 adds the companion
+`retained_version_restore_rollbacks` lifecycle and append-only
+`retained_version_restore_rollback_events`. It preserves the completed restore
+record while binding the expected restored-final fingerprint, pre-restore
+rollback fingerprint, rollback manifest hash and original due time. Explicit
+undo is admitted only for the exact completed restore before that due time. A
+fresh endpoint lease records undo intent before replacement; changed final bytes
+block the operation without consuming rollback evidence, while apply and
+full-hash verification are independently restartable. `UNDONE` keeps the
+rollback pair until normal expiry. Expiry verifies the exact pair before intent,
+then deletes payload before manifest. Restart can prove and finish either a
+fully deleted pair or a payload-deleted, still-bound manifest without repeating
+an unsafe effect. Lifecycle roots are retained as terminal catalog evidence.
 
 Quarantine and general catalog retention stay outside this version-expiry
 branch.

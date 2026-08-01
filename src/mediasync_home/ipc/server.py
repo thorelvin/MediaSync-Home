@@ -128,13 +128,17 @@ from mediasync_home.application.retained_version_history import (
     RetainedVersionHistoryError,
     RetainedVersionReadModelStore,
     RestoreRetainedVersionCommand,
+    UndoRetainedVersionRestoreCommand,
     VersionRestoreCommandName,
     VersionRestoreProtectionOutcome,
     VersionRestoreProtectionStore,
     VersionRestoreRequestOutcome,
     VersionRestoreRequestStore,
+    VersionRestoreUndoRequestOutcome,
+    VersionRestoreUndoRequestStore,
     parse_protect_retained_version_for_restore_command,
     parse_restore_retained_version_command,
+    parse_undo_retained_version_restore_command,
     query_retained_versions,
 )
 from mediasync_home.application.plans import (
@@ -324,6 +328,7 @@ class EngineHostIpcService:
     retained_version_read_store: RetainedVersionReadModelStore | None = None
     version_restore_protection_store: VersionRestoreProtectionStore | None = None
     version_restore_request_store: VersionRestoreRequestStore | None = None
+    version_restore_undo_request_store: VersionRestoreUndoRequestStore | None = None
     retained_version_utc_now: Callable[[], str] | None = None
     operation_audit_read_store: OperationAuditReadModelStore | None = None
     run_activity_read_store: RunActivityReadModelStore | None = None
@@ -787,6 +792,11 @@ class EngineHostIpcService:
             == VersionRestoreCommandName.RESTORE_RETAINED_VERSION.value
         ):
             return self._handle_version_restore_request(command, identity)
+        if (
+            command.command_name
+            == VersionRestoreCommandName.UNDO_RETAINED_VERSION_RESTORE.value
+        ):
+            return self._handle_version_restore_undo_request(command, identity)
         if command.command_name == RunCommandName.START_RUN.value:
             return self._handle_start_run(command, identity)
         if command.command_name in {
@@ -2389,6 +2399,149 @@ class EngineHostIpcService:
         self._add_receipt_payload(payload, envelope.idempotency_key)
         return IpcResponse.accepted(payload)
 
+    def _handle_version_restore_undo_request(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+    ) -> IpcResponse:
+        try:
+            command = parse_undo_retained_version_restore_command(
+                request_id=envelope.request_id,
+                idempotency_key=envelope.idempotency_key,
+                payload=envelope.payload,
+            )
+        except RetainedVersionHistoryError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        if not self.status.mutations_enabled:
+            receipt_response = self._record_terminal_rejected_receipt(
+                envelope,
+                identity,
+                rejection_reason=IpcReason.MUTATING_COMMANDS_DISABLED.value,
+            )
+            if receipt_response is not None:
+                return receipt_response
+            payload = _version_restore_undo_request_response_payload(
+                envelope=envelope,
+                mutations_enabled=False,
+                outcome=None,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, payload)
+        return self._run_command_effect_transaction(
+            lambda: self._dispatch_version_restore_undo_request_in_transaction(
+                envelope,
+                identity,
+                command,
+            )
+        )
+
+    def _dispatch_version_restore_undo_request_in_transaction(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: UndoRetainedVersionRestoreCommand,
+    ) -> IpcResponse:
+        if (
+            self.command_receipt_store is None
+            or self.version_restore_undo_request_store is None
+        ):
+            receipt_response = self._record_terminal_rejected_receipt(
+                envelope,
+                identity,
+                rejection_reason=IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED.value,
+            )
+            if receipt_response is not None:
+                return receipt_response
+            payload = _version_restore_undo_request_response_payload(
+                envelope=envelope,
+                mutations_enabled=True,
+                outcome=None,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(
+                IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED,
+                payload,
+            )
+        receipt, conflict_response = self._record_received_receipt(envelope, identity)
+        if conflict_response is not None:
+            return conflict_response
+        if receipt is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+        created_utc = (
+            self.retained_version_utc_now()
+            if self.retained_version_utc_now is not None
+            else _system_utc_now()
+        )
+        if receipt.state is not CommandReceiptState.RECEIVED:
+            if receipt.state is CommandReceiptState.REJECTED:
+                outcome = VersionRestoreUndoRequestOutcome(
+                    scheduled=False,
+                    validation_code="VERSION_RESTORE_UNDO_REQUEST_REJECTED",
+                    next_action="Refresh version history before trying again.",
+                )
+                payload = _version_restore_undo_request_response_payload(
+                    envelope=envelope,
+                    mutations_enabled=True,
+                    outcome=outcome,
+                )
+                self._add_receipt_payload(payload, envelope.idempotency_key)
+                return IpcResponse.rejected(_receipt_rejection_reason(receipt), payload)
+            outcome = (
+                self.version_restore_undo_request_store.request_retained_version_restore_undo(
+                    command=command,
+                    created_utc=created_utc,
+                )
+            )
+            payload = _version_restore_undo_request_response_payload(
+                envelope=envelope,
+                mutations_enabled=True,
+                outcome=outcome,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.accepted(payload)
+
+        receipt = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        outcome = (
+            self.version_restore_undo_request_store.request_retained_version_restore_undo(
+                command=command,
+                created_utc=created_utc,
+            )
+        )
+        if not outcome.scheduled or outcome.restore_id is None:
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.REJECTED,
+                rejection_reason=IpcReason.COMMAND_PRECONDITION_FAILED.value,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+            payload = _version_restore_undo_request_response_payload(
+                envelope=envelope,
+                mutations_enabled=True,
+                outcome=outcome,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(IpcReason.COMMAND_PRECONDITION_FAILED, payload)
+        receipt = transition_command_receipt(
+            receipt,
+            CommandReceiptState.EFFECT_PREPARED,
+            result_entity_type="retained_version_restore_undo",
+            result_entity_id=outcome.restore_id,
+        )
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.ACCEPTED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.SUCCEEDED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        self._enqueue_command_effect_outbox(receipt)
+        payload = _version_restore_undo_request_response_payload(
+            envelope=envelope,
+            mutations_enabled=True,
+            outcome=outcome,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.accepted(payload)
+
     def _handle_run_control(
         self,
         envelope: IpcCommandEnvelope,
@@ -3621,6 +3774,22 @@ def _version_restore_request_response_payload(
     }
     if outcome is not None:
         payload["version_restore_request"] = outcome.to_dict()
+    return payload
+
+
+def _version_restore_undo_request_response_payload(
+    *,
+    envelope: IpcCommandEnvelope,
+    mutations_enabled: bool,
+    outcome: VersionRestoreUndoRequestOutcome | None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "command_name": envelope.command_name,
+        "recognized": True,
+        "mutations_enabled": mutations_enabled,
+    }
+    if outcome is not None:
+        payload["version_restore_undo_request"] = outcome.to_dict()
     return payload
 
 

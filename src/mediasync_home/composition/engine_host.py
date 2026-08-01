@@ -262,6 +262,13 @@ from mediasync_home.application.version_restore import (
     VersionRestoreFilesystemPort,
     apply_next_version_restore,
 )
+from mediasync_home.application.version_restore_rollback import (
+    VersionRestoreRollbackApplyOutcome,
+    VersionRestoreRollbackExecutionStore,
+    VersionRestoreRollbackFilesystemPort,
+    apply_next_version_restore_rollback_expiry,
+    apply_next_version_restore_undo,
+)
 from mediasync_home.application.writable_endpoint_registration import (
     WritableEndpointRegistrationCandidate,
     WritableEndpointRegistrationCoordinator,
@@ -283,6 +290,22 @@ HOST_LOCATOR_HEARTBEAT_INTERVAL_MS = 5_000
 class PipeServer(Protocol):
     def serve_once(self) -> None:
         pass
+
+
+class VersionRestoreStore(
+    VersionRestoreExecutionStore,
+    VersionRestoreRollbackExecutionStore,
+    Protocol,
+):
+    pass
+
+
+class VersionRestoreFilesystem(
+    VersionRestoreFilesystemPort,
+    VersionRestoreRollbackFilesystemPort,
+    Protocol,
+):
+    pass
 
 
 class EngineHostMutexGuard(Protocol):
@@ -462,9 +485,9 @@ class EngineHostRuntime:
     ) = None
     version_retention_lease_authority: EndpointLeaseAuthority | None = None
     version_retention_deletion_port: VersionRetentionDeletionPort | None = None
-    version_restore_store: VersionRestoreExecutionStore | None = None
+    version_restore_store: VersionRestoreStore | None = None
     version_restore_lease_authority: EndpointLeaseAuthority | None = None
-    version_restore_filesystem_port: VersionRestoreFilesystemPort | None = None
+    version_restore_filesystem_port: VersionRestoreFilesystem | None = None
     backup_analysis_request_store: BackupAnalysisRequestStore | None = None
     backup_analysis_endpoint_refresher: SqliteEndpointClassificationRefresher | None = (
         None
@@ -870,6 +893,33 @@ class EngineHostRuntime:
             event_utc=self.clock.utc_now(),
         )
 
+    def run_version_restore_rollback_cycle(
+        self,
+    ) -> tuple[
+        VersionRestoreRollbackApplyOutcome,
+        VersionRestoreRollbackApplyOutcome,
+    ]:
+        if (
+            self.version_restore_store is None
+            or self.version_restore_lease_authority is None
+            or self.version_restore_filesystem_port is None
+        ):
+            raise RuntimeError("VERSION_RESTORE_ROLLBACK_RUNTIME_NOT_CONFIGURED")
+        event_utc = self.clock.utc_now()
+        undone = apply_next_version_restore_undo(
+            rollbacks=self.version_restore_store,
+            leases=self.version_restore_lease_authority,
+            filesystem=self.version_restore_filesystem_port,
+            event_utc=event_utc,
+        )
+        expired = apply_next_version_restore_rollback_expiry(
+            rollbacks=self.version_restore_store,
+            leases=self.version_restore_lease_authority,
+            filesystem=self.version_restore_filesystem_port,
+            event_utc=event_utc,
+        )
+        return undone, expired
+
     def _run_capacity_block(self) -> RunExecutorCyclePumpOutcome | None:
         if self.state_capacity_gate is None:
             return None
@@ -954,6 +1004,7 @@ class ExecutorMaintenanceLoop:
                 try:
                     _run_backup_analysis_cycle_if_configured(runtime)
                     outcome = runtime.run_executor_cycle(max_steps=self._max_steps)
+                    _run_version_restore_rollback_cycle_if_configured(runtime)
                     _run_version_restore_cycle_if_configured(runtime)
                     _run_version_retention_cycle_if_configured(runtime)
                 except Exception as exc:
@@ -1875,6 +1926,7 @@ def build_engine_host_runtime(
             retained_version_read_store=version_retention_store,
             version_restore_protection_store=version_retention_store,
             version_restore_request_store=version_retention_store,
+            version_restore_undo_request_store=version_retention_store,
             retained_version_utc_now=runtime_clock.utc_now,
             operation_audit_read_store=operation_audits,
             run_activity_read_store=runs,
@@ -2094,6 +2146,7 @@ def _build_after_request_executor_cycle(
     def run_cycle() -> None:
         _run_backup_analysis_cycle_if_configured(runtime)
         outcome = runtime.run_executor_cycle(max_steps=max_steps)
+        _run_version_restore_rollback_cycle_if_configured(runtime)
         _run_version_restore_cycle_if_configured(runtime)
         _run_version_retention_cycle_if_configured(runtime)
         _emit_run_executor_cycle_event(
@@ -2120,6 +2173,14 @@ def _run_version_retention_cycle_if_configured(runtime: EngineHostRuntime) -> No
 
 def _run_version_restore_cycle_if_configured(runtime: EngineHostRuntime) -> None:
     cycle = getattr(runtime, "run_version_restore_cycle", None)
+    if callable(cycle):
+        cycle()
+
+
+def _run_version_restore_rollback_cycle_if_configured(
+    runtime: EngineHostRuntime,
+) -> None:
+    cycle = getattr(runtime, "run_version_restore_rollback_cycle", None)
     if callable(cycle):
         cycle()
 

@@ -12,8 +12,10 @@ from mediasync_home.application.retained_version_history import (
     RetainedVersionCursor,
     RetainedVersionSummary,
     RestoreRetainedVersionCommand,
+    UndoRetainedVersionRestoreCommand,
     VersionRestoreProtectionOutcome,
     VersionRestoreRequestOutcome,
+    VersionRestoreUndoRequestOutcome,
 )
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
@@ -31,6 +33,7 @@ class _VersionStore:
         self.query_calls: list[tuple[str, int, RetainedVersionCursor | None]] = []
         self.protection_calls: list[ProtectRetainedVersionForRestoreCommand] = []
         self.restore_calls: list[RestoreRetainedVersionCommand] = []
+        self.undo_calls: list[UndoRetainedVersionRestoreCommand] = []
 
     def list_retained_versions_for_run(
         self,
@@ -82,6 +85,29 @@ class _VersionStore:
                 hold_reason="RESTORE_REQUESTED",
             ),
             idempotent_replay=len(self.restore_calls) > 1,
+        )
+
+    def request_retained_version_restore_undo(
+        self,
+        *,
+        command: UndoRetainedVersionRestoreCommand,
+        created_utc: str,
+    ) -> VersionRestoreUndoRequestOutcome:
+        del created_utc
+        self.undo_calls.append(command)
+        return VersionRestoreUndoRequestOutcome(
+            scheduled=True,
+            validation_code="VERSION_RESTORE_UNDO_SCHEDULED",
+            next_action="Scheduled.",
+            restore_id=command.restore_id,
+            state="UNDO_REQUESTED",
+            version=replace(
+                _summary(),
+                restore_id=command.restore_id,
+                restore_state="COMPLETED",
+                rollback_state="UNDO_REQUESTED",
+            ),
+            idempotent_replay=len(self.undo_calls) > 1,
         )
 
 
@@ -207,6 +233,35 @@ def test_engine_client_schedules_protected_version_restore() -> None:
     assert len(store.restore_calls) == 1
 
 
+def test_engine_client_schedules_retained_version_restore_undo() -> None:
+    store = _VersionStore()
+    engine = EngineClient(_client(_service(store, mutations_enabled=True)))
+
+    response = engine.undo_retained_version_restore(
+        restore_id="restore-a",
+        version_object_id="version-a",
+        expected_row_version=1,
+        request_id="55555555-5555-4555-8555-555555555555",
+        idempotency_key="66666666-6666-4666-8666-666666666666",
+    )
+
+    assert response.status is IpcStatus.ACCEPTED
+    request = response.payload["version_restore_undo_request"]
+    assert request["scheduled"] is True
+    assert request["restore_id"] == "restore-a"
+    assert response.payload["receipt"]["state"] == "SUCCEEDED"
+    assert store.undo_calls == [
+        UndoRetainedVersionRestoreCommand(
+            request_id="55555555-5555-4555-8555-555555555555",
+            idempotency_key="66666666-6666-4666-8666-666666666666",
+            restore_id="restore-a",
+            version_object_id="version-a",
+            expected_row_version=1,
+            explicit_confirmation=True,
+        )
+    ]
+
+
 def test_rejected_restore_protection_replay_never_retries_the_effect() -> None:
     store = _RejectingVersionStore()
     engine = EngineClient(_client(_service(store, mutations_enabled=True)))
@@ -238,6 +293,7 @@ def _service(
         retained_version_read_store=store,
         version_restore_protection_store=store,
         version_restore_request_store=store,
+        version_restore_undo_request_store=store,
         retained_version_utc_now=lambda: "2026-08-10T00:00:00.000Z",
         command_receipt_store=_ReceiptStore(),
     )

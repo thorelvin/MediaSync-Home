@@ -34,6 +34,11 @@ def test_retained_version_view_model_parses_protection_state() -> None:
                             "restore_state": "HISTORICAL_APPLIED",
                             "restore_pending": True,
                             "restore_validation_code": "RESTORE_RESUMING",
+                            "rollback_state": "UNDO_REQUESTED",
+                            "rollback_retention_until_utc": "2026-09-09T00:00:00.000Z",
+                            "rollback_validation_code": "UNDO_RESUMING",
+                            "restore_undo_available": False,
+                            "restore_undo_pending": True,
                             "hold_id": "restore:key-a",
                             "hold_reason": "RESTORE_REQUESTED",
                             "hold_created_utc": "2026-08-10T00:00:00.000Z",
@@ -52,6 +57,14 @@ def test_retained_version_view_model_parses_protection_state() -> None:
     assert state.versions[0].restore_state == "HISTORICAL_APPLIED"
     assert state.versions[0].restore_pending is True
     assert state.versions[0].restore_validation_code == "RESTORE_RESUMING"
+    assert state.versions[0].rollback_state == "UNDO_REQUESTED"
+    assert (
+        state.versions[0].rollback_retention_until_utc
+        == "2026-09-09T00:00:00.000Z"
+    )
+    assert state.versions[0].rollback_validation_code == "UNDO_RESUMING"
+    assert state.versions[0].restore_undo_available is False
+    assert state.versions[0].restore_undo_pending is True
 
 
 def test_retained_version_view_model_drops_malformed_rows() -> None:

@@ -394,6 +394,17 @@ preserve or replace resumable without repeating an unsafe effect. A changed
 final, invalid manifest/payload, stale permit, unsafe path or reparse boundary
 blocks the operation and keeps protected evidence.
 
+Migration 47 journals the completed restore's rollback lifecycle separately so
+undo never rewrites the original restore evidence. Confirmed undo is allowed
+only before the bound due time and only while the live final still full-hash
+matches the completed restore output. It records `UNDO_INTENT_RECORDED` before
+replacement and resumes through `UNDO_APPLIED` and `UNDO_VERIFIED` under a fresh
+lease. The rollback pair remains until expiry even after `UNDONE`. Expiry first
+verifies the exact pair, records `EXPIRY_INTENT_RECORDED`, then removes payload
+before manifest. Restart treats both-missing as completed and can validate and
+remove a lone manifest after payload deletion; a payload without its ownership
+manifest or any binding drift remains blocked.
+
 ### 17.5 Karantene som opaque managed objects og compare-and-swap
 
 All speil-«sletting» bevares i objektstore med `logical_role=QUARANTINE`:

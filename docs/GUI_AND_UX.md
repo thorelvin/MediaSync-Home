@@ -1269,6 +1269,16 @@ For flere elementer, ny plassering eller navnekollisjon brukes en eksplisitt gje
 
 Permanent tømming er en separat farehandling og viser antall, byte, lagringsområde og at handlingen ikke kan angres.
 
+The 0B implementation shows previous file versions directly in the run detail.
+The user first protects a selected version and then confirms restore. After a
+completed restore, the same action offers `Undo restore` until the bound rollback
+object expires. Undo requires separate confirmation and is disabled while work
+is active or when the live file changed. Restore, undo, expiry and blocked states
+are shown in Norwegian and English. At compact sizes, long source and target
+paths use middle elision with the full path in a tooltip, text areas reserve
+their required height, and the workspace scrolls vertically without hiding the
+action after folder selection.
+
 ### 8.14 Innstillinger og diagnostikk
 
 Globale innstillinger skal være korte og forståelige. Jobbspesifikke valg redigeres på den aktuelle jobben; tekniske detaljer ligger i en separat diagnostikkflate.
