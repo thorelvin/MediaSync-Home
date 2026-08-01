@@ -1,5 +1,21 @@
 # Implementeringsstatus
 
+Update 2026-08-01: `FILTER-001` now has a production bounded filter evaluator
+and exact active-revision binding. Canonical schema 1/2 JSON and SHA-256 are
+validated before sealed snapshot reuse. One immutable policy is applied to
+source and every target, with ordered last-match-wins include/exclude rules,
+six safe defaults, cheap pre-stat pruning, metadata rules, postorder empty
+directory handling and separate proven `.mediasync` control-area exclusion.
+Advanced regex is opt-in through the `regex==2026.7.19` engine and has explicit
+rule, pattern, input, per-match, total-scan and repeated-timeout limits. Budget
+failure records blocking `FILTER_INCOMPLETE` coverage. The exact dual-license
+expression is approved as notice-required and the dependency audit passes.
+Filesystem and SQLite tests prove default/custom source-target parity, override,
+reparse, empty-directory, stream-skip, entry-limit, regex-failure and tampered
+hash behavior. The machine contract and generated reason codes pin the same
+limits. User-visible per-path explanation, million-path benchmark and broader
+fuzz coverage remain pending.
+
 Update 2026-08-01: `META-001` now has executable Windows creation-time
 evidence. The local scanner reads `FILETIME` creation time through
 `GetFileInformationByHandle`; it never substitutes `st_ctime` and leaves the

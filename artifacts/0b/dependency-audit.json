@@ -217,6 +217,14 @@
       "version": "0.37.0"
     },
     {
+      "canonical_name": "regex",
+      "license": "Apache-2.0 AND CNRI-Python",
+      "name": "regex",
+      "notice_required": true,
+      "root_requirement": true,
+      "version": "2026.7.19"
+    },
+    {
       "canonical_name": "rich",
       "license": "MIT",
       "name": "rich",
@@ -274,6 +282,7 @@
     "pyside6-addons",
     "pyside6-essentials",
     "pywin32",
+    "regex",
     "shiboken6",
     "typing-extensions"
   ],
@@ -288,6 +297,11 @@
       "name": "PyYAML",
       "source": "requirements-handoff.txt",
       "version": "6.0.3"
+    },
+    {
+      "name": "regex",
+      "source": "requirements-handoff.txt",
+      "version": "2026.7.19"
     },
     {
       "name": "import-linter",

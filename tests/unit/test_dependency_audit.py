@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from tools.audit_dependencies import _normalize_license_name, read_pinned_requirements
+from tools.audit_dependencies import (
+    APPROVED_LICENSES,
+    NOTICE_REQUIRED_LICENSES,
+    _normalize_license_name,
+    read_pinned_requirements,
+)
 
 
 def test_read_pinned_requirements_follows_includes(tmp_path) -> None:
@@ -31,3 +36,10 @@ def test_dependency_audit_normalizes_python_software_foundation_license_alias() 
     assert _normalize_license_name("PSF") == "PSF-2.0"
     assert _normalize_license_name("Python Software Foundation License") == "PSF-2.0"
     assert _normalize_license_name("MIT") == "MIT"
+
+
+def test_regex_dual_license_is_approved_and_requires_notice() -> None:
+    license_expression = "Apache-2.0 AND CNRI-Python"
+
+    assert license_expression in APPROVED_LICENSES
+    assert license_expression in NOTICE_REQUIRED_LICENSES

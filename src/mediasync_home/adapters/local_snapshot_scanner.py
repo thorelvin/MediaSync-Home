@@ -6,7 +6,8 @@ import json
 import os
 import stat
 from collections import deque
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, ClassVar, SupportsInt, cast
 from ctypes import wintypes
@@ -27,6 +28,13 @@ from mediasync_home.application.snapshot_scanning import (
     DirectoryCaseContext,
     DirectoryCaseModeProbe,
     FilesystemSnapshotScan,
+)
+from mediasync_home.application.file_filters import (
+    FileFilterDecision,
+    FileFilterPolicy,
+    FileFilterSession,
+    FileFilterSubject,
+    default_file_filter_policy,
 )
 from mediasync_home.application.named_streams import (
     DEFAULT_NAMED_STREAM_POLICY,
@@ -136,6 +144,9 @@ class LocalFilesystemSnapshotScanner:
         case_mode_probe: DirectoryCaseModeProbe | None = None,
         named_stream_probe: NamedStreamProbe | None = None,
         named_stream_policy: NamedStreamPolicy = DEFAULT_NAMED_STREAM_POLICY,
+        filter_session_factory: Callable[
+            [FileFilterPolicy], FileFilterSession
+        ] = FileFilterSession,
         max_entries: int = MAX_LOCAL_SNAPSHOT_ENTRIES,
         max_directories: int = MAX_LOCAL_SNAPSHOT_DIRECTORIES,
     ) -> None:
@@ -147,6 +158,7 @@ class LocalFilesystemSnapshotScanner:
             Win32NamedStreamProbe() if os.name == "nt" else NoNamedStreamProbe()
         )
         self._named_stream_policy = named_stream_policy
+        self._filter_session_factory = filter_session_factory
         self._max_entries = max_entries
         self._max_directories = max_directories
 
@@ -156,14 +168,21 @@ class LocalFilesystemSnapshotScanner:
         *,
         snapshot_id: str,
         exclude_control_area: bool,
+        filter_policy: FileFilterPolicy | None = None,
     ) -> FilesystemSnapshotScan:
         root = Path(root)
         self._validate_root(root)
+        filter_session = self._filter_session_factory(
+            filter_policy or default_file_filter_policy()
+        )
         entries: list[SnapshotFileEntry] = []
         coverage: list[SnapshotDirectoryCoverage] = []
         issues: list[SnapshotIssue] = []
+        directory_filter_subjects: dict[str, FileFilterSubject] = {}
+        reported_filter_errors: set[tuple[str | None, str]] = set()
         queue = deque((_QueuedDirectory(root, ".", "."),))
         scanned_directories = 0
+        examined_entries = 0
         control_area_excluded = False
 
         while queue:
@@ -274,6 +293,7 @@ class LocalFilesystemSnapshotScanner:
                 continue
 
             limit_hit = False
+            directory_filter_incomplete = False
             for child in children:
                 if (
                     queued.relative_path == "."
@@ -282,7 +302,7 @@ class LocalFilesystemSnapshotScanner:
                 ):
                     control_area_excluded = True
                     continue
-                if len(entries) >= self._max_entries:
+                if examined_entries >= self._max_entries:
                     _append_limit_block(
                         coverage,
                         issues,
@@ -291,12 +311,42 @@ class LocalFilesystemSnapshotScanner:
                     )
                     limit_hit = True
                     break
+                examined_entries += 1
                 relative_path = _child_relative_path(queued.relative_path, child.name)
                 comparison_key = _child_comparison_key(
                     queued.comparison_key,
                     child.name,
                     case_context.case_mode,
                 )
+                try:
+                    pre_stat_object_type = _dir_entry_object_type(child)
+                except OSError:
+                    issues.append(
+                        _issue(
+                            relative_path,
+                            "ENTRY_UNREADABLE",
+                            "SNAPSHOT_ENTRY_TYPE_FAILED",
+                        )
+                    )
+                    continue
+                if filter_session.can_evaluate_before_metadata:
+                    pre_stat_decision = filter_session.evaluate(
+                        FileFilterSubject(
+                            relative_path=relative_path,
+                            object_type=pre_stat_object_type,
+                        )
+                    )
+                    if pre_stat_decision.error_code is not None:
+                        directory_filter_incomplete = True
+                        _append_filter_error(
+                            issues,
+                            reported_filter_errors,
+                            relative_path=relative_path,
+                            decision=pre_stat_decision,
+                        )
+                        continue
+                    if not pre_stat_decision.included:
+                        continue
                 try:
                     child_stat = os.stat(
                         queued.path / child.name,
@@ -311,10 +361,53 @@ class LocalFilesystemSnapshotScanner:
                         )
                     )
                     continue
-                is_reparse = child.is_symlink() or bool(
-                    int(getattr(child_stat, "st_file_attributes", 0))
-                    & FILE_ATTRIBUTE_REPARSE_POINT
+                file_attributes = int(
+                    getattr(child_stat, "st_file_attributes", 0)
                 )
+                is_reparse = child.is_symlink() or bool(
+                    file_attributes & FILE_ATTRIBUTE_REPARSE_POINT
+                )
+                object_type = _stat_object_type(child_stat, is_reparse=is_reparse)
+                birthtime_ns = (
+                    file_birthtime_ns(
+                        queued.path / child.name,
+                        stat_result=child_stat,
+                    )
+                    if object_type in {"file", "directory"}
+                    else None
+                )
+                filter_subject = FileFilterSubject(
+                    relative_path=relative_path,
+                    object_type=object_type,
+                    size_bytes=(
+                        int(child_stat.st_size) if object_type == "file" else None
+                    ),
+                    modified_ns=(
+                        int(child_stat.st_mtime_ns)
+                        if object_type == "file"
+                        else None
+                    ),
+                    created_ns=birthtime_ns if object_type == "file" else None,
+                    file_attributes=file_attributes,
+                )
+                if not filter_session.can_evaluate_before_metadata:
+                    decision = filter_session.evaluate(filter_subject)
+                    if decision.error_code is not None:
+                        directory_filter_incomplete = True
+                        _append_filter_error(
+                            issues,
+                            reported_filter_errors,
+                            relative_path=relative_path,
+                            decision=decision,
+                        )
+                        continue
+                    if not decision.included and not (
+                        object_type == "directory"
+                        and filter_session.has_empty_directory_rules
+                    ):
+                        continue
+                if object_type == "directory":
+                    directory_filter_subjects[relative_path] = filter_subject
                 if is_reparse:
                     entries.append(
                         _entry(
@@ -348,10 +441,6 @@ class LocalFilesystemSnapshotScanner:
                             )
                         )
                     continue
-                birthtime_ns = file_birthtime_ns(
-                    queued.path / child.name,
-                    stat_result=child_stat,
-                )
                 if birthtime_ns is None:
                     issues.append(
                         _issue(
@@ -417,7 +506,11 @@ class LocalFilesystemSnapshotScanner:
                 break
             after = _directory_signature(queued.path)
             after_inspection = self._inspect_queued_directory(queued)
-            coverage_state = "COMPLETE"
+            coverage_state = (
+                "FILTER_INCOMPLETE"
+                if directory_filter_incomplete
+                else "COMPLETE"
+            )
             if case_context.case_mode == "UNKNOWN":
                 coverage_state = "CASE_CONTEXT_UNKNOWN"
                 issues.append(
@@ -472,6 +565,16 @@ class LocalFilesystemSnapshotScanner:
                     case_context,
                     coverage_state=coverage_state,
                 )
+            )
+
+        if filter_session.has_empty_directory_rules:
+            entries, coverage, issues = _apply_empty_directory_filters(
+                entries=entries,
+                coverage=coverage,
+                issues=issues,
+                directory_subjects=directory_filter_subjects,
+                session=filter_session,
+                reported_errors=reported_filter_errors,
             )
 
         return FilesystemSnapshotScan(
@@ -539,6 +642,166 @@ class LocalFilesystemSnapshotScanner:
                 object_type=object_type,
             )
         )
+
+
+def _dir_entry_object_type(child: os.DirEntry[str]) -> str:
+    if child.is_symlink():
+        return "reparse"
+    if child.is_dir(follow_symlinks=False):
+        return "directory"
+    if child.is_file(follow_symlinks=False):
+        return "file"
+    return "other"
+
+
+def _stat_object_type(
+    child_stat: os.stat_result,
+    *,
+    is_reparse: bool,
+) -> str:
+    if is_reparse:
+        return "reparse"
+    if stat.S_ISDIR(child_stat.st_mode):
+        return "directory"
+    if stat.S_ISREG(child_stat.st_mode):
+        return "file"
+    return "other"
+
+
+def _append_filter_error(
+    issues: list[SnapshotIssue],
+    reported_errors: set[tuple[str | None, str]],
+    *,
+    relative_path: str,
+    decision: FileFilterDecision,
+) -> None:
+    error_code = decision.error_code
+    if error_code is None:
+        return
+    key = (decision.matched_rule_id, error_code)
+    if key in reported_errors:
+        return
+    reported_errors.add(key)
+    issues.append(
+        _issue(
+            relative_path,
+            "FILTER_EVALUATION_INCOMPLETE",
+            error_code,
+            sanitized_message=(
+                "A file-selection rule exceeded its bounded evaluation policy."
+            ),
+        )
+    )
+
+
+def _apply_empty_directory_filters(
+    *,
+    entries: list[SnapshotFileEntry],
+    coverage: list[SnapshotDirectoryCoverage],
+    issues: list[SnapshotIssue],
+    directory_subjects: dict[str, FileFilterSubject],
+    session: FileFilterSession,
+    reported_errors: set[tuple[str | None, str]],
+) -> tuple[
+    list[SnapshotFileEntry],
+    list[SnapshotDirectoryCoverage],
+    list[SnapshotIssue],
+]:
+    child_counts: dict[str, int] = {}
+    for entry in entries:
+        if entry.object_type != "directory":
+            parent = _parent_relative_path(entry.relative_path)
+            child_counts[parent] = child_counts.get(parent, 0) + 1
+
+    excluded_directories: set[str] = set()
+    filter_errors: dict[str, str] = {}
+    directories = sorted(
+        (
+            entry
+            for entry in entries
+            if entry.object_type == "directory"
+            and entry.relative_path in directory_subjects
+        ),
+        key=lambda entry: (entry.relative_path.count("/"), entry.relative_path),
+        reverse=True,
+    )
+    for entry in directories:
+        relative_path = entry.relative_path
+        decision = session.evaluate(
+            replace(
+                directory_subjects[relative_path],
+                is_empty_directory=child_counts.get(relative_path, 0) == 0,
+            )
+        )
+        if decision.error_code is not None:
+            filter_errors[relative_path] = decision.error_code
+            _append_filter_error(
+                issues,
+                reported_errors,
+                relative_path=relative_path,
+                decision=decision,
+            )
+        elif not decision.included:
+            excluded_directories.add(relative_path)
+            continue
+        parent = _parent_relative_path(relative_path)
+        child_counts[parent] = child_counts.get(parent, 0) + 1
+
+    if excluded_directories:
+        entries = [
+            entry
+            for entry in entries
+            if not _path_is_within_any(
+                entry.relative_path,
+                excluded_directories,
+            )
+        ]
+        coverage = [
+            item
+            for item in coverage
+            if not _path_is_within_any(
+                item.relative_path,
+                excluded_directories,
+            )
+        ]
+        issues = [
+            issue
+            for issue in issues
+            if not _path_is_within_any(
+                issue.relative_path,
+                excluded_directories,
+            )
+        ]
+
+    coverage = [
+        replace(
+            item,
+            coverage_state="FILTER_INCOMPLETE",
+            case_probe_error=filter_errors[item.relative_path],
+        )
+        if item.relative_path in filter_errors
+        and item.coverage_state == "COMPLETE"
+        else item
+        for item in coverage
+    ]
+    return entries, coverage, issues
+
+
+def _parent_relative_path(relative_path: str) -> str:
+    parent, separator, _name = relative_path.rpartition("/")
+    return parent if separator else "."
+
+
+def _path_is_within_any(
+    relative_path: str,
+    roots: set[str],
+) -> bool:
+    current = relative_path
+    while current != ".":
+        if current in roots:
+            return True
+        current = _parent_relative_path(current)
+    return False
 
 
 class _FileCaseSensitiveInfo(ctypes.Structure):

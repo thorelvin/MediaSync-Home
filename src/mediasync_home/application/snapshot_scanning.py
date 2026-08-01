@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from mediasync_home.application.file_filters import FileFilterPolicy
 from mediasync_home.application.snapshots import (
     SNAPSHOT_COMPLETE_COVERAGE_STATE,
     SnapshotDirectoryCoverage,
@@ -93,6 +94,7 @@ class FilesystemSnapshotScanner(Protocol):
         *,
         snapshot_id: str,
         exclude_control_area: bool,
+        filter_policy: FileFilterPolicy | None = None,
     ) -> FilesystemSnapshotScan: ...
 
 

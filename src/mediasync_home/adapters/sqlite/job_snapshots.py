@@ -15,6 +15,11 @@ from mediasync_home.application.endpoint_classification import (
     EXCLUDABLE_CONTROL_AREA_STATES,
     EndpointControlAreaState,
 )
+from mediasync_home.application.file_filters import (
+    FileFilterPolicy,
+    FileFilterPolicyError,
+    parse_file_filter_policy_json,
+)
 from mediasync_home.application.snapshot_scanning import (
     FilesystemSnapshotScan,
     FilesystemSnapshotScanner,
@@ -66,6 +71,8 @@ class _SnapshotEndpointCandidate:
 class _SnapshotJobCandidate:
     job_id: str
     job_revision_id: str
+    filter_rules_hash: str
+    filter_rules_json: str
     endpoints: tuple[_SnapshotEndpointCandidate, ...]
 
 
@@ -111,6 +118,25 @@ class SqliteJobSnapshotMaterializer:
                 candidate for candidate in candidates if candidate.job_id == job_id
             )
         for candidate in candidates:
+            try:
+                filter_policy = parse_file_filter_policy_json(
+                    candidate.filter_rules_json,
+                    expected_hash=candidate.filter_rules_hash,
+                )
+            except FileFilterPolicyError as exc:
+                persisted_reason = self._persist_blocked_without_analysis(
+                    candidate,
+                    reason_code=exc.validation_code,
+                    observed_utc=observed_utc,
+                )
+                results.append(
+                    _result(
+                        candidate,
+                        state="BLOCKED",
+                        reason_code=persisted_reason,
+                    )
+                )
+                continue
             reused = None if force else self._load_reusable_result(candidate)
             if reused is not None:
                 results.append(reused)
@@ -145,6 +171,7 @@ class SqliteJobSnapshotMaterializer:
             results.append(
                 self._scan_and_persist_candidate(
                     candidate,
+                    filter_policy=filter_policy,
                     observed_utc=observed_utc,
                 )
             )
@@ -156,6 +183,8 @@ class SqliteJobSnapshotMaterializer:
             SELECT
                 bindings.job_id,
                 bindings.job_revision_id,
+                filter_versions.rules_hash,
+                filter_versions.rules_json,
                 bindings.role,
                 bindings.ordinal,
                 bindings.endpoint_id,
@@ -170,6 +199,13 @@ class SqliteJobSnapshotMaterializer:
             INNER JOIN job_heads AS heads
                 ON heads.job_id = bindings.job_id
                 AND heads.active_revision_id = bindings.job_revision_id
+            INNER JOIN job_revision_filter_bindings AS filter_bindings
+                ON filter_bindings.job_id = bindings.job_id
+                AND filter_bindings.job_revision_id = bindings.job_revision_id
+            INNER JOIN filter_set_versions AS filter_versions
+                ON filter_versions.job_id = filter_bindings.job_id
+                AND filter_versions.filter_set_id = filter_bindings.filter_set_id
+                AND filter_versions.version = filter_bindings.filter_set_version
             INNER JOIN endpoint_revisions AS revisions
                 ON revisions.endpoint_id = bindings.endpoint_id
                 AND revisions.id = bindings.endpoint_revision_id
@@ -185,38 +221,60 @@ class SqliteJobSnapshotMaterializer:
         ).fetchall()
         grouped: list[_SnapshotJobCandidate] = []
         current_key: tuple[str, str] | None = None
+        current_filter_evidence: tuple[str, str] | None = None
         endpoints: list[_SnapshotEndpointCandidate] = []
         for row in rows:
             key = (str(row[0]), str(row[1]))
+            filter_evidence = (str(row[2]), str(row[3]))
             if current_key is not None and key != current_key:
+                if current_filter_evidence is None:
+                    raise SqliteJobSnapshotMaterializationError(
+                        "JOB_SNAPSHOT_FILTER_EVIDENCE_MISSING"
+                    )
                 grouped.append(
                     _SnapshotJobCandidate(
                         job_id=current_key[0],
                         job_revision_id=current_key[1],
+                        filter_rules_hash=current_filter_evidence[0],
+                        filter_rules_json=current_filter_evidence[1],
                         endpoints=tuple(endpoints),
                     )
                 )
                 endpoints = []
+                current_filter_evidence = None
+            if current_filter_evidence is not None and (
+                filter_evidence != current_filter_evidence
+            ):
+                raise SqliteJobSnapshotMaterializationError(
+                    "JOB_SNAPSHOT_FILTER_EVIDENCE_INCONSISTENT"
+                )
             current_key = key
+            current_filter_evidence = filter_evidence
             endpoints.append(
                 _SnapshotEndpointCandidate(
-                    role=str(row[2]),
-                    ordinal=int(row[3]),
-                    endpoint_id=str(row[4]),
-                    endpoint_revision_id=str(row[5]),
-                    endpoint_generation=int(row[6]),
-                    root_uri=str(row[7]),
-                    registration_state=str(row[8]),
-                    inspection_status=None if row[9] is None else str(row[9]),
-                    classification_state=None if row[10] is None else str(row[10]),
-                    marker_json=None if row[11] is None else str(row[11]),
+                    role=str(row[4]),
+                    ordinal=int(row[5]),
+                    endpoint_id=str(row[6]),
+                    endpoint_revision_id=str(row[7]),
+                    endpoint_generation=int(row[8]),
+                    root_uri=str(row[9]),
+                    registration_state=str(row[10]),
+                    inspection_status=None if row[11] is None else str(row[11]),
+                    classification_state=None if row[12] is None else str(row[12]),
+                    marker_json=None if row[13] is None else str(row[13]),
                 )
             )
         if current_key is not None:
+            if current_filter_evidence is None:
+                raise SqliteJobSnapshotMaterializationError(
+                    "JOB_SNAPSHOT_FILTER_EVIDENCE_MISSING"
+                )
             grouped.append(
                 _SnapshotJobCandidate(
                     job_id=current_key[0],
                     job_revision_id=current_key[1],
+                    filter_rules_hash=current_filter_evidence[0],
+                    filter_rules_json=current_filter_evidence[1],
                     endpoints=tuple(endpoints),
                 )
             )
@@ -284,6 +342,7 @@ class SqliteJobSnapshotMaterializer:
         self,
         candidate: _SnapshotJobCandidate,
         *,
+        filter_policy: FileFilterPolicy,
         observed_utc: str,
     ) -> JobSnapshotMaterializationResult:
         try:
@@ -309,6 +368,7 @@ class SqliteJobSnapshotMaterializer:
                         _local_root(endpoint.root_uri),
                         snapshot_id=snapshot_id,
                         exclude_control_area=_exclude_control_area(endpoint),
+                        filter_policy=filter_policy,
                     ),
                 )
                 for endpoint, snapshot_id in zip(

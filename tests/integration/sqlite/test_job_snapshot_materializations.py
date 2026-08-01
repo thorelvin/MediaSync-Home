@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,13 @@ from mediasync_home.adapters.sqlite.snapshots import SqliteSnapshotEntryStore
 from mediasync_home.application.snapshot_scanning import (
     DirectoryCaseContext,
     SnapshotMaterializationIds,
+)
+from mediasync_home.application.file_filters import (
+    FileFilterPolicy,
+    FileFilterRule,
+    FilterAction,
+    FilterRuleKind,
+    canonical_file_filter_policy_json,
 )
 from mediasync_home.application.state_capacity import (
     StateCapacityGate,
@@ -219,6 +227,143 @@ def test_job_snapshot_materializer_seals_source_and_target_and_reuses_them(
         ] == ["Photos", "Photos/Image.jpg", "Readme.txt"]
         assert not (source / ".mediasync").exists()
         assert not (target / ".mediasync").exists()
+
+
+def test_job_snapshot_materializer_applies_default_exclusions_to_both_endpoints(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    for root in (source, target):
+        (root / "$RECYCLE.BIN").mkdir(parents=True)
+        (root / "$RECYCLE.BIN" / "deleted.txt").write_text(
+            "deleted", encoding="utf-8"
+        )
+        (root / "System Volume Information").mkdir()
+        (root / "System Volume Information" / "index.dat").write_text(
+            "index", encoding="utf-8"
+        )
+        (root / "Thumbs.db").write_text("thumbs", encoding="utf-8")
+        (root / "Desktop.ini").write_text("desktop", encoding="utf-8")
+        (root / "scratch.tmp").write_text("temp", encoding="utf-8")
+        (root / "~$document.docx").write_text("office", encoding="utf-8")
+        (root / "keep.txt").write_text("keep", encoding="utf-8")
+    database = tmp_path / "catalog.sqlite"
+
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_active_job_with_endpoints(connection, source=source, target=target)
+        store = SqliteSnapshotEntryStore(connection)
+
+        report = SqliteJobSnapshotMaterializer(
+            connection,
+            scanner=LocalFilesystemSnapshotScanner(
+                case_mode_probe=_FixedCaseModeProbe(),
+            ),
+            id_factory=_FixedMaterializationIdFactory(),
+            entry_store=store,
+            seal_store=store,
+        ).refresh_job_snapshots(observed_utc="2026-07-30T22:00:00Z")
+
+        assert report.sealed_snapshot_count == 2
+        assert _cataloged_paths(connection, "endpoint-source") == ["keep.txt"]
+        assert _cataloged_paths(connection, "endpoint-target") == ["keep.txt"]
+
+
+def test_job_snapshot_materializer_applies_custom_filter_to_both_endpoints(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    for root in (source, target):
+        root.mkdir()
+        (root / "exclude.log").write_text("log", encoding="utf-8")
+        (root / "keep.txt").write_text("keep", encoding="utf-8")
+    policy = FileFilterPolicy(
+        include_default_exclusions=False,
+        rules=(
+            FileFilterRule(
+                "exclude-log-files",
+                FilterAction.EXCLUDE,
+                FilterRuleKind.EXTENSION,
+                ".log",
+            ),
+        ),
+    )
+    rules_json = canonical_file_filter_policy_json(policy)
+    database = tmp_path / "catalog.sqlite"
+
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_active_job_with_endpoints(connection, source=source, target=target)
+        _replace_filter_evidence(connection, rules_json=rules_json)
+        store = SqliteSnapshotEntryStore(connection)
+
+        report = SqliteJobSnapshotMaterializer(
+            connection,
+            scanner=LocalFilesystemSnapshotScanner(
+                case_mode_probe=_FixedCaseModeProbe(),
+            ),
+            id_factory=_FixedMaterializationIdFactory(),
+            entry_store=store,
+            seal_store=store,
+        ).refresh_job_snapshots(observed_utc="2026-07-30T22:00:00Z")
+
+        assert report.sealed_snapshot_count == 2
+        assert _cataloged_paths(connection, "endpoint-source") == ["keep.txt"]
+        assert _cataloged_paths(connection, "endpoint-target") == ["keep.txt"]
+
+
+def test_filter_hash_tampering_blocks_before_sealed_snapshot_reuse(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    (source / "keep.txt").write_text("keep", encoding="utf-8")
+    database = tmp_path / "catalog.sqlite"
+    factory = _FixedMaterializationIdFactory()
+
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_active_job_with_endpoints(connection, source=source, target=target)
+        store = SqliteSnapshotEntryStore(connection)
+        materializer = SqliteJobSnapshotMaterializer(
+            connection,
+            scanner=LocalFilesystemSnapshotScanner(
+                case_mode_probe=_FixedCaseModeProbe(),
+            ),
+            id_factory=factory,
+            entry_store=store,
+            seal_store=store,
+        )
+        first = materializer.refresh_job_snapshots(
+            observed_utc="2026-07-30T22:00:00Z"
+        )
+        connection.execute("DROP TRIGGER trg_filter_set_versions_no_update")
+        connection.execute(
+            "UPDATE filter_set_versions SET rules_hash = ?",
+            ("0" * 64,),
+        )
+        connection.commit()
+
+        replay = materializer.refresh_job_snapshots(
+            observed_utc="2026-07-30T22:01:00Z"
+        )
+
+        assert first.results[0].state == "SEALED"
+        assert replay.reused_job_count == 0
+        assert replay.blocked_job_count == 1
+        assert replay.results[0].analysis_id is None
+        assert replay.results[0].reason_code == "FILTER_RULES_HASH_MISMATCH"
+        assert factory.calls == 1
+        assert connection.execute(
+            """
+            SELECT state, analysis_id, snapshot_count, sealed_snapshot_count
+            FROM standard_backup_job_snapshot_materializations
+            """
+        ).fetchone() == ("BLOCKED", None, 0, 0)
 
 
 def test_job_snapshot_materializer_blocks_unclassified_endpoint_without_scanning(
@@ -469,3 +614,39 @@ def _insert_endpoint(
             "2026-07-30T21:00:00Z",
         ),
     )
+
+
+def _replace_filter_evidence(
+    connection: sqlite3.Connection,
+    *,
+    rules_json: str,
+) -> None:
+    connection.execute("DROP TRIGGER trg_filter_set_versions_no_update")
+    connection.execute(
+        """
+        UPDATE filter_set_versions
+        SET rules_hash = ?, rules_json = ?
+        WHERE job_id = 'job-a' AND filter_set_id = 'filter-a' AND version = 1
+        """,
+        (hashlib.sha256(rules_json.encode("utf-8")).hexdigest(), rules_json),
+    )
+    connection.commit()
+
+
+def _cataloged_paths(
+    connection: sqlite3.Connection,
+    endpoint_id: str,
+) -> list[str]:
+    return [
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT entries.relative_path
+            FROM file_entries AS entries
+            INNER JOIN snapshots ON snapshots.id = entries.snapshot_id
+            WHERE snapshots.endpoint_id = ?
+            ORDER BY entries.relative_path
+            """,
+            (endpoint_id,),
+        ).fetchall()
+    ]

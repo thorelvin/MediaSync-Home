@@ -29,6 +29,10 @@ from mediasync_home.application.job_read_models import (
     StandardBackupTargetSummary,
 )
 from mediasync_home.application.job_lifecycle import JobLifecycleState
+from mediasync_home.application.file_filters import (
+    canonical_file_filter_policy_json,
+    default_file_filter_policy,
+)
 
 
 class SqliteJobCatalogError(ValueError):
@@ -36,7 +40,6 @@ class SqliteJobCatalogError(ValueError):
 
 
 FILTER_SET_INITIAL_VERSION = 1
-FILTER_RULES_SCHEMA_VERSION = 1
 
 
 class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
@@ -786,14 +789,10 @@ def _serialize_defaults(defaults: StandardBackupDefaults) -> str:
 
 
 def _serialize_filter_rules(defaults: StandardBackupDefaults) -> str:
-    return json.dumps(
-        {
-            "preset": defaults.file_selection.value,
-            "schema_version": FILTER_RULES_SCHEMA_VERSION,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    policy = default_file_filter_policy()
+    if defaults.file_selection.value != policy.preset:
+        raise SqliteJobCatalogError("STANDARD_BACKUP_FILE_SELECTION_UNSUPPORTED")
+    return canonical_file_filter_policy_json(policy)
 
 
 def _deserialize_defaults(payload: str) -> StandardBackupDefaults:

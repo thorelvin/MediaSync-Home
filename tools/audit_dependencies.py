@@ -15,6 +15,7 @@ from packaging.utils import canonicalize_name
 
 ROOT = Path(__file__).resolve().parents[1]
 APPROVED_LICENSES = {
+    "Apache-2.0 AND CNRI-Python",
     "Apache-2.0 OR BSD-2-Clause",
     "BSD 2-Clause License",
     "BSD-2-Clause",
@@ -26,6 +27,7 @@ APPROVED_LICENSES = {
     "PSF-2.0",
 }
 NOTICE_REQUIRED_LICENSES = {
+    "Apache-2.0 AND CNRI-Python",
     "Apache-2.0 OR BSD-2-Clause",
     "CC0-1.0 OR Apache-2.0",
     "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only",

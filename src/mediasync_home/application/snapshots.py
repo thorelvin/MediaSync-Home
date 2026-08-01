@@ -26,6 +26,7 @@ SNAPSHOT_COVERAGE_STATES = frozenset(
         "DISAPPEARED",
         "REPARSE_BLOCKED",
         "CASE_CONTEXT_UNKNOWN",
+        "FILTER_INCOMPLETE",
         "CANCELLED",
     }
 )

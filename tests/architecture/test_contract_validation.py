@@ -190,6 +190,23 @@ def test_database_contract_rejects_named_stream_full_object_overclaim() -> None:
         validate_contracts.validate_database_contract(document)
 
 
+def test_database_contract_rejects_unbounded_filter_regex_budget() -> None:
+    yaml = _yaml_loader()
+    document = validate_contracts.load_yaml(
+        validate_contracts.ROOT / "schema/database-contract.yaml",
+        yaml,
+    )
+    document = copy.deepcopy(document)
+    invariant = _database_invariant(document, "FILTER-001_BOUNDED_EVALUATION")
+    invariant["regex"]["total_scan_budget_ms"] = 0
+
+    with pytest.raises(
+        validate_contracts.ContractValidationError,
+        match="FILTER-001 regex budget drifted",
+    ):
+        validate_contracts.validate_database_contract(document)
+
+
 def test_database_contract_rejects_merged_operation_result_axes() -> None:
     yaml = _yaml_loader()
     document = validate_contracts.load_yaml(

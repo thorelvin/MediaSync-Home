@@ -829,6 +829,100 @@ def _validate_named_stream_invariant(invariant: dict[str, Any]) -> None:
         fail("META-002 named-stream verification stages drifted")
 
 
+def _validate_bounded_filter_invariant(invariant: dict[str, Any]) -> None:
+    if invariant.get("requirement_id") != "FILTER-001":
+        fail("FILTER-001 bounded filter invariant must reference FILTER-001")
+    evidence = require_mapping(invariant.get("evidence"), "FILTER-001 evidence")
+    expected_evidence = {
+        "binding_table": "job_revision_filter_bindings",
+        "version_table": "filter_set_versions",
+        "json_column": "rules_json",
+        "hash_column": "rules_hash",
+        "hash_algorithm": "SHA-256",
+        "canonical_json_required": True,
+        "immutable": True,
+    }
+    if any(evidence.get(key) != value for key, value in expected_evidence.items()):
+        fail("FILTER-001 immutable policy evidence drifted")
+    if evidence.get("supported_schema_versions") != [1, 2]:
+        fail("FILTER-001 supported schema versions drifted")
+
+    evaluation = require_mapping(
+        invariant.get("evaluation"),
+        "FILTER-001 evaluation",
+    )
+    expected_evaluation = {
+        "default_matcher": "GLOB",
+        "ordered_resolution": "LAST_MATCH_WINS",
+        "cheap_rules_before_metadata": True,
+        "source_and_target_use_same_policy": True,
+        "max_rules": 128,
+        "max_glob_pattern_length": 512,
+    }
+    if any(evaluation.get(key) != value for key, value in expected_evaluation.items()):
+        fail("FILTER-001 evaluation policy drifted")
+    expected_rule_kinds = {
+        "EXTENSION",
+        "FILE_NAME_GLOB",
+        "RELATIVE_PATH_GLOB",
+        "DIRECTORY_GLOB",
+        "MIN_SIZE_BYTES",
+        "MAX_SIZE_BYTES",
+        "MODIFIED_AFTER_NS",
+        "MODIFIED_BEFORE_NS",
+        "CREATED_AFTER_NS",
+        "CREATED_BEFORE_NS",
+        "HIDDEN_ATTRIBUTE",
+        "SYSTEM_ATTRIBUTE",
+        "TEMPORARY_FILE",
+        "REPARSE_POINT",
+        "EMPTY_DIRECTORY",
+        "REGEX",
+    }
+    if set(
+        _column_tuple(
+            evaluation.get("supported_rule_kinds"),
+            "FILTER-001 supported rule kinds",
+        )
+    ) != expected_rule_kinds:
+        fail("FILTER-001 supported rule kinds drifted")
+    if _column_tuple(
+        invariant.get("safe_default_exclusions"),
+        "FILTER-001 safe default exclusions",
+    ) != (
+        "$RECYCLE.BIN/**",
+        "System Volume Information/**",
+        "Thumbs.db",
+        "Desktop.ini",
+        "*.tmp",
+        "~$*",
+    ):
+        fail("FILTER-001 safe default exclusions drifted")
+    if invariant.get("control_area_exclusion_requires_proven_classification") is not True:
+        fail("FILTER-001 control-area classification guard drifted")
+
+    regex_policy = require_mapping(invariant.get("regex"), "FILTER-001 regex")
+    expected_regex = {
+        "engine": "regex",
+        "advanced_mode_required": True,
+        "max_rules": 8,
+        "max_pattern_length": 256,
+        "max_input_length": 4096,
+        "per_match_timeout_ms": 5,
+        "total_scan_budget_ms": 2000,
+        "disable_after_timeouts": 2,
+    }
+    if any(regex_policy.get(key) != value for key, value in expected_regex.items()):
+        fail("FILTER-001 regex budget drifted")
+    failure = require_mapping(invariant.get("failure"), "FILTER-001 failure")
+    if failure != {
+        "reason_code": "FILTER_REGEX_BUDGET_EXCEEDED",
+        "coverage_state": "FILTER_INCOMPLETE",
+        "blocks_snapshot_seal": True,
+    }:
+        fail("FILTER-001 failure behavior drifted")
+
+
 def _validate_endpoint_capability_invariant(invariant: dict[str, Any]) -> None:
     expected = {
         "requirement_id": "END-001",
@@ -1133,6 +1227,7 @@ def validate_database_contract(document: dict[str, Any]) -> int:
         "DB-007_PARENT_SCOPE_COMPOSITE_KEYS",
         "DUR-001_FINAL_DURABILITY_EVIDENCE",
         "END-001_ENDPOINT_CAPABILITY_EVIDENCE",
+        "FILTER-001_BOUNDED_EVALUATION",
         "HASH-001_CURRENT_READ_HASH_EVIDENCE",
         "META-001_WINDOWS_BIRTHTIME",
         "META-002_NAMED_STREAM_PRESERVATION",
@@ -1183,6 +1278,9 @@ def validate_database_contract(document: dict[str, Any]) -> int:
     )
     _validate_named_stream_invariant(
         invariant_by_id["META-002_NAMED_STREAM_PRESERVATION"]
+    )
+    _validate_bounded_filter_invariant(
+        invariant_by_id["FILTER-001_BOUNDED_EVALUATION"]
     )
     _validate_endpoint_capability_invariant(
         invariant_by_id["END-001_ENDPOINT_CAPABILITY_EVIDENCE"]
