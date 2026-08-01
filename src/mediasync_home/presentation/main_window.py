@@ -65,6 +65,7 @@ from mediasync_home.application.job_drafts import (
     StandardBackupJobDraft,
 )
 from mediasync_home.presentation.view_models.backup_setup import (
+    ActivityOverviewViewState,
     BackupOverviewViewState,
     BackupSetupDraft,
     BackupSetupStep,
@@ -164,6 +165,22 @@ class _PendingRetry:
     source_run_id: str
     target_endpoint_ids: tuple[str, ...]
     source_operation_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _StatusQueryResult:
+    response: IpcResponse
+    connected: bool
+
+
+@dataclass(frozen=True)
+class _PlanPreviewResponses:
+    plan_id: str
+    operations: IpcResponse | None
+    endpoints: IpcResponse | None
+    blocking_issues: IpcResponse | None
+    coverage: IpcResponse | None
+    snapshot_id: str | None
 
 
 class BackupOverviewProvider(Protocol):
@@ -374,6 +391,7 @@ class MediaSyncWindow(QMainWindow):
         self._open_data_folder = open_data_folder
         self._icons = IconRegistry()
         self._connected = False
+        self._status_query_pending = False
         self._setup_draft = BackupSetupDraft.empty()
         self._setup_draft_id: str | None = None
         self._setup_request_id: str | None = None
@@ -382,12 +400,15 @@ class MediaSyncWindow(QMainWindow):
         self._start_idempotency_key: str | None = None
         self._analysis_request_id: str | None = None
         self._analysis_idempotency_key: str | None = None
+        self._analysis_query_pending = False
         self._retry_after_analysis: _PendingRetry | None = None
         self._latest_run_job_id: str | None = None
         self._latest_run_plan_id: str | None = None
         self._latest_run_state: str | None = None
         self._queued_backup_job_ids: set[str] = set()
         self._active_run_id: str | None = None
+        self._run_progress_query_pending = False
+        self._run_progress_query_run_id: str | None = None
         self._run_control_pending = False
         self._run_progress_state = empty_run_progress_state()
         self._setup_state = build_standard_backup_setup_state(self._setup_draft)
@@ -420,7 +441,13 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_next_button: QToolButton | None = None
         self._jobs_page_limit = 25
         self._jobs_page_offset = 0
+        self._jobs_query_pending = False
         self._selected_job_id: str | None = None
+        self._job_detail_query_pending = False
+        self._activity_query_job_id: str | None = None
+        self._catalog_query_pending = False
+        self._requested_plan_preview_id: str | None = None
+        self._plan_preview_query_pending = False
         self._history_page: QWidget | None = None
         self._history_scroll_area: QScrollArea | None = None
         self._history_title_label: QLabel | None = None
@@ -455,8 +482,10 @@ class MediaSyncWindow(QMainWindow):
         self._history_operation_next_button: QToolButton | None = None
         self._history_operation_page_limit = 25
         self._history_operation_page_index = 0
+        self._history_operation_query_pending = False
         self._history_operation_page_cursors: list[dict[str, object] | None] = [None]
         self._selected_history_operation_id: str | None = None
+        self._history_audit_query_pending = False
         self._history_operation_detail_title: QLabel | None = None
         self._history_operation_detail_labels: dict[str, QLabel] = {}
         self._history_operation_detail_values: dict[str, QLabel] = {}
@@ -659,6 +688,9 @@ class MediaSyncWindow(QMainWindow):
         return localize_display_value(self._selected_language_code, value)
 
     def refresh_engine_status(self) -> None:
+        if self._background_queries is not None and self._engine_client is not None:
+            self._refresh_engine_status_in_background()
+            return
         self._refresh_button.setEnabled(False)
         try:
             self._refresh_engine_status_now()
@@ -669,6 +701,71 @@ class MediaSyncWindow(QMainWindow):
             )
         finally:
             self._refresh_button.setEnabled(True)
+
+    def _refresh_engine_status_in_background(self) -> None:
+        if self._status_query_pending:
+            return
+        if self._engine_client is None and self._engine_client_factory is not None:
+            try:
+                self._engine_client = self._engine_client_factory()
+            except Exception:
+                self._apply_background_status_failure()
+                return
+        if self._engine_client is None or self._background_queries is None:
+            self.apply_engine_status(
+                EngineStatusViewState.disconnected(
+                    "Start a local Engine Host to refresh live status."
+                )
+            )
+            return
+
+        def query(client: object) -> object:
+            provider = cast(EngineStatusProvider, client)
+            handshake = provider.connect()
+            if handshake.reason is not None:
+                return _StatusQueryResult(response=handshake, connected=False)
+            return _StatusQueryResult(response=provider.get_status(), connected=True)
+
+        def accept(result: object) -> None:
+            value = cast(_StatusQueryResult, result)
+
+            def apply(item: object) -> None:
+                self._accept_background_status(cast(_StatusQueryResult, item))
+
+            if not self._ui_update_coalescer.submit(
+                channel="engine-status",
+                value=value,
+                apply=apply,
+            ):
+                apply(value)
+
+        submitted = self._background_queries.submit(
+            key="engine-status",
+            operation=query,
+            on_result=accept,
+            on_error=lambda error: self._apply_background_status_failure(),
+        )
+        if not submitted:
+            self._apply_background_status_failure()
+            return
+        self._status_query_pending = True
+        self._refresh_button.setEnabled(False)
+
+    def _accept_background_status(self, result: _StatusQueryResult) -> None:
+        self._status_query_pending = False
+        self._refresh_button.setEnabled(True)
+        self._connected = result.connected
+        self.apply_engine_status(engine_status_from_response(result.response))
+        if result.connected:
+            self._refresh_connected_read_models()
+
+    def _apply_background_status_failure(self) -> None:
+        self._status_query_pending = False
+        self._refresh_button.setEnabled(True)
+        self._connected = False
+        self.apply_engine_status(
+            EngineStatusViewState.disconnected("Engine status is unavailable.")
+        )
 
     def _refresh_engine_status_now(self) -> None:
         if self._engine_client is None and self._engine_client_factory is not None:
@@ -693,10 +790,14 @@ class MediaSyncWindow(QMainWindow):
                 return
             self._connected = True
         self.apply_engine_status(engine_status_from_response(self._engine_client.get_status()))
-        self._refresh_backup_overview()
-        self._refresh_activity_overview()
-        self._refresh_history_timeline()
-        self._refresh_cataloged_files_preview()
+        self._refresh_connected_read_models(background=False)
+
+    def _refresh_connected_read_models(self, *, background: bool = True) -> None:
+        self._refresh_backup_overview(background=background)
+        if not background:
+            self._refresh_activity_overview(background=False)
+        self._refresh_history_timeline(background=background)
+        self._refresh_cataloged_files_preview(background=background)
 
     def apply_engine_status(self, state: EngineStatusViewState) -> None:
         self._engine_status_state = state
@@ -742,32 +843,199 @@ class MediaSyncWindow(QMainWindow):
         self._history_timeline_state = state
         self._apply_history_timeline_state(state)
 
-    def _refresh_backup_overview(self) -> None:
+    def _refresh_backup_overview(self, *, background: bool = True) -> None:
         if self._engine_client is None or not hasattr(self._engine_client, "get_backup_overview"):
+            self._cancel_background_jobs_query()
             return
+        page_limit = self._jobs_page_limit
+        page_offset = self._jobs_page_offset
+        if background and self._background_queries is not None:
+
+            def query(client: object) -> object:
+                provider = cast(BackupOverviewProvider, client)
+                return provider.get_backup_overview(
+                    limit=page_limit,
+                    offset=page_offset,
+                )
+
+            def accept(response: object) -> None:
+                def apply(value: object) -> None:
+                    self._accept_background_backup_overview(
+                        response=cast(IpcResponse, value),
+                        page_offset=page_offset,
+                    )
+
+                if not self._ui_update_coalescer.submit(
+                    channel="backup-overview",
+                    value=response,
+                    apply=apply,
+                ):
+                    apply(response)
+
+            submitted = self._background_queries.submit(
+                key="backup-overview",
+                operation=query,
+                on_result=accept,
+                on_error=lambda _error: self._reject_background_backup_overview(
+                    page_offset=page_offset
+                ),
+            )
+            if submitted:
+                self._set_jobs_query_pending(True)
+            else:
+                self._reject_background_backup_overview(page_offset=page_offset)
+            return
+
         provider = cast(BackupOverviewProvider, self._engine_client)
-        state = backup_overview_from_response(
+        self._apply_backup_overview_response(
             provider.get_backup_overview(
-                limit=self._jobs_page_limit,
-                offset=self._jobs_page_offset,
+                limit=page_limit,
+                offset=page_offset,
+            ),
+            refresh_activity=False,
+            background=False,
+        )
+
+    def _accept_background_backup_overview(
+        self,
+        *,
+        response: IpcResponse,
+        page_offset: int,
+    ) -> None:
+        if self._jobs_page_offset != page_offset:
+            return
+        self._set_jobs_query_pending(False)
+        self._apply_backup_overview_response(
+            response,
+            refresh_activity=True,
+            background=True,
+        )
+
+    def _reject_background_backup_overview(self, *, page_offset: int) -> None:
+        if self._jobs_page_offset != page_offset:
+            return
+        self._set_jobs_query_pending(False)
+        self.apply_engine_status(
+            replace(
+                self._engine_status_state,
+                detail=self._texts().jobs_unavailable,
+                status_kind="warning",
             )
         )
+
+    def _apply_backup_overview_response(
+        self,
+        response: IpcResponse,
+        *,
+        refresh_activity: bool,
+        background: bool,
+    ) -> None:
+        state = backup_overview_from_response(response)
         job_ids = {job.job_id for job in state.jobs}
         if self._selected_job_id not in job_ids:
             self._selected_job_id = state.selected_job_id
         self.apply_backup_overview(state)
         if self._selected_job_id is None:
             self.apply_backup_job_detail(empty_backup_job_detail_state())
+            self._clear_selected_plan_previews()
             return
-        self._refresh_backup_job_detail(self._selected_job_id)
-
-    def _refresh_backup_job_detail(self, job_id: str) -> BackupJobDetailViewState | None:
-        if self._engine_client is None or not hasattr(self._engine_client, "get_backup_job_detail"):
-            return None
-        provider = cast(BackupJobDetailProvider, self._engine_client)
-        state = backup_job_detail_from_response(
-            provider.get_backup_job_detail(job_id=job_id)
+        if (
+            self._background_queries is not None
+            and self._job_detail_state.job_id != self._selected_job_id
+        ):
+            self.apply_backup_job_detail(empty_backup_job_detail_state())
+            self._clear_selected_plan_previews()
+        self._refresh_backup_job_detail(
+            self._selected_job_id,
+            background=background,
         )
+        if refresh_activity and self._engine_client is not None and hasattr(
+            self._engine_client,
+            "get_activity_overview",
+        ):
+            self._refresh_activity_overview()
+
+    def _refresh_backup_job_detail(
+        self,
+        job_id: str,
+        *,
+        background: bool = True,
+    ) -> BackupJobDetailViewState | None:
+        if self._engine_client is None or not hasattr(self._engine_client, "get_backup_job_detail"):
+            self._cancel_background_job_detail_query()
+            return None
+        if background and self._background_queries is not None:
+
+            def query(client: object) -> object:
+                provider = cast(BackupJobDetailProvider, client)
+                return provider.get_backup_job_detail(job_id=job_id)
+
+            def accept(response: object) -> None:
+                def apply(value: object) -> None:
+                    self._accept_background_job_detail(
+                        response=cast(IpcResponse, value),
+                        job_id=job_id,
+                    )
+
+                if not self._ui_update_coalescer.submit(
+                    channel="backup-job-detail",
+                    value=response,
+                    apply=apply,
+                ):
+                    apply(response)
+
+            submitted = self._background_queries.submit(
+                key="backup-job-detail",
+                operation=query,
+                on_result=accept,
+                on_error=lambda _error: self._reject_background_job_detail(
+                    job_id=job_id
+                ),
+            )
+            if submitted:
+                self._set_job_detail_query_pending(True)
+            else:
+                self._reject_background_job_detail(job_id=job_id)
+            return None
+
+        provider = cast(BackupJobDetailProvider, self._engine_client)
+        return self._apply_backup_job_detail_response(
+            provider.get_backup_job_detail(job_id=job_id),
+            job_id=job_id,
+        )
+
+    def _accept_background_job_detail(
+        self,
+        *,
+        response: IpcResponse,
+        job_id: str,
+    ) -> None:
+        if self._selected_job_id != job_id:
+            return
+        self._set_job_detail_query_pending(False)
+        self._apply_backup_job_detail_response(response, job_id=job_id)
+
+    def _reject_background_job_detail(self, *, job_id: str) -> None:
+        if self._selected_job_id != job_id:
+            return
+        self._set_job_detail_query_pending(False)
+        self.apply_engine_status(
+            replace(
+                self._engine_status_state,
+                detail=self._texts().jobs_unavailable,
+                status_kind="warning",
+            )
+        )
+
+    def _apply_backup_job_detail_response(
+        self,
+        response: IpcResponse,
+        *,
+        job_id: str,
+    ) -> BackupJobDetailViewState:
+        state = backup_job_detail_from_response(response)
+        if state.job_id is not None and state.job_id != job_id:
+            state = empty_backup_job_detail_state()
         if (
             state.analysis_request_id is not None
             and state.analysis_request_state in {"QUEUED", "RUNNING"}
@@ -776,7 +1044,50 @@ class MediaSyncWindow(QMainWindow):
             if not self._analysis_timer.isActive():
                 self._analysis_timer.start()
         self.apply_backup_job_detail(state)
+        if (
+            self._engine_client is not None
+            and not hasattr(self._engine_client, "get_activity_overview")
+            and state.plan_id is not None
+        ):
+            self._refresh_plan_previews(state.plan_id)
         return state
+
+    def _cancel_background_jobs_query(self) -> None:
+        if self._background_queries is not None:
+            self._background_queries.cancel("backup-overview")
+        self._ui_update_coalescer.cancel("backup-overview")
+        self._set_jobs_query_pending(False)
+
+    def _cancel_background_job_detail_query(self) -> None:
+        if self._background_queries is not None:
+            self._background_queries.cancel("backup-job-detail")
+        self._ui_update_coalescer.cancel("backup-job-detail")
+        self._set_job_detail_query_pending(False)
+
+    def _set_jobs_query_pending(self, pending: bool) -> None:
+        self._jobs_query_pending = pending
+        if self._jobs_list is not None:
+            self._jobs_list.setEnabled(
+                not pending and self._backup_overview_state.read_model_available
+            )
+        if self._jobs_previous_button is not None:
+            self._jobs_previous_button.setEnabled(
+                not pending and self._jobs_page_offset > 0
+            )
+        if self._jobs_next_button is not None:
+            self._jobs_next_button.setEnabled(
+                not pending and self._backup_overview_state.has_more_jobs
+            )
+
+    def _set_job_detail_query_pending(self, pending: bool) -> None:
+        self._job_detail_query_pending = pending
+        if pending:
+            for button in (
+                self._start_backup_button,
+                self._jobs_start_backup_button,
+            ):
+                if button is not None:
+                    button.setEnabled(False)
 
     def _apply_jobs_overview_state(self, state: BackupOverviewViewState) -> None:
         jobs_list = self._jobs_list
@@ -802,7 +1113,9 @@ class MediaSyncWindow(QMainWindow):
 
         has_jobs = bool(state.jobs)
         jobs_list.setVisible(state.read_model_available and has_jobs)
-        jobs_list.setEnabled(state.read_model_available)
+        jobs_list.setEnabled(
+            state.read_model_available and not self._jobs_query_pending
+        )
         if self._jobs_empty_label is not None:
             self._jobs_empty_label.setText(
                 self._texts().jobs_empty
@@ -815,7 +1128,9 @@ class MediaSyncWindow(QMainWindow):
             last = state.offset + len(state.jobs)
             self._jobs_page_label.setText(f"{first}-{last}")
         if self._jobs_previous_button is not None:
-            self._jobs_previous_button.setEnabled(state.offset > 0)
+            self._jobs_previous_button.setEnabled(
+                not self._jobs_query_pending and state.offset > 0
+            )
             self._jobs_previous_button.setToolTip(
                 self._texts().previous_page_tooltip
             )
@@ -823,7 +1138,9 @@ class MediaSyncWindow(QMainWindow):
                 self._texts().previous_page_tooltip
             )
         if self._jobs_next_button is not None:
-            self._jobs_next_button.setEnabled(state.has_more_jobs)
+            self._jobs_next_button.setEnabled(
+                not self._jobs_query_pending and state.has_more_jobs
+            )
             self._jobs_next_button.setToolTip(self._texts().next_page_tooltip)
             self._jobs_next_button.setAccessibleName(
                 self._texts().next_page_tooltip
@@ -849,7 +1166,16 @@ class MediaSyncWindow(QMainWindow):
             self._analysis_idempotency_key = None
             self._retry_after_analysis = None
             self._analysis_timer.stop()
+            self._cancel_background_analysis_query()
+            self._active_run_id = None
+            self._run_progress_timer.stop()
+            self._cancel_background_run_progress_query()
+            self._run_progress_state = empty_run_progress_state()
+            self._apply_run_progress_state(self._run_progress_state)
         self._selected_job_id = job_id
+        if self._background_queries is not None:
+            self.apply_backup_job_detail(empty_backup_job_detail_state())
+            self._clear_selected_plan_previews()
         state = self._refresh_backup_job_detail(job_id)
         if self._engine_client is not None and hasattr(
             self._engine_client,
@@ -866,14 +1192,14 @@ class MediaSyncWindow(QMainWindow):
         self._refresh_plan_previews(state.plan_id)
 
     def _show_previous_jobs_page(self) -> None:
-        if self._jobs_page_offset <= 0:
+        if self._jobs_query_pending or self._jobs_page_offset <= 0:
             return
         self._jobs_page_offset = max(0, self._jobs_page_offset - self._jobs_page_limit)
         self._selected_job_id = None
         self._refresh_backup_overview()
 
     def _show_next_jobs_page(self) -> None:
-        if not self._backup_overview_state.has_more_jobs:
+        if self._jobs_query_pending or not self._backup_overview_state.has_more_jobs:
             return
         self._jobs_page_offset += self._jobs_page_limit
         self._selected_job_id = None
@@ -1288,6 +1614,7 @@ class MediaSyncWindow(QMainWindow):
             or activity.run_id is None
             or activity.plan_id is None
         ):
+            self._cancel_background_history_operation_queries()
             self._history_operation_activity_key = None
             self._history_operation_run_id = None
             self._history_operation_plan_id = None
@@ -1314,6 +1641,7 @@ class MediaSyncWindow(QMainWindow):
             return
 
         self._history_operation_activity_key = activity_key
+        self._cancel_background_history_operation_queries()
         self._history_operation_run_id = activity.run_id
         self._history_operation_plan_id = activity.plan_id
         self._history_operation_page_index = 0
@@ -1329,30 +1657,155 @@ class MediaSyncWindow(QMainWindow):
                 self._history_operation_page_state
             )
 
-    def _refresh_history_operation_page(self) -> None:
+    def _refresh_history_operation_page(self, *, background: bool = True) -> None:
         plan_id = self._history_operation_plan_id
         if (
             plan_id is None
             or self._engine_client is None
             or not hasattr(self._engine_client, "get_plan_operations")
         ):
+            self._cancel_background_history_operation_page_query()
             self._history_operation_page_state = empty_plan_operation_preview_state()
             self._apply_history_operation_page_state(
                 self._history_operation_page_state
             )
             return
+        activity_key = self._history_operation_activity_key
+        run_id = self._history_operation_run_id
+        page_index = self._history_operation_page_index
+        raw_cursor = self._history_operation_page_cursors[page_index]
+        cursor = None if raw_cursor is None else dict(raw_cursor)
+        page_limit = self._history_operation_page_limit
+        if background and self._background_queries is not None:
+
+            def query(client: object) -> object:
+                provider = cast(PlanOperationsProvider, client)
+                return provider.get_plan_operations(
+                    plan_id=plan_id,
+                    limit=page_limit,
+                    after=cursor,
+                )
+
+            def accept(response: object) -> None:
+                def apply(value: object) -> None:
+                    self._accept_background_history_operation_page(
+                        response=cast(IpcResponse, value),
+                        activity_key=activity_key,
+                        run_id=run_id,
+                        plan_id=plan_id,
+                        page_index=page_index,
+                        cursor=cursor,
+                    )
+
+                if not self._ui_update_coalescer.submit(
+                    channel="history-operation-page",
+                    value=response,
+                    apply=apply,
+                ):
+                    apply(response)
+
+            submitted = self._background_queries.submit(
+                key="history-operation-page",
+                operation=query,
+                on_result=accept,
+                on_error=lambda _error: self._reject_background_history_operation_page(
+                    activity_key=activity_key,
+                    run_id=run_id,
+                    plan_id=plan_id,
+                    page_index=page_index,
+                    cursor=cursor,
+                ),
+            )
+            if submitted:
+                self._set_history_operation_query_pending(True)
+            else:
+                self._reject_background_history_operation_page(
+                    activity_key=activity_key,
+                    run_id=run_id,
+                    plan_id=plan_id,
+                    page_index=page_index,
+                    cursor=cursor,
+                )
+            return
         provider = cast(PlanOperationsProvider, self._engine_client)
-        cursor = self._history_operation_page_cursors[
-            self._history_operation_page_index
-        ]
         self._history_operation_page_state = plan_operation_preview_from_response(
             provider.get_plan_operations(
                 plan_id=plan_id,
-                limit=self._history_operation_page_limit,
+                limit=page_limit,
                 after=cursor,
             )
         )
         self._apply_history_operation_page_state(self._history_operation_page_state)
+
+    def _accept_background_history_operation_page(
+        self,
+        *,
+        response: IpcResponse,
+        activity_key: str | None,
+        run_id: str | None,
+        plan_id: str,
+        page_index: int,
+        cursor: dict[str, object] | None,
+    ) -> None:
+        if not self._history_operation_query_context_matches(
+            activity_key=activity_key,
+            run_id=run_id,
+            plan_id=plan_id,
+            page_index=page_index,
+            cursor=cursor,
+        ):
+            return
+        self._set_history_operation_query_pending(False)
+        self._history_operation_page_state = plan_operation_preview_from_response(
+            response
+        )
+        self._apply_history_operation_page_state(self._history_operation_page_state)
+
+    def _reject_background_history_operation_page(
+        self,
+        *,
+        activity_key: str | None,
+        run_id: str | None,
+        plan_id: str,
+        page_index: int,
+        cursor: dict[str, object] | None,
+    ) -> None:
+        if not self._history_operation_query_context_matches(
+            activity_key=activity_key,
+            run_id=run_id,
+            plan_id=plan_id,
+            page_index=page_index,
+            cursor=cursor,
+        ):
+            return
+        self._set_history_operation_query_pending(False)
+        self.apply_engine_status(
+            replace(
+                self._engine_status_state,
+                detail=self._texts().file_results_unavailable,
+                status_kind="warning",
+            )
+        )
+
+    def _history_operation_query_context_matches(
+        self,
+        *,
+        activity_key: str | None,
+        run_id: str | None,
+        plan_id: str,
+        page_index: int,
+        cursor: dict[str, object] | None,
+    ) -> bool:
+        if page_index >= len(self._history_operation_page_cursors):
+            return False
+        current_cursor = self._history_operation_page_cursors[page_index]
+        return (
+            self._history_operation_activity_key == activity_key
+            and self._history_operation_run_id == run_id
+            and self._history_operation_plan_id == plan_id
+            and self._history_operation_page_index == page_index
+            and current_cursor == cursor
+        )
 
     def _apply_history_operation_page_state(
         self,
@@ -1391,7 +1844,9 @@ class MediaSyncWindow(QMainWindow):
 
         has_rows = bool(state.rows)
         operation_list.setVisible(state.read_model_available and has_rows)
-        operation_list.setEnabled(state.read_model_available)
+        operation_list.setEnabled(
+            state.read_model_available and not self._history_operation_query_pending
+        )
         self._set_history_operation_detail_widgets_visible(
             state.read_model_available and has_rows
         )
@@ -1415,7 +1870,8 @@ class MediaSyncWindow(QMainWindow):
             self._history_operation_page_label.setText(f"{first}-{last}")
         if self._history_operation_previous_button is not None:
             self._history_operation_previous_button.setEnabled(
-                self._history_operation_page_index > 0
+                not self._history_operation_query_pending
+                and self._history_operation_page_index > 0
             )
             self._history_operation_previous_button.setToolTip(
                 self._texts().previous_page_tooltip
@@ -1425,7 +1881,9 @@ class MediaSyncWindow(QMainWindow):
             )
         if self._history_operation_next_button is not None:
             self._history_operation_next_button.setEnabled(
-                state.has_more_operations and state.next_cursor is not None
+                not self._history_operation_query_pending
+                and state.has_more_operations
+                and state.next_cursor is not None
             )
             self._history_operation_next_button.setToolTip(
                 self._texts().next_page_tooltip
@@ -1455,6 +1913,35 @@ class MediaSyncWindow(QMainWindow):
             self._refresh_history_operation_audit(operation_id)
         self._refresh_dashboard_geometry()
 
+    def _set_history_operation_query_pending(self, pending: bool) -> None:
+        self._history_operation_query_pending = pending
+        if self._history_operation_list is not None:
+            self._history_operation_list.setEnabled(
+                not pending
+                and self._history_operation_page_state.read_model_available
+            )
+        if self._history_operation_previous_button is not None:
+            self._history_operation_previous_button.setEnabled(
+                not pending and self._history_operation_page_index > 0
+            )
+        if self._history_operation_next_button is not None:
+            state = self._history_operation_page_state
+            self._history_operation_next_button.setEnabled(
+                not pending
+                and state.has_more_operations
+                and state.next_cursor is not None
+            )
+
+    def _cancel_background_history_operation_page_query(self) -> None:
+        if self._background_queries is not None:
+            self._background_queries.cancel("history-operation-page")
+        self._ui_update_coalescer.cancel("history-operation-page")
+        self._set_history_operation_query_pending(False)
+
+    def _cancel_background_history_operation_queries(self) -> None:
+        self._cancel_background_history_operation_page_query()
+        self._cancel_background_history_audit_query()
+
     def _select_history_operation(
         self,
         current: QListWidgetItem | None,
@@ -1469,31 +1956,161 @@ class MediaSyncWindow(QMainWindow):
         if operation_id == self._selected_history_operation_id:
             return
         self._selected_history_operation_id = operation_id
+        self._history_operation_audit_state = empty_operation_audit_state(
+            run_id=self._history_operation_run_id,
+            operation_id=operation_id,
+        )
+        self._apply_history_operation_audit_state(
+            self._history_operation_audit_state
+        )
         self._refresh_history_operation_audit(operation_id)
 
-    def _refresh_history_operation_audit(self, operation_id: str) -> None:
+    def _refresh_history_operation_audit(
+        self,
+        operation_id: str,
+        *,
+        background: bool = True,
+    ) -> None:
         run_id = self._history_operation_run_id
         if (
             run_id is None
             or self._engine_client is None
             or not hasattr(self._engine_client, "get_operation_audit")
         ):
+            self._cancel_background_history_audit_query()
             self._history_operation_audit_state = empty_operation_audit_state(
                 run_id=run_id,
                 operation_id=operation_id,
             )
-        else:
-            provider = cast(OperationAuditProvider, self._engine_client)
-            self._history_operation_audit_state = operation_audit_from_response(
-                provider.get_operation_audit(
+            self._apply_history_operation_audit_state(
+                self._history_operation_audit_state
+            )
+            return
+        activity_key = self._history_operation_activity_key
+        if background and self._background_queries is not None:
+
+            def query(client: object) -> object:
+                provider = cast(OperationAuditProvider, client)
+                return provider.get_operation_audit(
                     run_id=run_id,
                     operation_id=operation_id,
                     limit=25,
                 )
+
+            def accept(response: object) -> None:
+                def apply(value: object) -> None:
+                    self._accept_background_history_operation_audit(
+                        response=cast(IpcResponse, value),
+                        activity_key=activity_key,
+                        run_id=run_id,
+                        operation_id=operation_id,
+                    )
+
+                if not self._ui_update_coalescer.submit(
+                    channel="history-operation-audit",
+                    value=response,
+                    apply=apply,
+                ):
+                    apply(response)
+
+            submitted = self._background_queries.submit(
+                key="history-operation-audit",
+                operation=query,
+                on_result=accept,
+                on_error=lambda _error: self._reject_background_history_operation_audit(
+                    activity_key=activity_key,
+                    run_id=run_id,
+                    operation_id=operation_id,
+                ),
             )
+            if submitted:
+                self._set_history_audit_query_pending(True)
+            else:
+                self._reject_background_history_operation_audit(
+                    activity_key=activity_key,
+                    run_id=run_id,
+                    operation_id=operation_id,
+                )
+            return
+        provider = cast(OperationAuditProvider, self._engine_client)
+        self._history_operation_audit_state = operation_audit_from_response(
+            provider.get_operation_audit(
+                run_id=run_id,
+                operation_id=operation_id,
+                limit=25,
+            )
+        )
         self._apply_history_operation_audit_state(
             self._history_operation_audit_state
         )
+
+    def _accept_background_history_operation_audit(
+        self,
+        *,
+        response: IpcResponse,
+        activity_key: str | None,
+        run_id: str,
+        operation_id: str,
+    ) -> None:
+        if not self._history_audit_query_context_matches(
+            activity_key=activity_key,
+            run_id=run_id,
+            operation_id=operation_id,
+        ):
+            return
+        self._set_history_audit_query_pending(False)
+        self._history_operation_audit_state = operation_audit_from_response(response)
+        self._apply_history_operation_audit_state(
+            self._history_operation_audit_state
+        )
+
+    def _reject_background_history_operation_audit(
+        self,
+        *,
+        activity_key: str | None,
+        run_id: str,
+        operation_id: str,
+    ) -> None:
+        if not self._history_audit_query_context_matches(
+            activity_key=activity_key,
+            run_id=run_id,
+            operation_id=operation_id,
+        ):
+            return
+        self._set_history_audit_query_pending(False)
+        self.apply_engine_status(
+            replace(
+                self._engine_status_state,
+                detail=self._texts().file_results_unavailable,
+                status_kind="warning",
+            )
+        )
+
+    def _history_audit_query_context_matches(
+        self,
+        *,
+        activity_key: str | None,
+        run_id: str,
+        operation_id: str,
+    ) -> bool:
+        return (
+            self._history_operation_activity_key == activity_key
+            and self._history_operation_run_id == run_id
+            and self._selected_history_operation_id == operation_id
+        )
+
+    def _set_history_audit_query_pending(self, pending: bool) -> None:
+        self._history_audit_query_pending = pending
+        if self._history_attempt_list is not None:
+            self._history_attempt_list.setEnabled(not pending)
+        if pending and self._history_retry_operation_button is not None:
+            self._history_retry_operation_button.setEnabled(False)
+
+    def _cancel_background_history_audit_query(self) -> None:
+        if self._background_queries is not None:
+            self._background_queries.cancel("history-operation-audit")
+        self._ui_update_coalescer.cancel("history-operation-audit")
+        self._set_history_audit_query_pending(False)
 
     def _apply_history_operation_audit_state(
         self,
@@ -1606,6 +2223,7 @@ class MediaSyncWindow(QMainWindow):
         button.setVisible(visible)
         button.setEnabled(
             visible
+            and not self._history_audit_query_pending
             and self._analysis_request_id is None
             and self._retry_after_analysis is None
             and self._engine_client is not None
@@ -1645,13 +2263,17 @@ class MediaSyncWindow(QMainWindow):
             or state.operation_id != row.operation_id
             or state.outcome is None
             or state.outcome.final_state not in _RETRYABLE_OPERATION_OUTCOMES
+            or self._history_audit_query_pending
             or self._analysis_request_id is not None
         ):
             return
         self._start_request_id = None
         self._start_idempotency_key = None
         self._selected_job_id = activity.job_id
-        detail = self._refresh_backup_job_detail(activity.job_id)
+        detail = self._refresh_backup_job_detail(
+            activity.job_id,
+            background=False,
+        )
         if (
             detail is None
             or not detail.found
@@ -1669,7 +2291,10 @@ class MediaSyncWindow(QMainWindow):
         self._apply_history_operation_retry(state)
 
     def _show_previous_history_operation_page(self) -> None:
-        if self._history_operation_page_index <= 0:
+        if (
+            self._history_operation_query_pending
+            or self._history_operation_page_index <= 0
+        ):
             return
         self._history_operation_page_index -= 1
         self._selected_history_operation_id = None
@@ -1680,7 +2305,11 @@ class MediaSyncWindow(QMainWindow):
 
     def _show_next_history_operation_page(self) -> None:
         state = self._history_operation_page_state
-        if not state.has_more_operations or state.next_cursor is None:
+        if (
+            self._history_operation_query_pending
+            or not state.has_more_operations
+            or state.next_cursor is None
+        ):
             return
         next_index = self._history_operation_page_index + 1
         if next_index == len(self._history_operation_page_cursors):
@@ -1936,13 +2565,99 @@ class MediaSyncWindow(QMainWindow):
         )
         return pair[0] if english else pair[1]
 
-    def _refresh_activity_overview(self) -> None:
+    def _refresh_activity_overview(self, *, background: bool = True) -> None:
         if self._engine_client is None or not hasattr(self._engine_client, "get_activity_overview"):
+            self._cancel_background_activity_query()
             return
+        job_id = self._selected_job_id
+        if background and self._background_queries is not None:
+
+            def query(client: object) -> object:
+                provider = cast(ActivityOverviewProvider, client)
+                return provider.get_activity_overview(job_id=job_id)
+
+            def accept(response: object) -> None:
+                def apply(value: object) -> None:
+                    self._accept_background_activity_overview(
+                        response=cast(IpcResponse, value),
+                        job_id=job_id,
+                    )
+
+                if not self._ui_update_coalescer.submit(
+                    channel="activity-overview",
+                    value=response,
+                    apply=apply,
+                ):
+                    apply(response)
+
+            submitted = self._background_queries.submit(
+                key="activity-overview",
+                operation=query,
+                on_result=accept,
+                on_error=lambda _error: self._reject_background_activity_overview(
+                    job_id=job_id
+                ),
+            )
+            if submitted:
+                self._activity_query_job_id = job_id
+            else:
+                self._reject_background_activity_overview(job_id=job_id)
+            return
+
         provider = cast(ActivityOverviewProvider, self._engine_client)
-        state = activity_overview_from_response(
-            provider.get_activity_overview(job_id=self._selected_job_id)
+        self._apply_activity_overview_response(
+            provider.get_activity_overview(job_id=job_id),
+            job_id=job_id,
+            background=False,
         )
+
+    def _accept_background_activity_overview(
+        self,
+        *,
+        response: IpcResponse,
+        job_id: str | None,
+    ) -> None:
+        if self._selected_job_id != job_id:
+            return
+        self._activity_query_job_id = None
+        self._apply_activity_overview_response(
+            response,
+            job_id=job_id,
+            background=True,
+        )
+
+    def _reject_background_activity_overview(
+        self,
+        *,
+        job_id: str | None,
+    ) -> None:
+        if self._selected_job_id != job_id:
+            return
+        self._activity_query_job_id = None
+        self.apply_engine_status(
+            replace(
+                self._engine_status_state,
+                detail=self._texts().jobs_unavailable,
+                status_kind="warning",
+            )
+        )
+
+    def _cancel_background_activity_query(self) -> None:
+        if self._background_queries is not None:
+            self._background_queries.cancel("activity-overview")
+        self._ui_update_coalescer.cancel("activity-overview")
+        self._activity_query_job_id = None
+
+    def _apply_activity_overview_response(
+        self,
+        response: IpcResponse,
+        *,
+        job_id: str | None,
+        background: bool,
+    ) -> None:
+        if self._selected_job_id != job_id:
+            return
+        state: ActivityOverviewViewState = activity_overview_from_response(response)
         self._latest_run_job_id = state.latest_job_id
         self._latest_run_plan_id = state.latest_plan_id
         self._latest_run_state = state.latest_run_state
@@ -1958,7 +2673,14 @@ class MediaSyncWindow(QMainWindow):
             self._apply_job_status_state(state.job_status)
         if state.active_run_id is not None and active_matches_selected:
             self._set_active_run(state.active_run_id)
-            self._poll_active_run_progress()
+            if background:
+                self._poll_active_run_progress()
+            else:
+                active_state = self._load_run_progress(state.active_run_id)
+                self._handle_active_run_progress(
+                    active_state,
+                    run_id=state.active_run_id,
+                )
         elif (
             state.latest_run_id is not None
             and state.latest_run_state in _TERMINAL_RUN_STATES
@@ -1966,25 +2688,27 @@ class MediaSyncWindow(QMainWindow):
         ):
             self._active_run_id = None
             self._run_progress_timer.stop()
-            self._load_run_progress(state.latest_run_id)
+            if background:
+                self._request_run_progress(state.latest_run_id)
+            else:
+                self._load_run_progress(state.latest_run_id)
         else:
             self._active_run_id = None
             self._run_progress_timer.stop()
+            self._cancel_background_run_progress_query()
             self._run_progress_state = empty_run_progress_state()
             self._apply_run_progress_state(self._run_progress_state)
         latest_plan_id = state.latest_plan_id if latest_matches_selected else None
         plan_id = latest_plan_id or self._job_detail_state.plan_id
         self._apply_backup_job_detail_state(self._job_detail_state)
         if plan_id is None:
-            self.apply_plan_operation_preview(empty_plan_operation_preview_state())
-            self._clear_changes_plan()
-            self.apply_plan_endpoint_preview(empty_plan_endpoint_preview_state())
-            self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
+            self._clear_selected_plan_previews()
             return
-        self._refresh_plan_previews(plan_id)
+        self._refresh_plan_previews(plan_id, background=background)
 
     def _set_active_run(self, run_id: str) -> None:
         if run_id != self._active_run_id:
+            self._cancel_background_run_progress_query()
             self._active_run_id = run_id
             self._run_progress_state = empty_run_progress_state()
         if not self._run_progress_timer.isActive():
@@ -1995,7 +2719,20 @@ class MediaSyncWindow(QMainWindow):
         if run_id is None:
             self._run_progress_timer.stop()
             return
+        if self._background_queries is not None:
+            self._request_run_progress(run_id)
+            return
         state = self._load_run_progress(run_id)
+        self._handle_active_run_progress(state, run_id=run_id)
+
+    def _handle_active_run_progress(
+        self,
+        state: RunProgressViewState | None,
+        *,
+        run_id: str,
+    ) -> None:
+        if self._active_run_id != run_id:
+            return
         if state is None:
             self._run_progress_timer.stop()
             return
@@ -2009,6 +2746,110 @@ class MediaSyncWindow(QMainWindow):
             self._refresh_backup_overview()
             self._refresh_activity_overview()
             self._refresh_history_timeline()
+
+    def _request_run_progress(self, run_id: str) -> None:
+        if self._background_queries is None:
+            self._load_run_progress(run_id)
+            return
+        if self._run_progress_query_pending:
+            return
+        if self._engine_client is None or not hasattr(
+            self._engine_client,
+            "get_run_progress",
+        ):
+            self._cancel_background_run_progress_query()
+            return
+        selected_job_id = self._selected_job_id
+        previous = (
+            self._run_progress_state
+            if self._run_progress_state.run_id == run_id
+            else empty_run_progress_state()
+        )
+
+        def query(client: object) -> object:
+            provider = cast(RunProgressProvider, client)
+            return provider.get_run_progress(
+                run_id=run_id,
+                after_sequence_no=previous.sequence_no,
+            )
+
+        def accept(response: object) -> None:
+            def apply(value: object) -> None:
+                self._accept_background_run_progress(
+                    response=cast(IpcResponse, value),
+                    run_id=run_id,
+                    selected_job_id=selected_job_id,
+                    previous=previous,
+                )
+
+            if not self._ui_update_coalescer.submit(
+                channel="run-progress",
+                value=response,
+                apply=apply,
+            ):
+                apply(response)
+
+        submitted = self._background_queries.submit(
+            key="run-progress",
+            operation=query,
+            on_result=accept,
+            on_error=lambda _error: self._reject_background_run_progress(
+                run_id=run_id,
+                selected_job_id=selected_job_id,
+            ),
+        )
+        if submitted:
+            self._run_progress_query_pending = True
+            self._run_progress_query_run_id = run_id
+        else:
+            self._reject_background_run_progress(
+                run_id=run_id,
+                selected_job_id=selected_job_id,
+            )
+
+    def _accept_background_run_progress(
+        self,
+        *,
+        response: IpcResponse,
+        run_id: str,
+        selected_job_id: str | None,
+        previous: RunProgressViewState,
+    ) -> None:
+        if (
+            self._run_progress_query_run_id != run_id
+            or self._selected_job_id != selected_job_id
+        ):
+            return
+        self._run_progress_query_pending = False
+        self._run_progress_query_run_id = None
+        state = run_progress_from_response(response, previous=previous)
+        if state.run_id is not None and state.run_id != run_id:
+            state = empty_run_progress_state()
+        self._run_progress_state = state
+        self._apply_run_progress_state(state)
+        if self._active_run_id == run_id:
+            self._handle_active_run_progress(state, run_id=run_id)
+
+    def _reject_background_run_progress(
+        self,
+        *,
+        run_id: str,
+        selected_job_id: str | None,
+    ) -> None:
+        if (
+            self._run_progress_query_run_id not in {None, run_id}
+            or self._selected_job_id != selected_job_id
+        ):
+            return
+        self._run_progress_query_pending = False
+        self._run_progress_query_run_id = None
+
+    def _cancel_background_run_progress_query(self) -> None:
+        if self._background_queries is not None:
+            self._background_queries.cancel("run-progress")
+        self._ui_update_coalescer.cancel("run-progress")
+        self._run_progress_query_pending = False
+        self._run_progress_query_run_id = None
 
     def _load_run_progress(self, run_id: str) -> RunProgressViewState | None:
         if self._engine_client is None or not hasattr(
@@ -2321,6 +3162,7 @@ class MediaSyncWindow(QMainWindow):
         button.setVisible(visible)
         button.setEnabled(
             visible
+            and not self._job_detail_query_pending
             and self._analysis_request_id is None
             and self._retry_after_analysis is None
             and self._engine_client is not None
@@ -2456,13 +3298,156 @@ class MediaSyncWindow(QMainWindow):
         self._set_active_run(run_id)
         self._poll_active_run_progress()
 
-    def _refresh_plan_previews(self, plan_id: str) -> None:
+    def _refresh_plan_previews(
+        self,
+        plan_id: str,
+        *,
+        background: bool = True,
+    ) -> None:
+        if background and self._background_queries is not None:
+            self._requested_plan_preview_id = plan_id
+            if plan_id != self._changes_plan_id:
+                self._cancel_background_changes_query()
+                self._changes_plan_id = plan_id
+                self._changes_target_filter = None
+                self._changes_risk_filter = "ALL"
+                self._reset_changes_paging()
+            self._refresh_changes_page()
+
+            def query(client: object) -> object:
+                operations: IpcResponse | None = None
+                endpoints: IpcResponse | None = None
+                blocking_issues: IpcResponse | None = None
+                coverage: IpcResponse | None = None
+                snapshot_id: str | None = None
+                if hasattr(client, "get_plan_operations"):
+                    operations = cast(PlanOperationsProvider, client).get_plan_operations(
+                        plan_id=plan_id,
+                        limit=3,
+                    )
+                if hasattr(client, "get_plan_endpoints"):
+                    endpoints = cast(PlanEndpointsProvider, client).get_plan_endpoints(
+                        plan_id=plan_id,
+                        limit=4,
+                    )
+                    snapshot_id = plan_endpoint_preview_from_response(
+                        endpoints
+                    ).source_snapshot_id
+                if (
+                    snapshot_id is not None
+                    and hasattr(client, "get_snapshot_issues")
+                    and hasattr(client, "get_snapshot_coverage")
+                ):
+                    snapshot_provider = cast(SnapshotHealthProvider, client)
+                    blocking_issues = snapshot_provider.get_snapshot_issues(
+                        snapshot_id=snapshot_id,
+                        limit=2,
+                        blocking_only=True,
+                    )
+                    coverage = snapshot_provider.get_snapshot_coverage(
+                        snapshot_id=snapshot_id,
+                        limit=2,
+                        coverage_states=SNAPSHOT_HEALTH_COVERAGE_STATES,
+                    )
+                return _PlanPreviewResponses(
+                    plan_id=plan_id,
+                    operations=operations,
+                    endpoints=endpoints,
+                    blocking_issues=blocking_issues,
+                    coverage=coverage,
+                    snapshot_id=snapshot_id,
+                )
+
+            def accept(result: object) -> None:
+                def apply(value: object) -> None:
+                    self._accept_background_plan_previews(
+                        cast(_PlanPreviewResponses, value)
+                    )
+
+                if not self._ui_update_coalescer.submit(
+                    channel="plan-previews",
+                    value=result,
+                    apply=apply,
+                ):
+                    apply(result)
+
+            submitted = self._background_queries.submit(
+                key="plan-previews",
+                operation=query,
+                on_result=accept,
+                on_error=lambda _error: self._reject_background_plan_previews(
+                    plan_id=plan_id
+                ),
+            )
+            if submitted:
+                self._plan_preview_query_pending = True
+            else:
+                self._reject_background_plan_previews(plan_id=plan_id)
+            return
+
         self._refresh_plan_operation_preview(plan_id)
         endpoint_state = self._refresh_plan_endpoint_preview(plan_id)
         if endpoint_state.source_snapshot_id is None:
             self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
             return
         self._refresh_snapshot_health_preview(endpoint_state.source_snapshot_id)
+
+    def _accept_background_plan_previews(
+        self,
+        result: _PlanPreviewResponses,
+    ) -> None:
+        if self._requested_plan_preview_id != result.plan_id:
+            return
+        self._plan_preview_query_pending = False
+        operation_state = (
+            empty_plan_operation_preview_state()
+            if result.operations is None
+            else plan_operation_preview_from_response(result.operations)
+        )
+        self.apply_plan_operation_preview(operation_state)
+        endpoint_state = (
+            empty_plan_endpoint_preview_state()
+            if result.endpoints is None
+            else plan_endpoint_preview_from_response(result.endpoints)
+        )
+        self.apply_plan_endpoint_preview(endpoint_state)
+        if (
+            result.snapshot_id is None
+            or result.blocking_issues is None
+            or result.coverage is None
+        ):
+            self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
+            return
+        self.apply_snapshot_health_preview(
+            snapshot_health_preview_from_responses(
+                snapshot_id=result.snapshot_id,
+                blocking_issues_response=result.blocking_issues,
+                coverage_response=result.coverage,
+            )
+        )
+
+    def _reject_background_plan_previews(self, *, plan_id: str) -> None:
+        if self._requested_plan_preview_id != plan_id:
+            return
+        self._plan_preview_query_pending = False
+        self.apply_engine_status(
+            replace(
+                self._engine_status_state,
+                detail=self._texts().jobs_unavailable,
+                status_kind="warning",
+            )
+        )
+
+    def _clear_selected_plan_previews(self) -> None:
+        self._requested_plan_preview_id = None
+        self._plan_preview_query_pending = False
+        if self._background_queries is not None:
+            self._background_queries.cancel("plan-previews")
+        self._ui_update_coalescer.cancel("plan-previews")
+        self.apply_plan_operation_preview(empty_plan_operation_preview_state())
+        self._clear_changes_plan()
+        self.apply_plan_endpoint_preview(empty_plan_endpoint_preview_state())
+        self.apply_snapshot_health_preview(empty_snapshot_health_preview_state())
 
     def _refresh_plan_operation_preview(self, plan_id: str) -> None:
         self._cancel_background_changes_query()
@@ -2965,9 +3950,56 @@ class MediaSyncWindow(QMainWindow):
             )
         )
 
-    def _refresh_cataloged_files_preview(self) -> None:
+    def _refresh_cataloged_files_preview(self, *, background: bool = True) -> None:
         if self._engine_client is None or not hasattr(self._engine_client, "get_cataloged_files"):
+            if self._background_queries is not None:
+                self._background_queries.cancel("cataloged-files")
+            self._ui_update_coalescer.cancel("cataloged-files")
+            self._catalog_query_pending = False
             self.apply_cataloged_files_preview(empty_cataloged_files_preview_state())
+            return
+        if background and self._background_queries is not None:
+
+            def query(client: object) -> object:
+                provider = cast(CatalogedFilesProvider, client)
+                return provider.get_cataloged_files(limit=3)
+
+            def accept(response: object) -> None:
+                def apply(value: object) -> None:
+                    self._catalog_query_pending = False
+                    self.apply_cataloged_files_preview(
+                        cataloged_files_preview_from_response(
+                            cast(IpcResponse, value)
+                        )
+                    )
+
+                if not self._ui_update_coalescer.submit(
+                    channel="cataloged-files",
+                    value=response,
+                    apply=apply,
+                ):
+                    apply(response)
+
+            def reject(_error: Exception) -> None:
+                self._catalog_query_pending = False
+                self.apply_engine_status(
+                    replace(
+                        self._engine_status_state,
+                        detail=self._texts().jobs_unavailable,
+                        status_kind="warning",
+                    )
+                )
+
+            submitted = self._background_queries.submit(
+                key="cataloged-files",
+                operation=query,
+                on_result=accept,
+                on_error=reject,
+            )
+            if submitted:
+                self._catalog_query_pending = True
+            else:
+                reject(RuntimeError("background catalog query was not accepted"))
             return
         provider = cast(CatalogedFilesProvider, self._engine_client)
         self.apply_cataloged_files_preview(
@@ -3463,7 +4495,8 @@ class MediaSyncWindow(QMainWindow):
                 state.found and not active_for_job and (has_plan or check_mode)
             )
             start_button.setEnabled(
-                not analysis_pending
+                not self._job_detail_query_pending
+                and not analysis_pending
                 and not queued
                 and not active_for_job
                 and self._engine_client is not None
@@ -3493,6 +4526,8 @@ class MediaSyncWindow(QMainWindow):
         self._refresh_dashboard_geometry()
 
     def _invoke_primary_backup_action(self) -> None:
+        if self._job_detail_query_pending:
+            return
         state = self._job_detail_state
         completed_plan_already_run = (
             state.job_id is not None
@@ -3519,6 +4554,7 @@ class MediaSyncWindow(QMainWindow):
             self._engine_client is None
             or not hasattr(self._engine_client, "check_backup")
             or state.job_id is None
+            or self._job_detail_query_pending
             or self._analysis_request_id is not None
         ):
             return
@@ -3582,9 +4618,100 @@ class MediaSyncWindow(QMainWindow):
             or not hasattr(self._engine_client, "get_backup_job_detail")
         ):
             self._analysis_timer.stop()
+            self._cancel_background_analysis_query()
+            return
+        if self._background_queries is not None:
+            if self._analysis_query_pending:
+                return
+
+            def query(client: object) -> object:
+                provider = cast(BackupJobDetailProvider, client)
+                return provider.get_backup_job_detail(job_id=job_id)
+
+            def accept(response: object) -> None:
+                def apply(value: object) -> None:
+                    self._accept_background_analysis_poll(
+                        response=cast(IpcResponse, value),
+                        request_id=request_id,
+                        job_id=job_id,
+                    )
+
+                if not self._ui_update_coalescer.submit(
+                    channel="backup-analysis",
+                    value=response,
+                    apply=apply,
+                ):
+                    apply(response)
+
+            submitted = self._background_queries.submit(
+                key="backup-analysis",
+                operation=query,
+                on_result=accept,
+                on_error=lambda _error: self._reject_background_analysis_poll(
+                    request_id=request_id,
+                    job_id=job_id,
+                ),
+            )
+            if submitted:
+                self._analysis_query_pending = True
+            else:
+                self._reject_background_analysis_poll(
+                    request_id=request_id,
+                    job_id=job_id,
+                )
             return
         provider = cast(BackupJobDetailProvider, self._engine_client)
-        response = provider.get_backup_job_detail(job_id=job_id)
+        self._apply_backup_analysis_poll_response(
+            provider.get_backup_job_detail(job_id=job_id),
+            request_id=request_id,
+            job_id=job_id,
+        )
+
+    def _accept_background_analysis_poll(
+        self,
+        *,
+        response: IpcResponse,
+        request_id: str,
+        job_id: str,
+    ) -> None:
+        if (
+            self._analysis_request_id != request_id
+            or self._selected_job_id != job_id
+        ):
+            return
+        self._analysis_query_pending = False
+        self._apply_backup_analysis_poll_response(
+            response,
+            request_id=request_id,
+            job_id=job_id,
+        )
+
+    def _reject_background_analysis_poll(
+        self,
+        *,
+        request_id: str,
+        job_id: str,
+    ) -> None:
+        if (
+            self._analysis_request_id != request_id
+            or self._selected_job_id != job_id
+        ):
+            return
+        self._analysis_query_pending = False
+
+    def _cancel_background_analysis_query(self) -> None:
+        if self._background_queries is not None:
+            self._background_queries.cancel("backup-analysis")
+        self._ui_update_coalescer.cancel("backup-analysis")
+        self._analysis_query_pending = False
+
+    def _apply_backup_analysis_poll_response(
+        self,
+        response: IpcResponse,
+        *,
+        request_id: str,
+        job_id: str,
+    ) -> None:
         if response.status is IpcStatus.REJECTED:
             return
         state = backup_job_detail_from_response(response)
@@ -3656,6 +4783,7 @@ class MediaSyncWindow(QMainWindow):
             or state.plan_id is None
             or state.plan_checksum is None
             or not state.plan_runnable
+            or self._job_detail_query_pending
         ):
             return
         self._start_request_id = self._start_request_id or str(uuid4())

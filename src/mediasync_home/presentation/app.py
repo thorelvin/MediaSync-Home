@@ -4,7 +4,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import cast
 
-from PySide6.QtCore import QUrl, Qt
+from PySide6.QtCore import QTimer, QUrl, Qt
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -95,8 +95,13 @@ def run_gui(
     )
     theme_manager = ThemeManager(app)
     _apply_preferences_theme(theme_manager, preferences.appearance, preferences.density)
+    background_startup = engine_client_factory is not None and engine_client is not None
     window = MediaSyncWindow(
-        initial_state=load_engine_status(engine_client),
+        initial_state=(
+            EngineStatusViewState.disconnected()
+            if background_startup
+            else load_engine_status(engine_client)
+        ),
         engine_client=engine_client,
         engine_client_factory=engine_client_factory,
         user_preferences=preferences,
@@ -111,6 +116,8 @@ def run_gui(
         show_component_gallery=show_component_gallery,
     )
     window.show()
+    if background_startup:
+        QTimer.singleShot(0, window.refresh_engine_status)
     return app.exec()
 
 

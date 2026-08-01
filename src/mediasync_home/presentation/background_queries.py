@@ -114,6 +114,9 @@ class BackgroundQueryController(QObject):
         )
         self._latest_tokens[normalized_key] = token
         if self._active is None:
+            if normalized_key in self._pending:
+                del self._pending[normalized_key]
+                self._pending_order.remove(normalized_key)
             self._start(query)
             return True
         if normalized_key not in self._pending:
@@ -189,7 +192,7 @@ class BackgroundQueryController(QObject):
             self._start_next_pending()
 
     def _start_next_pending(self) -> None:
-        if self._closed:
+        if self._closed or self._active is not None:
             return
         while self._pending_order:
             key = self._pending_order.popleft()

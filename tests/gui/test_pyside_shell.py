@@ -946,6 +946,93 @@ def test_main_window_refresh_recovers_engine_client_from_factory(qapp) -> None:
         window.deleteLater()
 
 
+def test_background_status_stall_keeps_navigation_and_language_responsive(
+    qapp,
+) -> None:
+    provider = _FakeDashboardEngineClient()
+    worker_provider = _BlockingStatusDashboardEngineClient()
+    factory_calls: list[bool] = []
+
+    def worker_factory() -> _BlockingStatusDashboardEngineClient:
+        factory_calls.append(True)
+        return worker_provider
+
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=worker_factory,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        qapp.processEvents()
+        refresh = window.findChild(QPushButton, "refreshEngineButton")
+        nav = window.findChild(QListWidget, "navigationRail")
+        heading = window.findChild(QLabel, "workspaceHeading")
+        chip = window.findChild(QLabel, "engineStatusChip")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert refresh is not None
+        assert nav is not None
+        assert heading is not None
+        assert chip is not None
+        assert language is not None and language.menu() is not None
+        QTest.mouseClick(refresh, Qt.MouseButton.LeftButton)
+        assert worker_provider.started.wait(timeout=1)
+        assert not refresh.isEnabled()
+        assert not worker_provider.release.is_set()
+
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(1)).center(),
+        )
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(3)).center(),
+        )
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+
+        assert nav.currentRow() == 3
+        assert heading.text() == "Settings"
+        assert not worker_provider.release.is_set()
+        assert window._background_queries is not None
+        assert window._background_queries.pending_count == 1
+        worker_provider.release.set()
+
+        def dashboard_settled() -> bool:
+            return (
+                not window._background_queries.active
+                and window._background_queries.pending_count == 0
+                and window._ui_update_coalescer.pending_count == 0
+                and window._job_detail_state.job_id == "job-a"
+                and window._plan_preview_state.plan_id == "plan-a"
+            )
+
+        deadline = monotonic() + 4
+        while not dashboard_settled() and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        assert dashboard_settled()
+
+        assert len(factory_calls) == 1
+        assert worker_provider.calls.count("connect") == 1
+        assert worker_provider.calls.count("get_status") == 1
+        assert worker_provider.calls.count("get_backup_overview") == 2
+        assert worker_provider.calls.count("get_backup_job_detail") == 1
+        assert refresh.isEnabled()
+        assert chip.text() == "Connected: Ready"
+        assert nav.currentRow() == 3
+    finally:
+        worker_provider.release.set()
+        window.close()
+        window.deleteLater()
+
+
 def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -> None:
     provider = _FakeDashboardEngineClient()
     window = build_main_window(
@@ -1265,6 +1352,171 @@ def test_jobs_workspace_pages_without_losing_bounded_query_state(qapp) -> None:
         window.deleteLater()
 
 
+def test_background_job_selection_keeps_only_latest_detail(qapp) -> None:
+    provider = _FakeMultiJobDashboardEngineClient()
+    worker_provider = _BlockingMultiJobDashboardEngineClient()
+    factory_calls: list[bool] = []
+
+    def worker_factory() -> _BlockingMultiJobDashboardEngineClient:
+        factory_calls.append(True)
+        return worker_provider
+
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=worker_factory,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window._refresh_engine_status_now()
+        window._selected_navigation_index = 1
+        assert window._workspace_stack is not None
+        window._workspace_stack.setCurrentIndex(1)
+        qapp.processEvents()
+        jobs_list = window.findChild(QListWidget, "jobsList")
+        title = window.findChild(QLabel, "jobsDetailTitle")
+        start = window.findChild(QPushButton, "jobsStartBackupButton")
+        jobs_scroll = window.findChild(QScrollArea, "jobsScrollArea")
+
+        assert jobs_list is not None and jobs_list.count() == 2
+        assert title is not None
+        assert start is not None
+        assert jobs_scroll is not None
+        QTest.mouseClick(
+            jobs_list.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=jobs_list.visualItemRect(jobs_list.item(1)).center(),
+        )
+        assert worker_provider.started.wait(timeout=1)
+        qapp.processEvents()
+
+        assert worker_provider.attempted_job_ids == ["job-b"]
+        assert jobs_list.isEnabled()
+        assert not start.isEnabled()
+        assert not worker_provider.release.is_set()
+        QTest.mouseClick(
+            jobs_list.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=jobs_list.visualItemRect(jobs_list.item(0)).center(),
+        )
+        assert window._background_queries is not None
+        assert window._background_queries.pending_count == 2
+        worker_provider.release.set()
+
+        def selection_settled() -> bool:
+            return (
+                not window._background_queries.active
+                and window._background_queries.pending_count == 0
+                and window._ui_update_coalescer.pending_count == 0
+                and window._selected_job_id == "job-a"
+                and window._job_detail_state.job_id == "job-a"
+                and window._plan_preview_state.plan_id == "plan-a"
+            )
+
+        deadline = monotonic() + 4
+        while not selection_settled() and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        assert selection_settled()
+
+        assert len(factory_calls) == 1
+        assert worker_provider.max_active == 1
+        assert worker_provider.requested_job_ids == ["job-b", "job-a"]
+        assert jobs_list.currentItem() is not None
+        assert jobs_list.currentItem().data(Qt.ItemDataRole.UserRole) == "job-a"
+        assert title.text() == "Pictures"
+        assert jobs_list.isEnabled()
+        assert jobs_scroll.horizontalScrollBar().maximum() == 0
+    finally:
+        worker_provider.release.set()
+        window.close()
+        window.deleteLater()
+
+
+def test_background_jobs_page_locks_stale_rows_but_not_navigation(qapp) -> None:
+    provider = _FakePagedJobsEngineClient()
+    worker_provider = _BlockingPagedJobsEngineClient()
+    factory_calls: list[bool] = []
+
+    def worker_factory() -> _BlockingPagedJobsEngineClient:
+        factory_calls.append(True)
+        return worker_provider
+
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=worker_factory,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window._refresh_engine_status_now()
+        window._selected_navigation_index = 1
+        assert window._workspace_stack is not None
+        window._workspace_stack.setCurrentIndex(1)
+        qapp.processEvents()
+        nav = window.findChild(QListWidget, "navigationRail")
+        jobs_list = window.findChild(QListWidget, "jobsList")
+        previous = window.findChild(QToolButton, "jobsPreviousButton")
+        next_button = window.findChild(QToolButton, "jobsNextButton")
+
+        assert nav is not None
+        assert jobs_list is not None
+        assert previous is not None
+        assert next_button is not None and next_button.isEnabled()
+        QTest.mouseClick(next_button, Qt.MouseButton.LeftButton)
+        assert worker_provider.started.wait(timeout=1)
+        qapp.processEvents()
+
+        assert not jobs_list.isEnabled()
+        assert not previous.isEnabled()
+        assert not next_button.isEnabled()
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(3)).center(),
+        )
+        qapp.processEvents()
+        assert nav.currentRow() == 3
+        assert not worker_provider.release.is_set()
+        worker_provider.release.set()
+
+        assert window._background_queries is not None
+
+        def page_settled() -> bool:
+            return (
+                not window._background_queries.active
+                and window._background_queries.pending_count == 0
+                and window._ui_update_coalescer.pending_count == 0
+                and window._backup_overview_state.offset == 25
+                and window._job_detail_state.job_id == "job-z"
+            )
+
+        deadline = monotonic() + 4
+        while not page_settled() and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        assert page_settled()
+
+        assert len(factory_calls) == 1
+        assert worker_provider.max_active == 1
+        assert worker_provider.requested_offsets == [25]
+        assert jobs_list.count() == 1
+        assert jobs_list.item(0).data(Qt.ItemDataRole.UserRole) == "job-z"
+        assert jobs_list.isEnabled()
+        assert previous.isEnabled()
+        assert not next_button.isEnabled()
+    finally:
+        worker_provider.release.set()
+        window.close()
+        window.deleteLater()
+
+
 def test_jobs_changes_workspace_filters_pages_and_localizes_without_clipping(
     qapp,
 ) -> None:
@@ -1388,8 +1640,10 @@ def test_changes_query_stall_does_not_block_navigation_and_keeps_latest_filter(
     try:
         window.resize(900, 560)
         window.show()
-        window.refresh_engine_status()
-        window._select_navigation_row(1)
+        window._refresh_engine_status_now()
+        window._selected_navigation_index = 1
+        assert window._workspace_stack is not None
+        window._workspace_stack.setCurrentIndex(1)
         qapp.processEvents()
         nav = window.findChild(QListWidget, "navigationRail")
         target_filter = window.findChild(QComboBox, "changesTargetFilter")
@@ -1521,6 +1775,76 @@ def test_background_query_close_discards_late_worker_result(qapp) -> None:
 
     assert not controller.active
     assert applied == []
+    controller.deleteLater()
+
+
+def test_background_query_callback_chain_stays_serial_and_replaces_pending_key(
+    qapp,
+) -> None:
+    first_started = Event()
+    release_first = Event()
+    worker_lock = Lock()
+    active_calls = 0
+    max_active = 0
+    executed: list[str] = []
+    applied: list[str] = []
+    controller = BackgroundQueryController(
+        client_factory=lambda: object(),
+        max_pending=1,
+    )
+
+    def query(name: str, *, blocked: bool = False):
+        def execute(client: object) -> object:
+            nonlocal active_calls, max_active
+            del client
+            with worker_lock:
+                active_calls += 1
+                max_active = max(max_active, active_calls)
+            executed.append(name)
+            try:
+                if blocked:
+                    first_started.set()
+                    if not release_first.wait(timeout=2):
+                        raise TimeoutError("test query release timed out")
+                return name
+            finally:
+                with worker_lock:
+                    active_calls -= 1
+
+        return execute
+
+    def accept_first(value: object) -> None:
+        applied.append(str(value))
+        assert controller.submit(
+            key="detail",
+            operation=query("new-detail"),
+            on_result=lambda result: applied.append(str(result)),
+        )
+
+    assert controller.submit(
+        key="overview",
+        operation=query("overview", blocked=True),
+        on_result=accept_first,
+    )
+    assert first_started.wait(timeout=1)
+    assert controller.submit(
+        key="detail",
+        operation=query("stale-detail"),
+        on_result=lambda value: applied.append(str(value)),
+    )
+    release_first.set()
+
+    deadline = monotonic() + 2
+    while (controller.active or controller.pending_count) and monotonic() < deadline:
+        qapp.processEvents()
+        QTest.qWait(10)
+
+    assert not controller.active
+    assert controller.pending_count == 0
+    assert max_active == 1
+    assert executed == ["overview", "new-detail"]
+    assert applied == ["overview", "new-detail"]
+    controller.close()
     controller.deleteLater()
 
 
@@ -1903,6 +2227,113 @@ def test_history_query_stall_keeps_navigation_and_latest_filter_responsive(
         window.deleteLater()
 
 
+def test_history_audit_stall_keeps_latest_file_and_navigation_responsive(
+    qapp,
+) -> None:
+    provider = _FakeHistoryEngineClient()
+    worker_provider = _BlockingHistoryAuditEngineClient(block_call_no=2)
+    factory_calls: list[bool] = []
+
+    def worker_factory() -> _BlockingHistoryAuditEngineClient:
+        factory_calls.append(True)
+        return worker_provider
+
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=worker_factory,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        nav = window.findChild(QListWidget, "navigationRail")
+        operation_list = window.findChild(QListWidget, "historyOperationList")
+        retry = window.findChild(QPushButton, "historyRetryOperationButton")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert nav is not None
+        assert operation_list is not None
+        assert retry is not None
+        assert language is not None and language.menu() is not None
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(2)).center(),
+        )
+        assert window._background_queries is not None
+
+        def initial_audit_settled() -> bool:
+            return (
+                not window._background_queries.active
+                and window._background_queries.pending_count == 0
+                and window._ui_update_coalescer.pending_count == 0
+                and operation_list.count() == 2
+                and window._history_operation_audit_state.operation_id == "op-a"
+            )
+
+        deadline = monotonic() + 4
+        while not initial_audit_settled() and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        assert initial_audit_settled()
+
+        QTest.mouseClick(
+            operation_list.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=operation_list.visualItemRect(operation_list.item(1)).center(),
+        )
+        assert worker_provider.started.wait(timeout=1)
+        qapp.processEvents()
+        assert worker_provider.attempted_operation_ids[-1] == "op-b"
+        assert operation_list.isEnabled()
+        assert not retry.isEnabled()
+
+        QTest.mouseClick(
+            operation_list.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=operation_list.visualItemRect(operation_list.item(0)).center(),
+        )
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(3)).center(),
+        )
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+        assert nav.currentRow() == 3
+        assert not worker_provider.release.is_set()
+        worker_provider.release.set()
+
+        def latest_audit_settled() -> bool:
+            return (
+                not window._background_queries.active
+                and window._background_queries.pending_count == 0
+                and window._ui_update_coalescer.pending_count == 0
+                and window._history_operation_audit_state.operation_id == "op-a"
+            )
+
+        deadline = monotonic() + 4
+        while not latest_audit_settled() and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        assert latest_audit_settled()
+
+        assert len(factory_calls) == 1
+        assert worker_provider.max_active == 1
+        assert worker_provider.attempted_operation_ids == ["op-a", "op-b", "op-a"]
+        assert operation_list.currentItem() is not None
+        assert (
+            operation_list.currentItem().data(Qt.ItemDataRole.UserRole) == "op-a"
+        )
+        assert nav.currentRow() == 3
+    finally:
+        worker_provider.release.set()
+        window.close()
+        window.deleteLater()
+
+
 def test_history_file_results_page_with_bounded_plan_cursors(qapp) -> None:
     provider = _FakePagedHistoryOperationsEngineClient()
     window = build_main_window(
@@ -2095,6 +2526,151 @@ def test_jobs_page_shows_live_progress_and_run_controls(qapp) -> None:
         assert stop.isEnabled() is False
         assert stop.text() == "Stopper etter aktiv fil"
     finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_background_progress_poll_does_not_queue_or_block_navigation(qapp) -> None:
+    provider = _FakeRunControlDashboardEngineClient()
+    worker_provider = _BlockingRunProgressDashboardEngineClient()
+    factory_calls: list[bool] = []
+
+    def worker_factory() -> _BlockingRunProgressDashboardEngineClient:
+        factory_calls.append(True)
+        return worker_provider
+
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=worker_factory,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window._refresh_engine_status_now()
+        qapp.processEvents()
+        nav = window.findChild(QListWidget, "navigationRail")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert nav is not None
+        assert language is not None and language.menu() is not None
+        window._poll_active_run_progress()
+        assert worker_provider.started.wait(timeout=1)
+        window._poll_active_run_progress()
+        window._poll_active_run_progress()
+        qapp.processEvents()
+
+        assert worker_provider.attempted_calls == 1
+        assert window._run_progress_query_pending
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(3)).center(),
+        )
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+        assert nav.currentRow() == 3
+        assert not worker_provider.release.is_set()
+        worker_provider.release.set()
+
+        assert window._background_queries is not None
+
+        def progress_settled() -> bool:
+            return (
+                not window._run_progress_query_pending
+                and not window._background_queries.active
+                and window._background_queries.pending_count == 0
+                and window._ui_update_coalescer.pending_count == 0
+                and window._run_progress_state.run_id == "run-a"
+            )
+
+        deadline = monotonic() + 3
+        while not progress_settled() and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        assert progress_settled()
+
+        assert len(factory_calls) == 1
+        assert worker_provider.max_active == 1
+        assert nav.currentRow() == 3
+    finally:
+        worker_provider.release.set()
+        window.close()
+        window.deleteLater()
+
+
+def test_background_analysis_poll_does_not_queue_or_block_navigation(qapp) -> None:
+    provider = _FakeTargetRetryDashboardEngineClient()
+    worker_provider = _BlockingAnalysisPollEngineClient()
+    factory_calls: list[bool] = []
+
+    def worker_factory() -> _BlockingAnalysisPollEngineClient:
+        factory_calls.append(True)
+        return worker_provider
+
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        engine_client_factory=worker_factory,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window._refresh_engine_status_now()
+        window._check_selected_backup(start_when_safe=False)
+        qapp.processEvents()
+        nav = window.findChild(QListWidget, "navigationRail")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert nav is not None
+        assert language is not None and language.menu() is not None
+        assert window._analysis_request_id == "analysis-retry"
+        window._poll_backup_analysis()
+        assert worker_provider.started.wait(timeout=1)
+        window._poll_backup_analysis()
+        window._poll_backup_analysis()
+        qapp.processEvents()
+
+        assert worker_provider.attempted_calls == 1
+        assert window._analysis_query_pending
+        QTest.mouseClick(
+            nav.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=nav.visualItemRect(nav.item(3)).center(),
+        )
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+        assert nav.currentRow() == 3
+        assert not worker_provider.release.is_set()
+        worker_provider.release.set()
+
+        assert window._background_queries is not None
+
+        def analysis_settled() -> bool:
+            return (
+                window._analysis_request_id is None
+                and not window._analysis_query_pending
+                and not window._background_queries.active
+                and window._background_queries.pending_count == 0
+                and window._ui_update_coalescer.pending_count == 0
+                and window._job_detail_state.plan_id == "plan-refreshed"
+            )
+
+        deadline = monotonic() + 4
+        while not analysis_settled() and monotonic() < deadline:
+            qapp.processEvents()
+            QTest.qWait(10)
+        assert analysis_settled()
+
+        assert len(factory_calls) == 1
+        assert worker_provider.max_active == 1
+        assert nav.currentRow() == 3
+    finally:
+        worker_provider.release.set()
         window.close()
         window.deleteLater()
 
@@ -2891,6 +3467,19 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
         )
 
 
+class _BlockingStatusDashboardEngineClient(_FakeDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+        self.release = Event()
+
+    def get_status(self) -> IpcResponse:
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise TimeoutError("test query release timed out")
+        return super().get_status()
+
+
 class _FakeChangesDashboardEngineClient(_FakeDashboardEngineClient):
     def __init__(self) -> None:
         super().__init__()
@@ -3268,6 +3857,39 @@ class _FakeRunControlDashboardEngineClient(_FakeBackupStartDashboardEngineClient
         )
 
 
+class _BlockingRunProgressDashboardEngineClient(_FakeRunControlDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+        self.release = Event()
+        self._worker_lock = Lock()
+        self.attempted_calls = 0
+        self._active_calls = 0
+        self.max_active = 0
+
+    def get_run_progress(
+        self,
+        *,
+        run_id: str,
+        after_sequence_no: int | None = None,
+    ) -> IpcResponse:
+        with self._worker_lock:
+            self.attempted_calls += 1
+            self._active_calls += 1
+            self.max_active = max(self.max_active, self._active_calls)
+        self.started.set()
+        try:
+            if not self.release.wait(timeout=5):
+                raise TimeoutError("test query release timed out")
+            return super().get_run_progress(
+                run_id=run_id,
+                after_sequence_no=after_sequence_no,
+            )
+        finally:
+            with self._worker_lock:
+                self._active_calls -= 1
+
+
 class _FakeTerminalRunDashboardEngineClient(_FakeBackupStartDashboardEngineClient):
     def __init__(
         self,
@@ -3502,6 +4124,32 @@ class _FakeTargetRetryDashboardEngineClient(_FakeTerminalRunDashboardEngineClien
         return IpcResponse.accepted(payload)
 
 
+class _BlockingAnalysisPollEngineClient(_FakeTargetRetryDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.analysis_requested = True
+        self.started = Event()
+        self.release = Event()
+        self._worker_lock = Lock()
+        self.attempted_calls = 0
+        self._active_calls = 0
+        self.max_active = 0
+
+    def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        with self._worker_lock:
+            self.attempted_calls += 1
+            self._active_calls += 1
+            self.max_active = max(self.max_active, self._active_calls)
+        self.started.set()
+        try:
+            if not self.release.wait(timeout=5):
+                raise TimeoutError("test query release timed out")
+            return super().get_backup_job_detail(job_id=job_id)
+        finally:
+            with self._worker_lock:
+                self._active_calls -= 1
+
+
 class _FakeMultiTargetFreshnessDashboardEngineClient(_FakeDashboardEngineClient):
     def get_activity_overview(
         self,
@@ -3635,6 +4283,35 @@ class _FakeMultiJobDashboardEngineClient(_FakeBackupStartDashboardEngineClient):
         return IpcResponse.accepted(payload)
 
 
+class _BlockingMultiJobDashboardEngineClient(_FakeMultiJobDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+        self.release = Event()
+        self._worker_lock = Lock()
+        self._started_calls = 0
+        self._active_calls = 0
+        self.max_active = 0
+        self.attempted_job_ids: list[str] = []
+
+    def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        with self._worker_lock:
+            self.attempted_job_ids.append(job_id)
+            self._started_calls += 1
+            call_no = self._started_calls
+            self._active_calls += 1
+            self.max_active = max(self.max_active, self._active_calls)
+        try:
+            if call_no == 1:
+                self.started.set()
+                if not self.release.wait(timeout=5):
+                    raise TimeoutError("test query release timed out")
+            return super().get_backup_job_detail(job_id=job_id)
+        finally:
+            with self._worker_lock:
+                self._active_calls -= 1
+
+
 class _FakePagedJobsEngineClient(_FakeDashboardEngineClient):
     def __init__(self) -> None:
         super().__init__()
@@ -3698,6 +4375,39 @@ class _FakePagedJobsEngineClient(_FakeDashboardEngineClient):
         detail["job"] = job
         payload["backup_job_detail"] = detail
         return IpcResponse.accepted(payload)
+
+
+class _BlockingPagedJobsEngineClient(_FakePagedJobsEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+        self.release = Event()
+        self._worker_lock = Lock()
+        self._active_calls = 0
+        self.max_active = 0
+
+    def get_backup_overview(
+        self,
+        *,
+        draft_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        with self._worker_lock:
+            self._active_calls += 1
+            self.max_active = max(self.max_active, self._active_calls)
+        self.started.set()
+        try:
+            if not self.release.wait(timeout=5):
+                raise TimeoutError("test query release timed out")
+            return super().get_backup_overview(
+                draft_id=draft_id,
+                limit=limit,
+                offset=offset,
+            )
+        finally:
+            with self._worker_lock:
+                self._active_calls -= 1
 
 
 class _FakeHistoryEngineClient(_FakeDashboardEngineClient):
@@ -3821,6 +4531,46 @@ class _FakeHistoryEngineClient(_FakeDashboardEngineClient):
                 }
             }
         )
+
+
+class _BlockingHistoryAuditEngineClient(_FakeHistoryEngineClient):
+    def __init__(self, *, block_call_no: int) -> None:
+        super().__init__()
+        self.block_call_no = block_call_no
+        self.started = Event()
+        self.release = Event()
+        self._worker_lock = Lock()
+        self._started_calls = 0
+        self._active_calls = 0
+        self.max_active = 0
+        self.attempted_operation_ids: list[str] = []
+
+    def get_operation_audit(
+        self,
+        *,
+        run_id: str,
+        operation_id: str,
+        limit: int | None = None,
+    ) -> IpcResponse:
+        with self._worker_lock:
+            self._started_calls += 1
+            call_no = self._started_calls
+            self._active_calls += 1
+            self.max_active = max(self.max_active, self._active_calls)
+            self.attempted_operation_ids.append(operation_id)
+        try:
+            if call_no == self.block_call_no:
+                self.started.set()
+                if not self.release.wait(timeout=5):
+                    raise TimeoutError("test query release timed out")
+            return super().get_operation_audit(
+                run_id=run_id,
+                operation_id=operation_id,
+                limit=limit,
+            )
+        finally:
+            with self._worker_lock:
+                self._active_calls -= 1
 
 
 class _FakeHistoryOperationRetryEngineClient(_FakeHistoryEngineClient):

@@ -1,21 +1,25 @@
 # Implementeringsstatus
 
-Oppdatering 2026-07-31: Interaktive mål-/risikofiltre og sidebytte i
-**Jobber > Endringer**, samt aktivitets-/jobbfiltre og sidebytte i **Historikk**,
-blokkerer ikke lenger GUI-tråden i produktkjøringen. En sentral, bounded
-bakgrunnskontroller kjører høyst én rekonstruerbar IPC-query om gangen, holder
-maksimalt fire ventende querynøkler, erstatter en eldre ventende query med nyeste
-valg og forkaster stale resultater etter filter-, plan-, side- eller vindusbytte.
-Sidepilene og den aktuelle resultatlisten låses mens en side er på vei, mens
-filtrene, språkbyttet og navigasjonen forblir responsive og latest-wins.
-`UiUpdateCoalescer` holder maksimalt 16 kanaler og anvender bare siste snapshot
-per kanal, høyst fire ganger per sekund. Adversarial GUI-bevis blokkerer
-Engine-klienten med vilje, klikker reelt til Innstillinger mens queryen fortsatt
-venter, erstatter to filtervalg med én query og verifiserer at bare siste
-Endringer- eller Historikk-side vises. Close-cancellation, bounded overflow og
-norsk/engelsk 900×560 uten horisontal clipping er dekket. Virtuelle
-millionradstabeller og bredere konvertering av initial-/oversiktsqueryer til
-bakgrunnsarbeid gjenstår.
+Oppdatering 2026-08-01: Produktvinduet vises nå før første live Engine-read, og
+alle rutinemessige rekonstruerbare GUI-reads kjører utenfor GUI-tråden når
+Engine-client-factory er tilgjengelig. Dette omfatter status, Jobber-oversikt og
+-detalj, Aktivitet, Endringer, Historikkens tidslinje/filresultater/operasjonsaudit,
+plan-/endpoint-/snapshot-/katalogpreview samt run-progress og analysepolling. Den
+sentrale bounded kontrolleren gjenbruker én dedikert worker-client, kjører høyst
+én query om gangen, holder maksimalt fire ventende querynøkler og beholder
+serialisering også når en resultatcallback starter neste avhengige read. En nyere
+query erstatter ventende arbeid med samme nøkkel, og stale resultat forkastes mot
+eksakt jobb, run, plan, aktivitet, operasjon, filter, side og cursor. Sidepilene
+og resultatlisten låses bare når deres egne data er stale; filtre, andre jobber,
+språkvelger og navigasjon forblir responsive. Timerpolling tillater bare én
+in-flight read og kan derfor ikke bygge kø mot en treg host. `UiUpdateCoalescer`
+holder maksimalt 16 kanaler og anvender bare siste snapshot per kanal ved høyst
+4 Hz. Adversarial GUI-bevis blokkerer status, jobbdetalj, jobbside, progress,
+analyse, Endringer, Historikk og filaudit med vilje, utfører reelle klikk mens de
+venter og verifiserer latest-wins, én aktiv worker, én client-factory-resolusjon,
+close-cancellation, bounded overflow, norsk/engelsk og 900×560 uten horisontal
+clipping. Virtuelle millionradstabeller og flytting av ikke-rekonstruerbare
+command-submissions til en egen garantert command-worker gjenstår.
 
 Oppdatering 2026-07-31: **Historikk** kan nå prøve én valgt uferdig fil på
 nytt fra den bounded, paginerte filresultatvisningen. Handlingen vises bare
