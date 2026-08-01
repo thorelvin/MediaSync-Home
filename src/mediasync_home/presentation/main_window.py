@@ -4591,13 +4591,19 @@ class MediaSyncWindow(QMainWindow):
         settle_layout = (
             self._settle_setup_layout
             if reveal_action
-            else self._refresh_dashboard_geometry
+            else self._settle_setup_layout_at_top
         )
         QTimer.singleShot(0, settle_layout)
 
     def _settle_setup_layout(self) -> None:
         self._refresh_dashboard_geometry()
         self._ensure_setup_action_visible()
+
+    def _settle_setup_layout_at_top(self) -> None:
+        self._refresh_dashboard_geometry()
+        if self._dashboard_scroll_area is None:
+            return
+        self._dashboard_scroll_area.verticalScrollBar().setValue(0)
 
     def _ensure_setup_action_visible(self) -> None:
         if self._dashboard_scroll_area is None or self._setup_primary_button is None:

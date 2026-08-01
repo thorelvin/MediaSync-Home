@@ -587,6 +587,61 @@ def test_target_selection_reflows_without_horizontal_clipping(
         window.deleteLater()
 
 
+def test_compact_target_picker_return_restores_setup_top(qapp) -> None:
+    window = build_main_window(initial_state=_ready_state(), theme_mode=ThemeMode.DARK)
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        qapp.processEvents()
+        choices = [
+            "C:/Users/Ada/Pictures",
+            "E:/MediaSync Backups/Primary target",
+        ]
+        window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
+        create_backup = window.findChild(QPushButton, "createBackupButton")
+        add_target = window.findChild(QToolButton, "addTargetButton")
+        setup_title = window._setup_title_label
+        target_summary = window.findChild(QLabel, "setupTargetValue")
+        dashboard_scroll = window.findChild(QScrollArea, "dashboardScrollArea")
+
+        assert create_backup is not None
+        assert add_target is not None
+        assert setup_title is not None
+        assert target_summary is not None
+        assert dashboard_scroll is not None
+        QTest.mouseClick(create_backup, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        dashboard_scroll.verticalScrollBar().setValue(
+            dashboard_scroll.verticalScrollBar().maximum()
+        )
+
+        QTest.mouseClick(add_target, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        qapp.processEvents()
+
+        assert target_summary.text().endswith("Primary target")
+        assert dashboard_scroll.verticalScrollBar().value() == 0
+        title_position = setup_title.mapTo(
+            dashboard_scroll.viewport(),
+            setup_title.rect().topLeft(),
+        )
+        target_position = target_summary.mapTo(
+            dashboard_scroll.viewport(),
+            target_summary.rect().topLeft(),
+        )
+        assert title_position.y() >= 0
+        assert target_position.y() >= 0
+        assert (
+            target_position.y() + target_summary.height()
+            <= dashboard_scroll.viewport().height()
+        )
+        assert dashboard_scroll.horizontalScrollBar().maximum() == 0
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_directory_picker_is_parented_and_uses_visible_qt_dialog(qapp) -> None:
     window = build_main_window(initial_state=_ready_state(), theme_mode=ThemeMode.LIGHT)
 
