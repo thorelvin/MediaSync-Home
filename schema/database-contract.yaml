@@ -56,6 +56,7 @@ invariants:
       - job_revisions
       - standard_backup_job_revision_details
       - writable_endpoint_registrations
+      - controlled_endpoint_takeovers
       - current_read_hash_evidence
       - operation_attempts
       - operation_outcomes
@@ -104,6 +105,26 @@ invariants:
     evidence_immutable: true
     endpoint_revision_binding:
       columns: [endpoint_id, endpoint_revision_id, endpoint_generation]
+    active_heads_advanced:
+      - endpoint_heads
+      - job_heads
+  - id: OWN-001_CONTROLLED_ENDPOINT_TAKEOVER
+    requirement_id: OWN-001
+    assertion: >
+      A controlled takeover is restartable, binds the exact foreign owner and
+      epoch to an immutable next-epoch marker and write probe, advances endpoint
+      and job heads through new revisions, and queues a full analysis that may
+      not start a run automatically.
+    intent_table: controlled_endpoint_takeover_intents
+    evidence_table: controlled_endpoint_takeovers
+    intent_identity_immutable: true
+    terminal_states: [COMMITTED, BLOCKED]
+    evidence_immutable: true
+    epoch_rule: ownership_epoch = previous_ownership_epoch + 1
+    endpoint_revision_binding:
+      columns: [endpoint_id, endpoint_revision_id, endpoint_generation]
+    full_analysis_required: true
+    start_when_safe: false
     active_heads_advanced:
       - endpoint_heads
       - job_heads
@@ -210,6 +231,18 @@ invariants:
         parent_table: job_revisions
         parent_columns: [job_id, id]
       - child_table: writable_endpoint_registrations
+        child_columns: [endpoint_id, endpoint_revision_id]
+        parent_table: endpoint_revisions
+        parent_columns: [endpoint_id, id]
+      - child_table: controlled_endpoint_takeover_intents
+        child_columns: [job_id, source_job_revision_id]
+        parent_table: job_revisions
+        parent_columns: [job_id, id]
+      - child_table: controlled_endpoint_takeover_intents
+        child_columns: [endpoint_id, source_endpoint_revision_id]
+        parent_table: endpoint_revisions
+        parent_columns: [endpoint_id, id]
+      - child_table: controlled_endpoint_takeovers
         child_columns: [endpoint_id, endpoint_revision_id]
         parent_table: endpoint_revisions
         parent_columns: [endpoint_id, id]

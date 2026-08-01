@@ -27,8 +27,13 @@ class StandardBackupTargetSummary:
     name: str
     path_label: str
     independent_device_id: str | None = None
+    target_ordinal: int | None = None
+    endpoint_id: str | None = None
     registration_state: str | None = None
     registration_reason_code: str | None = None
+    foreign_owner_installation_id: str | None = None
+    foreign_ownership_epoch: int | None = None
+    foreign_recovery_status: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -40,6 +45,18 @@ class StandardBackupTargetSummary:
             payload["registration_state"] = self.registration_state
         if self.registration_reason_code is not None:
             payload["registration_reason_code"] = self.registration_reason_code
+        if self.target_ordinal is not None:
+            payload["target_ordinal"] = self.target_ordinal
+        if self.endpoint_id is not None:
+            payload["endpoint_id"] = self.endpoint_id
+        if self.foreign_owner_installation_id is not None:
+            payload["foreign_owner_installation_id"] = (
+                self.foreign_owner_installation_id
+            )
+        if self.foreign_ownership_epoch is not None:
+            payload["foreign_ownership_epoch"] = self.foreign_ownership_epoch
+        if self.foreign_recovery_status is not None:
+            payload["foreign_recovery_status"] = self.foreign_recovery_status
         return payload
 
 
@@ -55,7 +72,9 @@ class StandardBackupJobSummary:
 
     def to_dict(self) -> dict[str, object]:
         independent_device_ids = {
-            target.independent_device_id for target in self.targets if target.independent_device_id
+            target.independent_device_id
+            for target in self.targets
+            if target.independent_device_id
         }
         return {
             "job_id": self.job_id,
@@ -138,7 +157,9 @@ class StandardBackupJobDetail:
 
     def to_dict(self) -> dict[str, object]:
         independent_device_ids = {
-            target.independent_device_id for target in self.targets if target.independent_device_id
+            target.independent_device_id
+            for target in self.targets
+            if target.independent_device_id
         }
         payload: dict[str, object] = {
             "job_id": self.job_id,
@@ -175,7 +196,9 @@ class BackupOverviewPage:
     requested_draft_id: str | None = None
 
     @classmethod
-    def unavailable(cls, *, limit: int, offset: int, draft_id: str | None) -> "BackupOverviewPage":
+    def unavailable(
+        cls, *, limit: int, offset: int, draft_id: str | None
+    ) -> "BackupOverviewPage":
         return cls(
             limit=limit,
             offset=offset,
@@ -230,7 +253,9 @@ class StandardBackupJobReadModelStore(Protocol):
 
 
 class StandardBackupJobDetailReadModelStore(Protocol):
-    def load_standard_backup_job_detail(self, job_id: str) -> StandardBackupJobDetail | None: ...
+    def load_standard_backup_job_detail(
+        self, job_id: str
+    ) -> StandardBackupJobDetail | None: ...
 
 
 def query_backup_overview(
@@ -241,7 +266,9 @@ def query_backup_overview(
     limit: int | None = None,
     offset: int | None = None,
 ) -> BackupOverviewPage:
-    page_limit, page_offset = normalize_backup_overview_bounds(limit=limit, offset=offset)
+    page_limit, page_offset = normalize_backup_overview_bounds(
+        limit=limit, offset=offset
+    )
     normalized_draft_id = _normalized_draft_id(draft_id)
     draft = (
         draft_store.load_standard_backup_draft(normalized_draft_id)

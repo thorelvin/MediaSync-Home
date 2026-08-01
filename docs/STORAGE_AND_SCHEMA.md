@@ -226,6 +226,34 @@ flytter endpoint-/job-heads med compare-and-swap og binder bare den nye aktive
 target-revisjonen til `WRITABLE_READY`. Historiske revisjoner og bindingsrader
 overskrives ikke.
 
+#### `controlled_endpoint_takeover_intents`
+
+Restartbar, revisjonsbundet intent for eksplisitt lokal overtakelse av et mål som er
+klassifisert `VALID_FOREIGN`. Identitet, forventet gammel eier/epoke og nye
+revisjons-ID-er er immutable; bare den avgrensede state-maskinen kan flyttes.
+
+- binder eksakt jobb, aktiv jobbrevisjon, target ordinal og endpointrevisjon;
+- binder forventet fremmed installation-ID og positiv ownership epoch;
+- krever lagret eksplisitt brukerbekreftelse;
+- lagrer forberedt filsystemevidens og eventuelle kontrollerte blokkårsaker;
+- tillater `PREPARED` → `FILESYSTEM_APPLIED` → `COMMITTED`, med restartbar
+  terminal blokkering for sikkerhetsbrudd.
+
+#### `controlled_endpoint_takeovers`
+
+Immutable bevis for en fullført overtakelse, bundet til intent og ny eksakt
+endpoint-/jobbrevisjon. Beviset lagrer gammel/ny eier, gammel/ny epoke,
+root-identitet, markerchecksum, takeover-record og probe-tidspunkt. Constraints krever
+`new_ownership_epoch = previous_ownership_epoch + 1`; sammensatte fremmednøkler og
+triggere avviser feil parent, update og delete.
+
+0B-implementasjonsnote: Catalog migration 42 oppretter tabellene. Commit appender
+neste endpointgeneration og ny jobbrevisjon, flytter begge heads med
+compare-and-swap, ugyldiggjør eldre ubrukte planer og køer en full
+`backup_analysis_request` med `start_when_safe=0`. Filsystemfasen kjører under den
+virkelige endpointlåsen, beholder gammel owner-namespace og kan fortsettes ved
+startup før ordinær klassifisering.
+
 #### `jobs`
 
 Stabil jobbidentitet og livssyklus.

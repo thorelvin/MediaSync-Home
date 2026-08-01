@@ -44,7 +44,9 @@ def test_standard_backup_setup_has_four_steps_and_safe_defaults() -> None:
 def test_standard_backup_setup_blocks_creation_until_source_and_target_exist() -> None:
     empty = build_standard_backup_setup_state(BackupSetupDraft.empty())
     source_only = build_standard_backup_setup_state(
-        BackupSetupDraft(source_name="Pictures", source_path_label="C:/Users/Ada/Pictures"),
+        BackupSetupDraft(
+            source_name="Pictures", source_path_label="C:/Users/Ada/Pictures"
+        ),
         current_step=BackupSetupStep.REVIEW,
     )
 
@@ -64,7 +66,9 @@ def test_standard_backup_setup_allows_review_with_one_to_three_targets() -> None
         ),
     )
 
-    state = build_standard_backup_setup_state(draft, current_step=BackupSetupStep.REVIEW)
+    state = build_standard_backup_setup_state(
+        draft, current_step=BackupSetupStep.REVIEW
+    )
 
     assert state.configured_targets == 3
     assert state.max_targets == 3
@@ -81,7 +85,9 @@ def test_standard_backup_setup_can_render_application_job_draft() -> None:
     draft = (
         StandardBackupJobDraft.new("draft-1")
         .with_source(name="Pictures", path_label="C:/Users/Ada/Pictures")
-        .with_added_target(name="USB 1", path_label="E:/Backup", independent_device_id="disk-a")
+        .with_added_target(
+            name="USB 1", path_label="E:/Backup", independent_device_id="disk-a"
+        )
     )
 
     state = build_standard_backup_setup_state_from_job_draft(
@@ -293,7 +299,10 @@ def test_backup_job_detail_view_model_renders_exact_job_revision() -> None:
     assert state.source_label == "C:/Users/Ada/Pictures"
     assert state.revision_label == "Revisjon: job-rev-a - Filter: filter-a"
     assert state.target_summary_label == "1 mål / 1 uavhengig enhet"
-    assert state.defaults_summary_label == "Oppdater backup - Alle brukerfiler - Standard kontroll"
+    assert (
+        state.defaults_summary_label
+        == "Oppdater backup - Alle brukerfiler - Standard kontroll"
+    )
     assert state.target_lines == ("USB 1: E:/Backup",)
     assert state.plan_id == "plan-a"
     assert state.plan_checksum == "a" * 64
@@ -347,6 +356,51 @@ def test_backup_job_detail_requires_explicit_registration_only_for_all_pending_t
 
     assert state.job_revision_id == "job-rev-a"
     assert state.writable_target_registration_required is registration_required
+
+
+def test_backup_job_detail_exposes_exact_foreign_target_takeover_binding() -> None:
+    response = IpcResponse.accepted(
+        {
+            "backup_job_detail": {
+                "job_id": "job-a",
+                "read_model_available": True,
+                "found": True,
+                "job": {
+                    "job_id": "job-a",
+                    "job_revision_id": "job-rev-a",
+                    "title": "Pictures",
+                    "targets": [
+                        {
+                            "name": "Foreign target",
+                            "path_label": "E:/Backup",
+                            "target_ordinal": 1,
+                            "endpoint_id": "endpoint-a",
+                            "registration_state": "READ_ONLY_READY",
+                            "registration_reason_code": (
+                                "ENDPOINT_TARGET_FOREIGN_READ_ONLY"
+                            ),
+                            "foreign_owner_installation_id": "owner-a",
+                            "foreign_ownership_epoch": 7,
+                            "foreign_recovery_status": "CHECK_REQUIRED_UNDER_LOCK",
+                        }
+                    ],
+                },
+            }
+        }
+    )
+
+    state = backup_job_detail_from_response(response)
+
+    assert state.controlled_takeover_required is True
+    assert state.writable_target_registration_required is False
+    assert state.target_lines == (
+        "Foreign target: E:/Backup · Fremmed eier - skrivebeskyttet",
+    )
+    assert len(state.target_details) == 1
+    assert state.target_details[0].target_ordinal == 1
+    assert state.target_details[0].endpoint_id == "endpoint-a"
+    assert state.target_details[0].foreign_owner_installation_id == "owner-a"
+    assert state.target_details[0].foreign_ownership_epoch == 7
 
 
 def test_backup_job_detail_view_model_handles_missing_read_model() -> None:

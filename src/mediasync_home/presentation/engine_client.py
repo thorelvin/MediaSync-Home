@@ -6,6 +6,7 @@ from typing import Protocol
 
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.backup_analysis import BackupAnalysisCommandName
+from mediasync_home.application.endpoint_takeover import EndpointTakeoverCommandName
 from mediasync_home.application.job_creation import JobCreationCommandName
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
 from mediasync_home.application.runs import RunCommandName
@@ -373,6 +374,39 @@ class EngineClient:
         return self._request_with_handshake_retry(
             lambda: self._ipc_client.submit_command(
                 WritableEndpointRegistrationCommandName.REGISTER_WRITABLE_TARGETS.value,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                payload_hash=canonical_command_payload_hash(payload),
+            )
+        )
+
+    def start_controlled_endpoint_takeover(
+        self,
+        *,
+        job_id: str,
+        job_revision_id: str,
+        target_ordinal: int,
+        endpoint_id: str,
+        expected_foreign_owner_installation_id: str,
+        expected_ownership_epoch: int,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        payload: dict[str, object] = {
+            "job_id": job_id,
+            "job_revision_id": job_revision_id,
+            "target_ordinal": target_ordinal,
+            "endpoint_id": endpoint_id,
+            "expected_foreign_owner_installation_id": (
+                expected_foreign_owner_installation_id
+            ),
+            "expected_ownership_epoch": expected_ownership_epoch,
+            "explicit_confirmation": True,
+        }
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.submit_command(
+                EndpointTakeoverCommandName.START_CONTROLLED_ENDPOINT_TAKEOVER.value,
                 request_id=request_id,
                 idempotency_key=idempotency_key,
                 payload=payload,

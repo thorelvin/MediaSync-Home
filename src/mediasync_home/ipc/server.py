@@ -48,6 +48,15 @@ from mediasync_home.application.history_read_models import (
 from mediasync_home.application.endpoint_registration import (
     EndpointClassificationRefreshReport,
 )
+from mediasync_home.application.endpoint_takeover import (
+    EndpointTakeoverCommandName,
+    EndpointTakeoverCoordinator,
+    EndpointTakeoverError,
+    EndpointTakeoverPayloadError,
+    EndpointTakeoverReport,
+    StartControlledEndpointTakeoverCommand,
+    parse_start_controlled_endpoint_takeover_command,
+)
 from mediasync_home.application.job_creation import (
     CreateStandardBackupJobCommand,
     JobCreationOutcome,
@@ -163,7 +172,10 @@ from mediasync_home.application.writable_endpoint_registration import (
     parse_register_writable_targets_command,
 )
 from mediasync_home.domain.process_roles import ProcessRole
-from mediasync_home.ipc.client_identity import ClientAuthorizationPolicy, VerifiedClientIdentity
+from mediasync_home.ipc.client_identity import (
+    ClientAuthorizationPolicy,
+    VerifiedClientIdentity,
+)
 from mediasync_home.ipc.protocol import (
     COMMAND_SCHEMA_VERSION,
     MAX_PROGRESS_EVENT_BYTES,
@@ -202,11 +214,17 @@ class IpcResourceLimits:
         if self.frame_window_seconds <= 0:
             raise ValueError("frame_window_seconds must be positive")
         if self.max_client_frames_per_window > self.max_global_frames_per_window:
-            raise ValueError("per-client frame limit cannot exceed the global frame limit")
+            raise ValueError(
+                "per-client frame limit cannot exceed the global frame limit"
+            )
         if self.max_outstanding_requests != 1:
-            raise ValueError("the synchronous named-pipe transport permits one outstanding request")
+            raise ValueError(
+                "the synchronous named-pipe transport permits one outstanding request"
+            )
         if self.max_subscriptions != 0:
-            raise ValueError("IPC subscriptions are unavailable in the current protocol")
+            raise ValueError(
+                "IPC subscriptions are unavailable in the current protocol"
+            )
 
     def to_payload(self) -> dict[str, int]:
         return {
@@ -230,7 +248,9 @@ class _AcceptedClient:
 @dataclass
 class EngineHostIpcService:
     authorization: ClientAuthorizationPolicy
-    status: RuntimeStatus = field(default_factory=lambda: startup_status(ProcessRole.ENGINE_HOST))
+    status: RuntimeStatus = field(
+        default_factory=lambda: startup_status(ProcessRole.ENGINE_HOST)
+    )
     installation_id: str = "local-dev"
     resource_limits: IpcResourceLimits = field(default_factory=IpcResourceLimits)
     monotonic_clock: Callable[[], float] = field(
@@ -241,19 +261,27 @@ class EngineHostIpcService:
     job_draft_store: JobDraftStore | None = None
     standard_backup_job_catalog: StandardBackupJobCatalog | None = None
     standard_backup_job_read_store: StandardBackupJobReadModelStore | None = None
-    standard_backup_job_detail_store: StandardBackupJobDetailReadModelStore | None = None
-    standard_backup_job_endpoint_registrar: StandardBackupJobEndpointRegistrar | None = None
+    standard_backup_job_detail_store: StandardBackupJobDetailReadModelStore | None = (
+        None
+    )
+    standard_backup_job_endpoint_registrar: (
+        StandardBackupJobEndpointRegistrar | None
+    ) = None
     endpoint_classification_refresh: (
         Callable[[], EndpointClassificationRefreshReport] | None
     ) = None
-    writable_endpoint_registration: WritableEndpointRegistrationCoordinator | None = None
+    writable_endpoint_registration: WritableEndpointRegistrationCoordinator | None = (
+        None
+    )
     writable_endpoint_registration_utc_now: Callable[[], str] | None = None
-    job_snapshot_refresh: (
-        Callable[[], SnapshotMaterializationRefreshReport] | None
-    ) = None
-    initial_backup_plan_refresh: (
-        Callable[[], InitialBackupPlanRefreshReport] | None
-    ) = None
+    endpoint_takeover: EndpointTakeoverCoordinator | None = None
+    endpoint_takeover_utc_now: Callable[[], str] | None = None
+    job_snapshot_refresh: Callable[[], SnapshotMaterializationRefreshReport] | None = (
+        None
+    )
+    initial_backup_plan_refresh: Callable[[], InitialBackupPlanRefreshReport] | None = (
+        None
+    )
     history_timeline_read_store: HistoryTimelineReadModelStore | None = None
     operation_audit_read_store: OperationAuditReadModelStore | None = None
     run_activity_read_store: RunActivityReadModelStore | None = None
@@ -649,13 +677,21 @@ class EngineHostIpcService:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         if not compare_digest(command.payload_hash, actual_payload_hash):
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
-        if command.command_name == JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value:
+        if (
+            command.command_name
+            == JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value
+        ):
             return self._handle_create_standard_backup_job(command, identity)
         if (
             command.command_name
             == WritableEndpointRegistrationCommandName.REGISTER_WRITABLE_TARGETS.value
         ):
             return self._handle_register_writable_targets(command, identity)
+        if (
+            command.command_name
+            == EndpointTakeoverCommandName.START_CONTROLLED_ENDPOINT_TAKEOVER.value
+        ):
+            return self._handle_controlled_endpoint_takeover(command, identity)
         if command.command_name == BackupAnalysisCommandName.CHECK_BACKUP.value:
             return self._handle_check_backup(command, identity)
         if command.command_name == RunCommandName.START_RUN.value:
@@ -668,7 +704,10 @@ class EngineHostIpcService:
             return self._handle_run_control(command, identity)
         if command.command_name == TriggerCommandName.ENQUEUE_TRIGGER_OCCURRENCE.value:
             return self._handle_enqueue_trigger_occurrence(command, identity)
-        if command.command_name == StateMaintenanceCommandName.RESTORE_STATE_FROM_BACKUP_SET.value:
+        if (
+            command.command_name
+            == StateMaintenanceCommandName.RESTORE_STATE_FROM_BACKUP_SET.value
+        ):
             return self._handle_restore_state_from_backup_set(command)
         receipt_response = self._record_terminal_rejected_receipt(
             command,
@@ -677,7 +716,10 @@ class EngineHostIpcService:
         )
         if receipt_response is not None:
             return receipt_response
-        response_payload: dict[str, Any] = {"command_name": command.command_name, "recognized": False}
+        response_payload: dict[str, Any] = {
+            "command_name": command.command_name,
+            "recognized": False,
+        }
         self._add_receipt_payload(response_payload, command.idempotency_key)
         return IpcResponse.rejected(
             IpcReason.MUTATING_COMMANDS_DISABLED,
@@ -697,7 +739,10 @@ class EngineHostIpcService:
 
     def _admit_global_frame(self, now: float) -> IpcResponse | None:
         self._discard_expired_frame_times(self._global_frame_times, now)
-        if len(self._global_frame_times) >= self.resource_limits.max_global_frames_per_window:
+        if (
+            len(self._global_frame_times)
+            >= self.resource_limits.max_global_frames_per_window
+        ):
             return self._rate_limit_response(
                 scope="GLOBAL_FRAMES",
                 limit=self.resource_limits.max_global_frames_per_window,
@@ -886,7 +931,9 @@ class EngineHostIpcService:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
 
         if self.status.mutations_enabled:
-            return self._dispatch_enqueue_trigger_occurrence(envelope, identity, command)
+            return self._dispatch_enqueue_trigger_occurrence(
+                envelope, identity, command
+            )
 
         receipt_response = self._record_terminal_rejected_receipt(
             envelope,
@@ -897,7 +944,9 @@ class EngineHostIpcService:
             return receipt_response
         response_payload = command.response_payload(mutations_enabled=False)
         self._add_receipt_payload(response_payload, envelope.idempotency_key)
-        return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, response_payload)
+        return IpcResponse.rejected(
+            IpcReason.MUTATING_COMMANDS_DISABLED, response_payload
+        )
 
     def _dispatch_enqueue_trigger_occurrence(
         self,
@@ -927,7 +976,9 @@ class EngineHostIpcService:
             or self.run_store is None
             or self.run_id_factory is None
         ):
-            return self._reject_config_missing_trigger_occurrence(envelope, identity, command)
+            return self._reject_config_missing_trigger_occurrence(
+                envelope, identity, command
+            )
 
         receipt, conflict_response = self._record_received_receipt(envelope, identity)
         if conflict_response is not None:
@@ -950,7 +1001,11 @@ class EngineHostIpcService:
             runs=self.run_store,
             id_factory=self.run_id_factory,
         )
-        if not outcome.enqueued or outcome.run_start is None or outcome.run_start.run is None:
+        if (
+            not outcome.enqueued
+            or outcome.run_start is None
+            or outcome.run_start.run is None
+        ):
             receipt = transition_command_receipt(
                 receipt,
                 CommandReceiptState.REJECTED,
@@ -1012,7 +1067,9 @@ class EngineHostIpcService:
             outcome=None,
         )
         self._add_receipt_payload(payload, envelope.idempotency_key)
-        return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload)
+        return IpcResponse.rejected(
+            IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload
+        )
 
     def _trigger_occurrence_replay_response(
         self,
@@ -1058,7 +1115,9 @@ class EngineHostIpcService:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
 
         if self.status.mutations_enabled:
-            return self._dispatch_create_standard_backup_job(envelope, identity, command)
+            return self._dispatch_create_standard_backup_job(
+                envelope, identity, command
+            )
 
         receipt_response = self._record_terminal_rejected_receipt(
             envelope,
@@ -1079,7 +1138,9 @@ class EngineHostIpcService:
                 command=command,
                 drafts=self.job_draft_store,
             ).to_dict()
-        return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, response_payload)
+        return IpcResponse.rejected(
+            IpcReason.MUTATING_COMMANDS_DISABLED, response_payload
+        )
 
     def _handle_register_writable_targets(
         self,
@@ -1291,7 +1352,187 @@ class EngineHostIpcService:
             recognized=True,
         )
         self._add_receipt_payload(payload, envelope.idempotency_key)
-        return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload)
+        return IpcResponse.rejected(
+            IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload
+        )
+
+    def _handle_controlled_endpoint_takeover(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+    ) -> IpcResponse:
+        try:
+            command = parse_start_controlled_endpoint_takeover_command(
+                request_id=envelope.request_id,
+                idempotency_key=envelope.idempotency_key,
+                payload=envelope.payload,
+            )
+        except EndpointTakeoverPayloadError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        if not self.status.mutations_enabled:
+            receipt_response = self._record_terminal_rejected_receipt(
+                envelope,
+                identity,
+                rejection_reason=IpcReason.MUTATING_COMMANDS_DISABLED.value,
+            )
+            if receipt_response is not None:
+                return receipt_response
+            payload = _endpoint_takeover_response_payload(
+                envelope=envelope,
+                command=command,
+                mutations_enabled=False,
+                recognized=True,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, payload)
+        response = self._dispatch_controlled_endpoint_takeover(
+            envelope,
+            identity,
+            command,
+        )
+        return self._refresh_endpoint_classification_after_job_command(response)
+
+    def _dispatch_controlled_endpoint_takeover(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: StartControlledEndpointTakeoverCommand,
+    ) -> IpcResponse:
+        if self.command_receipt_store is None or self.endpoint_takeover is None:
+            receipt_response = self._record_terminal_rejected_receipt(
+                envelope,
+                identity,
+                rejection_reason=IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED.value,
+            )
+            if receipt_response is not None:
+                return receipt_response
+            payload = _endpoint_takeover_response_payload(
+                envelope=envelope,
+                command=command,
+                mutations_enabled=True,
+                recognized=True,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(
+                IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload
+            )
+
+        receipt, conflict_response = self._record_received_receipt(envelope, identity)
+        if conflict_response is not None:
+            return conflict_response
+        if receipt is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+        if receipt.state is CommandReceiptState.REJECTED:
+            payload = _endpoint_takeover_response_payload(
+                envelope=envelope,
+                command=command,
+                mutations_enabled=True,
+                recognized=True,
+                idempotent_replay=True,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(_receipt_rejection_reason(receipt), payload)
+        try:
+            report = self.endpoint_takeover.start_controlled_takeover(
+                command=command,
+                observed_utc=(
+                    self.endpoint_takeover_utc_now()
+                    if self.endpoint_takeover_utc_now is not None
+                    else _system_utc_now()
+                ),
+            )
+        except EndpointTakeoverError as exc:
+            validation_code = exc.validation_code
+            next_action = exc.next_action
+            return self._run_command_effect_transaction(
+                lambda: self._reject_controlled_endpoint_takeover(
+                    envelope,
+                    command,
+                    validation_code=validation_code,
+                    next_action=next_action,
+                )
+            )
+        return self._run_command_effect_transaction(
+            lambda: self._accept_controlled_endpoint_takeover(
+                envelope,
+                command,
+                report,
+            )
+        )
+
+    def _accept_controlled_endpoint_takeover(
+        self,
+        envelope: IpcCommandEnvelope,
+        command: StartControlledEndpointTakeoverCommand,
+        report: EndpointTakeoverReport,
+    ) -> IpcResponse:
+        assert self.command_receipt_store is not None
+        receipt = self.command_receipt_store.load_command_receipt(
+            envelope.idempotency_key
+        )
+        if receipt is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+        if receipt.state is CommandReceiptState.RECEIVED:
+            receipt = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
+            self.command_receipt_store.update_command_receipt(receipt)
+        if receipt.state is CommandReceiptState.VALIDATED:
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.EFFECT_PREPARED,
+                result_entity_type="controlled_endpoint_takeover",
+                result_entity_id=report.intent_id,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+        if receipt.state is CommandReceiptState.EFFECT_PREPARED:
+            receipt = transition_command_receipt(receipt, CommandReceiptState.ACCEPTED)
+            self.command_receipt_store.update_command_receipt(receipt)
+        if receipt.state is CommandReceiptState.ACCEPTED:
+            receipt = transition_command_receipt(receipt, CommandReceiptState.SUCCEEDED)
+            self.command_receipt_store.update_command_receipt(receipt)
+            self._enqueue_command_effect_outbox(receipt)
+        payload = _endpoint_takeover_response_payload(
+            envelope=envelope,
+            command=command,
+            mutations_enabled=True,
+            recognized=True,
+            report=report,
+            idempotent_replay=report.idempotent_replay,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.accepted(payload)
+
+    def _reject_controlled_endpoint_takeover(
+        self,
+        envelope: IpcCommandEnvelope,
+        command: StartControlledEndpointTakeoverCommand,
+        *,
+        validation_code: str,
+        next_action: str,
+    ) -> IpcResponse:
+        assert self.command_receipt_store is not None
+        receipt = self.command_receipt_store.load_command_receipt(
+            envelope.idempotency_key
+        )
+        if receipt is not None and receipt.state in {
+            CommandReceiptState.RECEIVED,
+            CommandReceiptState.VALIDATED,
+        }:
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.REJECTED,
+                rejection_reason=IpcReason.COMMAND_PRECONDITION_FAILED.value,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+        payload = _endpoint_takeover_response_payload(
+            envelope=envelope,
+            command=command,
+            mutations_enabled=True,
+            recognized=True,
+            validation_code=validation_code,
+            next_action=next_action,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.rejected(IpcReason.COMMAND_PRECONDITION_FAILED, payload)
 
     def _handle_start_run(
         self,
@@ -1329,7 +1570,9 @@ class EngineHostIpcService:
                 command=command,
                 plans=self.plan_store,
             ).to_dict()
-        return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, response_payload)
+        return IpcResponse.rejected(
+            IpcReason.MUTATING_COMMANDS_DISABLED, response_payload
+        )
 
     def _handle_check_backup(
         self,
@@ -1418,7 +1661,10 @@ class EngineHostIpcService:
         job = self.standard_backup_job_detail_store.load_standard_backup_job_detail(
             command.job_id
         )
-        if job is None or self.run_store.load_active_run_for_job(command.job_id) is not None:
+        if (
+            job is None
+            or self.run_store.load_active_run_for_job(command.job_id) is not None
+        ):
             receipt = transition_command_receipt(
                 receipt,
                 CommandReceiptState.REJECTED,
@@ -1497,7 +1743,9 @@ class EngineHostIpcService:
             request=None,
         )
         self._add_receipt_payload(payload, envelope.idempotency_key)
-        return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload)
+        return IpcResponse.rejected(
+            IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload
+        )
 
     def _handle_run_control(
         self,
@@ -1638,7 +1886,9 @@ class EngineHostIpcService:
             outcome=None,
         )
         self._add_receipt_payload(payload, envelope.idempotency_key)
-        return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload)
+        return IpcResponse.rejected(
+            IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload
+        )
 
     def _run_control_replay_response(
         self,
@@ -1769,7 +2019,9 @@ class EngineHostIpcService:
             "mutations_enabled": True,
         }
         self._add_receipt_payload(payload, envelope.idempotency_key)
-        return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload)
+        return IpcResponse.rejected(
+            IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload
+        )
 
     def _start_run_replay_response(
         self,
@@ -1781,7 +2033,9 @@ class EngineHostIpcService:
             return None
         if self.run_store is None:
             return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
-        run = self.run_store.load_started_run_by_idempotency_key(envelope.idempotency_key)
+        run = self.run_store.load_started_run_by_idempotency_key(
+            envelope.idempotency_key
+        )
         payload = _start_run_response_payload(
             envelope=envelope,
             plan_id=command.plan_id,
@@ -1806,7 +2060,9 @@ class EngineHostIpcService:
         command: CreateStandardBackupJobCommand,
     ) -> IpcResponse:
         response = self._run_command_effect_transaction(
-            lambda: self._dispatch_create_standard_backup_job_in_transaction(envelope, identity, command)
+            lambda: self._dispatch_create_standard_backup_job_in_transaction(
+                envelope, identity, command
+            )
         )
         response = self._refresh_endpoint_classification_after_job_command(response)
         response = self._register_writable_targets_after_job_command(
@@ -1900,7 +2156,10 @@ class EngineHostIpcService:
         self,
         response: IpcResponse,
     ) -> IpcResponse:
-        if response.status is not IpcStatus.ACCEPTED or self.job_snapshot_refresh is None:
+        if (
+            response.status is not IpcStatus.ACCEPTED
+            or self.job_snapshot_refresh is None
+        ):
             return response
         payload = dict(response.payload)
         classification_refresh = payload.get("endpoint_classification_refresh")
@@ -1994,7 +2253,9 @@ class EngineHostIpcService:
             or self.standard_backup_job_catalog is None
             or self.standard_backup_job_id_factory is None
         ):
-            return self._reject_config_missing_standard_backup_job(envelope, identity, command)
+            return self._reject_config_missing_standard_backup_job(
+                envelope, identity, command
+            )
 
         receipt, conflict_response = self._record_received_receipt(envelope, identity)
         if conflict_response is not None:
@@ -2035,10 +2296,8 @@ class EngineHostIpcService:
 
         endpoint_set = None
         if self.standard_backup_job_endpoint_registrar is not None:
-            endpoint_set = (
-                self.standard_backup_job_endpoint_registrar.register_standard_backup_job_endpoints(
-                    outcome.job
-                )
+            endpoint_set = self.standard_backup_job_endpoint_registrar.register_standard_backup_job_endpoints(
+                outcome.job
             )
         receipt = transition_command_receipt(
             receipt,
@@ -2084,7 +2343,9 @@ class EngineHostIpcService:
             "mutations_enabled": True,
         }
         self._add_receipt_payload(payload, envelope.idempotency_key)
-        return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload)
+        return IpcResponse.rejected(
+            IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload
+        )
 
     def _standard_backup_job_replay_response(
         self,
@@ -2101,11 +2362,9 @@ class EngineHostIpcService:
         )
         endpoint_set = None
         if job is not None and self.standard_backup_job_endpoint_registrar is not None:
-            endpoint_set = (
-                self.standard_backup_job_endpoint_registrar.load_standard_backup_job_endpoint_set(
-                    job_id=job.job_id,
-                    job_revision_id=job.job_revision_id,
-                )
+            endpoint_set = self.standard_backup_job_endpoint_registrar.load_standard_backup_job_endpoint_set(
+                job_id=job.job_id,
+                job_revision_id=job.job_revision_id,
             )
         payload = _create_standard_backup_job_response_payload(
             envelope=envelope,
@@ -2173,14 +2432,18 @@ class EngineHostIpcService:
             self.command_receipt_store.update_command_receipt(receipt)
         return None
 
-    def _add_receipt_payload(self, payload: dict[str, Any], idempotency_key: str) -> None:
+    def _add_receipt_payload(
+        self, payload: dict[str, Any], idempotency_key: str
+    ) -> None:
         if self.command_receipt_store is None:
             return
         receipt = self.command_receipt_store.load_command_receipt(idempotency_key)
         if receipt is not None:
             payload["receipt"] = _receipt_payload(receipt)
 
-    def _run_command_effect_transaction(self, work: Callable[[], IpcResponse]) -> IpcResponse:
+    def _run_command_effect_transaction(
+        self, work: Callable[[], IpcResponse]
+    ) -> IpcResponse:
         if self.command_effect_transaction is None:
             return work()
         try:
@@ -2284,9 +2547,7 @@ def _writable_endpoint_registration_response_payload(
     next_action: str | None = None,
 ) -> dict[str, Any]:
     active_job_revision_id = (
-        command.job_revision_id
-        if report is None
-        else report.active_job_revision_id
+        command.job_revision_id if report is None else report.active_job_revision_id
     )
     result: dict[str, Any] = {
         "command_name": envelope.command_name,
@@ -2313,6 +2574,56 @@ def _writable_endpoint_registration_response_payload(
             "registered_target_count": 0,
             "idempotent_replay": idempotent_replay,
             "completed": False,
+            "validation_codes": [validation_code],
+            "next_action": next_action,
+        }
+    return result
+
+
+def _endpoint_takeover_response_payload(
+    *,
+    envelope: IpcCommandEnvelope,
+    command: StartControlledEndpointTakeoverCommand,
+    mutations_enabled: bool,
+    recognized: bool,
+    report: EndpointTakeoverReport | None = None,
+    idempotent_replay: bool = False,
+    validation_code: str | None = None,
+    next_action: str | None = None,
+) -> dict[str, Any]:
+    active_job_revision_id = (
+        command.job_revision_id if report is None else report.active_job_revision_id
+    )
+    result: dict[str, Any] = {
+        "command_name": envelope.command_name,
+        "job_id": command.job_id,
+        "requested_job_revision_id": command.job_revision_id,
+        "target_ordinal": command.target_ordinal,
+        "endpoint_id": command.endpoint_id,
+        "recognized": recognized,
+        "mutations_enabled": mutations_enabled,
+        "idempotent_replay": idempotent_replay,
+        "job": {
+            "job_id": command.job_id,
+            "job_revision_id": active_job_revision_id,
+        },
+    }
+    if report is not None:
+        result["endpoint_takeover"] = report.to_dict()
+    elif validation_code is not None:
+        result["endpoint_takeover"] = {
+            "job_id": command.job_id,
+            "source_job_revision_id": command.job_revision_id,
+            "active_job_revision_id": command.job_revision_id,
+            "endpoint_id": command.endpoint_id,
+            "target_ordinal": command.target_ordinal,
+            "intent_id": None,
+            "analysis_request_id": None,
+            "state": None,
+            "idempotent_replay": idempotent_replay,
+            "completed": False,
+            "full_analysis_queued": False,
+            "start_when_safe": False,
             "validation_codes": [validation_code],
             "next_action": next_action,
         }

@@ -253,21 +253,45 @@ class SqliteEndpointClassificationRefresher:
             return False
         row = self._connection.execute(
             """
+            WITH writable_evidence AS (
+                SELECT
+                    endpoint_id,
+                    endpoint_revision_id,
+                    endpoint_generation,
+                    control_area_id,
+                    owner_installation_id,
+                    ownership_epoch,
+                    root_identity_hash_algorithm,
+                    root_identity_hash,
+                    marker_checksum_algorithm,
+                    marker_checksum
+                FROM writable_endpoint_registrations
+                UNION ALL
+                SELECT
+                    endpoint_id,
+                    endpoint_revision_id,
+                    endpoint_generation,
+                    control_area_id,
+                    owner_installation_id,
+                    ownership_epoch,
+                    root_identity_hash_algorithm,
+                    root_identity_hash,
+                    marker_checksum_algorithm,
+                    marker_checksum
+                FROM controlled_endpoint_takeovers
+            )
             SELECT
-                registrations.control_area_id,
-                registrations.owner_installation_id,
-                registrations.ownership_epoch,
-                registrations.root_identity_hash_algorithm,
-                registrations.root_identity_hash,
-                registrations.marker_checksum_algorithm,
-                registrations.marker_checksum,
-                revisions.generation
-            FROM writable_endpoint_registrations AS registrations
-            INNER JOIN endpoint_revisions AS revisions
-                ON revisions.endpoint_id = registrations.endpoint_id
-                AND revisions.id = registrations.endpoint_revision_id
-            WHERE registrations.endpoint_id = ?
-                AND registrations.endpoint_revision_id = ?
+                evidence.control_area_id,
+                evidence.owner_installation_id,
+                evidence.ownership_epoch,
+                evidence.root_identity_hash_algorithm,
+                evidence.root_identity_hash,
+                evidence.marker_checksum_algorithm,
+                evidence.marker_checksum,
+                evidence.endpoint_generation
+            FROM writable_evidence AS evidence
+            WHERE evidence.endpoint_id = ?
+                AND evidence.endpoint_revision_id = ?
             """,
             (endpoint.endpoint_id, endpoint.endpoint_revision_id),
         ).fetchone()

@@ -77,6 +77,7 @@ from mediasync_home.presentation.view_models.backup_setup import (
     BackupSetupStep,
     BackupSetupStepViewState,
     BackupTargetDraft,
+    BackupJobDetailTargetViewState,
     BackupJobDetailViewState,
     BackupJobStatusViewState,
     StandardBackupSetupViewState,
@@ -161,9 +162,7 @@ _TERMINAL_RUN_STATES = frozenset(
         "RECOVERY_REQUIRED",
     }
 )
-_RETRYABLE_OPERATION_OUTCOMES = frozenset(
-    {"SKIPPED", "CANCELLED", "RECOVERY_REQUIRED"}
-)
+_RETRYABLE_OPERATION_OUTCOMES = frozenset({"SKIPPED", "CANCELLED", "RECOVERY_REQUIRED"})
 
 
 @dataclass(frozen=True)
@@ -346,6 +345,21 @@ class WritableTargetRegistrationProvider(Protocol):
     ) -> IpcResponse: ...
 
 
+class ControlledEndpointTakeoverProvider(Protocol):
+    def start_controlled_endpoint_takeover(
+        self,
+        *,
+        job_id: str,
+        job_revision_id: str,
+        target_ordinal: int,
+        endpoint_id: str,
+        expected_foreign_owner_installation_id: str,
+        expected_ownership_epoch: int,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse: ...
+
+
 class BackupStartProvider(Protocol):
     def start_backup(
         self,
@@ -475,6 +489,12 @@ class MediaSyncWindow(QMainWindow):
         self._registration_command_job_id: str | None = None
         self._registration_command_revision_id: str | None = None
         self._registration_command_pending = False
+        self._takeover_request_id: str | None = None
+        self._takeover_idempotency_key: str | None = None
+        self._takeover_command_identity: tuple[str, str, int, str, str, int] | None = (
+            None
+        )
+        self._takeover_command_pending = False
         self._start_request_id: str | None = None
         self._start_idempotency_key: str | None = None
         self._start_command_pending = False
@@ -717,7 +737,9 @@ class MediaSyncWindow(QMainWindow):
             ("nb", "Norsk"),
             ("en", "English"),
         )
-        self._selected_language_code = LanguageCode(self._user_preferences.language.value)
+        self._selected_language_code = LanguageCode(
+            self._user_preferences.language.value
+        )
         self._language_actions: dict[str, QAction] = {}
         self._run_progress_timer = QTimer(self)
         self._run_progress_timer.setInterval(1000)
@@ -797,7 +819,9 @@ class MediaSyncWindow(QMainWindow):
         return localize_display_value(self._selected_language_code, value)
 
     def _command_worker_active(self) -> bool:
-        return self._command_submissions is not None and self._command_submissions.active
+        return (
+            self._command_submissions is not None and self._command_submissions.active
+        )
 
     def _page_prefetch_lane_available(self) -> bool:
         controller = self._page_prefetch_queries
@@ -946,7 +970,9 @@ class MediaSyncWindow(QMainWindow):
                 self.apply_engine_status(engine_status_from_response(handshake))
                 return
             self._connected = True
-        self.apply_engine_status(engine_status_from_response(self._engine_client.get_status()))
+        self.apply_engine_status(
+            engine_status_from_response(self._engine_client.get_status())
+        )
         self._refresh_connected_read_models(background=False)
 
     def _refresh_connected_read_models(self, *, background: bool = True) -> None:
@@ -958,7 +984,9 @@ class MediaSyncWindow(QMainWindow):
 
     def apply_engine_status(self, state: EngineStatusViewState) -> None:
         self._engine_status_state = state
-        self._engine_chip.setText(f"{self._display(state.connection_label)}: {self._display(state.state_label)}")
+        self._engine_chip.setText(
+            f"{self._display(state.connection_label)}: {self._display(state.state_label)}"
+        )
         self._engine_chip.setProperty("statusKind", state.status_kind)
         self._engine_state.setText(self._display(state.state_label))
         self._engine_detail.setText(self._display(state.detail))
@@ -1001,7 +1029,9 @@ class MediaSyncWindow(QMainWindow):
         self._apply_history_timeline_state(state)
 
     def _refresh_backup_overview(self, *, background: bool = True) -> None:
-        if self._engine_client is None or not hasattr(self._engine_client, "get_backup_overview"):
+        if self._engine_client is None or not hasattr(
+            self._engine_client, "get_backup_overview"
+        ):
             self._cancel_background_jobs_query()
             return
         page_limit = self._jobs_page_limit
@@ -1106,9 +1136,13 @@ class MediaSyncWindow(QMainWindow):
             self._selected_job_id,
             background=background,
         )
-        if refresh_activity and self._engine_client is not None and hasattr(
-            self._engine_client,
-            "get_activity_overview",
+        if (
+            refresh_activity
+            and self._engine_client is not None
+            and hasattr(
+                self._engine_client,
+                "get_activity_overview",
+            )
         ):
             self._refresh_activity_overview()
 
@@ -1118,7 +1152,9 @@ class MediaSyncWindow(QMainWindow):
         *,
         background: bool = True,
     ) -> BackupJobDetailViewState | None:
-        if self._engine_client is None or not hasattr(self._engine_client, "get_backup_job_detail"):
+        if self._engine_client is None or not hasattr(
+            self._engine_client, "get_backup_job_detail"
+        ):
             self._cancel_background_job_detail_query()
             return None
         if background and self._background_queries is not None:
@@ -1193,10 +1229,10 @@ class MediaSyncWindow(QMainWindow):
         state = backup_job_detail_from_response(response)
         if state.job_id is not None and state.job_id != job_id:
             state = empty_backup_job_detail_state()
-        if (
-            state.analysis_request_id is not None
-            and state.analysis_request_state in {"QUEUED", "RUNNING"}
-        ):
+        if state.analysis_request_id is not None and state.analysis_request_state in {
+            "QUEUED",
+            "RUNNING",
+        }:
             self._analysis_request_id = state.analysis_request_id
             if not self._analysis_timer.isActive():
                 self._analysis_timer.start()
@@ -1255,8 +1291,7 @@ class MediaSyncWindow(QMainWindow):
         selected_row = -1
         for index, job in enumerate(state.jobs):
             item = QListWidgetItem(
-                f"{self._display(job.title)}\n"
-                f"{self._display(job.target_summary_label)}"
+                f"{self._display(job.title)}\n{self._display(job.target_summary_label)}"
             )
             item.setData(Qt.ItemDataRole.UserRole, job.job_id)
             item.setToolTip(job.source_label)
@@ -1279,7 +1314,9 @@ class MediaSyncWindow(QMainWindow):
                 if state.read_model_available
                 else self._texts().jobs_unavailable
             )
-            self._jobs_empty_label.setVisible(not has_jobs or not state.read_model_available)
+            self._jobs_empty_label.setVisible(
+                not has_jobs or not state.read_model_available
+            )
         if self._jobs_page_label is not None:
             first = state.offset + 1 if has_jobs else 0
             last = state.offset + len(state.jobs)
@@ -1288,9 +1325,7 @@ class MediaSyncWindow(QMainWindow):
             self._jobs_previous_button.setEnabled(
                 not self._jobs_query_pending and state.offset > 0
             )
-            self._jobs_previous_button.setToolTip(
-                self._texts().previous_page_tooltip
-            )
+            self._jobs_previous_button.setToolTip(self._texts().previous_page_tooltip)
             self._jobs_previous_button.setAccessibleName(
                 self._texts().previous_page_tooltip
             )
@@ -1299,9 +1334,7 @@ class MediaSyncWindow(QMainWindow):
                 not self._jobs_query_pending and state.has_more_jobs
             )
             self._jobs_next_button.setToolTip(self._texts().next_page_tooltip)
-            self._jobs_next_button.setAccessibleName(
-                self._texts().next_page_tooltip
-            )
+            self._jobs_next_button.setAccessibleName(self._texts().next_page_tooltip)
         self._apply_history_job_filter_options(state)
         self._refresh_dashboard_geometry()
 
@@ -1584,7 +1617,11 @@ class MediaSyncWindow(QMainWindow):
         self._history_page_prefetch.clear()
         context = self._history_next_page_context()
         controller = self._page_prefetch_queries
-        if context is None or controller is None or not self._page_prefetch_lane_available():
+        if (
+            context is None
+            or controller is None
+            or not self._page_prefetch_lane_available()
+        ):
             return
         page_limit = self._history_page_limit
 
@@ -1710,9 +1747,7 @@ class MediaSyncWindow(QMainWindow):
                 not self._history_query_pending and state.has_more
             )
             self._history_next_button.setToolTip(self._texts().next_page_tooltip)
-            self._history_next_button.setAccessibleName(
-                self._texts().next_page_tooltip
-            )
+            self._history_next_button.setAccessibleName(self._texts().next_page_tooltip)
         selected = next(
             (
                 activity
@@ -1843,7 +1878,11 @@ class MediaSyncWindow(QMainWindow):
         finished = (
             self._format_history_timestamp(activity.finished_utc)
             if activity.finished_utc is not None
-            else ("In progress" if self._selected_language_code is LanguageCode.ENGLISH else "Pågår")
+            else (
+                "In progress"
+                if self._selected_language_code is LanguageCode.ENGLISH
+                else "Pågår"
+            )
         )
         if activity.activity_kind == "CONTROL":
             operations = (
@@ -1858,8 +1897,7 @@ class MediaSyncWindow(QMainWindow):
             )
         else:
             operations = (
-                f"{activity.completed_operations} / "
-                f"{activity.planned_operations}"
+                f"{activity.completed_operations} / {activity.planned_operations}"
             )
             transferred = (
                 f"{_format_bytes(activity.completed_bytes)} / "
@@ -1884,9 +1922,7 @@ class MediaSyncWindow(QMainWindow):
             "operations": operations,
             "transferred": transferred,
             "average_speed": self._format_history_average_speed(activity),
-            "warnings_errors": (
-                f"{activity.warning_count} / {activity.error_count}"
-            ),
+            "warnings_errors": (f"{activity.warning_count} / {activity.error_count}"),
             "trigger": self._format_history_trigger(activity.trigger_type),
             "identifiers": identifiers,
         }
@@ -1961,9 +1997,7 @@ class MediaSyncWindow(QMainWindow):
         if self._selected_navigation_index == 2:
             self._refresh_history_operation_page()
         else:
-            self._apply_history_operation_page_state(
-                self._history_operation_page_state
-            )
+            self._apply_history_operation_page_state(self._history_operation_page_state)
 
     def _refresh_history_operation_page(self, *, background: bool = True) -> None:
         plan_id = self._history_operation_plan_id
@@ -1974,9 +2008,7 @@ class MediaSyncWindow(QMainWindow):
         ):
             self._cancel_background_history_operation_page_query()
             self._history_operation_page_state = empty_plan_operation_preview_state()
-            self._apply_history_operation_page_state(
-                self._history_operation_page_state
-            )
+            self._apply_history_operation_page_state(self._history_operation_page_state)
             return
         activity_key = self._history_operation_activity_key
         run_id = self._history_operation_run_id
@@ -2180,8 +2212,7 @@ class MediaSyncWindow(QMainWindow):
                 not has_rows or not state.read_model_available
             )
         first = (
-            self._history_operation_page_index * self._history_operation_page_limit
-            + 1
+            self._history_operation_page_index * self._history_operation_page_limit + 1
             if has_rows
             else 0
         )
@@ -2237,8 +2268,7 @@ class MediaSyncWindow(QMainWindow):
         self._history_operation_query_pending = pending
         if self._history_operation_list is not None:
             self._history_operation_list.setEnabled(
-                not pending
-                and self._history_operation_page_state.read_model_available
+                not pending and self._history_operation_page_state.read_model_available
             )
         if self._history_operation_previous_button is not None:
             self._history_operation_previous_button.setEnabled(
@@ -2288,7 +2318,11 @@ class MediaSyncWindow(QMainWindow):
         self._history_operation_page_prefetch.clear()
         context = self._history_operation_next_page_context()
         controller = self._page_prefetch_queries
-        if context is None or controller is None or not self._page_prefetch_lane_available():
+        if (
+            context is None
+            or controller is None
+            or not self._page_prefetch_lane_available()
+        ):
             return
         page_limit = self._history_operation_page_limit
 
@@ -2303,9 +2337,7 @@ class MediaSyncWindow(QMainWindow):
         def accept(response: object) -> None:
             if self._history_operation_next_page_context() != context:
                 return
-            state = plan_operation_preview_from_response(
-                cast(IpcResponse, response)
-            )
+            state = plan_operation_preview_from_response(cast(IpcResponse, response))
             if (
                 not state.read_model_available
                 or state.plan_id != context.plan_id
@@ -2346,9 +2378,7 @@ class MediaSyncWindow(QMainWindow):
             run_id=self._history_operation_run_id,
             operation_id=operation_id,
         )
-        self._apply_history_operation_audit_state(
-            self._history_operation_audit_state
-        )
+        self._apply_history_operation_audit_state(self._history_operation_audit_state)
         self._refresh_history_operation_audit(operation_id)
 
     def _refresh_history_operation_audit(
@@ -2426,9 +2456,7 @@ class MediaSyncWindow(QMainWindow):
                 limit=25,
             )
         )
-        self._apply_history_operation_audit_state(
-            self._history_operation_audit_state
-        )
+        self._apply_history_operation_audit_state(self._history_operation_audit_state)
 
     def _accept_background_history_operation_audit(
         self,
@@ -2446,9 +2474,7 @@ class MediaSyncWindow(QMainWindow):
             return
         self._set_history_audit_query_pending(False)
         self._history_operation_audit_state = operation_audit_from_response(response)
-        self._apply_history_operation_audit_state(
-            self._history_operation_audit_state
-        )
+        self._apply_history_operation_audit_state(self._history_operation_audit_state)
 
     def _reject_background_history_operation_audit(
         self,
@@ -2512,7 +2538,9 @@ class MediaSyncWindow(QMainWindow):
             detail_title.setText(self._texts().file_audit_not_found)
         else:
             detail_title.setText(
-                state.target_relative_path or state.operation_id or self._texts().file_result
+                state.target_relative_path
+                or state.operation_id
+                or self._texts().file_result
             )
 
         outcome = state.outcome
@@ -2536,9 +2564,7 @@ class MediaSyncWindow(QMainWindow):
                 else "-"
             ),
             "transferred": (
-                _format_bytes(outcome.bytes_transferred)
-                if outcome is not None
-                else "-"
+                _format_bytes(outcome.bytes_transferred) if outcome is not None else "-"
             ),
             "verification": (
                 self._history_evidence_label(outcome.assurance_level)
@@ -2567,10 +2593,13 @@ class MediaSyncWindow(QMainWindow):
             result = self._history_file_state_label(attempt.state)
             finished = self._format_history_timestamp(attempt.finished_utc)
             detail = attempt.error_code or _format_bytes(attempt.bytes_transferred)
-            prefix = "Attempt" if self._selected_language_code is LanguageCode.ENGLISH else "Forsøk"
+            prefix = (
+                "Attempt"
+                if self._selected_language_code is LanguageCode.ENGLISH
+                else "Forsøk"
+            )
             item = QListWidgetItem(
-                f"{prefix} {attempt.attempt_number} · {result}\n"
-                f"{finished} · {detail}"
+                f"{prefix} {attempt.attempt_number} · {result}\n{finished} · {detail}"
             )
             item.setToolTip(attempt.error_code or result)
             item.setSizeHint(QSize(0, 54))
@@ -2695,9 +2724,7 @@ class MediaSyncWindow(QMainWindow):
         context = self._history_operation_next_page_context()
         if context is None:
             return
-        prefetched_state = self._history_operation_page_prefetch.take(
-            context=context
-        )
+        prefetched_state = self._history_operation_page_prefetch.take(context=context)
         next_index = self._history_operation_page_index + 1
         if next_index == len(self._history_operation_page_cursors):
             self._history_operation_page_cursors.append(dict(state.next_cursor))
@@ -2938,7 +2965,9 @@ class MediaSyncWindow(QMainWindow):
             or activity.duration_seconds < 1
         ):
             return "-"
-        return f"{_format_bytes(activity.completed_bytes // activity.duration_seconds)}/s"
+        return (
+            f"{_format_bytes(activity.completed_bytes // activity.duration_seconds)}/s"
+        )
 
     def _format_history_trigger(self, trigger_type: str) -> str:
         english = self._selected_language_code is LanguageCode.ENGLISH
@@ -2960,7 +2989,9 @@ class MediaSyncWindow(QMainWindow):
         return pair[0] if english else pair[1]
 
     def _refresh_activity_overview(self, *, background: bool = True) -> None:
-        if self._engine_client is None or not hasattr(self._engine_client, "get_activity_overview"):
+        if self._engine_client is None or not hasattr(
+            self._engine_client, "get_activity_overview"
+        ):
             self._cancel_background_activity_query()
             return
         job_id = self._selected_job_id
@@ -3405,9 +3436,7 @@ class MediaSyncWindow(QMainWindow):
                     f"{self._texts().current_file}: {active_path}{active_size} "
                     f"· {phase}{retry_detail}"
                 )
-                self._jobs_run_active_file.setToolTip(
-                    "\n".join(active_tooltip_lines)
-                )
+                self._jobs_run_active_file.setToolTip("\n".join(active_tooltip_lines))
             else:
                 self._jobs_run_active_file.setText("")
                 self._jobs_run_active_file.setToolTip("")
@@ -3445,9 +3474,7 @@ class MediaSyncWindow(QMainWindow):
                     )
                 backoff_label = "Scheduled backoff" if english else "Planlagt ventetid"
                 total_label = (
-                    "Total scheduled backoff"
-                    if english
-                    else "Samlet planlagt ventetid"
+                    "Total scheduled backoff" if english else "Samlet planlagt ventetid"
                 )
                 if target.endpoint_retry_backoff_ms is not None:
                     tooltip_lines.append(
@@ -3461,10 +3488,12 @@ class MediaSyncWindow(QMainWindow):
             row.setText(" · ".join(details))
             row.setToolTip("\n".join(tooltip_lines))
             row.setVisible(True)
-        pausable = (
-            not state.stop_requested
-            and state.state in {"CREATED", "QUEUED", "PREFLIGHT", "EXECUTING"}
-        )
+        pausable = not state.stop_requested and state.state in {
+            "CREATED",
+            "QUEUED",
+            "PREFLIGHT",
+            "EXECUTING",
+        }
         resumable = not state.stop_requested and state.state == "PAUSED"
         stoppable = state.active and state.state in {
             "CREATED",
@@ -3624,9 +3653,7 @@ class MediaSyncWindow(QMainWindow):
                 f"{state.completed_target_count} of {state.target_count} "
                 f"{noun} completed"
             )
-        return (
-            f"{state.completed_target_count} av {state.target_count} mål fullført"
-        )
+        return f"{state.completed_target_count} av {state.target_count} mål fullført"
 
     def _pause_active_backup(self) -> None:
         self._submit_run_control("pause")
@@ -3745,10 +3772,7 @@ class MediaSyncWindow(QMainWindow):
             )
             self._apply_run_progress_state(self._run_progress_state)
             return
-        if (
-            self._active_run_id == run_id
-            or self._run_progress_state.run_id == run_id
-        ):
+        if self._active_run_id == run_id or self._run_progress_state.run_id == run_id:
             self._set_active_run(run_id)
             self._poll_active_run_progress()
         else:
@@ -3777,7 +3801,9 @@ class MediaSyncWindow(QMainWindow):
                 coverage: IpcResponse | None = None
                 snapshot_id: str | None = None
                 if hasattr(client, "get_plan_operations"):
-                    operations = cast(PlanOperationsProvider, client).get_plan_operations(
+                    operations = cast(
+                        PlanOperationsProvider, client
+                    ).get_plan_operations(
                         plan_id=plan_id,
                         limit=3,
                     )
@@ -4118,7 +4144,11 @@ class MediaSyncWindow(QMainWindow):
         self._changes_page_prefetch.clear()
         context = self._changes_next_page_context()
         controller = self._page_prefetch_queries
-        if context is None or controller is None or not self._page_prefetch_lane_available():
+        if (
+            context is None
+            or controller is None
+            or not self._page_prefetch_lane_available()
+        ):
             return
         page_limit = self._changes_page_limit
 
@@ -4135,9 +4165,7 @@ class MediaSyncWindow(QMainWindow):
         def accept(response: object) -> None:
             if self._changes_next_page_context() != context:
                 return
-            state = plan_operation_preview_from_response(
-                cast(IpcResponse, response)
-            )
+            state = plan_operation_preview_from_response(cast(IpcResponse, response))
             if (
                 not state.read_model_available
                 or state.plan_id != context.plan_id
@@ -4262,15 +4290,11 @@ class MediaSyncWindow(QMainWindow):
         self._apply_changes_target_options(state)
         if self._changes_risk_combo is not None:
             self._changes_risk_combo.blockSignals(True)
-            risk_index = self._changes_risk_combo.findData(
-                self._changes_risk_filter
-            )
+            risk_index = self._changes_risk_combo.findData(self._changes_risk_filter)
             self._changes_risk_combo.setCurrentIndex(max(0, risk_index))
             self._changes_risk_combo.blockSignals(False)
         if self._changes_attention_banner is not None:
-            self._changes_attention_banner.setText(
-                self._changes_attention_text(state)
-            )
+            self._changes_attention_banner.setText(self._changes_attention_text(state))
             self._changes_attention_banner.setProperty(
                 "attentionKind",
                 self._changes_attention_kind(state),
@@ -4460,12 +4484,16 @@ class MediaSyncWindow(QMainWindow):
         return pair[0] if english else pair[1]
 
     def _refresh_plan_endpoint_preview(self, plan_id: str) -> PlanEndpointPreviewState:
-        if self._engine_client is None or not hasattr(self._engine_client, "get_plan_endpoints"):
+        if self._engine_client is None or not hasattr(
+            self._engine_client, "get_plan_endpoints"
+        ):
             state = empty_plan_endpoint_preview_state()
             self.apply_plan_endpoint_preview(state)
             return state
         provider = cast(PlanEndpointsProvider, self._engine_client)
-        state = plan_endpoint_preview_from_response(provider.get_plan_endpoints(plan_id=plan_id, limit=4))
+        state = plan_endpoint_preview_from_response(
+            provider.get_plan_endpoints(plan_id=plan_id, limit=4)
+        )
         self.apply_plan_endpoint_preview(state)
         return state
 
@@ -4495,7 +4523,9 @@ class MediaSyncWindow(QMainWindow):
         )
 
     def _refresh_cataloged_files_preview(self, *, background: bool = True) -> None:
-        if self._engine_client is None or not hasattr(self._engine_client, "get_cataloged_files"):
+        if self._engine_client is None or not hasattr(
+            self._engine_client, "get_cataloged_files"
+        ):
             if self._background_queries is not None:
                 self._background_queries.cancel("cataloged-files")
             self._ui_update_coalescer.cancel("cataloged-files")
@@ -4512,9 +4542,7 @@ class MediaSyncWindow(QMainWindow):
                 def apply(value: object) -> None:
                     self._catalog_query_pending = False
                     self.apply_cataloged_files_preview(
-                        cataloged_files_preview_from_response(
-                            cast(IpcResponse, value)
-                        )
+                        cataloged_files_preview_from_response(cast(IpcResponse, value))
                     )
 
                 if not self._ui_update_coalescer.submit(
@@ -4560,7 +4588,11 @@ class MediaSyncWindow(QMainWindow):
             label.setText(f"{step.number}. {title}")
             label.setProperty(
                 "stepState",
-                "current" if step.current else "complete" if step.complete else "upcoming",
+                "current"
+                if step.current
+                else "complete"
+                if step.complete
+                else "upcoming",
             )
             _refresh_style(label)
         if self._setup_source_value is not None:
@@ -4569,10 +4601,14 @@ class MediaSyncWindow(QMainWindow):
             self._setup_target_value.setText(self._display(state.target_label))
         if self._setup_defaults_value is not None:
             self._setup_defaults_value.setText(
-                " · ".join(self._display(label) for label in state.defaults.summary()[:3])
+                " · ".join(
+                    self._display(label) for label in state.defaults.summary()[:3]
+                )
             )
         if self._setup_retention_value is not None:
-            self._setup_retention_value.setText(self._display(state.defaults.retention_label))
+            self._setup_retention_value.setText(
+                self._display(state.defaults.retention_label)
+            )
         self._apply_setup_target_controls(state)
         if self._setup_back_button is not None:
             can_go_back = self._setup_can_go_back(state)
@@ -4875,8 +4911,7 @@ class MediaSyncWindow(QMainWindow):
 
         registration = response.payload.get("writable_endpoint_registration")
         registration_incomplete = (
-            isinstance(registration, dict)
-            and registration.get("completed") is not True
+            isinstance(registration, dict) and registration.get("completed") is not True
         )
         self._setup_registration_retry_required = registration_incomplete
         success_detail = "Backup job and writable target registration were saved."
@@ -5021,7 +5056,8 @@ class MediaSyncWindow(QMainWindow):
                 target_summary_label=f"{target_count} {target_word}",
                 defaults_summary_label="Update backup - All user files - Standard verification",
                 target_lines=tuple(
-                    f"{target.name}: {target.path_label}" for target in self._setup_draft.targets
+                    f"{target.name}: {target.path_label}"
+                    for target in self._setup_draft.targets
                 ),
                 read_model_available=False,
                 found=False,
@@ -5070,9 +5106,8 @@ class MediaSyncWindow(QMainWindow):
                     row.setText("")
                     row.setVisible(False)
         analysis_pending = state.analysis_request_state in {"QUEUED", "RUNNING"}
-        registration_mode = (
-            state.found and state.writable_target_registration_required
-        )
+        registration_mode = state.found and state.writable_target_registration_required
+        takeover_mode = state.found and state.controlled_takeover_required
         completed_plan_already_run = (
             state.job_id is not None
             and state.job_id == self._latest_run_job_id
@@ -5080,13 +5115,10 @@ class MediaSyncWindow(QMainWindow):
             and state.plan_id == self._latest_run_plan_id
             and self._latest_run_state in _TERMINAL_RUN_STATES
         )
-        check_mode = (
-            state.found
-            and (
-                state.plan_id is None
-                or state.plan_state != "SEALED"
-                or completed_plan_already_run
-            )
+        check_mode = state.found and (
+            state.plan_id is None
+            or state.plan_state != "SEALED"
+            or completed_plan_already_run
         )
         for start_button in (
             self._start_backup_button,
@@ -5108,11 +5140,12 @@ class MediaSyncWindow(QMainWindow):
             start_button.setVisible(
                 state.found
                 and not active_for_job
-                and (registration_mode or has_plan or check_mode)
+                and (takeover_mode or registration_mode or has_plan or check_mode)
             )
             start_button.setEnabled(
                 not self._job_detail_query_pending
                 and not self._registration_command_pending
+                and not self._takeover_command_pending
                 and not self._analysis_command_pending
                 and not self._start_command_pending
                 and not analysis_pending
@@ -5121,20 +5154,34 @@ class MediaSyncWindow(QMainWindow):
                 and not self._command_worker_active()
                 and self._engine_client is not None
                 and (
-                    hasattr(self._engine_client, "register_writable_targets")
-                    if registration_mode
+                    hasattr(self._engine_client, "start_controlled_endpoint_takeover")
+                    if takeover_mode
                     else (
-                        hasattr(self._engine_client, "check_backup")
-                        if check_mode
+                        hasattr(self._engine_client, "register_writable_targets")
+                        if registration_mode
                         else (
-                            has_plan
-                            and state.plan_runnable
-                            and hasattr(self._engine_client, "start_backup")
+                            hasattr(self._engine_client, "check_backup")
+                            if check_mode
+                            else (
+                                has_plan
+                                and state.plan_runnable
+                                and hasattr(self._engine_client, "start_backup")
+                            )
                         )
                     )
                 )
             )
-            if registration_mode and self._registration_command_pending:
+            if takeover_mode and self._takeover_command_pending:
+                start_button.setText(self._display("Overtar mål..."))
+                start_button.setToolTip(
+                    self._display("Kontrollert overtakelse pågår under mållåsen.")
+                )
+            elif takeover_mode:
+                start_button.setText(self._display("Start kontrollert overtakelse"))
+                start_button.setToolTip(
+                    self._display("Se detaljer og bekreft overtakelse av fremmed mål.")
+                )
+            elif registration_mode and self._registration_command_pending:
                 start_button.setText(self._texts().registering_targets)
                 start_button.setToolTip(self._texts().register_targets_tooltip)
             elif registration_mode:
@@ -5159,6 +5206,9 @@ class MediaSyncWindow(QMainWindow):
         if self._job_detail_query_pending:
             return
         state = self._job_detail_state
+        if state.found and state.controlled_takeover_required:
+            self._start_controlled_endpoint_takeover()
+            return
         if state.found and state.writable_target_registration_required:
             self._register_selected_targets()
             return
@@ -5169,17 +5219,259 @@ class MediaSyncWindow(QMainWindow):
             and state.plan_id == self._latest_run_plan_id
             and self._latest_run_state in _TERMINAL_RUN_STATES
         )
-        if (
-            state.found
-            and (
-                state.plan_id is None
-                or state.plan_state != "SEALED"
-                or completed_plan_already_run
-            )
+        if state.found and (
+            state.plan_id is None
+            or state.plan_state != "SEALED"
+            or completed_plan_already_run
         ):
             self._check_selected_backup()
             return
         self._start_selected_backup()
+
+    def _start_controlled_endpoint_takeover(self) -> bool:
+        state = self._job_detail_state
+        job_id = state.job_id
+        job_revision_id = state.job_revision_id
+        candidates = tuple(
+            target
+            for target in state.target_details
+            if target.registration_reason_code == "ENDPOINT_TARGET_FOREIGN_READ_ONLY"
+            and target.target_ordinal is not None
+            and target.endpoint_id is not None
+            and target.foreign_owner_installation_id is not None
+            and target.foreign_ownership_epoch is not None
+        )
+        if (
+            self._engine_client is None
+            or not hasattr(self._engine_client, "start_controlled_endpoint_takeover")
+            or job_id is None
+            or job_revision_id is None
+            or not candidates
+            or self._job_detail_query_pending
+            or self._takeover_command_pending
+            or self._command_worker_active()
+        ):
+            return False
+        selected = self._confirm_controlled_endpoint_takeover(candidates)
+        if selected is None:
+            return False
+        assert selected.target_ordinal is not None
+        assert selected.endpoint_id is not None
+        assert selected.foreign_owner_installation_id is not None
+        assert selected.foreign_ownership_epoch is not None
+        target_ordinal = selected.target_ordinal
+        endpoint_id = selected.endpoint_id
+        foreign_owner_installation_id = selected.foreign_owner_installation_id
+        foreign_ownership_epoch = selected.foreign_ownership_epoch
+        identity = (
+            job_id,
+            job_revision_id,
+            target_ordinal,
+            endpoint_id,
+            foreign_owner_installation_id,
+            foreign_ownership_epoch,
+        )
+        if (
+            self._takeover_command_identity != identity
+            or self._takeover_request_id is None
+            or self._takeover_idempotency_key is None
+        ):
+            self._takeover_command_identity = identity
+            self._takeover_request_id = str(uuid4())
+            self._takeover_idempotency_key = str(uuid4())
+        request_id = self._takeover_request_id
+        idempotency_key = self._takeover_idempotency_key
+        assert request_id is not None
+        assert idempotency_key is not None
+        self._takeover_command_pending = True
+        self._refresh_command_buttons()
+
+        def command(client: object) -> object:
+            return cast(
+                ControlledEndpointTakeoverProvider,
+                client,
+            ).start_controlled_endpoint_takeover(
+                job_id=job_id,
+                job_revision_id=job_revision_id,
+                target_ordinal=target_ordinal,
+                endpoint_id=endpoint_id,
+                expected_foreign_owner_installation_id=foreign_owner_installation_id,
+                expected_ownership_epoch=foreign_ownership_epoch,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+            )
+
+        def accept(value: object) -> None:
+            self._takeover_command_pending = False
+            self._apply_controlled_takeover_response(
+                cast(IpcResponse, value),
+                job_id=job_id,
+            )
+
+        def reject(_error: Exception) -> None:
+            self._takeover_command_pending = False
+            self._apply_command_transport_failure(
+                "Controlled takeover could not be submitted. Retry to reuse the same request."
+            )
+            self._refresh_command_buttons()
+
+        submitted = self._submit_engine_command(
+            name="controlled-endpoint-takeover",
+            operation=command,
+            on_result=accept,
+            on_error=reject,
+        )
+        if not submitted:
+            self._takeover_command_pending = False
+            self._refresh_command_buttons()
+        return submitted
+
+    def _confirm_controlled_endpoint_takeover(
+        self,
+        candidates: tuple[BackupJobDetailTargetViewState, ...],
+    ) -> BackupJobDetailTargetViewState | None:
+        dialog = QDialog(self)
+        dialog.setObjectName("controlledTakeoverDialog")
+        dialog.setWindowTitle(self._display("Kontrollert overtakelse"))
+        dialog.setModal(True)
+        dialog.setMinimumWidth(460)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        heading = QLabel(self._display("Velg mål og gjennomgå konsekvensene"))
+        heading.setObjectName("controlledTakeoverHeading")
+        heading.setProperty("textRole", "sectionTitle")
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+
+        target_picker = QComboBox(dialog)
+        target_picker.setObjectName("controlledTakeoverTargetPicker")
+        for index, target in enumerate(candidates):
+            target_picker.addItem(f"{target.name}: {target.path_label}", index)
+        target_picker.setVisible(len(candidates) > 1)
+        layout.addWidget(target_picker)
+
+        details = QLabel(dialog)
+        details.setObjectName("controlledTakeoverDetails")
+        details.setWordWrap(True)
+        details.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        details.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        layout.addWidget(details)
+
+        confirmation = QCheckBox(
+            self._display("Jeg bekrefter ny eier."),
+            dialog,
+        )
+        confirmation.setObjectName("controlledTakeoverConfirmation")
+        confirmation.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
+        )
+        layout.addWidget(confirmation)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel_button = QPushButton(self._display("Avbryt"), dialog)
+        cancel_button.setObjectName("controlledTakeoverCancel")
+        confirm_button = QPushButton(
+            self._display("Start overtakelse"),
+            dialog,
+        )
+        confirm_button.setObjectName("controlledTakeoverConfirm")
+        confirm_button.setEnabled(False)
+        actions.addWidget(cancel_button)
+        actions.addWidget(confirm_button)
+        layout.addLayout(actions)
+
+        def update_details(index: int) -> None:
+            selected = candidates[max(0, min(index, len(candidates) - 1))]
+            owner = selected.foreign_owner_installation_id or "ukjent"
+            shortened_owner = (
+                owner if len(owner) <= 16 else f"{owner[:8]}...{owner[-4:]}"
+            )
+            epoch = selected.foreign_ownership_epoch or 0
+            details.setText(
+                "\n".join(
+                    (
+                        self._display(f"Mål: {selected.path_label}"),
+                        self._display(f"Nåværende eier: {shortened_owner}"),
+                        self._display(f"Siste eierepoke: {epoch}"),
+                        self._display(
+                            "Uavklart gjenoppretting kontrolleres under lås før endring. "
+                            "Overtakelsen stopper dersom data finnes."
+                        ),
+                        "",
+                        self._display(
+                            "Data fra den gamle installasjonen slettes ikke. Etter "
+                            "overtakelsen kjøres en full kontroll, og backupen starter "
+                            "ikke automatisk."
+                        ),
+                    )
+                )
+            )
+            detail_width = max(320, dialog.minimumWidth() - 40)
+            details.setMinimumHeight(
+                max(details.sizeHint().height(), details.heightForWidth(detail_width))
+            )
+            details.updateGeometry()
+
+        target_picker.currentIndexChanged.connect(update_details)
+        confirmation.toggled.connect(confirm_button.setEnabled)
+        cancel_button.clicked.connect(dialog.reject)
+        confirm_button.clicked.connect(dialog.accept)
+        update_details(0)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        selected_index = target_picker.currentData()
+        return candidates[selected_index if isinstance(selected_index, int) else 0]
+
+    def _apply_controlled_takeover_response(
+        self,
+        response: IpcResponse,
+        *,
+        job_id: str,
+    ) -> None:
+        takeover = response.payload.get("endpoint_takeover")
+        completed = isinstance(takeover, dict) and takeover.get("completed") is True
+        if completed:
+            assert isinstance(takeover, dict)
+            self._takeover_request_id = None
+            self._takeover_idempotency_key = None
+            self._takeover_command_identity = None
+            analysis_request_id = takeover.get("analysis_request_id")
+            if isinstance(analysis_request_id, str) and analysis_request_id:
+                self._analysis_request_id = analysis_request_id
+            self.apply_engine_status(
+                replace(
+                    self._engine_status_state,
+                    detail=self._display(
+                        "Overtakelsen er fullført. En full kontroll er satt i kø."
+                    ),
+                    status_kind="ready",
+                )
+            )
+        else:
+            reason = response.reason.value if response.reason is not None else "UNKNOWN"
+            if isinstance(takeover, dict):
+                codes = takeover.get("validation_codes")
+                if isinstance(codes, list) and codes and isinstance(codes[0], str):
+                    reason = codes[0]
+            if response.status is IpcStatus.REJECTED:
+                self._takeover_request_id = None
+                self._takeover_idempotency_key = None
+                self._takeover_command_identity = None
+            self.apply_engine_status(
+                replace(
+                    self._engine_status_state,
+                    detail=f"{self._display('Overtakelsen kunne ikke fullføres')}: {reason}",
+                    status_kind="warning",
+                )
+            )
+        if self._selected_job_id == job_id:
+            self._refresh_backup_job_detail(job_id)
+        self._refresh_backup_overview()
+        self._refresh_activity_overview()
+        self._refresh_command_buttons()
 
     def _register_selected_targets(self) -> bool:
         state = self._job_detail_state
@@ -5263,8 +5555,7 @@ class MediaSyncWindow(QMainWindow):
     ) -> None:
         registration = response.payload.get("writable_endpoint_registration")
         completed = (
-            isinstance(registration, dict)
-            and registration.get("completed") is True
+            isinstance(registration, dict) and registration.get("completed") is True
         )
         if response.status is IpcStatus.REJECTED:
             reason = response.reason.value if response.reason is not None else "UNKNOWN"
@@ -5520,10 +5811,7 @@ class MediaSyncWindow(QMainWindow):
         request_id: str,
         job_id: str,
     ) -> None:
-        if (
-            self._analysis_request_id != request_id
-            or self._selected_job_id != job_id
-        ):
+        if self._analysis_request_id != request_id or self._selected_job_id != job_id:
             return
         self._analysis_query_pending = False
         self._apply_backup_analysis_poll_response(
@@ -5538,10 +5826,7 @@ class MediaSyncWindow(QMainWindow):
         request_id: str,
         job_id: str,
     ) -> None:
-        if (
-            self._analysis_request_id != request_id
-            or self._selected_job_id != job_id
-        ):
+        if self._analysis_request_id != request_id or self._selected_job_id != job_id:
             return
         self._analysis_query_pending = False
 
@@ -5572,10 +5857,7 @@ class MediaSyncWindow(QMainWindow):
         terminal_state = state.analysis_request_state or "FAILED"
         started_run_id = state.analysis_request_started_run_id
         pending_retry = self._retry_after_analysis
-        if (
-            terminal_state == "SUCCEEDED"
-            and started_run_id is not None
-        ):
+        if terminal_state == "SUCCEEDED" and started_run_id is not None:
             self._queued_backup_job_ids.add(job_id)
             detail = self._texts().backup_queued
             status_kind = "ready"
@@ -5590,8 +5872,7 @@ class MediaSyncWindow(QMainWindow):
             status_kind = "ready"
         else:
             detail = (
-                state.analysis_request_reason_code
-                or self._texts().backup_check_failed
+                state.analysis_request_reason_code or self._texts().backup_check_failed
             )
             status_kind = "warning"
         if terminal_state != "SUCCEEDED":
@@ -5695,7 +5976,11 @@ class MediaSyncWindow(QMainWindow):
     ) -> None:
         if response.status is IpcStatus.REJECTED:
             readiness = response.payload.get("readiness")
-            codes = readiness.get("validation_codes") if isinstance(readiness, dict) else None
+            codes = (
+                readiness.get("validation_codes")
+                if isinstance(readiness, dict)
+                else None
+            )
             reason = (
                 str(codes[0])
                 if isinstance(codes, list) and codes
@@ -5714,11 +5999,7 @@ class MediaSyncWindow(QMainWindow):
             return
 
         run_payload = response.payload.get("run")
-        run_id = (
-            run_payload.get("run_id")
-            if isinstance(run_payload, dict)
-            else None
-        )
+        run_id = run_payload.get("run_id") if isinstance(run_payload, dict) else None
         self._queued_backup_job_ids.add(job_id)
         self._start_request_id = None
         self._start_idempotency_key = None
@@ -5729,14 +6010,13 @@ class MediaSyncWindow(QMainWindow):
                 status_kind="ready",
             )
         )
-        if self._selected_job_id == job_id and self._job_detail_state.plan_id == plan_id:
-            self._apply_backup_job_detail_state(submitted_state)
-        self._refresh_activity_overview()
         if (
             self._selected_job_id == job_id
-            and isinstance(run_id, str)
-            and run_id
+            and self._job_detail_state.plan_id == plan_id
         ):
+            self._apply_backup_job_detail_state(submitted_state)
+        self._refresh_activity_overview()
+        if self._selected_job_id == job_id and isinstance(run_id, str) and run_id:
             self._set_active_run(run_id)
             self._poll_active_run_progress()
         self._refresh_command_buttons()
@@ -5745,9 +6025,7 @@ class MediaSyncWindow(QMainWindow):
         combo = self._jobs_retry_target_combo
         source_run_id = self._run_progress_state.run_id
         endpoint_id = (
-            combo.currentData(Qt.ItemDataRole.UserRole)
-            if combo is not None
-            else None
+            combo.currentData(Qt.ItemDataRole.UserRole) if combo is not None else None
         )
         if (
             source_run_id is None
@@ -5779,7 +6057,9 @@ class MediaSyncWindow(QMainWindow):
             ),
             (texts.next_action, self._format_recommended_actions(state)),
         )
-        for row, (label, value) in zip(self._activity_dimension_rows, values, strict=False):
+        for row, (label, value) in zip(
+            self._activity_dimension_rows, values, strict=False
+        ):
             row.setText(f"{label}: {self._display(value)}")
         self._refresh_responsive_page_geometry(
             self._activity_content,
@@ -5817,14 +6097,16 @@ class MediaSyncWindow(QMainWindow):
                 lines.append(f"{target.name}: {action}")
         return "\n".join(lines)
 
-    def _apply_plan_operation_preview_state(self, state: PlanOperationPreviewState) -> None:
+    def _apply_plan_operation_preview_state(
+        self, state: PlanOperationPreviewState
+    ) -> None:
         if self._plan_preview_title is not None:
             self._plan_preview_title.setText(self._display(state.title))
         if self._plan_preview_summary is not None:
             self._plan_preview_summary.setText(self._display(state.summary_label))
-        lines = tuple(f"{row.risk_label}: {row.display_line}" for row in state.rows) or (
-            "No plan operations.",
-        )
+        lines = tuple(
+            f"{row.risk_label}: {row.display_line}" for row in state.rows
+        ) or ("No plan operations.",)
         for index, row in enumerate(self._plan_preview_rows):
             if index < len(lines):
                 row.setText(self._display(lines[index]))
@@ -5833,14 +6115,14 @@ class MediaSyncWindow(QMainWindow):
                 row.setText("")
                 row.setVisible(False)
 
-    def _apply_plan_endpoint_preview_state(self, state: PlanEndpointPreviewState) -> None:
+    def _apply_plan_endpoint_preview_state(
+        self, state: PlanEndpointPreviewState
+    ) -> None:
         if self._plan_endpoint_title is not None:
             self._plan_endpoint_title.setText(self._display(state.title))
         if self._plan_endpoint_summary is not None:
             self._plan_endpoint_summary.setText(self._display(state.summary_label))
-        lines = tuple(row.display_line for row in state.rows) or (
-            "No endpoint rows.",
-        )
+        lines = tuple(row.display_line for row in state.rows) or ("No endpoint rows.",)
         for index, row in enumerate(self._plan_endpoint_rows):
             if index < len(lines):
                 row.setText(self._display(lines[index]))
@@ -5849,7 +6131,9 @@ class MediaSyncWindow(QMainWindow):
                 row.setText("")
                 row.setVisible(False)
 
-    def _apply_snapshot_health_preview_state(self, state: SnapshotHealthPreviewState) -> None:
+    def _apply_snapshot_health_preview_state(
+        self, state: SnapshotHealthPreviewState
+    ) -> None:
         if self._snapshot_health_title is not None:
             self._snapshot_health_title.setText(self._display(state.title))
         if self._snapshot_health_summary is not None:
@@ -5865,7 +6149,9 @@ class MediaSyncWindow(QMainWindow):
                 row.setText("")
                 row.setVisible(False)
 
-    def _apply_cataloged_files_preview_state(self, state: CatalogedFilesPreviewState) -> None:
+    def _apply_cataloged_files_preview_state(
+        self, state: CatalogedFilesPreviewState
+    ) -> None:
         if self._cataloged_files_title is not None:
             self._cataloged_files_title.setText(self._display(state.title))
         if self._cataloged_files_summary is not None:
@@ -6125,32 +6411,40 @@ class MediaSyncWindow(QMainWindow):
             )
         )
         self._jobs_detail_source_value.setObjectName("jobsDetailSourceValue")
-        self._jobs_detail_targets_label, self._jobs_detail_targets_value = _add_labeled_text_value(
-            layout,
-            2,
-            texts.target,
-            self._display(state.target_summary_label),
+        self._jobs_detail_targets_label, self._jobs_detail_targets_value = (
+            _add_labeled_text_value(
+                layout,
+                2,
+                texts.target,
+                self._display(state.target_summary_label),
+            )
         )
         self._jobs_detail_targets_value.setObjectName("jobsDetailTargetsValue")
-        self._jobs_detail_defaults_label, self._jobs_detail_defaults_value = _add_labeled_text_value(
-            layout,
-            3,
-            texts.defaults,
-            self._display(state.defaults_summary_label),
+        self._jobs_detail_defaults_label, self._jobs_detail_defaults_value = (
+            _add_labeled_text_value(
+                layout,
+                3,
+                texts.defaults,
+                self._display(state.defaults_summary_label),
+            )
         )
         self._jobs_detail_defaults_value.setObjectName("jobsDetailDefaultsValue")
-        self._jobs_detail_revision_label, self._jobs_detail_revision_value = _add_labeled_text_value(
-            layout,
-            4,
-            texts.revision,
-            self._display(state.revision_label),
+        self._jobs_detail_revision_label, self._jobs_detail_revision_value = (
+            _add_labeled_text_value(
+                layout,
+                4,
+                texts.revision,
+                self._display(state.revision_label),
+            )
         )
         self._jobs_detail_revision_value.setObjectName("jobsDetailRevisionValue")
-        self._jobs_detail_plan_label, self._jobs_detail_plan_value = _add_labeled_text_value(
-            layout,
-            5,
-            texts.plan,
-            self._display(state.plan_summary_label),
+        self._jobs_detail_plan_label, self._jobs_detail_plan_value = (
+            _add_labeled_text_value(
+                layout,
+                5,
+                texts.plan,
+                self._display(state.plan_summary_label),
+            )
         )
         self._jobs_detail_plan_value.setObjectName("jobsDetailPlanValue")
 
@@ -6396,9 +6690,7 @@ class MediaSyncWindow(QMainWindow):
                 "-",
             )
             label.setObjectName("changesDetailLabel")
-            value.setObjectName(
-                f"changesDetail{key.title().replace('_', '')}Value"
-            )
+            value.setObjectName(f"changesDetail{key.title().replace('_', '')}Value")
             self._changes_detail_labels[key] = label
             self._changes_detail_values[key] = value
         layout.setColumnStretch(0, 1)
@@ -6461,11 +6753,13 @@ class MediaSyncWindow(QMainWindow):
         filter_layout.setSpacing(6)
         filter_group = QButtonGroup(filters)
         filter_group.setExclusive(True)
-        for column, (activity_filter, label) in enumerate((
-            ("ALL", texts.all_activities),
-            ("CONTROLS", texts.controls),
-            ("BACKUPS", texts.backup_runs),
-        )):
+        for column, (activity_filter, label) in enumerate(
+            (
+                ("ALL", texts.all_activities),
+                ("CONTROLS", texts.controls),
+                ("BACKUPS", texts.backup_runs),
+            )
+        ):
             button = QPushButton(label)
             button.setObjectName("historyFilterButton")
             button.setCheckable(True)
@@ -6586,9 +6880,7 @@ class MediaSyncWindow(QMainWindow):
         operation_previous.setIconSize(QSize(18, 18))
         operation_previous.setToolTip(texts.previous_page_tooltip)
         operation_previous.setAccessibleName(texts.previous_page_tooltip)
-        operation_previous.clicked.connect(
-            self._show_previous_history_operation_page
-        )
+        operation_previous.clicked.connect(self._show_previous_history_operation_page)
         operation_page_label = QLabel("0-0")
         operation_page_label.setObjectName("mutedLabel")
         operation_page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -6682,9 +6974,7 @@ class MediaSyncWindow(QMainWindow):
         attempt_list = QListWidget()
         attempt_list.setObjectName("historyAttemptList")
         attempt_list.setAccessibleName(texts.file_attempts)
-        attempt_list.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
+        attempt_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         attempt_list.setTextElideMode(Qt.TextElideMode.ElideRight)
         attempt_list.setWordWrap(True)
         attempt_list.setMinimumHeight(112)
@@ -6723,7 +7013,9 @@ class MediaSyncWindow(QMainWindow):
         self._settings_labels["theme"] = self._settings_row_label(text.theme)
         layout.addWidget(self._settings_labels["theme"], 2, 0)
         theme_controls = QWidget()
-        theme_controls.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        theme_controls.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         theme_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight, theme_controls)
         theme_layout.setContentsMargins(0, 0, 0, 0)
         theme_layout.setSpacing(8)
@@ -6857,7 +7149,9 @@ class MediaSyncWindow(QMainWindow):
         action_layout.setSpacing(8)
         open_button = QPushButton(text.open_data_folder)
         open_button.setObjectName("settingsActionButton")
-        open_button.setEnabled(self._data_root is not None and self._open_data_folder is not None)
+        open_button.setEnabled(
+            self._data_root is not None and self._open_data_folder is not None
+        )
         open_button.clicked.connect(self._open_local_data_folder)
         self._settings_open_data_button = open_button
         copy_button = QPushButton(text.copy_diagnostics)
@@ -7050,18 +7344,24 @@ class MediaSyncWindow(QMainWindow):
         self._setup_target_controls = target_controls
         self._setup_add_target_button = add_target
         layout.addWidget(target_controls, 5, 1, 1, 2)
-        self._setup_defaults_label, self._setup_defaults_value = _add_labeled_text_value(
-            layout,
-            6,
-            texts.defaults,
-            " · ".join(self._display(label) for label in state.defaults.summary()[:3]),
+        self._setup_defaults_label, self._setup_defaults_value = (
+            _add_labeled_text_value(
+                layout,
+                6,
+                texts.defaults,
+                " · ".join(
+                    self._display(label) for label in state.defaults.summary()[:3]
+                ),
+            )
         )
         self._setup_defaults_value.setObjectName("setupDefaultsValue")
-        self._setup_retention_label, self._setup_retention_value = _add_labeled_text_value(
-            layout,
-            7,
-            texts.retention,
-            self._display(state.defaults.retention_label),
+        self._setup_retention_label, self._setup_retention_value = (
+            _add_labeled_text_value(
+                layout,
+                7,
+                texts.retention,
+                self._display(state.defaults.retention_label),
+            )
         )
         self._setup_retention_value.setObjectName("setupRetentionValue")
 
@@ -7119,33 +7419,41 @@ class MediaSyncWindow(QMainWindow):
             )
         )
         self._job_detail_source_value.setObjectName("jobDetailSourceValue")
-        self._job_detail_targets_label, self._job_detail_targets_value = _add_labeled_text_value(
-            layout,
-            2,
-            texts.target,
-            self._display(state.target_summary_label),
+        self._job_detail_targets_label, self._job_detail_targets_value = (
+            _add_labeled_text_value(
+                layout,
+                2,
+                texts.target,
+                self._display(state.target_summary_label),
+            )
         )
         self._job_detail_targets_value.setObjectName("jobDetailTargetsValue")
-        self._job_detail_defaults_label, self._job_detail_defaults_value = _add_labeled_text_value(
-            layout,
-            3,
-            texts.defaults,
-            self._display(state.defaults_summary_label),
+        self._job_detail_defaults_label, self._job_detail_defaults_value = (
+            _add_labeled_text_value(
+                layout,
+                3,
+                texts.defaults,
+                self._display(state.defaults_summary_label),
+            )
         )
         self._job_detail_defaults_value.setObjectName("jobDetailDefaultsValue")
-        self._job_detail_revision_label, self._job_detail_revision_value = _add_labeled_text_value(
-            layout,
-            4,
-            texts.revision,
-            self._display(state.revision_label),
+        self._job_detail_revision_label, self._job_detail_revision_value = (
+            _add_labeled_text_value(
+                layout,
+                4,
+                texts.revision,
+                self._display(state.revision_label),
+            )
         )
         self._job_detail_revision_value.setObjectName("jobDetailRevisionValue")
 
-        self._job_detail_plan_label, self._job_detail_plan_value = _add_labeled_text_value(
-            layout,
-            5,
-            texts.plan,
-            self._display(state.plan_summary_label),
+        self._job_detail_plan_label, self._job_detail_plan_value = (
+            _add_labeled_text_value(
+                layout,
+                5,
+                texts.plan,
+                self._display(state.plan_summary_label),
+            )
         )
         self._job_detail_plan_value.setObjectName("jobDetailPlanValue")
 
@@ -7196,8 +7504,12 @@ class MediaSyncWindow(QMainWindow):
         layout.addWidget(self._engine_state, 0, 2)
         layout.addWidget(self._engine_detail, 1, 0, 1, 3)
 
-        self._engine_scope_label = _add_key_value(layout, 2, texts.scope, self._engine_scope)
-        self._engine_contract_label = _add_key_value(layout, 3, texts.contract, self._engine_protocol)
+        self._engine_scope_label = _add_key_value(
+            layout, 2, texts.scope, self._engine_scope
+        )
+        self._engine_contract_label = _add_key_value(
+            layout, 3, texts.contract, self._engine_protocol
+        )
         self._engine_mutation_label = _add_key_value(
             layout,
             4,
@@ -7302,9 +7614,9 @@ class MediaSyncWindow(QMainWindow):
         layout.addWidget(title)
         layout.addWidget(summary)
         self._plan_preview_rows = []
-        lines = tuple(f"{row.risk_label}: {row.display_line}" for row in state.rows) or (
-            "No plan operations.",
-        )
+        lines = tuple(
+            f"{row.risk_label}: {row.display_line}" for row in state.rows
+        ) or ("No plan operations.",)
         for index in range(3):
             row = QLabel(self._display(lines[index]) if index < len(lines) else "")
             row.setObjectName("planPreviewRow")
@@ -7329,9 +7641,7 @@ class MediaSyncWindow(QMainWindow):
         layout.addWidget(title)
         layout.addWidget(summary)
         self._plan_endpoint_rows = []
-        lines = tuple(row.display_line for row in state.rows) or (
-            "No endpoint rows.",
-        )
+        lines = tuple(row.display_line for row in state.rows) or ("No endpoint rows.",)
         for index in range(4):
             row = QLabel(self._display(lines[index]) if index < len(lines) else "")
             row.setObjectName("planEndpointRow")
@@ -7418,7 +7728,9 @@ class MediaSyncWindow(QMainWindow):
             action.setCheckable(True)
             action.setChecked(code == self._selected_language_code.value)
             action.triggered.connect(
-                lambda checked=False, language_code=code: self._select_language(language_code)
+                lambda checked=False, language_code=code: self._select_language(
+                    language_code
+                )
             )
             menu.addAction(action)
             self._language_actions[code] = action
@@ -7492,9 +7804,7 @@ class MediaSyncWindow(QMainWindow):
             self._user_preferences_store.save(self._user_preferences)
         except (OSError, ValueError):
             self._set_settings_status(
-                settings_text(
-                    self._selected_language_code
-                ).preference_save_failed,
+                settings_text(self._selected_language_code).preference_save_failed,
                 status_kind="error",
             )
 
@@ -7504,9 +7814,7 @@ class MediaSyncWindow(QMainWindow):
         self._data_root.mkdir(parents=True, exist_ok=True)
         if not self._open_data_folder(self._data_root):
             self._set_settings_status(
-                settings_text(
-                    self._selected_language_code
-                ).open_data_folder_failed,
+                settings_text(self._selected_language_code).open_data_folder_failed,
                 status_kind="error",
             )
 
@@ -7929,7 +8237,9 @@ class MediaSyncWindow(QMainWindow):
             self._settings_copy_diagnostics_button.setText(text.copy_diagnostics)
 
 
-def _add_key_value(layout: QGridLayout, row: int, label_text: str, value: QLabel) -> QLabel:
+def _add_key_value(
+    layout: QGridLayout, row: int, label_text: str, value: QLabel
+) -> QLabel:
     label = QLabel(label_text)
     label.setObjectName("mutedLabel")
     _configure_responsive_label(value, selectable=True)
@@ -7938,7 +8248,9 @@ def _add_key_value(layout: QGridLayout, row: int, label_text: str, value: QLabel
     return label
 
 
-def _add_text_value(layout: QGridLayout, row: int, label_text: str, value_text: str) -> QLabel:
+def _add_text_value(
+    layout: QGridLayout, row: int, label_text: str, value_text: str
+) -> QLabel:
     return _add_labeled_text_value(layout, row, label_text, value_text)[1]
 
 

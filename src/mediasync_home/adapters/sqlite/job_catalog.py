@@ -138,7 +138,9 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
         except sqlite3.Error as exc:
             if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
-            raise SqliteJobCatalogError("STANDARD_BACKUP_JOB_PERSISTENCE_FAILED") from exc
+            raise SqliteJobCatalogError(
+                "STANDARD_BACKUP_JOB_PERSISTENCE_FAILED"
+            ) from exc
 
     def load_standard_backup_job(self, job_id: str) -> SealedStandardBackupJob | None:
         return self._load_one(
@@ -253,7 +255,9 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
         ).fetchall()
         return tuple(_job_summary_from_row(row) for row in rows)
 
-    def load_standard_backup_job_detail(self, job_id: str) -> StandardBackupJobDetail | None:
+    def load_standard_backup_job_detail(
+        self, job_id: str
+    ) -> StandardBackupJobDetail | None:
         row = self._connection.execute(
             """
             SELECT
@@ -281,20 +285,25 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
         detail = _job_detail_from_row(row)
         registration_rows = self._connection.execute(
             """
-            SELECT ordinal, registration_state, registration_reason_code
-            FROM standard_backup_job_endpoint_bindings
+            SELECT
+                bindings.ordinal,
+                bindings.endpoint_id,
+                bindings.registration_state,
+                bindings.registration_reason_code,
+                observations.marker_json
+            FROM standard_backup_job_endpoint_bindings AS bindings
+            LEFT JOIN endpoint_classification_observations AS observations
+                ON observations.endpoint_id = bindings.endpoint_id
+                AND observations.endpoint_revision_id = bindings.endpoint_revision_id
             WHERE job_id = ?
                 AND job_revision_id = ?
                 AND role = 'TARGET'
-            ORDER BY ordinal
+            ORDER BY bindings.ordinal
             """,
             (detail.job_id, detail.job_revision_id),
         ).fetchall()
         registrations = {
-            int(registration_row[0]): (
-                str(registration_row[1]),
-                str(registration_row[2]),
-            )
+            int(registration_row[0]): _target_registration_metadata(registration_row)
             for registration_row in registration_rows
         }
         initial_plan_row = self._connection.execute(
@@ -346,8 +355,25 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
             targets=tuple(
                 replace(
                     target,
-                    registration_state=registrations.get(index, (None, None))[0],
-                    registration_reason_code=registrations.get(index, (None, None))[1],
+                    target_ordinal=index,
+                    endpoint_id=registrations.get(
+                        index, (None, None, None, None, None, None)
+                    )[0],
+                    registration_state=registrations.get(
+                        index, (None, None, None, None, None, None)
+                    )[1],
+                    registration_reason_code=registrations.get(
+                        index, (None, None, None, None, None, None)
+                    )[2],
+                    foreign_owner_installation_id=registrations.get(
+                        index, (None, None, None, None, None, None)
+                    )[3],
+                    foreign_ownership_epoch=registrations.get(
+                        index, (None, None, None, None, None, None)
+                    )[4],
+                    foreign_recovery_status=registrations.get(
+                        index, (None, None, None, None, None, None)
+                    )[5],
                 )
                 for index, target in enumerate(detail.targets, start=1)
             ),
@@ -378,9 +404,7 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                         if analysis_request_row[5] is None
                         else str(analysis_request_row[5])
                     ),
-                    start_when_safe=bool(
-                        _required_int(analysis_request_row[6])
-                    ),
+                    start_when_safe=bool(_required_int(analysis_request_row[6])),
                     started_run_id=(
                         None
                         if analysis_request_row[7] is None
@@ -409,7 +433,9 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
             return None
         return _job_from_row(row)
 
-    def _reject_active_standard_backup_root_overlap(self, job: SealedStandardBackupJob) -> None:
+    def _reject_active_standard_backup_root_overlap(
+        self, job: SealedStandardBackupJob
+    ) -> None:
         new_roots = _job_roots(job)
         for existing_job in self.list_active_standard_backup_jobs():
             for new_root in new_roots:
@@ -436,7 +462,9 @@ def _job_from_row(row: sqlite3.Row | tuple[object, ...]) -> SealedStandardBackup
     )
 
 
-def _job_summary_from_row(row: sqlite3.Row | tuple[object, ...]) -> StandardBackupJobSummary:
+def _job_summary_from_row(
+    row: sqlite3.Row | tuple[object, ...],
+) -> StandardBackupJobSummary:
     return StandardBackupJobSummary(
         job_id=str(row[0]),
         job_revision_id=str(row[1]),
@@ -455,7 +483,9 @@ def _job_summary_from_row(row: sqlite3.Row | tuple[object, ...]) -> StandardBack
     )
 
 
-def _job_detail_from_row(row: sqlite3.Row | tuple[object, ...]) -> StandardBackupJobDetail:
+def _job_detail_from_row(
+    row: sqlite3.Row | tuple[object, ...],
+) -> StandardBackupJobDetail:
     targets = _deserialize_targets(str(row[6]))
     return StandardBackupJobDetail(
         job_id=str(row[0]),
@@ -545,7 +575,9 @@ def _deserialize_defaults(payload: str) -> StandardBackupDefaults:
             performance=PerformancePreset(str(data["performance"])),
         )
     except (KeyError, ValueError) as exc:
-        raise SqliteJobCatalogError("STANDARD_BACKUP_JOB_DEFAULTS_JSON_INVALID") from exc
+        raise SqliteJobCatalogError(
+            "STANDARD_BACKUP_JOB_DEFAULTS_JSON_INVALID"
+        ) from exc
 
 
 def _serialize_targets(targets: tuple[SealedStandardBackupTarget, ...]) -> str:
@@ -579,11 +611,15 @@ def _deserialize_targets(payload: str) -> tuple[SealedStandardBackupTarget, ...]
                 SealedStandardBackupTarget(
                     name=str(item["name"]),
                     path_label=str(item["path_label"]),
-                    independent_device_id=_optional_str(item.get("independent_device_id")),
+                    independent_device_id=_optional_str(
+                        item.get("independent_device_id")
+                    ),
                 )
             )
         except KeyError as exc:
-            raise SqliteJobCatalogError("STANDARD_BACKUP_JOB_TARGETS_JSON_INVALID") from exc
+            raise SqliteJobCatalogError(
+                "STANDARD_BACKUP_JOB_TARGETS_JSON_INVALID"
+            ) from exc
     return tuple(targets)
 
 
@@ -595,6 +631,42 @@ def _json_object(payload: str, reason: str) -> dict[str, object]:
     if not isinstance(data, dict):
         raise SqliteJobCatalogError(reason)
     return data
+
+
+def _target_registration_metadata(
+    row: sqlite3.Row | tuple[object, ...],
+) -> tuple[str, str, str, str | None, int | None, str | None]:
+    endpoint_id = str(row[1])
+    registration_state = str(row[2])
+    reason_code = str(row[3])
+    if reason_code != "ENDPOINT_TARGET_FOREIGN_READ_ONLY" or not isinstance(
+        row[4], str
+    ):
+        return endpoint_id, registration_state, reason_code, None, None, None
+    try:
+        marker: Any = json.loads(row[4])
+    except json.JSONDecodeError:
+        return endpoint_id, registration_state, reason_code, None, None, "UNKNOWN"
+    if not isinstance(marker, dict):
+        return endpoint_id, registration_state, reason_code, None, None, "UNKNOWN"
+    owner = marker.get("owner_installation_id")
+    epoch = marker.get("ownership_epoch")
+    if (
+        not isinstance(owner, str)
+        or not owner
+        or isinstance(epoch, bool)
+        or not isinstance(epoch, int)
+        or epoch < 1
+    ):
+        return endpoint_id, registration_state, reason_code, None, None, "UNKNOWN"
+    return (
+        endpoint_id,
+        registration_state,
+        reason_code,
+        owner,
+        epoch,
+        "CHECK_REQUIRED_UNDER_LOCK",
+    )
 
 
 def _optional_str(value: object) -> str | None:

@@ -105,7 +105,11 @@ class ShellText:
 
     @property
     def run_backup(self) -> str:
-        return "Run backup" if self.language_tooltip_prefix == "Language" else "Kjør backup"
+        return (
+            "Run backup"
+            if self.language_tooltip_prefix == "Language"
+            else "Kjør backup"
+        )
 
     @property
     def run_backup_tooltip(self) -> str:
@@ -175,7 +179,11 @@ class ShellText:
 
     @property
     def backup_queued(self) -> str:
-        return "Backup queued" if self.language_tooltip_prefix == "Language" else "Backup er lagt i kø"
+        return (
+            "Backup queued"
+            if self.language_tooltip_prefix == "Language"
+            else "Backup er lagt i kø"
+        )
 
     @property
     def pause_backup(self) -> str:
@@ -217,7 +225,11 @@ class ShellText:
 
     @property
     def run_progress(self) -> str:
-        return "Backup progress" if self.language_tooltip_prefix == "Language" else "Backupfremdrift"
+        return (
+            "Backup progress"
+            if self.language_tooltip_prefix == "Language"
+            else "Backupfremdrift"
+        )
 
     @property
     def changes(self) -> str:
@@ -225,11 +237,17 @@ class ShellText:
 
     @property
     def all_targets(self) -> str:
-        return "All targets" if self.language_tooltip_prefix == "Language" else "Alle mål"
+        return (
+            "All targets" if self.language_tooltip_prefix == "Language" else "Alle mål"
+        )
 
     @property
     def all_changes(self) -> str:
-        return "All changes" if self.language_tooltip_prefix == "Language" else "Alle endringer"
+        return (
+            "All changes"
+            if self.language_tooltip_prefix == "Language"
+            else "Alle endringer"
+        )
 
     @property
     def attention_changes(self) -> str:
@@ -239,7 +257,11 @@ class ShellText:
 
     @property
     def safe_changes(self) -> str:
-        return "Safe changes" if self.language_tooltip_prefix == "Language" else "Trygge endringer"
+        return (
+            "Safe changes"
+            if self.language_tooltip_prefix == "Language"
+            else "Trygge endringer"
+        )
 
     @property
     def no_plan_changes(self) -> str:
@@ -261,7 +283,9 @@ class ShellText:
 
     @property
     def decision(self) -> str:
-        return "Decision" if self.language_tooltip_prefix == "Language" else "Beslutning"
+        return (
+            "Decision" if self.language_tooltip_prefix == "Language" else "Beslutning"
+        )
 
     @property
     def change_type(self) -> str:
@@ -273,23 +297,43 @@ class ShellText:
 
     @property
     def reason_code(self) -> str:
-        return "Reason code" if self.language_tooltip_prefix == "Language" else "Årsakskode"
+        return (
+            "Reason code"
+            if self.language_tooltip_prefix == "Language"
+            else "Årsakskode"
+        )
 
     @property
     def precondition(self) -> str:
-        return "Precondition" if self.language_tooltip_prefix == "Language" else "Forhåndsvilkår"
+        return (
+            "Precondition"
+            if self.language_tooltip_prefix == "Language"
+            else "Forhåndsvilkår"
+        )
 
     @property
     def planned_size(self) -> str:
-        return "Planned size" if self.language_tooltip_prefix == "Language" else "Planlagt størrelse"
+        return (
+            "Planned size"
+            if self.language_tooltip_prefix == "Language"
+            else "Planlagt størrelse"
+        )
 
     @property
     def run_result(self) -> str:
-        return "Backup result" if self.language_tooltip_prefix == "Language" else "Backupresultat"
+        return (
+            "Backup result"
+            if self.language_tooltip_prefix == "Language"
+            else "Backupresultat"
+        )
 
     @property
     def retry_target(self) -> str:
-        return "Retry target" if self.language_tooltip_prefix == "Language" else "Prøv målet på nytt"
+        return (
+            "Retry target"
+            if self.language_tooltip_prefix == "Language"
+            else "Prøv målet på nytt"
+        )
 
     @property
     def retry_target_tooltip(self) -> str:
@@ -299,7 +343,11 @@ class ShellText:
 
     @property
     def failed_target(self) -> str:
-        return "Failed target" if self.language_tooltip_prefix == "Language" else "Mislykket mål"
+        return (
+            "Failed target"
+            if self.language_tooltip_prefix == "Language"
+            else "Mislykket mål"
+        )
 
     @property
     def retry_files(self) -> str:
@@ -327,15 +375,27 @@ class ShellText:
 
     @property
     def operation_count(self) -> str:
-        return "operations" if self.language_tooltip_prefix == "Language" else "operasjoner"
+        return (
+            "operations"
+            if self.language_tooltip_prefix == "Language"
+            else "operasjoner"
+        )
 
     @property
     def current_file(self) -> str:
-        return "Current file" if self.language_tooltip_prefix == "Language" else "Aktiv fil"
+        return (
+            "Current file"
+            if self.language_tooltip_prefix == "Language"
+            else "Aktiv fil"
+        )
 
     @property
     def calculating_eta(self) -> str:
-        return "Calculating remaining time" if self.language_tooltip_prefix == "Language" else "Beregner gjenstående tid"
+        return (
+            "Calculating remaining time"
+            if self.language_tooltip_prefix == "Language"
+            else "Beregner gjenstående tid"
+        )
 
     @property
     def remaining(self) -> str:
@@ -343,27 +403,47 @@ class ShellText:
 
     @property
     def pause_requested(self) -> str:
-        return "Pausing safely..." if self.language_tooltip_prefix == "Language" else "Pauser trygt..."
+        return (
+            "Pausing safely..."
+            if self.language_tooltip_prefix == "Language"
+            else "Pauser trygt..."
+        )
 
     @property
     def history_activities(self) -> str:
-        return "Activity history" if self.language_tooltip_prefix == "Language" else "Aktivitetshistorikk"
+        return (
+            "Activity history"
+            if self.language_tooltip_prefix == "Language"
+            else "Aktivitetshistorikk"
+        )
 
     @property
     def all_activities(self) -> str:
-        return "All activities" if self.language_tooltip_prefix == "Language" else "Alle aktiviteter"
+        return (
+            "All activities"
+            if self.language_tooltip_prefix == "Language"
+            else "Alle aktiviteter"
+        )
 
     @property
     def controls(self) -> str:
-        return "Controls" if self.language_tooltip_prefix == "Language" else "Kontroller"
+        return (
+            "Controls" if self.language_tooltip_prefix == "Language" else "Kontroller"
+        )
 
     @property
     def backup_runs(self) -> str:
-        return "Backup runs" if self.language_tooltip_prefix == "Language" else "Backupkjøringer"
+        return (
+            "Backup runs"
+            if self.language_tooltip_prefix == "Language"
+            else "Backupkjøringer"
+        )
 
     @property
     def all_jobs(self) -> str:
-        return "All jobs" if self.language_tooltip_prefix == "Language" else "Alle jobber"
+        return (
+            "All jobs" if self.language_tooltip_prefix == "Language" else "Alle jobber"
+        )
 
     @property
     def history_empty(self) -> str:
@@ -403,11 +483,17 @@ class ShellText:
 
     @property
     def operations(self) -> str:
-        return "Operations" if self.language_tooltip_prefix == "Language" else "Operasjoner"
+        return (
+            "Operations"
+            if self.language_tooltip_prefix == "Language"
+            else "Operasjoner"
+        )
 
     @property
     def transferred(self) -> str:
-        return "Transferred" if self.language_tooltip_prefix == "Language" else "Overført"
+        return (
+            "Transferred" if self.language_tooltip_prefix == "Language" else "Overført"
+        )
 
     @property
     def average_speed(self) -> str:
@@ -431,11 +517,19 @@ class ShellText:
 
     @property
     def identifiers(self) -> str:
-        return "Identifiers" if self.language_tooltip_prefix == "Language" else "Identifikatorer"
+        return (
+            "Identifiers"
+            if self.language_tooltip_prefix == "Language"
+            else "Identifikatorer"
+        )
 
     @property
     def activity_targets(self) -> str:
-        return "Targets included" if self.language_tooltip_prefix == "Language" else "Mål som inngikk"
+        return (
+            "Targets included"
+            if self.language_tooltip_prefix == "Language"
+            else "Mål som inngikk"
+        )
 
     @property
     def activity_control(self) -> str:
@@ -447,7 +541,11 @@ class ShellText:
 
     @property
     def file_results(self) -> str:
-        return "File results" if self.language_tooltip_prefix == "Language" else "Filresultater"
+        return (
+            "File results"
+            if self.language_tooltip_prefix == "Language"
+            else "Filresultater"
+        )
 
     @property
     def file_results_unavailable(self) -> str:
@@ -473,11 +571,19 @@ class ShellText:
 
     @property
     def verification(self) -> str:
-        return "Verification" if self.language_tooltip_prefix == "Language" else "Verifisering"
+        return (
+            "Verification"
+            if self.language_tooltip_prefix == "Language"
+            else "Verifisering"
+        )
 
     @property
     def durability(self) -> str:
-        return "Durability" if self.language_tooltip_prefix == "Language" else "Varig lagring"
+        return (
+            "Durability"
+            if self.language_tooltip_prefix == "Language"
+            else "Varig lagring"
+        )
 
     @property
     def attempts(self) -> str:
@@ -485,11 +591,17 @@ class ShellText:
 
     @property
     def last_error(self) -> str:
-        return "Last error" if self.language_tooltip_prefix == "Language" else "Siste feil"
+        return (
+            "Last error" if self.language_tooltip_prefix == "Language" else "Siste feil"
+        )
 
     @property
     def file_attempts(self) -> str:
-        return "Attempt history" if self.language_tooltip_prefix == "Language" else "Forsøkshistorikk"
+        return (
+            "Attempt history"
+            if self.language_tooltip_prefix == "Language"
+            else "Forsøkshistorikk"
+        )
 
     @property
     def no_terminal_outcome(self) -> str:
@@ -693,6 +805,7 @@ _NB_TO_EN = {
     "Alle brukerfiler": "All user files",
     "Auto - anbefalt": "Auto - recommended",
     "Avvist": "Rejected",
+    "Avbryt": "Cancel",
     "Bevaring": "Retention",
     "Blokkert": "Blocked",
     "Blokkerende problem": "Blocking issue",
@@ -700,6 +813,7 @@ _NB_TO_EN = {
     "Ekstra filer på målet beholdes": "Extra files on the target are kept",
     "Fortsett": "Continue",
     "Fortsett backupen når du er klar.": "Resume the backup when you are ready.",
+    "Fremmed eier - skrivebeskyttet": "Foreign owner - read-only",
     "Følg fremdrift per mål.": "Follow progress per target.",
     "Følg opp NAS etter aktiv kopiering.": "Follow up NAS after active copying.",
     "Gjenoppretter": "Recovering",
@@ -740,6 +854,10 @@ _NB_TO_EN = {
     "Klar til kontroll": "Ready for review",
     "Kontrollerer mål før lease og revalidering.": "Checking targets before lease and revalidation.",
     "Kontrollerer måltilgang.": "Checking target access.",
+    "Kontrollert overtakelse": "Controlled takeover",
+    "Kontrollert overtakelse pågår under mållåsen.": (
+        "Controlled takeover is running under the target lock."
+    ),
     "Kontrakt": "Contract",
     "Kopierer": "Copying",
     "Kopiering pågår.": "Copying is in progress.",
@@ -755,6 +873,7 @@ _NB_TO_EN = {
     "Mutasjoner aktivert": "Mutations enabled",
     "Mutasjonspolicy": "Mutation policy",
     "Neste handling": "Next action",
+    "Nåværende eier": "Current owner",
     "Normal": "Normal",
     "Oppdatert": "Up to date",
     "Oppdater backup": "Update backup",
@@ -763,6 +882,11 @@ _NB_TO_EN = {
     "Opprett og registrer": "Create and register",
     "Prøv målregistrering igjen": "Retry target registration",
     "Opprett mappe": "Create folder",
+    "Overtar mål...": "Taking over target...",
+    "Overtakelsen kunne ikke fullføres": "Takeover could not be completed",
+    "Overtakelsen er fullført. En full kontroll er satt i kø.": (
+        "Takeover is complete. A full check has been queued."
+    ),
     "Pauset": "Paused",
     "Plan venter": "Plan waiting",
     "Planlegging feilet": "Planning failed",
@@ -780,6 +904,7 @@ _NB_TO_EN = {
     "Se gjennom målfeilen.": "Review the target error.",
     "Se gjennom målresultatet.": "Review the target result.",
     "Sist sikkerhetskopiert": "Last backed up",
+    "Siste eierepoke": "Latest ownership epoch",
     "Skrivebeskyttet lokal forhåndsvisning": "Read-only local preview",
     "Skrivebeskyttet målendepunkt": "Read-only target endpoint",
     "Skrivbar og registrert": "Writable and registered",
@@ -806,6 +931,19 @@ _NB_TO_EN = {
     "Venter på lokal 0B-kjøringsmotor.": "Waiting for the local 0B run engine.",
     "Venter på målbehandling.": "Waiting for target processing.",
     "Venter på analyse og kjøring.": "Waiting for analysis and run.",
+    "Velg mål og gjennomgå konsekvensene": "Select a target and review the consequences",
+    "Se detaljer og bekreft overtakelse av fremmed mål.": (
+        "Review details and confirm takeover of the foreign target."
+    ),
+    "Start kontrollert overtakelse": "Start controlled takeover",
+    "Start overtakelse": "Start takeover",
+    "Jeg bekrefter ny eier.": "I confirm the new owner.",
+    "Uavklart gjenoppretting kontrolleres under lås før endring. Overtakelsen stopper dersom data finnes.": (
+        "Unresolved recovery is checked under lock before changes. Takeover stops if data exists."
+    ),
+    "Data fra den gamle installasjonen slettes ikke. Etter overtakelsen kjøres en full kontroll, og backupen starter ikke automatisk.": (
+        "Data from the old installation is not deleted. A full check runs after takeover, and the backup does not start automatically."
+    ),
 }
 
 _EN_TO_NB = {value: key for key, value in _NB_TO_EN.items()}
@@ -1141,8 +1279,12 @@ def _translate_endpoint_role_to_norwegian(value: str) -> str:
 
 
 def _translate_snapshot_summary_to_english(value: str) -> str:
-    if value.startswith("Ingen blokkerende snapshotproblemer i ") and value.endswith("."):
-        snapshot = value.removeprefix("Ingen blokkerende snapshotproblemer i ").removesuffix(".")
+    if value.startswith("Ingen blokkerende snapshotproblemer i ") and value.endswith(
+        "."
+    ):
+        snapshot = value.removeprefix(
+            "Ingen blokkerende snapshotproblemer i "
+        ).removesuffix(".")
         return f"No blocking snapshot issues in {snapshot}."
     match = re.fullmatch(
         r"(?P<count>\d+) blokkerende problem(?:er)? i (?P<snapshot>.+)\.(?P<more> Flere snapshoterader finnes\.)?",
@@ -1165,7 +1307,9 @@ def _translate_snapshot_summary_to_english(value: str) -> str:
 
 def _translate_snapshot_summary_to_norwegian(value: str) -> str:
     if value.startswith("No blocking snapshot issues in ") and value.endswith("."):
-        snapshot = value.removeprefix("No blocking snapshot issues in ").removesuffix(".")
+        snapshot = value.removeprefix("No blocking snapshot issues in ").removesuffix(
+            "."
+        )
         return f"Ingen blokkerende snapshotproblemer i {snapshot}."
     match = re.fullmatch(
         r"(?P<count>\d+) blocking issue(?:s)? in (?P<snapshot>.+)\.(?P<more> More snapshot rows exist\.)?",
@@ -1181,7 +1325,9 @@ def _translate_snapshot_summary_to_norwegian(value: str) -> str:
     )
     if match is None:
         return value
-    warning_word = "dekningsadvarsel" if match.group("count") == "1" else "dekningsadvarsler"
+    warning_word = (
+        "dekningsadvarsel" if match.group("count") == "1" else "dekningsadvarsler"
+    )
     more = " Flere snapshoterader finnes." if match.group("more") else ""
     return f"{match.group('count')} {warning_word} i {match.group('snapshot')}.{more}"
 
@@ -1205,6 +1351,10 @@ def _translate_catalog_summary_to_norwegian(value: str) -> str:
     )
     if match is None:
         return value
-    file_word = "katalogf\u00f8rt fil" if match.group("count") == "1" else "katalogf\u00f8rte filer"
+    file_word = (
+        "katalogf\u00f8rt fil"
+        if match.group("count") == "1"
+        else "katalogf\u00f8rte filer"
+    )
     more = " Flere katalogf\u00f8rte filer finnes." if match.group("more") else ""
     return f"{match.group('count')} {file_word}.{more}"

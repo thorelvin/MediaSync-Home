@@ -127,7 +127,13 @@ class BackupJobDetailTargetViewState:
     name: str
     path_label: str
     independent_device_id: str | None = None
+    target_ordinal: int | None = None
+    endpoint_id: str | None = None
     registration_state: str | None = None
+    registration_reason_code: str | None = None
+    foreign_owner_installation_id: str | None = None
+    foreign_ownership_epoch: int | None = None
+    foreign_recovery_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +159,8 @@ class BackupJobDetailViewState:
     analysis_request_started_run_id: str | None = None
     job_revision_id: str | None = None
     writable_target_registration_required: bool = False
+    controlled_takeover_required: bool = False
+    target_details: tuple[BackupJobDetailTargetViewState, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -277,7 +285,11 @@ def build_backup_job_status_state(
         attention_label=_attention_label(attention),
         configured_target_count=len(target_statuses),
         independent_device_count=len(
-            {target.independent_device_id for target in target_statuses if target.independent_device_id}
+            {
+                target.independent_device_id
+                for target in target_statuses
+                if target.independent_device_id
+            }
         ),
         target_statuses=target_statuses,
         recommended_action=recommended_action,
@@ -338,7 +350,9 @@ def empty_backup_job_detail_state() -> BackupJobDetailViewState:
     )
 
 
-def backup_overview_from_response(response: IpcResponse | None) -> BackupOverviewViewState:
+def backup_overview_from_response(
+    response: IpcResponse | None,
+) -> BackupOverviewViewState:
     if response is None or response.status is IpcStatus.REJECTED:
         return empty_backup_overview_state()
     overview = response.payload.get("backup_overview")
@@ -347,7 +361,11 @@ def backup_overview_from_response(response: IpcResponse | None) -> BackupOvervie
 
     draft = _setup_draft_from_payload(overview.get("draft"))
     jobs = overview.get("jobs")
-    job_payloads = tuple(item for item in jobs if isinstance(item, dict)) if isinstance(jobs, list) else ()
+    job_payloads = (
+        tuple(item for item in jobs if isinstance(item, dict))
+        if isinstance(jobs, list)
+        else ()
+    )
     job_rows = tuple(
         row
         for payload in job_payloads
@@ -357,9 +375,13 @@ def backup_overview_from_response(response: IpcResponse | None) -> BackupOvervie
     return BackupOverviewViewState(
         setup=build_standard_backup_setup_state(
             draft or BackupSetupDraft.empty(),
-            current_step=BackupSetupStep.REVIEW if draft is not None and draft.targets else BackupSetupStep.SOURCE,
+            current_step=BackupSetupStep.REVIEW
+            if draft is not None and draft.targets
+            else BackupSetupStep.SOURCE,
         ),
-        job_status=_job_status_from_payload(job_payloads[0]) if job_payloads else empty_backup_job_status_state(),
+        job_status=_job_status_from_payload(job_payloads[0])
+        if job_payloads
+        else empty_backup_job_status_state(),
         read_model_available=bool(overview.get("read_model_available", False)),
         has_more_jobs=bool(overview.get("has_more", False)),
         jobs=job_rows,
@@ -369,7 +391,9 @@ def backup_overview_from_response(response: IpcResponse | None) -> BackupOvervie
     )
 
 
-def backup_job_detail_from_response(response: IpcResponse | None) -> BackupJobDetailViewState:
+def backup_job_detail_from_response(
+    response: IpcResponse | None,
+) -> BackupJobDetailViewState:
     if response is None or response.status is IpcStatus.REJECTED:
         return empty_backup_job_detail_state()
     detail = response.payload.get("backup_job_detail")
@@ -397,7 +421,9 @@ def backup_job_detail_from_response(response: IpcResponse | None) -> BackupJobDe
     return _job_detail_from_payload(job, job_id=job_id)
 
 
-def activity_overview_from_response(response: IpcResponse | None) -> ActivityOverviewViewState:
+def activity_overview_from_response(
+    response: IpcResponse | None,
+) -> ActivityOverviewViewState:
     if response is None or response.status is IpcStatus.REJECTED:
         return ActivityOverviewViewState(
             job_status=None,
@@ -413,7 +439,11 @@ def activity_overview_from_response(response: IpcResponse | None) -> ActivityOve
         )
 
     runs = overview.get("runs")
-    run_payloads = tuple(item for item in runs if isinstance(item, dict)) if isinstance(runs, list) else ()
+    run_payloads = (
+        tuple(item for item in runs if isinstance(item, dict))
+        if isinstance(runs, list)
+        else ()
+    )
     active_payload = next(
         (
             payload
@@ -424,13 +454,23 @@ def activity_overview_from_response(response: IpcResponse | None) -> ActivityOve
         None,
     )
     return ActivityOverviewViewState(
-        job_status=_activity_status_from_run_payload(run_payloads[0]) if run_payloads else None,
+        job_status=_activity_status_from_run_payload(run_payloads[0])
+        if run_payloads
+        else None,
         read_model_available=bool(overview.get("read_model_available", False)),
         has_more_runs=bool(overview.get("has_more", False)),
-        latest_plan_id=_required_text(run_payloads[0].get("plan_id")) if run_payloads else None,
-        latest_run_id=_required_text(run_payloads[0].get("run_id")) if run_payloads else None,
-        latest_run_state=_required_text(run_payloads[0].get("state")) if run_payloads else None,
-        latest_job_id=_required_text(run_payloads[0].get("job_id")) if run_payloads else None,
+        latest_plan_id=_required_text(run_payloads[0].get("plan_id"))
+        if run_payloads
+        else None,
+        latest_run_id=_required_text(run_payloads[0].get("run_id"))
+        if run_payloads
+        else None,
+        latest_run_state=_required_text(run_payloads[0].get("state"))
+        if run_payloads
+        else None,
+        latest_job_id=_required_text(run_payloads[0].get("job_id"))
+        if run_payloads
+        else None,
         active_run_id=(
             _required_text(active_payload.get("run_id"))
             if active_payload is not None
@@ -483,7 +523,9 @@ def _can_continue(draft: BackupSetupDraft, step: BackupSetupStep) -> bool:
 
 
 def _can_create(draft: BackupSetupDraft, step: BackupSetupStep) -> bool:
-    return step is BackupSetupStep.REVIEW and _step_complete(draft, BackupSetupStep.REVIEW)
+    return step is BackupSetupStep.REVIEW and _step_complete(
+        draft, BackupSetupStep.REVIEW
+    )
 
 
 def _target_label(targets: tuple[BackupTargetDraft, ...]) -> str:
@@ -549,7 +591,9 @@ def _setup_draft_from_payload(payload: object) -> BackupSetupDraft | None:
                 BackupTargetDraft(
                     name=name,
                     path_label=path_label,
-                    independent_device_id=_optional_text(item.get("independent_device_id")),
+                    independent_device_id=_optional_text(
+                        item.get("independent_device_id")
+                    ),
                 )
             )
     return BackupSetupDraft(
@@ -576,10 +620,16 @@ def _job_status_from_payload(payload: dict[object, object]) -> BackupJobStatusVi
                     attention=AttentionState.WAITING,
                     freshness=FreshnessState.UNKNOWN,
                     recommended_action="Venter pÃ¥ analyse og kjÃ¸ring.",
-                    independent_device_id=_optional_text(item.get("independent_device_id")),
+                    independent_device_id=_optional_text(
+                        item.get("independent_device_id")
+                    ),
                 )
             )
-    title = _required_text(payload.get("title")) or _required_text(payload.get("source_name")) or "Backupjobb"
+    title = (
+        _required_text(payload.get("title"))
+        or _required_text(payload.get("source_name"))
+        or "Backupjobb"
+    )
     return build_backup_job_status_state(
         title=title,
         activity=ActivityState.INACTIVE,
@@ -603,10 +653,16 @@ def _job_list_item_from_payload(
     )
     if configured_target_count is None:
         configured_target_count = len(targets)
-    independent_device_count = _non_negative_int(payload.get("independent_device_count"))
+    independent_device_count = _non_negative_int(
+        payload.get("independent_device_count")
+    )
     if independent_device_count is None:
         independent_device_count = len(
-            {target.independent_device_id for target in targets if target.independent_device_id}
+            {
+                target.independent_device_id
+                for target in targets
+                if target.independent_device_id
+            }
         )
     return BackupJobListItemViewState(
         job_id=job_id,
@@ -627,13 +683,23 @@ def _job_list_item_from_payload(
     )
 
 
-def _job_detail_from_payload(payload: dict[object, object], *, job_id: str | None) -> BackupJobDetailViewState:
+def _job_detail_from_payload(
+    payload: dict[object, object], *, job_id: str | None
+) -> BackupJobDetailViewState:
     targets = _target_details_from_payload(payload.get("targets"))
-    configured_target_count = _non_negative_int(payload.get("configured_target_count")) or len(targets)
-    independent_device_count = _non_negative_int(payload.get("independent_device_count"))
+    configured_target_count = _non_negative_int(
+        payload.get("configured_target_count")
+    ) or len(targets)
+    independent_device_count = _non_negative_int(
+        payload.get("independent_device_count")
+    )
     if independent_device_count is None:
         independent_device_count = len(
-            {target.independent_device_id for target in targets if target.independent_device_id}
+            {
+                target.independent_device_id
+                for target in targets
+                if target.independent_device_id
+            }
         )
     job_revision_id = _required_text(payload.get("job_revision_id"))
     filter_set_id = _required_text(payload.get("filter_set_id"))
@@ -641,9 +707,7 @@ def _job_detail_from_payload(payload: dict[object, object], *, job_id: str | Non
     plan_payload = initial_plan if isinstance(initial_plan, dict) else {}
     latest_analysis_request = payload.get("latest_analysis_request")
     request_payload = (
-        latest_analysis_request
-        if isinstance(latest_analysis_request, dict)
-        else {}
+        latest_analysis_request if isinstance(latest_analysis_request, dict) else {}
     )
     return BackupJobDetailViewState(
         job_id=_required_text(payload.get("job_id")) or job_id,
@@ -674,9 +738,7 @@ def _job_detail_from_payload(payload: dict[object, object], *, job_id: str | Non
         analysis_id=_optional_text(plan_payload.get("analysis_id")),
         analysis_request_id=_optional_text(request_payload.get("request_id")),
         analysis_request_state=_optional_text(request_payload.get("state")),
-        analysis_request_reason_code=_optional_text(
-            request_payload.get("reason_code")
-        ),
+        analysis_request_reason_code=_optional_text(request_payload.get("reason_code")),
         analysis_request_started_run_id=_optional_text(
             request_payload.get("started_run_id")
         ),
@@ -688,6 +750,15 @@ def _job_detail_from_payload(payload: dict[object, object], *, job_id: str | Non
                 for target in targets
             )
         ),
+        controlled_takeover_required=any(
+            target.registration_reason_code == "ENDPOINT_TARGET_FOREIGN_READ_ONLY"
+            and target.target_ordinal is not None
+            and target.endpoint_id is not None
+            and target.foreign_owner_installation_id is not None
+            and target.foreign_ownership_epoch is not None
+            for target in targets
+        ),
+        target_details=targets,
     )
 
 
@@ -719,7 +790,9 @@ def _initial_plan_summary(payload: dict[object, object]) -> str:
     )
 
 
-def _target_details_from_payload(payload: object) -> tuple[BackupJobDetailTargetViewState, ...]:
+def _target_details_from_payload(
+    payload: object,
+) -> tuple[BackupJobDetailTargetViewState, ...]:
     if not isinstance(payload, list):
         return ()
     targets: list[BackupJobDetailTargetViewState] = []
@@ -735,19 +808,37 @@ def _target_details_from_payload(payload: object) -> tuple[BackupJobDetailTarget
                 name=name,
                 path_label=path_label,
                 independent_device_id=_optional_text(item.get("independent_device_id")),
+                target_ordinal=_positive_int(item.get("target_ordinal")),
+                endpoint_id=_optional_text(item.get("endpoint_id")),
                 registration_state=_optional_text(item.get("registration_state")),
+                registration_reason_code=_optional_text(
+                    item.get("registration_reason_code")
+                ),
+                foreign_owner_installation_id=_optional_text(
+                    item.get("foreign_owner_installation_id")
+                ),
+                foreign_ownership_epoch=_positive_int(
+                    item.get("foreign_ownership_epoch")
+                ),
+                foreign_recovery_status=_optional_text(
+                    item.get("foreign_recovery_status")
+                ),
             )
         )
     return tuple(targets)
 
 
 def _target_detail_line(target: BackupJobDetailTargetViewState) -> str:
-    registration_label = {
-        "WRITABLE_READY": "Skrivbar og registrert",
-        "READ_ONLY_READY": "Skrivebeskyttet",
-        "REGISTRATION_PENDING": "Registrering venter",
-        "BLOCKED": "Blokkert",
-    }.get(target.registration_state or "")
+    registration_label = (
+        "Fremmed eier - skrivebeskyttet"
+        if target.registration_reason_code == "ENDPOINT_TARGET_FOREIGN_READ_ONLY"
+        else {
+            "WRITABLE_READY": "Skrivbar og registrert",
+            "READ_ONLY_READY": "Skrivebeskyttet",
+            "REGISTRATION_PENDING": "Registrering venter",
+            "BLOCKED": "Blokkert",
+        }.get(target.registration_state or "")
+    )
     base = f"{target.name}: {target.path_label}"
     return base if registration_label is None else f"{base} · {registration_label}"
 
@@ -769,7 +860,9 @@ def _defaults_summary_from_payload(payload: object) -> str:
         return "Standardvalg ikke lastet"
     labels = (
         _enum_label(payload.get("behavior"), {"UPDATE_BACKUP": "Oppdater backup"}),
-        _enum_label(payload.get("file_selection"), {"ALL_USER_FILES": "Alle brukerfiler"}),
+        _enum_label(
+            payload.get("file_selection"), {"ALL_USER_FILES": "Alle brukerfiler"}
+        ),
         _enum_label(payload.get("verification"), {"STANDARD": "Standard kontroll"}),
     )
     return " - ".join(label for label in labels if label)
@@ -795,7 +888,9 @@ def _positive_int(value: object) -> int | None:
     return parsed if parsed is not None and parsed > 0 else None
 
 
-def _activity_status_from_run_payload(payload: dict[object, object]) -> BackupJobStatusViewState:
+def _activity_status_from_run_payload(
+    payload: dict[object, object],
+) -> BackupJobStatusViewState:
     state = _run_state(payload.get("state"))
     targets_payload = payload.get("targets")
     targets: list[TargetStatusViewState] = []
@@ -867,11 +962,25 @@ def _run_activity(state: RunState) -> ActivityState:
 
 
 def _run_attention(state: RunState) -> AttentionState:
-    if state in {RunState.FAILED, RunState.BLOCKED_BY_SAFETY, RunState.RECOVERY_REQUIRED}:
+    if state in {
+        RunState.FAILED,
+        RunState.BLOCKED_BY_SAFETY,
+        RunState.RECOVERY_REQUIRED,
+    }:
         return AttentionState.BLOCKED
-    if state in {RunState.COMPLETED_WITH_WARNINGS, RunState.PARTIAL_FAILURE, RunState.CANCELLED}:
+    if state in {
+        RunState.COMPLETED_WITH_WARNINGS,
+        RunState.PARTIAL_FAILURE,
+        RunState.CANCELLED,
+    }:
         return AttentionState.NEEDS_ATTENTION
-    if state in {RunState.CREATED, RunState.QUEUED, RunState.PREFLIGHT, RunState.PAUSING, RunState.PAUSED}:
+    if state in {
+        RunState.CREATED,
+        RunState.QUEUED,
+        RunState.PREFLIGHT,
+        RunState.PAUSING,
+        RunState.PAUSED,
+    }:
         return AttentionState.WAITING
     return AttentionState.NORMAL
 
@@ -883,7 +992,11 @@ def _run_next_action(state: RunState) -> str:
         return "Kontrollerer mål før lease og revalidering."
     if state is RunState.EXECUTING:
         return "Følg fremdrift per mål."
-    if state in {RunState.FAILED, RunState.BLOCKED_BY_SAFETY, RunState.RECOVERY_REQUIRED}:
+    if state in {
+        RunState.FAILED,
+        RunState.BLOCKED_BY_SAFETY,
+        RunState.RECOVERY_REQUIRED,
+    }:
         return "Se gjennom blokkeringen før ny kjøring."
     if state in {RunState.COMPLETED, RunState.COMPLETED_WITH_WARNINGS}:
         return "Kontroller resultatet før neste backup."
@@ -903,7 +1016,11 @@ def _target_activity(state: RunTargetState) -> ActivityState:
 
 
 def _target_attention(state: RunTargetState) -> AttentionState:
-    if state in {RunTargetState.FAILED, RunTargetState.BLOCKED, RunTargetState.RECOVERY_REQUIRED}:
+    if state in {
+        RunTargetState.FAILED,
+        RunTargetState.BLOCKED,
+        RunTargetState.RECOVERY_REQUIRED,
+    }:
         return AttentionState.BLOCKED
     if state in {
         RunTargetState.WAITING_FOR_ENDPOINT,
@@ -912,7 +1029,11 @@ def _target_attention(state: RunTargetState) -> AttentionState:
         RunTargetState.CANCELLED,
     }:
         return AttentionState.NEEDS_ATTENTION
-    if state in {RunTargetState.PENDING, RunTargetState.ACQUIRING_LEASE, RunTargetState.REVALIDATING}:
+    if state in {
+        RunTargetState.PENDING,
+        RunTargetState.ACQUIRING_LEASE,
+        RunTargetState.REVALIDATING,
+    }:
         return AttentionState.WAITING
     return AttentionState.NORMAL
 
@@ -944,7 +1065,11 @@ def _target_next_action(state: RunTargetState) -> str:
         return "Se gjennom målresultatet."
     if state is RunTargetState.CANCELLED:
         return "Kjør backupen på nytt når målet er klart."
-    if state in {RunTargetState.FAILED, RunTargetState.BLOCKED, RunTargetState.RECOVERY_REQUIRED}:
+    if state in {
+        RunTargetState.FAILED,
+        RunTargetState.BLOCKED,
+        RunTargetState.RECOVERY_REQUIRED,
+    }:
         return "Se gjennom målfeilen."
     return "Ingen handling kreves nå."
 

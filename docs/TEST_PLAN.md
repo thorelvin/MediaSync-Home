@@ -41,6 +41,12 @@ Alle bindende krav-ID-er skal ha minst én automatisk test, dokumentert manuell 
 | `FILTER-001` | §7 | filter evaluator | regex budget/cancel/disable suite | pass/fail |
 | `PROC-001` | §15.2, §15.9 | system executable resolver/argv builder | `GetSystemDirectoryW` + Windows argv round-trip corpus | pass/fail |
 | `REC-001` | §4.5 | `RecoveryJournal` | phase fault-injection suite | pass/fail |
+
+0B lokal takeover-evidence dekker streng commandvalidering, lock contention,
+locked reclassification, uavklart recovery, immutable intent/evidence, avbrudd før
+og etter markørpublisering, startup-resume, eksakt epokeøkning, stale gammel writer,
+tvungen full analyse og kompakt norsk/engelsk GUI uten tekstklipping. Kravet om to
+ekte Windows-klienter mot SMB beholdes som separat utsatt labgate for writable SMB.
 | `REC-003` | §4.5, §9.14 | `IntentSegmentStore` | bounded segment/hash-chain suite | pass/fail |
 | `REC-004` | §4.5, §17, §19.6 | directory mutation adapters | create/metadata/quarantine/restore crash suite | pass/fail |
 | `SAF-003` | §4.4, §13.3 | `DestructiveGate` | `test_incomplete_coverage_blocks_quarantine` | pass/fail |

@@ -243,6 +243,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_history_timeline_keyset_indexes",
                 statements=CATALOG_HISTORY_TIMELINE_KEYSET_INDEXES,
             ),
+            SqliteMigration(
+                version=42,
+                name="catalog_controlled_endpoint_takeovers",
+                statements=CATALOG_CONTROLLED_ENDPOINT_TAKEOVERS,
+            ),
         ),
     )
 
@@ -2831,6 +2836,149 @@ CATALOG_WRITABLE_ENDPOINT_REGISTRATIONS = (
     BEFORE DELETE ON writable_endpoint_registrations
     BEGIN
         SELECT RAISE(ABORT, 'WRITABLE_ENDPOINT_REGISTRATION_IMMUTABLE');
+    END
+    """,
+)
+
+
+CATALOG_CONTROLLED_ENDPOINT_TAKEOVERS = (
+    """
+    CREATE TABLE controlled_endpoint_takeover_intents (
+        intent_id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        source_job_revision_id TEXT NOT NULL,
+        resulting_job_revision_id TEXT NOT NULL UNIQUE,
+        analysis_request_id TEXT NOT NULL UNIQUE,
+        target_ordinal INTEGER NOT NULL CHECK (target_ordinal BETWEEN 1 AND 3),
+        endpoint_id TEXT NOT NULL,
+        source_endpoint_revision_id TEXT NOT NULL,
+        resulting_endpoint_revision_id TEXT NOT NULL UNIQUE,
+        foreign_owner_installation_id TEXT NOT NULL,
+        foreign_ownership_epoch INTEGER NOT NULL CHECK (foreign_ownership_epoch >= 1),
+        owner_installation_id TEXT NOT NULL,
+        ownership_epoch INTEGER NOT NULL CHECK (
+            ownership_epoch = foreign_ownership_epoch + 1
+        ),
+        command_request_id TEXT NOT NULL,
+        command_idempotency_key TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL CHECK (
+            state IN ('PREPARED', 'FILESYSTEM_APPLIED', 'COMMITTED', 'BLOCKED')
+        ),
+        prepared_takeover_json TEXT NOT NULL,
+        last_error_code TEXT,
+        last_next_action TEXT,
+        created_utc TEXT NOT NULL,
+        updated_utc TEXT NOT NULL,
+        committed_utc TEXT,
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+        UNIQUE (job_id, source_job_revision_id, target_ordinal),
+        UNIQUE (endpoint_id, source_endpoint_revision_id),
+        FOREIGN KEY (job_id, source_job_revision_id)
+            REFERENCES job_revisions (job_id, id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (endpoint_id, source_endpoint_revision_id)
+            REFERENCES endpoint_revisions (endpoint_id, id)
+            ON DELETE RESTRICT,
+        CHECK (
+            (state = 'COMMITTED' AND committed_utc IS NOT NULL)
+            OR (state <> 'COMMITTED' AND committed_utc IS NULL)
+        ),
+        CHECK (
+            (last_error_code IS NULL AND last_next_action IS NULL)
+            OR (last_error_code IS NOT NULL AND last_next_action IS NOT NULL)
+        )
+    )
+    """,
+    """
+    CREATE INDEX idx_controlled_endpoint_takeover_intents_recovery
+        ON controlled_endpoint_takeover_intents (state, created_utc, intent_id)
+    """,
+    """
+    CREATE TABLE controlled_endpoint_takeovers (
+        endpoint_id TEXT NOT NULL,
+        endpoint_revision_id TEXT NOT NULL,
+        endpoint_generation INTEGER NOT NULL CHECK (endpoint_generation >= 2),
+        intent_id TEXT NOT NULL UNIQUE,
+        control_area_id TEXT NOT NULL,
+        previous_owner_installation_id TEXT NOT NULL,
+        previous_ownership_epoch INTEGER NOT NULL CHECK (previous_ownership_epoch >= 1),
+        owner_installation_id TEXT NOT NULL,
+        ownership_epoch INTEGER NOT NULL CHECK (
+            ownership_epoch = previous_ownership_epoch + 1
+        ),
+        root_identity_hash_algorithm TEXT NOT NULL,
+        root_identity_hash TEXT NOT NULL CHECK (length(root_identity_hash) = 64),
+        marker_checksum_algorithm TEXT NOT NULL,
+        marker_checksum TEXT NOT NULL CHECK (length(marker_checksum) = 64),
+        takeover_record_path TEXT NOT NULL,
+        ownership_record_path TEXT NOT NULL,
+        probe_completed_utc TEXT NOT NULL,
+        created_utc TEXT NOT NULL,
+        PRIMARY KEY (endpoint_id, endpoint_revision_id),
+        FOREIGN KEY (endpoint_id, endpoint_revision_id)
+            REFERENCES endpoint_revisions (endpoint_id, id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (intent_id)
+            REFERENCES controlled_endpoint_takeover_intents (intent_id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TRIGGER trg_controlled_endpoint_takeover_intents_identity_immutable
+    BEFORE UPDATE ON controlled_endpoint_takeover_intents
+    WHEN
+        NEW.intent_id IS NOT OLD.intent_id
+        OR NEW.job_id IS NOT OLD.job_id
+        OR NEW.source_job_revision_id IS NOT OLD.source_job_revision_id
+        OR NEW.resulting_job_revision_id IS NOT OLD.resulting_job_revision_id
+        OR NEW.analysis_request_id IS NOT OLD.analysis_request_id
+        OR NEW.target_ordinal IS NOT OLD.target_ordinal
+        OR NEW.endpoint_id IS NOT OLD.endpoint_id
+        OR NEW.source_endpoint_revision_id IS NOT OLD.source_endpoint_revision_id
+        OR NEW.resulting_endpoint_revision_id IS NOT OLD.resulting_endpoint_revision_id
+        OR NEW.foreign_owner_installation_id IS NOT OLD.foreign_owner_installation_id
+        OR NEW.foreign_ownership_epoch IS NOT OLD.foreign_ownership_epoch
+        OR NEW.owner_installation_id IS NOT OLD.owner_installation_id
+        OR NEW.ownership_epoch IS NOT OLD.ownership_epoch
+        OR NEW.command_request_id IS NOT OLD.command_request_id
+        OR NEW.command_idempotency_key IS NOT OLD.command_idempotency_key
+        OR NEW.prepared_takeover_json IS NOT OLD.prepared_takeover_json
+        OR NEW.created_utc IS NOT OLD.created_utc
+    BEGIN
+        SELECT RAISE(ABORT, 'CONTROLLED_ENDPOINT_TAKEOVER_INTENT_IDENTITY_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_controlled_endpoint_takeover_intents_transition
+    BEFORE UPDATE OF state ON controlled_endpoint_takeover_intents
+    WHEN NOT (
+        NEW.state = OLD.state
+        OR (OLD.state = 'PREPARED' AND NEW.state IN ('FILESYSTEM_APPLIED', 'BLOCKED'))
+        OR (OLD.state = 'FILESYSTEM_APPLIED' AND NEW.state IN ('COMMITTED', 'BLOCKED'))
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'CONTROLLED_ENDPOINT_TAKEOVER_TRANSITION_INVALID');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_controlled_endpoint_takeover_intents_no_delete
+    BEFORE DELETE ON controlled_endpoint_takeover_intents
+    BEGIN
+        SELECT RAISE(ABORT, 'CONTROLLED_ENDPOINT_TAKEOVER_INTENT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_controlled_endpoint_takeovers_no_update
+    BEFORE UPDATE ON controlled_endpoint_takeovers
+    BEGIN
+        SELECT RAISE(ABORT, 'CONTROLLED_ENDPOINT_TAKEOVER_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_controlled_endpoint_takeovers_no_delete
+    BEFORE DELETE ON controlled_endpoint_takeovers
+    BEGIN
+        SELECT RAISE(ABORT, 'CONTROLLED_ENDPOINT_TAKEOVER_IMMUTABLE');
     END
     """,
 )

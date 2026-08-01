@@ -1,5 +1,21 @@
 # Implementeringsstatus
 
+Oppdatering 2026-08-01: Kontrollert overtakelse av et lokalt mål med gyldig
+fremmed eier er nå implementert. **Oversikt** og **Jobber** viser en eksplisitt
+lokalisert handling; dialogen viser gammel eier, eierskapsepoke, recovery-status,
+at tidligere kontrollnamespace beholdes og at full analyse kreves. Bekreftelsen
+sendes som en streng, revisjonsbundet og idempotent kommando. Engine Host tar den
+virkelige `mutation.lock`, klassifiserer markør og recovery på nytt under låsen,
+avviser aktiv mutasjon eller uavklart recovery, skriver immutable takeover-intent
+og neste ownership-record, og publiserer deretter en checksummet markør for lokal
+eier med eksakt `old_epoch + 1`. Catalog migration 42 lagrer restartbar intent og
+immutable bevis, appender nye endpoint-/jobbrevisjoner, ugyldiggjør gamle planer
+og køer obligatorisk full analyse uten automatisk start. Avbrudd før og etter
+markørpublisering fortsetter deterministisk ved startup; gammel owner/epoch
+avvises som stale. Qt-bevis ved 900×560 dekker norsk/engelsk språkbytte, lang
+målsti, dialogens høyde-for-bredde og klikkbare kontroller uten tekstklipping.
+To-maskin SMB-lab og writable SMB-scope er fortsatt eksplisitt utsatt.
+
 Oppdatering 2026-08-01: Aktive jobber som ble opprettet før catalog migration
 30 kan nå repareres uten automatisk eller skjult skriving til brukerens mål.
 Når alle målbindingene i den eksakte aktive jobbrevisjonen er
@@ -12,7 +28,8 @@ og probe-evidence, appender endpoint-/jobbrevisjon og kjører deretter
 klassifisering, snapshots og første plan på nytt. Stale revisjon, blandet
 registreringsstate og fremmed/korrupt kontrollstate avvises uten takeover.
 Kompakt GUI-bevis ved 900×560 dekker dobbelklikk, lang målsti, språkbytte og
-ingen horisontal klipping. Kontrollert fremmed-overtakelse gjenstår.
+ingen horisontal klipping. Kontrollert lokal fremmed-overtakelse er dekket av
+den nyere oppdateringen over.
 
 Oppdatering 2026-08-01: Multi-target backup er nå bevist gjennom hele den
 lokale executorgrensen, ikke bare i planleggingen. En forseglet plan binder to
@@ -24,8 +41,8 @@ journal, final commit, operasjonsaudit og cataloghandoff mot riktig rot og
 frigir hver lease separat. Integrasjonen verifiserer identiske kildebytes på
 begge mål, to separate terminale operation outcomes/handoffs, to vellykkede
 targettilstander og at runnen først blir `COMPLETED` etter begge. Dette lukker
-den tidligere markerte multi-target operation-binding-gapen. Kontrollert
-fremmed-overtakelse gjenstår.
+den tidligere markerte multi-target operation-binding-gapen. Kontrollert lokal
+fremmed-overtakelse er dekket av den nyere oppdateringen over.
 
 Oppdatering 2026-08-01: Rekonstruerbare GUI-spørringer har nå faktisk
 transportkansellering i tillegg til den eksisterende logical cancellation og
@@ -382,8 +399,8 @@ Statusrettelse 2026-08-01: Milepælradens eldre «Neste slice» er erstattet av
 oppdateringene over og av start-/directory-beviset nedenfor. Explicit start,
 journalført katalogoppretting og multi-target operation-binding er levert.
 Reparasjon av pre-migration-30 pending jobs er nå også levert gjennom den
-eksplisitte, revisjonsbundne **Registrer mål**-handlingen. Neste lokale gap er
-kontrollert fremmed-overtakelse.
+eksplisitte, revisjonsbundne **Registrer mål**-handlingen. Den senere
+oppdateringen øverst dekker også kontrollert lokal fremmed-overtakelse.
 
 Nyeste 0B-slice: **Jobber**-arbeidsflaten viser nå live, sekvensbevisst
 `QUERY_RUN_PROGRESS` for den aktive kjøringen med durable runntilstand,
@@ -411,9 +428,9 @@ produktflaten er **Innstillinger**.
 
 Forrige 0B-slice: En runnable forseglet førstegangsplan kan nå startes eksplisitt fra jobbdeltaljen. GUI sender plan-ID og checksum som `START_RUN`, beholder request-/idempotens-ID ved feil og viser køstatus etter aksept; catalog avviser samtidig en ny levende run for samme jobb. Journalførte `CREATE_DIRECTORY`-operasjoner har eksplisitt operation-kind og planrekkefølge, en deterministisk recovery-markør, atomisk lokal rename, restartverifisering, eget catalog-effect og kontrollert markøropprydding. Executor fullfører parent-directory før nested filer og kjeder flere durable intent-segmenter. Catalog migration 32 og recovery migration 6 oppgraderer eksisterende state. Integrasjonstesten kjører en directory-plus-file-plan helt til `COMPLETED`, og fault-window-testen beviser idempotent retry etter rename. Source-, target-, status- og planetiketter beholder den tidligere breddesensitive minimumshøyden, slik at valgte lange mål ikke klippes. Multi-target operation-binding, pre-migration-30 pending-jobbreparasjon og kontrollert fremmed-overtakelse gjenstår.
 
-Statusrettelse: Multi-target operation-binding og pre-migration-30
-pending-jobbreparasjon er levert og bevist gjennom oppdateringene øverst.
-Kontrollert fremmed-overtakelse gjenstår.
+Statusrettelse: Multi-target operation-binding, pre-migration-30
+pending-jobbreparasjon og kontrollert lokal fremmed-overtakelse er levert og
+bevist gjennom oppdateringene øverst.
 
 Forrige 0B-slice: Den firestegs lokale backupflyten utfører eksplisitt registrering av det valgte skrivbare målet gjennom handlingen **Opprett og registrer**. Før filsystempublisering lagrer Engine Host en restartbar catalog-intent. Den lokale provisioneren godtar bare et fraværende kontrollområde eller sin egen eksakt matchende partial staging, oppretter checksummet schema-4 `endpoint.json`, immutable ownership-record, påkrevde og installasjonsspesifikke namespaces, og gjennomfører en avgrenset write/read/delete-probe. Catalog migration 30 lagrer immutable registreringsbevis; commit appender ny endpointrevisjon/generasjon og ny jobbrevisjon, flytter begge heads med compare-and-swap og setter bare den aktive bindingen til `WRITABLE_READY`. Startup fullfører eksakte pending intents før endpointklassifisering. Fremmed, korrupt, nyere, ukjent eller endret kontrollstate blokkeres uten takeover eller sletting. GUI viser registreringsstatus, beholder gjennomgått utkast ved delvis feil og tilbyr **Prøv registrering på nytt**.
 

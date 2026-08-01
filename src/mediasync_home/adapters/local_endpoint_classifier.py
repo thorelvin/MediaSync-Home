@@ -141,7 +141,9 @@ class LocalEndpointControlAreaClassifier(EndpointControlAreaClassifier):
             limit_code="ENDPOINT_CONTROL_AREA_ENTRY_LIMIT_EXCEEDED",
         )
         marker_aliases = tuple(
-            name for name in control_names if name.casefold() == ENDPOINT_MARKER_NAME.casefold()
+            name
+            for name in control_names
+            if name.casefold() == ENDPOINT_MARKER_NAME.casefold()
         )
         if not marker_aliases:
             if not control_names:
@@ -150,7 +152,9 @@ class LocalEndpointControlAreaClassifier(EndpointControlAreaClassifier):
                     EndpointControlAreaState.UNKNOWN_EMPTY_DIRECTORY,
                     "ENDPOINT_CONTROL_AREA_UNKNOWN_EMPTY",
                 )
-            if any(name.casefold() in _KNOWN_CONTROL_CHILDREN for name in control_names):
+            if any(
+                name.casefold() in _KNOWN_CONTROL_CHILDREN for name in control_names
+            ):
                 return _classification(
                     root,
                     EndpointControlAreaState.PARTIAL_CONTROL_AREA,
@@ -247,7 +251,11 @@ class LocalEndpointControlAreaClassifier(EndpointControlAreaClassifier):
             limit=self._max_root_entries,
             limit_code="ENDPOINT_ROOT_ENTRY_LIMIT_EXCEEDED",
         )
-        return tuple(name for name in names if name.casefold() == CONTROL_DIRECTORY_NAME.casefold())
+        return tuple(
+            name
+            for name in names
+            if name.casefold() == CONTROL_DIRECTORY_NAME.casefold()
+        )
 
     def _bounded_entry_names(
         self,
@@ -381,7 +389,9 @@ def local_root_identity_hash(
     try:
         inspection = active_probe.inspect_path(Path(root))
     except ReparseGuardError as exc:
-        raise LocalEndpointClassificationError(exc.validation_code, exc.next_action) from exc
+        raise LocalEndpointClassificationError(
+            exc.validation_code, exc.next_action
+        ) from exc
     if (
         not inspection.exists
         or inspection.is_reparse_point
@@ -412,6 +422,22 @@ def endpoint_marker_checksum(marker: Mapping[str, object]) -> str:
             "Restore marker fields supported by the canonical JSON contract.",
         ) from exc
     return blake3(canonical).hexdigest()
+
+
+def load_validated_endpoint_marker_payload(
+    root: Path,
+    *,
+    probe: ReparsePathProbe | None = None,
+) -> dict[str, object]:
+    """Read the strict marker payload after the caller has acquired its endpoint lock."""
+    classifier = LocalEndpointControlAreaClassifier(probe=probe)
+    payload = classifier._read_json_object(
+        Path(root) / CONTROL_DIRECTORY_NAME / ENDPOINT_MARKER_NAME,
+        maximum_bytes=MAX_MARKER_BYTES,
+        invalid_code="ENDPOINT_MARKER_INVALID",
+    )
+    _validate_marker_payload(payload)
+    return payload
 
 
 def _validate_marker_payload(payload: dict[str, object]) -> EndpointMarkerEvidence:

@@ -4,6 +4,7 @@ from threading import Event
 from typing import Any
 
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
+from mediasync_home.application.endpoint_takeover import EndpointTakeoverCommandName
 from mediasync_home.application.job_creation import JobCreationCommandName
 from mediasync_home.application.job_drafts import DraftTarget, StandardBackupJobDraft
 from mediasync_home.application.runs import RunCommandName
@@ -42,7 +43,10 @@ def test_engine_client_submits_reviewed_standard_backup_draft() -> None:
     )
 
     assert response.reason is None
-    assert ipc_client.command_name == JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value
+    assert (
+        ipc_client.command_name
+        == JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value
+    )
     assert ipc_client.request_id == "44444444-4444-4444-8444-444444444444"
     assert ipc_client.idempotency_key == "66666666-6666-4666-8666-666666666666"
     assert ipc_client.payload is not None
@@ -102,6 +106,39 @@ def test_engine_client_submits_revision_bound_writable_target_registration() -> 
     assert ipc_client.payload == {
         "job_id": "job-a",
         "job_revision_id": "job-revision-a",
+    }
+    assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
+
+
+def test_engine_client_submits_explicit_revision_bound_controlled_takeover() -> None:
+    ipc_client = _RecordingIpcClient()
+    client = EngineClient(ipc_client)  # type: ignore[arg-type]
+
+    response = client.start_controlled_endpoint_takeover(
+        job_id="job-a",
+        job_revision_id="job-revision-a",
+        target_ordinal=2,
+        endpoint_id="11111111-1111-4111-8111-111111111111",
+        expected_foreign_owner_installation_id=("22222222-2222-4222-8222-222222222222"),
+        expected_ownership_epoch=7,
+        request_id="request-a",
+        idempotency_key="idempotency-a",
+    )
+
+    assert response.reason is None
+    assert ipc_client.command_name == (
+        EndpointTakeoverCommandName.START_CONTROLLED_ENDPOINT_TAKEOVER.value
+    )
+    assert ipc_client.payload == {
+        "job_id": "job-a",
+        "job_revision_id": "job-revision-a",
+        "target_ordinal": 2,
+        "endpoint_id": "11111111-1111-4111-8111-111111111111",
+        "expected_foreign_owner_installation_id": (
+            "22222222-2222-4222-8222-222222222222"
+        ),
+        "expected_ownership_epoch": 7,
+        "explicit_confirmation": True,
     }
     assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
 

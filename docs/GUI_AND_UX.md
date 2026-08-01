@@ -872,6 +872,13 @@ Normalvisningen skal forklare konsekvens uten distribuert-systemterminologi:
 
 `VALID_FOREIGN` er read-only. Handlingslinjen kan tilby **Se detaljer** og **Start kontrollert overtakelse**, men aldri **Kjør backup**. Overtakelsesveiviseren viser gammel installasjons-ID i forkortet form, siste eierskapsepoke, uavklart recovery, hva som ikke blir slettet, og at full kontroll må kjøres etterpå.
 
+0B-implementasjonsnote: Den lokale GUI-flyten viser **Start kontrollert overtakelse**
+bare for en eksakt fremmed målbinding. En kompakt, språkbyttbar bekreftelsesdialog
+viser eier, epoke, recovery-status, bevart namespace og konsekvensen før en eksplisitt
+checkbox låser opp bekreftelsen. Lange mål- og detaljtekster reserverer høyde etter
+`heightForWidth`, og Qt-testen verifiserer hele dialogen og hovedvinduet ved 900×560.
+Et vellykket svar køer full analyse og tilbyr ikke automatisk kjøring.
+
 En eksisterende ukjent `.mediasync`-mappe skal ikke beskrives som «MediaSync-data» før markøren er validert. Ved `UNKNOWN_NONEMPTY_DIRECTORY` brukes en hard blokkering med mulighet til å åpne mappen; appen skal ikke foreslå å tømme eller gi nytt navn automatisk.
 
 Assurance-tekst skal være presis:

@@ -18,6 +18,7 @@ from mediasync_home.adapters.endpoint_leases import (
     LocalResolvingEndpointLeaseAuthority,
     MutationPermitIssueError,
 )
+from mediasync_home.adapters.endpoint_takeover import LocalEndpointTakeoverFilesystem
 from mediasync_home.adapters.final_commit import LocalResolvingFinalCommitAdapter
 from mediasync_home.adapters.final_verification import (
     LocalFinalArtifactVerificationAdapter,
@@ -64,6 +65,9 @@ from mediasync_home.adapters.sqlite.initial_backup_plans import (
     SqliteInitialBackupPlanMaterializer,
 )
 from mediasync_home.adapters.sqlite.endpoint_roots import SqliteEndpointRootResolver
+from mediasync_home.adapters.sqlite.endpoint_takeovers import (
+    SqliteEndpointTakeoverStore,
+)
 from mediasync_home.adapters.sqlite.endpoint_classifications import (
     SqliteEndpointClassificationRefresher,
 )
@@ -158,6 +162,10 @@ from mediasync_home.application.run_executor_cycle import (
 from mediasync_home.application.host_locator import LocalEngineHostPublication
 from mediasync_home.application.endpoint_registration import (
     EndpointClassificationRefreshReport,
+)
+from mediasync_home.application.endpoint_takeover import (
+    EndpointTakeoverCoordinator,
+    EndpointTakeoverIds,
 )
 from mediasync_home.application.job_creation import StandardBackupJobIds
 from mediasync_home.application.initial_backup_planning import (
@@ -305,6 +313,16 @@ class UuidWritableEndpointRegistrationIdFactory:
                 )
                 for candidate in candidates
             ),
+        )
+
+
+class UuidEndpointTakeoverIdFactory:
+    def new_takeover_ids(self) -> EndpointTakeoverIds:
+        return EndpointTakeoverIds(
+            intent_id=str(uuid4()),
+            resulting_endpoint_revision_id=str(uuid4()),
+            resulting_job_revision_id=str(uuid4()),
+            analysis_request_id=str(uuid4()),
         )
 
 
@@ -1599,6 +1617,15 @@ def build_engine_host_runtime(
         writable_endpoint_registration.reconcile_pending(
             observed_utc=runtime_clock.utc_now(),
         )
+        endpoint_takeover = EndpointTakeoverCoordinator(
+            store=SqliteEndpointTakeoverStore(catalog_connection),
+            filesystem=LocalEndpointTakeoverFilesystem(),
+            id_factory=UuidEndpointTakeoverIdFactory(),
+            owner_installation_id=installation_state.installation_id,
+        )
+        endpoint_takeover.reconcile_pending(
+            observed_utc=runtime_clock.utc_now(),
+        )
         endpoint_classification_refresher = SqliteEndpointClassificationRefresher(
             catalog_connection,
             classifier=LocalEndpointControlAreaClassifier(),
@@ -1735,6 +1762,8 @@ def build_engine_host_runtime(
             standard_backup_job_endpoint_registrar=standard_backup_job_endpoints,
             writable_endpoint_registration=writable_endpoint_registration,
             writable_endpoint_registration_utc_now=runtime_clock.utc_now,
+            endpoint_takeover=endpoint_takeover,
+            endpoint_takeover_utc_now=runtime_clock.utc_now,
             endpoint_classification_refresh=lambda: (
                 endpoint_classification_refresher.refresh_endpoint_classifications(
                     observed_utc=runtime_clock.utc_now(),

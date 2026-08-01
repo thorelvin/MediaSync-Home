@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QBoxLayout,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QLabel,
@@ -160,7 +161,10 @@ def test_main_window_displays_engine_status(qapp) -> None:
         action_bar = window.findChild(QWidget, "actionBar")
         assert action_bar is not None
         assert action_bar.layout() is not None
-        assert action_bar.layout().itemAt(action_bar.layout().count() - 1).widget() is language
+        assert (
+            action_bar.layout().itemAt(action_bar.layout().count() - 1).widget()
+            is language
+        )
         assert [action.text() for action in language.menu().actions()] == [
             "Norsk",
             "English",
@@ -483,8 +487,10 @@ def test_target_selection_reflows_without_horizontal_clipping(
         qapp.processEvents()
         qapp.processEvents()
 
-        assert target_paths[0].text().endswith(
-            "CompleteComputerBackupTargetFolderWithoutBreaksOne"
+        assert (
+            target_paths[0]
+            .text()
+            .endswith("CompleteComputerBackupTargetFolderWithoutBreaksOne")
         )
         assert source_path.text().endswith(
             "ImportantDocumentsAndFamilyPicturesCollectionWithoutBreaks"
@@ -500,7 +506,10 @@ def test_target_selection_reflows_without_horizontal_clipping(
         )
         assert all(target.wordWrap() is False for target in target_paths)
         assert window._dashboard_detail_layout is not None
-        assert window._dashboard_detail_layout.direction() is QBoxLayout.Direction.TopToBottom
+        assert (
+            window._dashboard_detail_layout.direction()
+            is QBoxLayout.Direction.TopToBottom
+        )
         assert window._setup_stepper_layout is not None
         positions = [
             window._setup_stepper_layout.getItemPosition(
@@ -528,7 +537,9 @@ def test_target_selection_reflows_without_horizontal_clipping(
             assert target_position.x() >= 0
             assert target_position.y() >= 0
             assert target_position.x() + target_path.width() <= target_controls.width()
-            assert target_position.y() + target_path.height() <= target_controls.height()
+            assert (
+                target_position.y() + target_path.height() <= target_controls.height()
+            )
         bounded_folder_labels = (
             source_path,
             target_summary,
@@ -582,7 +593,10 @@ def test_target_selection_reflows_without_horizontal_clipping(
             dashboard_scroll.viewport(), create_backup.rect().topLeft()
         )
         assert action_position.y() >= 0
-        assert action_position.y() + create_backup.height() <= dashboard_scroll.viewport().height()
+        assert (
+            action_position.y() + create_backup.height()
+            <= dashboard_scroll.viewport().height()
+        )
     finally:
         window.close()
         window.deleteLater()
@@ -678,7 +692,9 @@ def test_directory_picker_returns_packaged_qt_acceptance_value(qapp) -> None:
             lambda title: AcceptedDirectoryDialog()
         )
 
-        assert window._choose_directory("Choose source folder") == "C:/Users/Ada/Pictures"
+        assert (
+            window._choose_directory("Choose source folder") == "C:/Users/Ada/Pictures"
+        )
     finally:
         window.close()
         window.deleteLater()
@@ -765,7 +781,9 @@ def test_setup_target_controls_persist_multiple_reviewed_targets(qapp) -> None:
         window.deleteLater()
 
 
-def test_failed_target_registration_keeps_review_and_retry_without_clipping(qapp) -> None:
+def test_failed_target_registration_keeps_review_and_retry_without_clipping(
+    qapp,
+) -> None:
     provider = _FakeFailedRegistrationEngineClient()
     window = build_main_window(
         initial_state=_ready_state(),
@@ -1184,9 +1202,7 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert jobs_list.count() == 1
         assert jobs_list.currentItem() is not None
         assert jobs_list.currentItem().data(Qt.ItemDataRole.UserRole) == "job-a"
-        assert jobs_list.currentItem().text() == (
-            "Pictures\n1 mål / 1 uavhengig enhet"
-        )
+        assert jobs_list.currentItem().text() == ("Pictures\n1 mål / 1 uavhengig enhet")
         assert jobs_empty is not None
         assert jobs_empty.isHidden() is True
         assert jobs_detail_title is not None
@@ -1205,7 +1221,10 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert job_detail_targets is not None
         assert job_detail_targets.text() == "1 mål / 1 uavhengig enhet"
         assert job_detail_defaults is not None
-        assert job_detail_defaults.text() == "Oppdater backup - Alle brukerfiler - Standard kontroll"
+        assert (
+            job_detail_defaults.text()
+            == "Oppdater backup - Alle brukerfiler - Standard kontroll"
+        )
         assert job_detail_revision is not None
         assert job_detail_revision.text() == "Revisjon: job-rev-a - Filter: filter-a"
         assert job_detail_plan is not None
@@ -1222,23 +1241,40 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         )
         assert plan_endpoint_summary is not None
         assert plan_endpoint_summary.text() == "2 endepunkter fra plan-a."
-        assert plan_endpoint_rows[0].text() == "Kildeendepunkt: source-a · snapshot source-snapshot-a"
-        assert plan_endpoint_rows[1].text() == "Målendepunkt 1: target-a · snapshot target-snapshot-a"
+        assert (
+            plan_endpoint_rows[0].text()
+            == "Kildeendepunkt: source-a · snapshot source-snapshot-a"
+        )
+        assert (
+            plan_endpoint_rows[1].text()
+            == "Målendepunkt 1: target-a · snapshot target-snapshot-a"
+        )
         assert snapshot_health_summary is not None
-        assert snapshot_health_summary.text() == "1 blokkerende problem i source-snapshot-a."
-        assert snapshot_health_rows[0].text() == "Blokkerende problem: Archive · UNREADABLE_DIRECTORY"
+        assert (
+            snapshot_health_summary.text()
+            == "1 blokkerende problem i source-snapshot-a."
+        )
+        assert (
+            snapshot_health_rows[0].text()
+            == "Blokkerende problem: Archive · UNREADABLE_DIRECTORY"
+        )
         assert snapshot_health_rows[1].text() == "Dekningsadvarsel: Videos · VOLATILE"
         assert cataloged_files_summary is not None
         assert cataloged_files_summary.text() == (
             "1 katalogf\u00f8rt fil. Flere katalogf\u00f8rte filer finnes."
         )
-        assert cataloged_files_rows[0].text() == "Photos/2026/a.jpg · target-a · sha abcdef01"
+        assert (
+            cataloged_files_rows[0].text()
+            == "Photos/2026/a.jpg · target-a · sha abcdef01"
+        )
         assert activity_title is not None
         assert activity_title.text() == "Siste kjøring: run-a"
         assert activity_rows[0].text() == "Aktivitet: Kontrollerer"
         assert activity_rows[1].text() == "Oppmerksomhet: Venter"
-        assert activity_rows[2].text().startswith(
-            "Ferskhet per mål: target-a: Sist sikkerhetskopiert"
+        assert (
+            activity_rows[2]
+            .text()
+            .startswith("Ferskhet per mål: target-a: Sist sikkerhetskopiert")
         )
         assert "Siste vellykkede:" in activity_rows[2].text()
         assert "19.07.2026" in activity_rows[2].text()
@@ -1253,32 +1289,49 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         )
         assert jobs_detail_targets.text() == "1 target / 1 independent device"
         assert job_detail_targets.text() == "1 target / 1 independent device"
-        assert job_detail_defaults.text() == "Update backup - All user files - Standard verification"
+        assert (
+            job_detail_defaults.text()
+            == "Update backup - All user files - Standard verification"
+        )
         assert job_detail_revision.text() == "Revision: job-rev-a - Filter: filter-a"
         assert job_detail_plan.text().startswith("2 operations from plan-a.")
         assert job_detail_plan.text().endswith("Preview only")
         assert plan_preview_summary.text() == "2 operations from plan-a."
-        assert plan_preview_rows[0].text() == (
-            "Low: Create folder: Photos -> target-a"
-        )
+        assert plan_preview_rows[0].text() == ("Low: Create folder: Photos -> target-a")
         assert plan_preview_rows[1].text() == (
             "Low: Copy new: Photos/2026/a.jpg - 2.0 KiB -> target-a"
         )
         assert plan_endpoint_summary.text() == "2 endpoints from plan-a."
-        assert plan_endpoint_rows[0].text() == "Source endpoint: source-a · snapshot source-snapshot-a"
-        assert plan_endpoint_rows[1].text() == "Target endpoint 1: target-a · snapshot target-snapshot-a"
-        assert snapshot_health_summary.text() == "1 blocking issue in source-snapshot-a."
-        assert snapshot_health_rows[0].text() == "Blocking issue: Archive · UNREADABLE_DIRECTORY"
+        assert (
+            plan_endpoint_rows[0].text()
+            == "Source endpoint: source-a · snapshot source-snapshot-a"
+        )
+        assert (
+            plan_endpoint_rows[1].text()
+            == "Target endpoint 1: target-a · snapshot target-snapshot-a"
+        )
+        assert (
+            snapshot_health_summary.text() == "1 blocking issue in source-snapshot-a."
+        )
+        assert (
+            snapshot_health_rows[0].text()
+            == "Blocking issue: Archive · UNREADABLE_DIRECTORY"
+        )
         assert snapshot_health_rows[1].text() == "Coverage warning: Videos · VOLATILE"
         assert cataloged_files_summary.text() == (
             "1 cataloged file. More cataloged files exist."
         )
-        assert cataloged_files_rows[0].text() == "Photos/2026/a.jpg · target-a · sha abcdef01"
+        assert (
+            cataloged_files_rows[0].text()
+            == "Photos/2026/a.jpg · target-a · sha abcdef01"
+        )
         assert activity_title.text() == "Latest run: run-a"
         assert activity_rows[0].text() == "Activity: Checking"
         assert activity_rows[1].text() == "Attention: Waiting"
-        assert activity_rows[2].text().startswith(
-            "Freshness per target: target-a: Last backed up"
+        assert (
+            activity_rows[2]
+            .text()
+            .startswith("Freshness per target: target-a: Last backed up")
         )
         assert "Last successful:" in activity_rows[2].text()
         assert "2026-07-19" in activity_rows[2].text()
@@ -1287,12 +1340,13 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         language.menu().actions()[0].trigger()
 
         assert target.text() == "1 mål: USB 1"
-        assert jobs_list.currentItem().text() == (
-            "Pictures\n1 mål / 1 uavhengig enhet"
-        )
+        assert jobs_list.currentItem().text() == ("Pictures\n1 mål / 1 uavhengig enhet")
         assert jobs_detail_targets.text() == "1 mål / 1 uavhengig enhet"
         assert job_detail_targets.text() == "1 mål / 1 uavhengig enhet"
-        assert job_detail_defaults.text() == "Oppdater backup - Alle brukerfiler - Standard kontroll"
+        assert (
+            job_detail_defaults.text()
+            == "Oppdater backup - Alle brukerfiler - Standard kontroll"
+        )
         assert job_detail_revision.text() == "Revisjon: job-rev-a - Filter: filter-a"
         assert job_detail_plan.text().startswith("2 operasjoner fra plan-a.")
         assert plan_preview_summary.text() == "2 operasjoner fra plan-a."
@@ -1301,10 +1355,22 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
             "Lav: Kopier ny: Photos/2026/a.jpg - 2.0 KiB -> target-a"
         )
         assert plan_endpoint_summary.text() == "2 endepunkter fra plan-a."
-        assert plan_endpoint_rows[0].text() == "Kildeendepunkt: source-a · snapshot source-snapshot-a"
-        assert plan_endpoint_rows[1].text() == "Målendepunkt 1: target-a · snapshot target-snapshot-a"
-        assert snapshot_health_summary.text() == "1 blokkerende problem i source-snapshot-a."
-        assert snapshot_health_rows[0].text() == "Blokkerende problem: Archive · UNREADABLE_DIRECTORY"
+        assert (
+            plan_endpoint_rows[0].text()
+            == "Kildeendepunkt: source-a · snapshot source-snapshot-a"
+        )
+        assert (
+            plan_endpoint_rows[1].text()
+            == "Målendepunkt 1: target-a · snapshot target-snapshot-a"
+        )
+        assert (
+            snapshot_health_summary.text()
+            == "1 blokkerende problem i source-snapshot-a."
+        )
+        assert (
+            snapshot_health_rows[0].text()
+            == "Blokkerende problem: Archive · UNREADABLE_DIRECTORY"
+        )
         assert snapshot_health_rows[1].text() == "Dekningsadvarsel: Videos · VOLATILE"
         assert cataloged_files_summary.text() == (
             "1 katalogf\u00f8rt fil. Flere katalogf\u00f8rte filer finnes."
@@ -1312,8 +1378,10 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert activity_title.text() == "Siste kjøring: run-a"
         assert activity_rows[0].text() == "Aktivitet: Kontrollerer"
         assert activity_rows[1].text() == "Oppmerksomhet: Venter"
-        assert activity_rows[2].text().startswith(
-            "Ferskhet per mål: target-a: Sist sikkerhetskopiert"
+        assert (
+            activity_rows[2]
+            .text()
+            .startswith("Ferskhet per mål: target-a: Sist sikkerhetskopiert")
         )
         assert "target-a: Kontrollerer måltilgang." in activity_rows[3].text()
     finally:
@@ -1639,9 +1707,7 @@ def test_jobs_changes_workspace_filters_pages_and_localizes_without_clipping(
 
         assert title is not None and title.text() == "Endringer"
         assert banner is not None
-        assert banner.text() == (
-            "Krever oppmerksomhet: 1 blokkert, 3 må vurderes."
-        )
+        assert banner.text() == ("Krever oppmerksomhet: 1 blokkert, 3 må vurderes.")
         assert banner.property("attentionKind") == "blocked"
         assert target_filter is not None
         assert [target_filter.itemText(index) for index in range(3)] == [
@@ -1689,7 +1755,9 @@ def test_jobs_changes_workspace_filters_pages_and_localizes_without_clipping(
         target_filter.setCurrentIndex(target_filter.findData("target-b"))
         qapp.processEvents()
         assert _virtual_row_count(changes_list) == 2
-        assert all("target-b" in _virtual_row_text(changes_list, index) for index in range(2))
+        assert all(
+            "target-b" in _virtual_row_text(changes_list, index) for index in range(2)
+        )
         assert provider.changes_queries[-1][3:] == (
             "target-b",
             ("MEDIUM", "HIGH", "BLOCKED"),
@@ -2073,7 +2141,9 @@ def test_command_worker_is_dedicated_serial_and_reuses_its_client(qapp) -> None:
     controller.deleteLater()
 
 
-def test_command_worker_close_discards_late_result_without_cancelling_execution(qapp) -> None:
+def test_command_worker_close_discards_late_result_without_cancelling_execution(
+    qapp,
+) -> None:
     started = Event()
     release = Event()
     completed = Event()
@@ -2571,9 +2641,7 @@ def test_stalled_history_prefetch_never_blocks_or_repaints_foreground_filter(
     factory_calls: list[object] = []
 
     def worker_factory() -> object:
-        client: object = (
-            foreground_provider if not factory_calls else prefetch_provider
-        )
+        client: object = foreground_provider if not factory_calls else prefetch_provider
         factory_calls.append(client)
         return client
 
@@ -3102,9 +3170,9 @@ def test_pending_target_registration_stays_responsive_and_bounded(qapp) -> None:
         assert target_rows[0].toolTip() == target_rows[0].text()
         assert "…" in str(target_rows[0].property("displayText"))
         assert (
-            target_rows[0].fontMetrics().horizontalAdvance(
-                str(target_rows[0].property("displayText"))
-            )
+            target_rows[0]
+            .fontMetrics()
+            .horizontalAdvance(str(target_rows[0].property("displayText")))
             <= target_rows[0].contentsRect().width()
         )
         assert language is not None and language.menu() is not None
@@ -3150,6 +3218,85 @@ def test_pending_target_registration_stays_responsive_and_bounded(qapp) -> None:
         assert register.text() == "Start backup"
     finally:
         worker_provider.release.set()
+        window.close()
+        window.deleteLater()
+
+
+def test_foreign_target_takeover_confirmation_is_localized_and_bounded(qapp) -> None:
+    provider = _FakeForeignTakeoverDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window.refresh_engine_status()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+        takeover = window.findChild(QPushButton, "jobsStartBackupButton")
+        target_rows = window.findChildren(QLabel, "jobsDetailTargetRow")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert takeover is not None and takeover.isVisible() and takeover.isEnabled()
+        assert takeover.text() == "Start kontrollert overtakelse"
+        assert target_rows and target_rows[0].isVisible()
+        assert target_rows[0].toolTip() == target_rows[0].text()
+        assert "…" in str(target_rows[0].property("displayText"))
+        assert language is not None and language.menu() is not None
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+        assert takeover.text() == "Start controlled takeover"
+
+        dialog_checks: list[bool] = []
+        dialog_errors: list[BaseException] = []
+
+        def confirm_dialog() -> None:
+            dialog = window.findChild(QDialog, "controlledTakeoverDialog")
+            try:
+                assert dialog is not None and dialog.isVisible()
+                details = dialog.findChild(QLabel, "controlledTakeoverDetails")
+                checkbox = dialog.findChild(QCheckBox, "controlledTakeoverConfirmation")
+                confirm = dialog.findChild(QPushButton, "controlledTakeoverConfirm")
+                assert details is not None and details.wordWrap()
+                assert "Current owner: 22222222...2222" in details.text()
+                assert "Latest ownership epoch: 7" in details.text()
+                assert "does not start automatically" in details.text()
+                assert details.height() >= details.heightForWidth(details.width())
+                assert checkbox is not None
+                assert checkbox.text() == "I confirm the new owner."
+                assert checkbox.sizeHint().width() <= checkbox.width()
+                assert confirm is not None and confirm.isEnabled() is False
+                QTest.mouseClick(checkbox, Qt.MouseButton.LeftButton)
+                assert confirm.isEnabled() is True
+                dialog_checks.append(True)
+                QTest.mouseClick(confirm, Qt.MouseButton.LeftButton)
+            except BaseException as exc:
+                dialog_errors.append(exc)
+                if dialog is not None:
+                    dialog.reject()
+
+        QTimer.singleShot(0, confirm_dialog)
+        QTest.mouseClick(takeover, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert dialog_errors == []
+        assert dialog_checks == [True]
+        assert provider.takeover_args == (
+            "job-a",
+            "job-rev-a",
+            1,
+            "target-a",
+            "22222222-2222-4222-8222-222222222222",
+            7,
+        )
+        assert provider.start_calls == 0
+        assert window._job_detail_state.job_revision_id == "job-rev-b"
+        assert window._job_detail_state.controlled_takeover_required is False
+        assert window._job_detail_state.analysis_request_state == "QUEUED"
+    finally:
         window.close()
         window.deleteLater()
 
@@ -3227,7 +3374,9 @@ def test_stalled_create_command_keeps_shell_responsive_and_submits_once(qapp) ->
         window.deleteLater()
 
 
-def test_stalled_check_command_keeps_navigation_language_and_duplicate_guard(qapp) -> None:
+def test_stalled_check_command_keeps_navigation_language_and_duplicate_guard(
+    qapp,
+) -> None:
     provider = _FakeTargetRetryDashboardEngineClient()
     worker_provider = _BlockingCheckCommandEngineClient()
 
@@ -3765,7 +3914,10 @@ def test_jobs_page_localizes_terminal_partial_failure_summary(qapp) -> None:
         assert detail is not None
         assert "2 / 3 operations" in detail.text()
         assert "2 of 3 targets completed" in detail.text()
-        assert "Some files were not backed up. Review History and run again." in detail.text()
+        assert (
+            "Some files were not backed up. Review History and run again."
+            in detail.text()
+        )
         assert "1 warnings / 1 errors" in detail.text()
         assert "Calculating remaining time" not in detail.text()
         assert jobs_scroll is not None
@@ -3998,7 +4150,9 @@ def test_jobs_page_wraps_file_retry_diagnostics_without_clipping(qapp) -> None:
 
 def _ready_state() -> EngineStatusViewState:
     return engine_status_from_response(
-        IpcResponse.accepted({"host_status": startup_status(ProcessRole.ENGINE_HOST).to_dict()})
+        IpcResponse.accepted(
+            {"host_status": startup_status(ProcessRole.ENGINE_HOST).to_dict()}
+        )
     )
 
 
@@ -4214,7 +4368,6 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                 }
             }
         )
-
 
     def get_activity_overview(
         self,
@@ -4793,6 +4946,106 @@ class _FakePendingRegistrationDashboardEngineClient(_FakeDashboardEngineClient):
         )
 
 
+class _FakeForeignTakeoverDashboardEngineClient(_FakeDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.taken_over = False
+        self.takeover_args: tuple[str, str, int, str, str, int] | None = None
+        self.start_calls = 0
+
+    def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        response = super().get_backup_job_detail(job_id=job_id)
+        payload = dict(response.payload)
+        detail = dict(payload["backup_job_detail"])
+        job = dict(detail["job"])
+        job["job_revision_id"] = "job-rev-b" if self.taken_over else "job-rev-a"
+        targets = list(job["targets"])
+        target = dict(targets[0])
+        target.update(
+            {
+                "path_label": (
+                    "E:/MediaSync Home Backups/Foreign Installation/"
+                    "CompleteComputerBackupTargetFolderWithoutBreaks"
+                ),
+                "target_ordinal": 1,
+                "endpoint_id": "target-a",
+                "registration_state": (
+                    "WRITABLE_READY" if self.taken_over else "READ_ONLY_READY"
+                ),
+                "registration_reason_code": (
+                    "ENDPOINT_TARGET_WRITABLE_PROBE_VERIFIED"
+                    if self.taken_over
+                    else "ENDPOINT_TARGET_FOREIGN_READ_ONLY"
+                ),
+                "foreign_owner_installation_id": (
+                    None if self.taken_over else "22222222-2222-4222-8222-222222222222"
+                ),
+                "foreign_ownership_epoch": None if self.taken_over else 7,
+                "foreign_recovery_status": (
+                    None if self.taken_over else "CHECK_REQUIRED_UNDER_LOCK"
+                ),
+            }
+        )
+        targets[0] = target
+        job["targets"] = targets
+        if self.taken_over:
+            job["initial_plan"] = None
+            job["latest_analysis_request"] = {
+                "request_id": "analysis-request-a",
+                "state": "QUEUED",
+                "requested_utc": "2026-08-01T12:00:00Z",
+                "reason_code": None,
+                "analysis_id": None,
+                "plan_id": None,
+                "start_when_safe": False,
+                "started_run_id": None,
+                "row_version": 1,
+            }
+        detail["job"] = job
+        payload["backup_job_detail"] = detail
+        return IpcResponse.accepted(payload)
+
+    def start_controlled_endpoint_takeover(
+        self,
+        *,
+        job_id: str,
+        job_revision_id: str,
+        target_ordinal: int,
+        endpoint_id: str,
+        expected_foreign_owner_installation_id: str,
+        expected_ownership_epoch: int,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        assert request_id
+        assert idempotency_key
+        self.takeover_args = (
+            job_id,
+            job_revision_id,
+            target_ordinal,
+            endpoint_id,
+            expected_foreign_owner_installation_id,
+            expected_ownership_epoch,
+        )
+        self.taken_over = True
+        return IpcResponse.accepted(
+            {
+                "job": {"job_id": job_id, "job_revision_id": "job-rev-b"},
+                "endpoint_takeover": {
+                    "completed": True,
+                    "state": "COMMITTED",
+                    "analysis_request_id": "analysis-request-a",
+                    "full_analysis_queued": True,
+                    "start_when_safe": False,
+                },
+            }
+        )
+
+    def start_backup(self, **_kwargs: object) -> IpcResponse:
+        self.start_calls += 1
+        return IpcResponse.accepted({"created": True})
+
+
 class _BlockingTargetRegistrationEngineClient(
     _FakePendingRegistrationDashboardEngineClient
 ):
@@ -4857,9 +5110,7 @@ class _FailOnceStartCommandEngineClient(_FakeBackupStartDashboardEngineClient):
         resumed_from_run_id: str | None = None,
         source_operation_ids: tuple[str, ...] = (),
     ) -> IpcResponse:
-        self.attempts.append(
-            (plan_id, plan_checksum, request_id, idempotency_key)
-        )
+        self.attempts.append((plan_id, plan_checksum, request_id, idempotency_key))
         if len(self.attempts) == 1:
             raise TimeoutError("simulated uncertain command transport outcome")
         return super().start_backup(
@@ -4909,21 +5160,13 @@ class _FakeRunControlDashboardEngineClient(_FakeBackupStartDashboardEngineClient
             "active_relative_path": "Photos/2026/current.jpg",
             "active_phase": "STAGING_ALLOCATED",
             "active_planned_bytes": 2048,
-            "active_staging_failure_count": (
-                1 if self.staging_retry_waiting else 0
-            ),
-            "active_retry_backoff_ms": (
-                900 if self.staging_retry_waiting else None
-            ),
+            "active_staging_failure_count": (1 if self.staging_retry_waiting else 0),
+            "active_retry_backoff_ms": (900 if self.staging_retry_waiting else None),
             "active_retry_not_before_utc": (
-                "2026-07-31T00:00:00.900Z"
-                if self.staging_retry_waiting
-                else None
+                "2026-07-31T00:00:00.900Z" if self.staging_retry_waiting else None
             ),
             "active_last_error_code": (
-                "LOCAL_STAGING_TRANSFER_FAILED"
-                if self.staging_retry_waiting
-                else None
+                "LOCAL_STAGING_TRANSFER_FAILED" if self.staging_retry_waiting else None
             ),
             "bytes_per_second": 512.0,
             "eta_seconds": 3,
@@ -4952,17 +5195,13 @@ class _FakeRunControlDashboardEngineClient(_FakeBackupStartDashboardEngineClient
                         9_500 if self.target_waiting else None
                     ),
                     "endpoint_retry_not_before_utc": (
-                        "2026-07-31T00:00:09.500Z"
-                        if self.target_waiting
-                        else None
+                        "2026-07-31T00:00:09.500Z" if self.target_waiting else None
                     ),
                     "endpoint_wait_reason_code": (
                         self.endpoint_wait_reason if self.target_waiting else None
                     ),
                     "endpoint_wait_started_utc": (
-                        "2026-07-31T00:00:00.000Z"
-                        if self.target_waiting
-                        else None
+                        "2026-07-31T00:00:00.000Z" if self.target_waiting else None
                     ),
                 }
             ],
@@ -5110,19 +5349,23 @@ class _FakeTerminalRunDashboardEngineClient(_FakeBackupStartDashboardEngineClien
         self.completed_bytes = completed_bytes
         self.warning_count = warning_count
         self.error_count = error_count
-        self.target_states = target_states if target_states is not None else {
-            "COMPLETED": ("SUCCEEDED",),
-            "COMPLETED_WITH_WARNINGS": ("SUCCEEDED_WITH_WARNINGS",),
-            "PARTIAL_FAILURE": (
-                "SUCCEEDED",
-                "SUCCEEDED_WITH_WARNINGS",
-                "FAILED",
-            ),
-            "FAILED": ("FAILED",),
-            "CANCELLED": ("CANCELLED",),
-            "BLOCKED_BY_SAFETY": ("BLOCKED",),
-            "RECOVERY_REQUIRED": ("RECOVERY_REQUIRED",),
-        }.get(run_state, ("FAILED",))
+        self.target_states = (
+            target_states
+            if target_states is not None
+            else {
+                "COMPLETED": ("SUCCEEDED",),
+                "COMPLETED_WITH_WARNINGS": ("SUCCEEDED_WITH_WARNINGS",),
+                "PARTIAL_FAILURE": (
+                    "SUCCEEDED",
+                    "SUCCEEDED_WITH_WARNINGS",
+                    "FAILED",
+                ),
+                "FAILED": ("FAILED",),
+                "CANCELLED": ("CANCELLED",),
+                "BLOCKED_BY_SAFETY": ("BLOCKED",),
+                "RECOVERY_REQUIRED": ("RECOVERY_REQUIRED",),
+            }.get(run_state, ("FAILED",))
+        )
         self.progress_after_sequences: list[int | None] = []
 
     def _target_payloads(self) -> list[dict[str, object]]:
@@ -5135,12 +5378,16 @@ class _FakeTerminalRunDashboardEngineClient(_FakeBackupStartDashboardEngineClien
             completed_operations = (
                 self.completed_operations
                 if target_count == 1
-                else planned_operations if succeeded else 0
+                else planned_operations
+                if succeeded
+                else 0
             )
             completed_bytes = (
                 self.completed_bytes
                 if target_count == 1
-                else planned_bytes if succeeded else 0
+                else planned_bytes
+                if succeeded
+                else 0
             )
             payloads.append(
                 {
@@ -5722,9 +5969,7 @@ class _FakeHistoryEngineClient(_FakeDashboardEngineClient):
             activities = activities[:1]
         if job_id is not None:
             activities = [
-                activity
-                for activity in activities
-                if activity["job_id"] == job_id
+                activity for activity in activities if activity["job_id"] == job_id
             ]
         return IpcResponse.accepted(
             {
@@ -5749,13 +5994,10 @@ class _FakeHistoryEngineClient(_FakeDashboardEngineClient):
         limit: int | None = None,
     ) -> IpcResponse:
         normalized_limit = limit or 25
-        self.operation_audit_queries.append(
-            (run_id, operation_id, normalized_limit)
-        )
+        self.operation_audit_queries.append((run_id, operation_id, normalized_limit))
         retried = operation_id == "op-b"
         path = (
-            "Photos/2026/a-directory-name-that-keeps-going/"
-            "a-very-long-file-name.jpg"
+            "Photos/2026/a-directory-name-that-keeps-going/a-very-long-file-name.jpg"
             if retried
             else "Photos"
         )
@@ -6220,14 +6462,10 @@ def _history_activity_payload(
         "plan_id": "plan-a" if is_backup else None,
         "state": "COMPLETED" if is_backup else "NO_CHANGES",
         "started_utc": (
-            "2026-07-20T12:00:00.000Z"
-            if is_backup
-            else "2026-07-20T11:00:00.000Z"
+            "2026-07-20T12:00:00.000Z" if is_backup else "2026-07-20T11:00:00.000Z"
         ),
         "finished_utc": (
-            "2026-07-20T12:01:30.000Z"
-            if is_backup
-            else "2026-07-20T11:01:00.000Z"
+            "2026-07-20T12:01:30.000Z" if is_backup else "2026-07-20T11:01:00.000Z"
         ),
         "planned_operations": 2 if is_backup else 0,
         "completed_operations": 2 if is_backup else 0,
@@ -6235,9 +6473,7 @@ def _history_activity_payload(
         "completed_bytes": 1024 if is_backup else 0,
         "warning_count": 0,
         "error_count": 0,
-        "trigger_type": (
-            "MANUAL_LOCAL_PREVIEW" if is_backup else "INITIAL_JOB_SETUP"
-        ),
+        "trigger_type": ("MANUAL_LOCAL_PREVIEW" if is_backup else "INITIAL_JOB_SETUP"),
         "targets": [
             {
                 "endpoint_id": (
