@@ -92,6 +92,8 @@ def run_trigger_client(argv: Sequence[str] | None = None, *, emit: Emit | None =
     pipe_name = args.pipe_name
     if pipe_name is None:
         publication = _load_matching_local_preview_publication(args)
+        if publication is None and _bootstrap_packaged_local_preview_host(args):
+            publication = _load_matching_local_preview_publication(args)
         if publication is None:
             response = IpcResponse.rejected(
                 IpcReason.ENGINE_HOST_UNAVAILABLE,
@@ -116,15 +118,27 @@ def run_trigger_client(argv: Sequence[str] | None = None, *, emit: Emit | None =
         if publication is None:
             raise
         stale_publication_cleared = _clear_stale_host_publication(publication)
-        response = IpcResponse.rejected(
-            IpcReason.ENGINE_HOST_UNAVAILABLE,
-            {
-                "host_locator_publication": publication.to_payload(),
-                "reason": "HOST_LOCATOR_PUBLICATION_NOT_LIVE",
-                "scope": "0B_SAME_USER_LOCAL_PREVIEW",
-                "stale_host_locator_publication_cleared": stale_publication_cleared,
-            },
-        )
+        replacement = None
+        if stale_publication_cleared and _bootstrap_packaged_local_preview_host(args):
+            replacement = _load_matching_local_preview_publication(args)
+        if replacement is not None:
+            retry_client = Win32NamedPipeClient(
+                pipe_name=replacement.pipe_name,
+                role=ProcessRole.TRIGGER_CLIENT,
+                timeout_ms=int(args.timeout_seconds * 1000),
+            )
+            try:
+                response = _run_named_pipe_action(args, retry_client)
+            except (OSError, TimeoutError):
+                response = _unavailable_publication_response(
+                    replacement,
+                    stale_publication_cleared=False,
+                )
+        else:
+            response = _unavailable_publication_response(
+                publication,
+                stale_publication_cleared=stale_publication_cleared,
+            )
 
     output(json.dumps(response.to_dict(), sort_keys=True, separators=(",", ":")))
     return 0 if response.reason is None else 2
@@ -203,6 +217,67 @@ def _load_matching_local_preview_publication(
     return _load_matching_publication_for_descriptor(descriptor)
 
 
+def _bootstrap_packaged_local_preview_host(args: argparse.Namespace) -> bool:
+    from mediasync_home.adapters.local_host_locator import (
+        build_local_engine_host_descriptor_for_user,
+    )
+    from mediasync_home.adapters.process_supervisor import LocalSubprocessSupervisor
+    from mediasync_home.adapters.sqlite.connection_policy import (
+        build_state_store_layout,
+    )
+    from mediasync_home.composition.launcher import (
+        DesktopLaunchError,
+        _current_product_process_layout,
+        _probe_local_preview_desktop_host,
+        build_local_preview_desktop_launch,
+        run_local_preview_desktop,
+    )
+    from mediasync_home.ipc.win32_named_pipe import current_process_identity
+
+    identity = current_process_identity()
+    descriptor = build_local_engine_host_descriptor_for_user(
+        installation_id=args.installation_id,
+        user_scope_hash=identity.user_sid_hash,
+        state_root=args.state_root,
+        environ=os.environ,
+    )
+    if descriptor.state_root is None:
+        return False
+    if (
+        args.enqueue_trigger_occurrence
+        and not build_state_store_layout(descriptor.state_root).catalog.is_file()
+    ):
+        return False
+    executable, role_runner, application_root = _current_product_process_layout()
+    if role_runner is not None:
+        return False
+    try:
+        launch = build_local_preview_desktop_launch(
+            host_descriptor=descriptor,
+            executable=executable,
+            role_runner=None,
+            application_root=application_root,
+            environment=dict(os.environ),
+            reconcile_task_scheduler_resources=True,
+            task_scheduler_executable_path=executable,
+        )
+        return (
+            run_local_preview_desktop(
+                launch,
+                supervisor=LocalSubprocessSupervisor(),
+                probe_host=lambda: _probe_local_preview_desktop_host(
+                    descriptor,
+                    timeout_seconds=min(1.0, args.timeout_seconds),
+                ),
+                run_gui=lambda: 0,
+                timeout_seconds=args.timeout_seconds,
+            )
+            == 0
+        )
+    except (DesktopLaunchError, OSError, RuntimeError, ValueError):
+        return False
+
+
 def _load_matching_publication_for_descriptor(
     descriptor: LocalEngineHostDescriptor,
 ) -> LocalEngineHostPublication | None:
@@ -230,6 +305,22 @@ def _clear_stale_host_publication(
         return clear_unreachable_local_engine_host_publication(publication)
     except (OSError, ValueError):
         return False
+
+
+def _unavailable_publication_response(
+    publication: LocalEngineHostPublication,
+    *,
+    stale_publication_cleared: bool,
+) -> IpcResponse:
+    return IpcResponse.rejected(
+        IpcReason.ENGINE_HOST_UNAVAILABLE,
+        {
+            "host_locator_publication": publication.to_payload(),
+            "reason": "HOST_LOCATOR_PUBLICATION_NOT_LIVE",
+            "scope": "0B_SAME_USER_LOCAL_PREVIEW",
+            "stale_host_locator_publication_cleared": stale_publication_cleared,
+        },
+    )
 
 
 def _positive_float(value: str) -> float:

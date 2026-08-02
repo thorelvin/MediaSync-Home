@@ -24,7 +24,9 @@ class SqliteTriggerOccurrenceStore(TriggerOccurrenceStore):
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
-    def record_received(self, occurrence: TriggerOccurrence) -> TriggerOccurrenceRegistration:
+    def record_received(
+        self, occurrence: TriggerOccurrence
+    ) -> TriggerOccurrenceRegistration:
         outer_transaction = self._connection.in_transaction
         try:
             if not outer_transaction:
@@ -35,14 +37,23 @@ class SqliteTriggerOccurrenceStore(TriggerOccurrenceStore):
             tombstone = self._load_trigger_tombstone(occurrence.deduplication_key)
             if existing is not None:
                 ensure_trigger_occurrence_compatible(existing, occurrence)
-                if tombstone is not None and tombstone.payload_hash != existing.payload_hash:
-                    raise SqliteTriggerOccurrenceStoreError("TRIGGER_OCCURRENCE_CONFLICT")
+                if (
+                    tombstone is not None
+                    and tombstone.payload_hash != existing.payload_hash
+                ):
+                    raise SqliteTriggerOccurrenceStoreError(
+                        "TRIGGER_OCCURRENCE_CONFLICT"
+                    )
                 if not outer_transaction:
                     self._connection.execute("COMMIT")
-                return TriggerOccurrenceRegistration(occurrence=existing, deduplicated=True)
+                return TriggerOccurrenceRegistration(
+                    occurrence=existing, deduplicated=True
+                )
             if tombstone is not None:
                 if tombstone.payload_hash != occurrence.payload_hash:
-                    raise SqliteTriggerOccurrenceStoreError("TRIGGER_OCCURRENCE_CONFLICT")
+                    raise SqliteTriggerOccurrenceStoreError(
+                        "TRIGGER_OCCURRENCE_CONFLICT"
+                    )
                 if not outer_transaction:
                     self._connection.execute("COMMIT")
                 return TriggerOccurrenceRegistration(
@@ -79,14 +90,22 @@ class SqliteTriggerOccurrenceStore(TriggerOccurrenceStore):
             )
             if not outer_transaction:
                 self._connection.execute("COMMIT")
-        except (sqlite3.Error, TriggerOccurrenceConflict, SqliteTriggerOccurrenceStoreError) as exc:
+        except (
+            sqlite3.Error,
+            TriggerOccurrenceConflict,
+            SqliteTriggerOccurrenceStoreError,
+        ) as exc:
             if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
             if isinstance(exc, TriggerOccurrenceConflict):
-                raise SqliteTriggerOccurrenceStoreError("TRIGGER_OCCURRENCE_CONFLICT") from exc
+                raise SqliteTriggerOccurrenceStoreError(
+                    "TRIGGER_OCCURRENCE_CONFLICT"
+                ) from exc
             if isinstance(exc, SqliteTriggerOccurrenceStoreError):
                 raise
-            raise SqliteTriggerOccurrenceStoreError("TRIGGER_OCCURRENCE_RECORD_FAILED") from exc
+            raise SqliteTriggerOccurrenceStoreError(
+                "TRIGGER_OCCURRENCE_RECORD_FAILED"
+            ) from exc
         return TriggerOccurrenceRegistration(occurrence=occurrence, deduplicated=False)
 
     def load_trigger_occurrence(self, occurrence_id: str) -> TriggerOccurrence | None:
@@ -123,10 +142,16 @@ class SqliteTriggerOccurrenceStore(TriggerOccurrenceStore):
             if cursor.rowcount != 1:
                 if not outer_transaction:
                     self._connection.execute("ROLLBACK")
-                raise SqliteTriggerOccurrenceStoreError("TRIGGER_OCCURRENCE_RUN_ENQUEUE_CONFLICT")
-            updated = self.load_trigger_occurrence_by_deduplication_key(deduplication_key)
+                raise SqliteTriggerOccurrenceStoreError(
+                    "TRIGGER_OCCURRENCE_RUN_ENQUEUE_CONFLICT"
+                )
+            updated = self.load_trigger_occurrence_by_deduplication_key(
+                deduplication_key
+            )
             if updated is None:
-                raise SqliteTriggerOccurrenceStoreError("TRIGGER_OCCURRENCE_LOAD_FAILED")
+                raise SqliteTriggerOccurrenceStoreError(
+                    "TRIGGER_OCCURRENCE_LOAD_FAILED"
+                )
             if not outer_transaction:
                 self._connection.execute("COMMIT")
             return updated
@@ -135,7 +160,9 @@ class SqliteTriggerOccurrenceStore(TriggerOccurrenceStore):
                 self._connection.execute("ROLLBACK")
             if isinstance(exc, SqliteTriggerOccurrenceStoreError):
                 raise
-            raise SqliteTriggerOccurrenceStoreError("TRIGGER_OCCURRENCE_RUN_ENQUEUE_FAILED") from exc
+            raise SqliteTriggerOccurrenceStoreError(
+                "TRIGGER_OCCURRENCE_RUN_ENQUEUE_FAILED"
+            ) from exc
 
     def mark_terminal(
         self,
@@ -146,9 +173,13 @@ class SqliteTriggerOccurrenceStore(TriggerOccurrenceStore):
         run_id: str | None = None,
     ) -> TriggerOccurrence:
         if state not in TERMINAL_TRIGGER_OCCURRENCE_STATES:
-            raise SqliteTriggerOccurrenceStoreError("TRIGGER_OCCURRENCE_TERMINAL_STATE_REQUIRED")
+            raise SqliteTriggerOccurrenceStoreError(
+                "TRIGGER_OCCURRENCE_TERMINAL_STATE_REQUIRED"
+            )
         if len(terminal_effect_hash) != 64:
-            raise SqliteTriggerOccurrenceStoreError("TRIGGER_OCCURRENCE_TERMINAL_HASH_REQUIRED")
+            raise SqliteTriggerOccurrenceStoreError(
+                "TRIGGER_OCCURRENCE_TERMINAL_HASH_REQUIRED"
+            )
         outer_transaction = self._connection.in_transaction
         try:
             cursor = self._connection.execute(
@@ -165,9 +196,13 @@ class SqliteTriggerOccurrenceStore(TriggerOccurrenceStore):
             )
             if cursor.rowcount != 1:
                 raise SqliteTriggerOccurrenceStoreError("TRIGGER_OCCURRENCE_NOT_FOUND")
-            updated = self.load_trigger_occurrence_by_deduplication_key(deduplication_key)
+            updated = self.load_trigger_occurrence_by_deduplication_key(
+                deduplication_key
+            )
             if updated is None:
-                raise SqliteTriggerOccurrenceStoreError("TRIGGER_OCCURRENCE_LOAD_FAILED")
+                raise SqliteTriggerOccurrenceStoreError(
+                    "TRIGGER_OCCURRENCE_LOAD_FAILED"
+                )
             if not outer_transaction:
                 self._connection.commit()
             return updated
@@ -176,18 +211,48 @@ class SqliteTriggerOccurrenceStore(TriggerOccurrenceStore):
                 self._connection.execute("ROLLBACK")
             if isinstance(exc, SqliteTriggerOccurrenceStoreError):
                 raise
-            raise SqliteTriggerOccurrenceStoreError("TRIGGER_OCCURRENCE_UPDATE_FAILED") from exc
+            raise SqliteTriggerOccurrenceStoreError(
+                "TRIGGER_OCCURRENCE_UPDATE_FAILED"
+            ) from exc
 
-    def compact_terminal_trigger_occurrence(self, deduplication_key: str) -> TriggerOccurrence:
+    def list_run_enqueued_trigger_occurrences(
+        self,
+        *,
+        limit: int,
+    ) -> tuple[TriggerOccurrence, ...]:
+        if limit < 1 or limit > 100:
+            raise SqliteTriggerOccurrenceStoreError(
+                "TRIGGER_OCCURRENCE_RECONCILIATION_LIMIT_INVALID"
+            )
+        rows = self._connection.execute(
+            f"""
+            SELECT {_OCCURRENCE_COLUMNS}
+            FROM trigger_occurrences
+            WHERE state = 'RUN_ENQUEUED'
+                AND run_id IS NOT NULL
+            ORDER BY id
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return tuple(_occurrence_from_row(row) for row in rows)
+
+    def compact_terminal_trigger_occurrence(
+        self, deduplication_key: str
+    ) -> TriggerOccurrence:
         outer_transaction = self._connection.in_transaction
         try:
             if not outer_transaction:
                 self._connection.execute("BEGIN IMMEDIATE")
-            occurrence = self.load_trigger_occurrence_by_deduplication_key(deduplication_key)
+            occurrence = self.load_trigger_occurrence_by_deduplication_key(
+                deduplication_key
+            )
             if occurrence is None:
                 tombstone = self._load_trigger_tombstone(deduplication_key)
                 if tombstone is None:
-                    raise SqliteTriggerOccurrenceStoreError("TRIGGER_OCCURRENCE_NOT_FOUND")
+                    raise SqliteTriggerOccurrenceStoreError(
+                        "TRIGGER_OCCURRENCE_NOT_FOUND"
+                    )
                 if not outer_transaction:
                     self._connection.execute("COMMIT")
                 raise SqliteTriggerOccurrenceStoreError(
@@ -238,9 +303,13 @@ class SqliteTriggerOccurrenceStore(TriggerOccurrenceStore):
                 self._connection.execute("ROLLBACK")
             if isinstance(exc, SqliteTriggerOccurrenceStoreError):
                 raise
-            raise SqliteTriggerOccurrenceStoreError("TRIGGER_OCCURRENCE_COMPACTION_FAILED") from exc
+            raise SqliteTriggerOccurrenceStoreError(
+                "TRIGGER_OCCURRENCE_COMPACTION_FAILED"
+            ) from exc
 
-    def _load_trigger_tombstone(self, deduplication_key: str) -> _TriggerTombstone | None:
+    def _load_trigger_tombstone(
+        self, deduplication_key: str
+    ) -> _TriggerTombstone | None:
         row = self._connection.execute(
             """
             SELECT payload_hash, terminal_state, terminal_effect_hash
@@ -253,7 +322,9 @@ class SqliteTriggerOccurrenceStore(TriggerOccurrenceStore):
         if row is None:
             return None
         if row[2] is None:
-            raise SqliteTriggerOccurrenceStoreError("TRIGGER_TOMBSTONE_REQUIRES_EFFECT_HASH")
+            raise SqliteTriggerOccurrenceStoreError(
+                "TRIGGER_TOMBSTONE_REQUIRES_EFFECT_HASH"
+            )
         try:
             terminal_state = TriggerOccurrenceState(str(row[1]))
         except ValueError as exc:
@@ -273,21 +344,7 @@ class SqliteTriggerOccurrenceStore(TriggerOccurrenceStore):
     ) -> TriggerOccurrence | None:
         row = self._connection.execute(
             f"""
-            SELECT
-                id,
-                schedule_id,
-                schedule_revision_hash,
-                job_id,
-                occurrence_key,
-                deduplication_key,
-                first_delivery_id,
-                occurrence_slot_utc,
-                source_instance_key,
-                trigger_type,
-                payload_hash,
-                state,
-                run_id,
-                terminal_effect_hash
+            SELECT {_OCCURRENCE_COLUMNS}
             FROM trigger_occurrences
             {where_clause}
             """,
@@ -296,6 +353,24 @@ class SqliteTriggerOccurrenceStore(TriggerOccurrenceStore):
         if row is None:
             return None
         return _occurrence_from_row(row)
+
+
+_OCCURRENCE_COLUMNS = """
+    id,
+    schedule_id,
+    schedule_revision_hash,
+    job_id,
+    occurrence_key,
+    deduplication_key,
+    first_delivery_id,
+    occurrence_slot_utc,
+    source_instance_key,
+    trigger_type,
+    payload_hash,
+    state,
+    run_id,
+    terminal_effect_hash
+"""
 
 
 @dataclass(frozen=True)

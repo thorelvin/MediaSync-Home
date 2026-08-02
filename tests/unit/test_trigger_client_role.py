@@ -199,6 +199,40 @@ def test_trigger_status_query_returns_typed_unavailable_when_publication_missing
     assert FakeWin32NamedPipeClient.instances == []
 
 
+def test_packaged_trigger_bootstraps_host_before_status_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeWin32NamedPipeClient(_AcceptedStatusClient):
+        instances: list["FakeWin32NamedPipeClient"] = []
+
+    publication = _Publication(pipe_name="bootstrapped-pipe")
+    publications = iter((None, publication))
+    bootstrap_calls: list[object] = []
+    monkeypatch.setattr(trigger_module.os, "name", "nt")
+    monkeypatch.setattr(
+        trigger_module,
+        "_load_matching_local_preview_publication",
+        lambda args: next(publications),
+    )
+    monkeypatch.setattr(
+        trigger_module,
+        "_bootstrap_packaged_local_preview_host",
+        lambda args: bootstrap_calls.append(args) is None,
+    )
+    _install_fake_win32_module(monkeypatch, FakeWin32NamedPipeClient)
+    output: list[str] = []
+
+    result = run_trigger_client(
+        ["--query-status", "--installation-id", "preview-a"],
+        emit=output.append,
+    )
+
+    assert result == 0
+    assert len(bootstrap_calls) == 1
+    assert json.loads(output[0])["status"] == "ACCEPTED"
+    assert FakeWin32NamedPipeClient.instances[0].pipe_name == "bootstrapped-pipe"
+
+
 def test_trigger_status_query_uses_matching_host_locator_publication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

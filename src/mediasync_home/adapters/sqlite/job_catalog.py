@@ -23,11 +23,13 @@ from mediasync_home.application.job_drafts import (
 )
 from mediasync_home.application.job_read_models import (
     BackupAnalysisRequestSummary,
+    BackupAutomationScheduleSummary,
     InitialBackupPlanSummary,
     StandardBackupJobDetail,
     StandardBackupJobSummary,
     StandardBackupTargetSummary,
 )
+from mediasync_home.application.job_scheduling import daily_backup_schedule_id
 from mediasync_home.application.job_lifecycle import JobLifecycleState
 from mediasync_home.application.file_filters import (
     canonical_file_filter_policy_json,
@@ -528,6 +530,29 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
             """,
             (detail.job_id, detail.job_revision_id),
         ).fetchone()
+        automation_schedule_row = self._connection.execute(
+            """
+            SELECT
+                schedules.id,
+                schedules.trigger_type,
+                schedules.enabled,
+                schedules.row_version,
+                schedules.definition_generation,
+                schedules.configuration_json,
+                schedules.time_zone_id,
+                schedules.task_logon_type,
+                schedules.requires_network,
+                schedules.run_only_when_logged_on,
+                external_resource_state.state,
+                external_resource_state.last_error_code
+            FROM schedules
+            LEFT JOIN external_resource_state
+                ON external_resource_state.resource_type = 'task_scheduler'
+                AND external_resource_state.resource_id = schedules.id
+            WHERE schedules.id = ? AND schedules.job_id = ?
+            """,
+            (daily_backup_schedule_id(detail.job_id), detail.job_id),
+        ).fetchone()
         return replace(
             detail,
             targets=tuple(
@@ -590,6 +615,11 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                     ),
                     row_version=_required_int(analysis_request_row[8]),
                 )
+            ),
+            automation_schedule=(
+                None
+                if automation_schedule_row is None
+                else _automation_schedule_summary_from_row(automation_schedule_row)
             ),
         )
 
@@ -764,6 +794,42 @@ def _initial_plan_summary_from_row(
             and operation_count > 0
         ),
         next_action=str(row[8]),
+    )
+
+
+def _automation_schedule_summary_from_row(
+    row: sqlite3.Row | tuple[object, ...],
+) -> BackupAutomationScheduleSummary:
+    daily_local_time = None
+    try:
+        configuration = json.loads(str(row[5]))
+        if isinstance(configuration, dict) and configuration.get("kind") == "daily":
+            hour = configuration.get("hour")
+            minute = configuration.get("minute")
+            if (
+                isinstance(hour, int)
+                and not isinstance(hour, bool)
+                and 0 <= hour <= 23
+                and isinstance(minute, int)
+                and not isinstance(minute, bool)
+                and 0 <= minute <= 59
+            ):
+                daily_local_time = f"{hour:02d}:{minute:02d}"
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return BackupAutomationScheduleSummary(
+        schedule_id=str(row[0]),
+        trigger_type=str(row[1]),
+        enabled=bool(_required_int(row[2])),
+        row_version=_required_int(row[3]),
+        definition_generation=_required_int(row[4]),
+        daily_local_time=daily_local_time,
+        time_zone_id=_optional_str(row[6]),
+        task_logon_type=str(row[7]),
+        requires_network=bool(_required_int(row[8])),
+        run_only_when_logged_on=bool(_required_int(row[9])),
+        reconciliation_state=_optional_str(row[10]),
+        reconciliation_error_code=_optional_str(row[11]),
     )
 
 

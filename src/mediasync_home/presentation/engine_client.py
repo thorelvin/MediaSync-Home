@@ -12,6 +12,7 @@ from mediasync_home.application.job_draft_saving import JobDraftCommandName
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
 from mediasync_home.application.job_editing import JobEditingCommandName
 from mediasync_home.application.job_lifecycle import JobLifecycleCommandName
+from mediasync_home.application.job_scheduling import JobSchedulingCommandName
 from mediasync_home.application.retained_version_history import VersionRestoreCommandName
 from mediasync_home.application.runs import RunCommandName
 from mediasync_home.application.writable_endpoint_registration import (
@@ -598,6 +599,36 @@ class EngineClient:
         return self._request_with_handshake_retry(
             lambda: self._ipc_client.submit_command(
                 command_name.value,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                payload_hash=canonical_command_payload_hash(payload),
+            )
+        )
+
+    def configure_daily_backup_schedule(
+        self,
+        *,
+        job_id: str,
+        expected_job_revision_id: str,
+        expected_lifecycle_row_version: int,
+        expected_schedule_row_version: int,
+        enabled: bool,
+        local_time: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        payload: dict[str, object] = {
+            "job_id": job_id,
+            "expected_job_revision_id": expected_job_revision_id,
+            "expected_lifecycle_row_version": expected_lifecycle_row_version,
+            "expected_schedule_row_version": expected_schedule_row_version,
+            "enabled": enabled,
+            "local_time": local_time,
+        }
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.submit_command(
+                JobSchedulingCommandName.CONFIGURE_DAILY_BACKUP_SCHEDULE.value,
                 request_id=request_id,
                 idempotency_key=idempotency_key,
                 payload=payload,

@@ -34,6 +34,11 @@ from mediasync_home.application.endpoint_registration import (
     EndpointClassificationRefreshReport,
 )
 from mediasync_home.application.endpoint_takeover import EndpointTakeoverCommandName
+from mediasync_home.application.external_resources import (
+    ExternalResourceRecord,
+    ExternalResourceState,
+    ExternalResourceType,
+)
 from mediasync_home.application.job_creation import (
     JobCreationCommandName,
     SealedStandardBackupJob,
@@ -55,10 +60,12 @@ from mediasync_home.application.job_lifecycle import (
     JobLifecycleTransitionOutcome,
 )
 from mediasync_home.application.job_read_models import (
+    InitialBackupPlanSummary,
     StandardBackupJobDetail,
     StandardBackupJobSummary,
     StandardBackupTargetSummary,
 )
+from mediasync_home.application.job_scheduling import JobSchedulingCommandName
 from mediasync_home.application.initial_backup_planning import (
     InitialBackupPlanRefreshReport,
 )
@@ -494,6 +501,66 @@ class _BackupJobDetailStore:
             targets=(),
             defaults=StandardBackupDefaults(),
         )
+
+
+class _AutomationJobDetailStore:
+    def load_standard_backup_job_detail(
+        self,
+        job_id: str,
+    ) -> StandardBackupJobDetail | None:
+        if job_id != "job-a":
+            return None
+        return StandardBackupJobDetail(
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            filter_set_id="filter-a",
+            source_name="Pictures",
+            source_path_label="C:/Pictures",
+            targets=(
+                StandardBackupTargetSummary(
+                    name="NAS",
+                    path_label="//server/backup",
+                    independent_device_id="nas-a",
+                ),
+            ),
+            defaults=StandardBackupDefaults(),
+            initial_plan=InitialBackupPlanSummary(
+                state="SEALED",
+                reason_code="PLAN_READY",
+                operation_count=3,
+                planned_bytes=1024,
+                plan_runnable=True,
+                next_action="Start backup.",
+                analysis_id="analysis-a",
+                plan_id="plan-a",
+                plan_checksum="a" * 64,
+            ),
+        )
+
+
+class _InMemoryExternalResourceStateStore:
+    def __init__(self) -> None:
+        self.records: dict[tuple[ExternalResourceType, str], ExternalResourceRecord] = {}
+        self.upsert_calls = 0
+
+    def upsert_desired_resource_state(
+        self,
+        *,
+        resource_type: ExternalResourceType,
+        resource_id: str,
+        desired_generation: int,
+        desired_hash: str,
+    ) -> ExternalResourceRecord:
+        self.upsert_calls += 1
+        record = ExternalResourceRecord(
+            resource_type=resource_type,
+            resource_id=resource_id,
+            desired_generation=desired_generation,
+            desired_hash=desired_hash,
+            state=ExternalResourceState.PENDING,
+        )
+        self.records[(resource_type, resource_id)] = record
+        return record
 
 
 class _FixedStandardBackupJobIdFactory(StandardBackupJobIdFactory):
@@ -1000,6 +1067,28 @@ class _InMemoryTriggerOccurrenceStore(TriggerOccurrenceStore):
         if occurrence.state is not TriggerOccurrenceState.RECEIVED or occurrence.run_id is not None:
             raise AssertionError("occurrence cannot be rebound to a different run")
         updated = replace(occurrence, state=TriggerOccurrenceState.RUN_ENQUEUED, run_id=run_id)
+        self.occurrences[updated.occurrence_id] = updated
+        return updated
+
+    def mark_terminal(
+        self,
+        *,
+        deduplication_key: str,
+        state: TriggerOccurrenceState,
+        terminal_effect_hash: str,
+        run_id: str | None = None,
+    ) -> TriggerOccurrence:
+        occurrence = self.load_trigger_occurrence_by_deduplication_key(
+            deduplication_key
+        )
+        if occurrence is None:
+            raise AssertionError("occurrence must exist before completion")
+        updated = replace(
+            occurrence,
+            state=state,
+            run_id=run_id or occurrence.run_id,
+            terminal_effect_hash=terminal_effect_hash,
+        )
         self.occurrences[updated.occurrence_id] = updated
         return updated
 
@@ -2189,19 +2278,17 @@ def test_enabled_enqueue_trigger_occurrence_requires_dispatcher_dependencies() -
     )
 
 
-def test_enabled_enqueue_trigger_occurrence_records_occurrence_and_queues_run() -> None:
+def test_enabled_enqueue_trigger_occurrence_queues_fresh_safe_analysis() -> None:
     plan = _sealed_plan()
     receipts = _InMemoryCommandReceiptStore()
-    runs = _InMemoryRunStore()
     occurrences = _InMemoryTriggerOccurrenceStore()
-    id_factory = _FixedRunIdFactory()
+    requests = _InMemoryBackupAnalysisRequestStore()
     service = _service(mutations_enabled=True)
     service.installation_id = "preview-a"
     service.schedule_store = _InMemoryScheduleStore(_schedule(plan))
     service.trigger_occurrence_store = occurrences
-    service.plan_store = _InMemoryPlanStore(plan)
-    service.run_store = runs
-    service.run_id_factory = id_factory
+    service.standard_backup_job_detail_store = _BackupJobDetailStore()
+    service.backup_analysis_request_store = requests  # type: ignore[assignment]
     service.command_receipt_store = receipts
     ipc_client = _client(service=service, role=ProcessRole.TRIGGER_CLIENT)
     ipc_client.connect()
@@ -2216,8 +2303,10 @@ def test_enabled_enqueue_trigger_occurrence_records_occurrence_and_queues_run() 
     )
 
     receipt = receipts.load_command_receipt(TRIGGER_DELIVERY_ID)
-    run = runs.load_started_run("run-a")
     occurrence = next(iter(occurrences.occurrences.values()))
+    analysis_request = requests.load_backup_analysis_request(
+        occurrence.occurrence_id
+    )
     assert response.status is IpcStatus.ACCEPTED
     assert response.reason is None
     assert response.payload["enqueued"] is True
@@ -2226,38 +2315,40 @@ def test_enabled_enqueue_trigger_occurrence_records_occurrence_and_queues_run() 
     assert response.payload["schedule_resolution"] == "READY"
     assert response.payload["occurrence"] == {
         "occurrence_id": occurrence.occurrence_id,
-        "state": TriggerOccurrenceState.RUN_ENQUEUED.value,
-        "run_id": "run-a",
+        "state": TriggerOccurrenceState.RECEIVED.value,
+        "run_id": None,
     }
-    assert response.payload["run"]["run_id"] == "run-a"
-    assert response.payload["run"]["trigger_occurrence_id"] == occurrence.occurrence_id
+    assert response.payload["analysis_request"]["request_id"] == (
+        occurrence.occurrence_id
+    )
+    assert response.payload["analysis_request"]["state"] == "QUEUED"
+    assert response.payload["analysis_request"]["start_when_safe"] is True
     assert response.payload["receipt"]["state"] == CommandReceiptState.SUCCEEDED.value
-    assert response.payload["receipt"]["result_entity_type"] == "run"
-    assert response.payload["receipt"]["result_entity_id"] == "run-a"
+    assert response.payload["receipt"]["result_entity_type"] == (
+        "backup_analysis_request"
+    )
+    assert response.payload["receipt"]["result_entity_id"] == occurrence.occurrence_id
     assert receipt is not None
     assert receipt.state is CommandReceiptState.SUCCEEDED
-    assert run is not None
-    assert run.trigger_occurrence_id == occurrence.occurrence_id
-    assert run.command_receipt_id == TRIGGER_DELIVERY_ID
-    assert run.idempotency_key == occurrence.occurrence_id
-    assert occurrence.state is TriggerOccurrenceState.RUN_ENQUEUED
-    assert occurrence.run_id == "run-a"
-    assert id_factory.calls == 1
+    assert analysis_request is not None
+    assert analysis_request.job_id == "job-a"
+    assert analysis_request.job_revision_id == "job-rev-a"
+    assert analysis_request.start_when_safe is True
+    assert occurrence.state is TriggerOccurrenceState.RECEIVED
+    assert occurrence.run_id is None
 
 
-def test_enabled_enqueue_trigger_occurrence_deduplicates_retry_to_existing_run() -> None:
+def test_enabled_enqueue_trigger_occurrence_deduplicates_retry_to_existing_analysis() -> None:
     plan = _sealed_plan()
     receipts = _InMemoryCommandReceiptStore()
-    runs = _InMemoryRunStore()
     occurrences = _InMemoryTriggerOccurrenceStore()
-    id_factory = _FixedRunIdFactory()
+    requests = _InMemoryBackupAnalysisRequestStore()
     service = _service(mutations_enabled=True)
     service.installation_id = "preview-a"
     service.schedule_store = _InMemoryScheduleStore(_schedule(plan))
     service.trigger_occurrence_store = occurrences
-    service.plan_store = _InMemoryPlanStore(plan)
-    service.run_store = runs
-    service.run_id_factory = id_factory
+    service.standard_backup_job_detail_store = _BackupJobDetailStore()
+    service.backup_analysis_request_store = requests  # type: ignore[assignment]
     service.command_receipt_store = receipts
     ipc_client = _client(service=service, role=ProcessRole.TRIGGER_CLIENT)
     ipc_client.connect()
@@ -2290,30 +2381,29 @@ def test_enabled_enqueue_trigger_occurrence_deduplicates_retry_to_existing_run()
 
     assert first.status is IpcStatus.ACCEPTED
     assert retry.status is IpcStatus.ACCEPTED
-    assert first.payload["run"]["run_id"] == "run-a"
-    assert retry.payload["run"]["run_id"] == "run-a"
+    assert first.payload["analysis_request"]["request_id"] == retry.payload[
+        "analysis_request"
+    ]["request_id"]
     assert retry.payload["deduplicated"] is True
     assert retry.payload["created"] is False
     assert retry.payload["idempotent_replay"] is True
-    assert retry.payload["occurrence"]["run_id"] == "run-a"
+    assert retry.payload["occurrence"]["run_id"] is None
     assert receipts.load_command_receipt(retry_delivery_id) is not None
     assert len(receipts.receipts) == 2
-    assert len(runs.runs) == 1
-    assert id_factory.calls == 1
+    assert len(requests.requests) == 1
 
 
 def test_enabled_enqueue_trigger_occurrence_rejects_schedule_revision_mismatch() -> None:
     plan = _sealed_plan()
     receipts = _InMemoryCommandReceiptStore()
-    runs = _InMemoryRunStore()
     occurrences = _InMemoryTriggerOccurrenceStore()
+    requests = _InMemoryBackupAnalysisRequestStore()
     service = _service(mutations_enabled=True)
     service.installation_id = "preview-a"
     service.schedule_store = _InMemoryScheduleStore(_schedule(plan, desired_definition_hash="c" * 64))
     service.trigger_occurrence_store = occurrences
-    service.plan_store = _InMemoryPlanStore(plan)
-    service.run_store = runs
-    service.run_id_factory = _FixedRunIdFactory()
+    service.standard_backup_job_detail_store = _BackupJobDetailStore()
+    service.backup_analysis_request_store = requests  # type: ignore[assignment]
     service.command_receipt_store = receipts
     ipc_client = _client(service=service, role=ProcessRole.TRIGGER_CLIENT)
     ipc_client.connect()
@@ -2337,7 +2427,7 @@ def test_enabled_enqueue_trigger_occurrence_rejects_schedule_revision_mismatch()
     assert receipt is not None
     assert receipt.rejection_reason == IpcReason.COMMAND_PRECONDITION_FAILED.value
     assert occurrences.occurrences == {}
-    assert runs.runs == {}
+    assert requests.requests == {}
 
 
 def test_restore_state_command_runs_in_read_only_ipc_mode(
@@ -2972,6 +3062,111 @@ def test_enabled_check_backup_queues_durable_idempotent_request() -> None:
     assert receipt is not None
     assert receipt.result_entity_type == "backup_analysis_request"
     assert receipt.state is CommandReceiptState.SUCCEEDED
+
+
+def test_enabled_daily_schedule_is_persisted_staged_and_idempotent() -> None:
+    receipts = _InMemoryCommandReceiptStore()
+    schedules = _InMemoryScheduleStore()
+    resources = _InMemoryExternalResourceStateStore()
+    service = _service(mutations_enabled=True)
+    service.installation_id = "install-a"
+    service.command_receipt_store = receipts
+    service.standard_backup_job_detail_store = _AutomationJobDetailStore()
+    service.schedule_store = schedules
+    service.external_resource_state_store = resources  # type: ignore[assignment]
+    service.task_scheduler_executable_path = "C:/Program Files/MediaSync/MediaSync.exe"
+    service.task_scheduler_time_zone_id = "W. Europe Standard Time"
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    command_payload = {
+        "job_id": "job-a",
+        "expected_job_revision_id": "job-rev-a",
+        "expected_lifecycle_row_version": 1,
+        "expected_schedule_row_version": 0,
+        "enabled": True,
+        "local_time": "21:30",
+    }
+
+    first = ipc_client.submit_command(
+        JobSchedulingCommandName.CONFIGURE_DAILY_BACKUP_SCHEDULE.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=command_payload,
+        payload_hash=payload_hash(command_payload),
+    )
+    replay = ipc_client.submit_command(
+        JobSchedulingCommandName.CONFIGURE_DAILY_BACKUP_SCHEDULE.value,
+        request_id=REQUEST_ID_B,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=command_payload,
+        payload_hash=payload_hash(command_payload),
+    )
+
+    assert first.status is IpcStatus.ACCEPTED
+    assert first.payload["configured"] is True
+    assert first.payload["reconciliation_state"] == "PENDING"
+    assert first.payload["schedule"]["configuration"] == {
+        "days_interval": 1,
+        "hour": 21,
+        "kind": "daily",
+        "minute": 30,
+    }
+    assert first.payload["schedule"]["requires_network"] is True
+    assert first.payload["schedule"]["task_logon_type"] == "INTERACTIVE_TOKEN"
+    assert first.payload["schedule"]["run_only_when_logged_on"] is True
+    assert replay.status is IpcStatus.ACCEPTED
+    assert replay.payload["idempotent_replay"] is True
+    assert resources.upsert_calls == 1
+    receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
+    assert receipt is not None
+    assert receipt.state is CommandReceiptState.SUCCEEDED
+    assert receipt.result_entity_type == "backup_automation_schedule"
+
+
+def test_daily_schedule_precondition_rejection_replays_original_validation() -> None:
+    receipts = _InMemoryCommandReceiptStore()
+    schedules = _InMemoryScheduleStore()
+    resources = _InMemoryExternalResourceStateStore()
+    service = _service(mutations_enabled=True)
+    service.command_receipt_store = receipts
+    service.standard_backup_job_detail_store = _AutomationJobDetailStore()
+    service.schedule_store = schedules
+    service.external_resource_state_store = resources  # type: ignore[assignment]
+    service.task_scheduler_executable_path = "C:/MediaSync.exe"
+    service.task_scheduler_time_zone_id = "W. Europe Standard Time"
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    command_payload = {
+        "job_id": "job-a",
+        "expected_job_revision_id": "stale-revision",
+        "expected_lifecycle_row_version": 1,
+        "expected_schedule_row_version": 0,
+        "enabled": True,
+        "local_time": "21:30",
+    }
+
+    first = ipc_client.submit_command(
+        JobSchedulingCommandName.CONFIGURE_DAILY_BACKUP_SCHEDULE.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=command_payload,
+        payload_hash=payload_hash(command_payload),
+    )
+    replay = ipc_client.submit_command(
+        JobSchedulingCommandName.CONFIGURE_DAILY_BACKUP_SCHEDULE.value,
+        request_id=REQUEST_ID_B,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=command_payload,
+        payload_hash=payload_hash(command_payload),
+    )
+
+    assert first.status is IpcStatus.REJECTED
+    assert first.payload["validation_code"] == "BACKUP_AUTOMATION_JOB_REVISION_STALE"
+    assert replay.status is IpcStatus.REJECTED
+    assert replay.payload["validation_code"] == "BACKUP_AUTOMATION_JOB_REVISION_STALE"
+    assert replay.payload["idempotent_replay"] is True
+    assert schedules.schedules == {}
+    assert resources.upsert_calls == 0
 
 
 def test_start_run_command_is_recognized_but_rejected_when_mutations_disabled() -> None:

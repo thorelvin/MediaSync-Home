@@ -11,7 +11,10 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     apply_sqlite_connection_policy,
     catalog_critical_writer_policy,
 )
-from mediasync_home.adapters.sqlite.migrations import apply_sqlite_migrations, catalog_migration_plan
+from mediasync_home.adapters.sqlite.migrations import (
+    apply_sqlite_migrations,
+    catalog_migration_plan,
+)
 from mediasync_home.adapters.sqlite.trigger_occurrences import (
     SqliteTriggerOccurrenceStore,
     SqliteTriggerOccurrenceStoreError,
@@ -75,6 +78,7 @@ def test_sqlite_trigger_occurrence_marks_run_enqueued_idempotently(
         assert updated.state is TriggerOccurrenceState.RUN_ENQUEUED
         assert updated.run_id == "run-a"
         assert replay == updated
+        assert store.list_run_enqueued_trigger_occurrences(limit=100) == (updated,)
         with pytest.raises(
             SqliteTriggerOccurrenceStoreError,
             match="TRIGGER_OCCURRENCE_RUN_ENQUEUE_CONFLICT",
@@ -83,6 +87,11 @@ def test_sqlite_trigger_occurrence_marks_run_enqueued_idempotently(
                 deduplication_key=occurrence.deduplication_key,
                 run_id="run-b",
             )
+        with pytest.raises(
+            SqliteTriggerOccurrenceStoreError,
+            match="TRIGGER_OCCURRENCE_RECONCILIATION_LIMIT_INVALID",
+        ):
+            store.list_run_enqueued_trigger_occurrences(limit=0)
 
 
 def test_sqlite_trigger_occurrence_rejects_same_key_payload_conflict(
@@ -95,7 +104,9 @@ def test_sqlite_trigger_occurrence_rejects_same_key_payload_conflict(
         store = SqliteTriggerOccurrenceStore(connection)
         store.record_received(_occurrence(delivery_id=DELIVERY_ID))
 
-        with pytest.raises(SqliteTriggerOccurrenceStoreError, match="TRIGGER_OCCURRENCE_CONFLICT"):
+        with pytest.raises(
+            SqliteTriggerOccurrenceStoreError, match="TRIGGER_OCCURRENCE_CONFLICT"
+        ):
             store.record_received(
                 _occurrence(
                     delivery_id=RETRY_DELIVERY_ID,
@@ -119,7 +130,9 @@ def test_sqlite_trigger_occurrence_replay_uses_tombstone_after_compaction(
             state=TriggerOccurrenceState.SUCCEEDED,
             terminal_effect_hash="d" * 64,
         )
-        compacted = store.compact_terminal_trigger_occurrence(occurrence.deduplication_key)
+        compacted = store.compact_terminal_trigger_occurrence(
+            occurrence.deduplication_key
+        )
 
         replay = store.record_received(_occurrence(delivery_id=RETRY_DELIVERY_ID))
 
@@ -128,9 +141,12 @@ def test_sqlite_trigger_occurrence_replay_uses_tombstone_after_compaction(
         assert replay.compacted is True
         assert replay.occurrence.state is TriggerOccurrenceState.SUCCEEDED
         assert replay.occurrence.terminal_effect_hash == "d" * 64
+        assert store.list_run_enqueued_trigger_occurrences(limit=100) == ()
         assert _row_count(connection, "trigger_occurrences") == 0
         assert _row_count(connection, "effect_dedup_tombstones") == 1
-        with pytest.raises(SqliteTriggerOccurrenceStoreError, match="TRIGGER_OCCURRENCE_CONFLICT"):
+        with pytest.raises(
+            SqliteTriggerOccurrenceStoreError, match="TRIGGER_OCCURRENCE_CONFLICT"
+        ):
             store.record_received(
                 _occurrence(
                     delivery_id=RETRY_DELIVERY_ID,
@@ -173,11 +189,15 @@ def _prepare_catalog(connection: sqlite3.Connection, database: Path) -> None:
 
 
 def _insert_job(connection: sqlite3.Connection) -> None:
-    connection.execute("INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')")
+    connection.execute(
+        "INSERT INTO jobs (id, kind) VALUES ('job-a', 'multi_target_backup')"
+    )
 
 
 def _insert_run_parent_rows(connection: sqlite3.Connection) -> None:
-    connection.execute("INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')")
+    connection.execute(
+        "INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')"
+    )
     insert_default_filter_set_version(
         connection,
         job_id="job-a",
@@ -195,7 +215,9 @@ def _insert_run_parent_rows(connection: sqlite3.Connection) -> None:
             VALUES ('analysis-a', 'job-a', 'job-rev-a')
         """
     )
-    connection.execute("INSERT INTO plans (id, analysis_id) VALUES ('plan-a', 'analysis-a')")
+    connection.execute(
+        "INSERT INTO plans (id, analysis_id) VALUES ('plan-a', 'analysis-a')"
+    )
     connection.execute(
         """
         INSERT INTO plan_seal_details (

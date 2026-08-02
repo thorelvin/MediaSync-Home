@@ -467,6 +467,23 @@ QComboBox#historyJobFilter {{
     padding: 0 {tokens.space_3}px;
 }}
 
+QTimeEdit#jobsAutomationTime {{
+    min-height: 30px;
+    border: {tokens.border_hairline}px solid {tokens.border};
+    border-radius: {tokens.radius_sm}px;
+    background: {tokens.surface};
+    color: {tokens.text};
+    padding: 0 {tokens.space_2}px;
+}}
+
+QTimeEdit#jobsAutomationTime:focus {{
+    border: {tokens.border_focus}px solid {tokens.focus};
+}}
+
+QLabel#jobsAutomationStatus {{
+    color: {tokens.text_muted};
+}}
+
 QProgressBar#jobsRunProgressBar {{
     border: {tokens.border_hairline}px solid {tokens.border};
     border-radius: {tokens.radius_sm}px;

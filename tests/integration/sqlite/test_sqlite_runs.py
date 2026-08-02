@@ -10,6 +10,9 @@ from tests.support.sqlite_catalog import insert_default_filter_set_version
 from tests.support.source_preconditions import source_precondition_json
 from tests.support.fake_clock import FakeClock
 
+from mediasync_home.adapters.sqlite.backup_analysis import (
+    SqliteBackupAnalysisRequestStore,
+)
 from mediasync_home.adapters.sqlite.command_receipts import SqliteCommandReceiptStore
 from mediasync_home.adapters.sqlite.connection_policy import (
     apply_sqlite_connection_policy,
@@ -19,6 +22,7 @@ from mediasync_home.adapters.sqlite.migrations import (
     apply_sqlite_migrations,
     catalog_migration_plan,
 )
+from mediasync_home.adapters.sqlite.job_catalog import SqliteStandardBackupJobCatalog
 from mediasync_home.adapters.sqlite.outbox import SqliteOutboxStore
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
 from mediasync_home.adapters.sqlite.runs import SqliteRunStore, SqliteRunStoreError
@@ -590,8 +594,7 @@ def test_sqlite_run_store_journals_timed_endpoint_waits_and_requeues_when_due(
         )
         assert first_snapshot.targets[0].endpoint_wait_attempts == 1
         assert (
-            first_snapshot.targets[0].endpoint_wait_total_backoff_ms
-            == first_backoff_ms
+            first_snapshot.targets[0].endpoint_wait_total_backoff_ms == first_backoff_ms
         )
         assert first_snapshot.targets[0].endpoint_retry_backoff_ms == first_backoff_ms
         assert (
@@ -1335,9 +1338,7 @@ def test_sqlite_run_store_lists_recent_run_activity_summaries(tmp_path: Path) ->
         assert page[0].targets[0].completed_operations == 1
         assert page[0].targets[0].completed_bytes == 128
         assert page[0].targets[0].warning_count == 1
-        assert page[0].targets[0].last_success_utc == (
-            "2026-07-20T10:05:00.000Z"
-        )
+        assert page[0].targets[0].last_success_utc == ("2026-07-20T10:05:00.000Z")
 
 
 def test_sqlite_run_progress_snapshot_sequence_tracks_authoritative_changes(
@@ -1520,15 +1521,18 @@ def test_sqlite_enabled_start_run_ipc_persists_run_and_success_receipt(
         assert id_factory.calls == 1
 
 
-def test_sqlite_enabled_trigger_occurrence_ipc_records_occurrence_and_queues_run(
+def test_sqlite_enabled_trigger_occurrence_ipc_queues_fresh_safe_analysis(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "catalog.sqlite"
     with sqlite3.connect(database) as connection:
         _prepare_catalog(connection, database)
         _insert_plan_parent_rows(connection)
+        _insert_standard_backup_job_detail(connection)
         plan_store = SqlitePlanStore(connection)
         run_store = SqliteRunStore(connection)
+        analysis_request_store = SqliteBackupAnalysisRequestStore(connection)
+        job_detail_store = SqliteStandardBackupJobCatalog(connection)
         receipt_store = SqliteCommandReceiptStore(connection)
         outbox_store = SqliteOutboxStore(connection)
         schedule_store = SqliteScheduleStore(connection)
@@ -1553,6 +1557,8 @@ def test_sqlite_enabled_trigger_occurrence_ipc_records_occurrence_and_queues_run
             run_id_factory=id_factory,
             schedule_store=schedule_store,
             trigger_occurrence_store=occurrence_store,
+            standard_backup_job_detail_store=job_detail_store,
+            backup_analysis_request_store=analysis_request_store,
             command_receipt_store=receipt_store,
             command_effect_transaction=SqliteImmediateTransactionRunner(connection),
             outbox_store=outbox_store,
@@ -1591,37 +1597,44 @@ def test_sqlite_enabled_trigger_occurrence_ipc_records_occurrence_and_queues_run
         )
 
         loaded_receipt = receipt_store.load_command_receipt(delivery_id)
+        occurrence_id = response.payload["occurrence"]["occurrence_id"]
+        assert isinstance(occurrence_id, str)
+        loaded_analysis_request = analysis_request_store.load_backup_analysis_request(
+            occurrence_id
+        )
+        loaded_occurrence = occurrence_store.load_trigger_occurrence(occurrence_id)
         loaded_run = run_store.load_started_run("run-a")
-        assert response.status is IpcStatus.ACCEPTED
-        assert response.reason is None
-        assert response.payload["enqueued"] is True
-        assert response.payload["run"]["run_id"] == "run-a"
-        assert response.payload["receipt"]["state"] == "SUCCEEDED"
-        assert loaded_receipt is not None
-        assert loaded_receipt.result_entity_type == "run"
-        assert loaded_receipt.result_entity_id == "run-a"
-        assert loaded_run is not None
-        assert (
-            loaded_run.trigger_occurrence_id
-            == response.payload["occurrence"]["occurrence_id"]
-        )
-        loaded_occurrence = occurrence_store.load_trigger_occurrence(
-            loaded_run.trigger_occurrence_id
-        )
         loaded_outbox = outbox_store.load_outbox_message(
             f"command-effect:{delivery_id}"
         )
+        assert response.status is IpcStatus.ACCEPTED
+        assert response.reason is None
+        assert response.payload["enqueued"] is True
+        assert response.payload["created"] is True
+        assert response.payload["analysis_request"]["request_id"] == occurrence_id
+        assert response.payload["analysis_request"]["state"] == "QUEUED"
+        assert response.payload["analysis_request"]["start_when_safe"] is True
+        assert response.payload["receipt"]["state"] == "SUCCEEDED"
+        assert loaded_receipt is not None
+        assert loaded_receipt.result_entity_type == "backup_analysis_request"
+        assert loaded_receipt.result_entity_id == occurrence_id
+        assert loaded_analysis_request is not None
+        assert loaded_analysis_request.job_id == "job-a"
+        assert loaded_analysis_request.job_revision_id == "job-rev-a"
+        assert loaded_analysis_request.start_when_safe is True
+        assert loaded_run is None
         assert loaded_occurrence is not None
-        assert loaded_occurrence.state is TriggerOccurrenceState.RUN_ENQUEUED
-        assert loaded_occurrence.run_id == "run-a"
+        assert loaded_occurrence.state is TriggerOccurrenceState.RECEIVED
+        assert loaded_occurrence.run_id is None
         assert loaded_outbox is not None
-        assert loaded_outbox.aggregate_type == "run"
-        assert loaded_outbox.aggregate_id == "run-a"
+        assert loaded_outbox.aggregate_type == "backup_analysis_request"
+        assert loaded_outbox.aggregate_id == occurrence_id
         assert _row_count(connection, "trigger_occurrences") == 1
-        assert _row_count(connection, "runs") == 1
+        assert _row_count(connection, "backup_analysis_requests") == 1
+        assert _row_count(connection, "runs") == 0
         assert _row_count(connection, "command_receipts") == 1
         assert _row_count(connection, "outbox_messages") == 1
-        assert id_factory.calls == 1
+        assert id_factory.calls == 0
 
 
 def _prepare_catalog(connection: sqlite3.Connection, database: Path) -> None:
@@ -1674,6 +1687,59 @@ def _insert_plan_parent_rows(connection: sqlite3.Connection) -> None:
         INSERT INTO snapshots (id, analysis_id, endpoint_id, endpoint_revision_id)
             VALUES ('target-snapshot-a', 'analysis-a', 'target-a', 'target-rev-a')
         """
+    )
+    connection.commit()
+
+
+def _insert_standard_backup_job_detail(connection: sqlite3.Connection) -> None:
+    defaults_json = (
+        '{"behavior":"UPDATE_BACKUP","extra_files":"KEEP_ON_TARGET",'
+        '"file_selection":"ALL_USER_FILES","performance":"AUTO",'
+        '"retention":"THIRTY_DAYS","verification":"STANDARD"}'
+    )
+    targets_json = (
+        '[{"independent_device_id":null,"name":"USB","path_label":"E:/Backup"}]'
+    )
+    connection.execute(
+        """
+        INSERT INTO standard_backup_job_drafts (
+            draft_id,
+            schema_version,
+            source_name,
+            source_path_label,
+            defaults_json,
+            targets_json
+        )
+        VALUES (?, 1, ?, ?, ?, ?)
+        """,
+        ("draft-a", "Pictures", "C:/Source", defaults_json, targets_json),
+    )
+    connection.execute(
+        """
+        INSERT INTO standard_backup_job_revision_details (
+            job_id,
+            job_revision_id,
+            draft_id,
+            command_request_id,
+            idempotency_key,
+            source_name,
+            source_path_label,
+            defaults_json,
+            targets_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "job-a",
+            "job-rev-a",
+            "draft-a",
+            "create-request-a",
+            "create-idempotency-a",
+            "Pictures",
+            "C:/Source",
+            defaults_json,
+            targets_json,
+        ),
     )
     connection.commit()
 

@@ -426,6 +426,11 @@ def _complete_after_safe_start(
             run_idempotency_key=f"backup-analysis-run:{request.request_id}",
             plan_id=plan_id,
             plan_checksum=plan_checksum,
+            trigger_occurrence_id=(
+                request.request_id
+                if request.request_id.startswith("trigger:")
+                else None
+            ),
         ),
         plans=plans,
         runs=runs,

@@ -62,6 +62,31 @@ def test_sqlite_external_resource_state_claims_and_completes_current_desired_gen
         assert completed.last_success_utc is not None
 
 
+def test_sqlite_external_resource_upsert_preserves_caller_transaction(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        connection.commit()
+        store = SqliteExternalResourceStateStore(connection)
+
+        connection.execute("BEGIN IMMEDIATE")
+        store.upsert_desired_resource_state(
+            resource_type=ExternalResourceType.TASK_SCHEDULER,
+            resource_id="schedule-a",
+            desired_generation=1,
+            desired_hash="a" * 64,
+        )
+        assert connection.in_transaction is True
+        connection.execute("ROLLBACK")
+
+        assert store.load_external_resource_state(
+            resource_type=ExternalResourceType.TASK_SCHEDULER,
+            resource_id="schedule-a",
+        ) is None
+
+
 def test_sqlite_external_resource_state_rejects_late_completion_after_generation_update(
     tmp_path: Path,
 ) -> None:

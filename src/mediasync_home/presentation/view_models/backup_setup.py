@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 
@@ -164,6 +165,14 @@ class BackupJobDetailViewState:
     lifecycle_state: str = "ACTIVE"
     lifecycle_row_version: int = 1
     archived_utc: str | None = None
+    automation_schedule_id: str | None = None
+    automation_enabled: bool = False
+    automation_daily_local_time: str = "21:00"
+    automation_schedule_row_version: int = 0
+    automation_reconciliation_state: str | None = None
+    automation_reconciliation_error_code: str | None = None
+    automation_time_zone_id: str | None = None
+    automation_requires_network: bool = False
 
 
 @dataclass(frozen=True)
@@ -740,6 +749,17 @@ def _job_detail_from_payload(
     request_payload = (
         latest_analysis_request if isinstance(latest_analysis_request, dict) else {}
     )
+    automation_schedule = payload.get("automation_schedule")
+    automation_payload = (
+        automation_schedule if isinstance(automation_schedule, dict) else {}
+    )
+    automation_local_time = _optional_text(
+        automation_payload.get("daily_local_time")
+    )
+    if automation_local_time is None or re.fullmatch(
+        r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", automation_local_time
+    ) is None:
+        automation_local_time = "21:00"
     return BackupJobDetailViewState(
         job_id=_required_text(payload.get("job_id")) or job_id,
         title=(
@@ -796,6 +816,26 @@ def _job_detail_from_payload(
         )
         or 1,
         archived_utc=_optional_text(payload.get("archived_utc")),
+        automation_schedule_id=_optional_text(
+            automation_payload.get("schedule_id")
+        ),
+        automation_enabled=automation_payload.get("enabled") is True,
+        automation_daily_local_time=automation_local_time,
+        automation_schedule_row_version=(
+            _non_negative_int(automation_payload.get("row_version")) or 0
+        ),
+        automation_reconciliation_state=_optional_text(
+            automation_payload.get("reconciliation_state")
+        ),
+        automation_reconciliation_error_code=_optional_text(
+            automation_payload.get("reconciliation_error_code")
+        ),
+        automation_time_zone_id=_optional_text(
+            automation_payload.get("time_zone_id")
+        ),
+        automation_requires_network=(
+            automation_payload.get("requires_network") is True
+        ),
     )
 
 

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Protocol, cast
 from uuid import uuid4
 
-from PySide6.QtCore import QSize, QTimer, Qt
+from PySide6.QtCore import QSignalBlocker, QSize, QTime, QTimer, Qt
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QSpacerItem,
     QStackedWidget,
     QToolButton,
+    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -277,6 +278,21 @@ class JobLifecycleProvider(Protocol):
         job_id: str,
         expected_job_revision_id: str,
         expected_lifecycle_row_version: int,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse: ...
+
+
+class AutomationScheduleProvider(Protocol):
+    def configure_daily_backup_schedule(
+        self,
+        *,
+        job_id: str,
+        expected_job_revision_id: str,
+        expected_lifecycle_row_version: int,
+        expected_schedule_row_version: int,
+        enabled: bool,
+        local_time: str,
         request_id: str,
         idempotency_key: str,
     ) -> IpcResponse: ...
@@ -718,6 +734,14 @@ class MediaSyncWindow(QMainWindow):
         self._job_lifecycle_request_id: str | None = None
         self._job_lifecycle_idempotency_key: str | None = None
         self._job_lifecycle_command_key: tuple[str, str, int] | None = None
+        self._automation_command_pending = False
+        self._automation_request_id: str | None = None
+        self._automation_idempotency_key: str | None = None
+        self._automation_command_key: tuple[str, str, int, int, bool, str] | None = (
+            None
+        )
+        self._automation_loaded_key: tuple[str | None, int] | None = None
+        self._automation_dirty = False
         self._jobs_page_limit = 25
         self._jobs_page_offset = 0
         self._jobs_query_pending = False
@@ -872,6 +896,11 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_stop_button: QPushButton | None = None
         self._jobs_retry_target_combo: QComboBox | None = None
         self._jobs_retry_target_button: QPushButton | None = None
+        self._jobs_automation_label: QLabel | None = None
+        self._jobs_automation_enabled: QCheckBox | None = None
+        self._jobs_automation_time: QTimeEdit | None = None
+        self._jobs_automation_save_button: QPushButton | None = None
+        self._jobs_automation_status: QLabel | None = None
         self._changes_plan_id: str | None = None
         self._changes_page_state = empty_plan_operation_preview_state()
         self._changes_page_limit = 200
@@ -7082,8 +7111,233 @@ class MediaSyncWindow(QMainWindow):
                 and self._engine_client is not None
                 and hasattr(self._engine_client, "update_standard_backup_job")
             )
+        self._apply_automation_controls(state)
         self._apply_run_progress_state(self._run_progress_state)
         self._refresh_dashboard_geometry()
+
+    def _apply_automation_controls(self, state: BackupJobDetailViewState) -> None:
+        enabled_control = self._jobs_automation_enabled
+        time_control = self._jobs_automation_time
+        save_button = self._jobs_automation_save_button
+        status_label = self._jobs_automation_status
+        if (
+            enabled_control is None
+            or time_control is None
+            or save_button is None
+            or status_label is None
+        ):
+            return
+        visible = state.found
+        if self._jobs_automation_label is not None:
+            self._jobs_automation_label.setVisible(visible)
+        enabled_control.setVisible(visible)
+        time_control.setVisible(visible)
+        save_button.setVisible(visible)
+        status_label.setVisible(visible)
+        if not visible:
+            return
+
+        loaded_key = (state.job_id, state.automation_schedule_row_version)
+        if loaded_key != self._automation_loaded_key and not self._automation_command_pending:
+            enabled_blocker = QSignalBlocker(enabled_control)
+            time_blocker = QSignalBlocker(time_control)
+            enabled_control.setChecked(state.automation_enabled)
+            parsed_time = QTime.fromString(
+                state.automation_daily_local_time,
+                "HH:mm",
+            )
+            time_control.setTime(parsed_time if parsed_time.isValid() else QTime(21, 0))
+            del enabled_blocker, time_blocker
+            self._automation_loaded_key = loaded_key
+            self._automation_dirty = False
+
+        selected_enabled = enabled_control.isChecked()
+        selected_time = time_control.time().toString("HH:mm")
+        self._automation_dirty = (
+            selected_enabled != state.automation_enabled
+            or selected_time != state.automation_daily_local_time
+        )
+        lifecycle_active = state.lifecycle_state == "ACTIVE"
+        has_ready_plan = (
+            state.plan_state == "SEALED"
+            and state.plan_runnable
+            and state.plan_id is not None
+            and state.plan_checksum is not None
+        )
+        controls_available = (
+            lifecycle_active
+            and not self._job_detail_query_pending
+            and not self._automation_command_pending
+            and not self._command_worker_active()
+            and self._engine_client is not None
+            and hasattr(self._engine_client, "configure_daily_backup_schedule")
+        )
+        enabled_control.setEnabled(controls_available)
+        time_control.setEnabled(controls_available and selected_enabled)
+        save_button.setText(
+            self._texts().saving_automation
+            if self._automation_command_pending
+            else self._texts().save_automation
+        )
+        save_button.setEnabled(
+            controls_available
+            and self._automation_dirty
+            and (not selected_enabled or has_ready_plan)
+            and (selected_enabled or state.automation_schedule_id is not None)
+        )
+
+        reconciliation_state = state.automation_reconciliation_state
+        if selected_enabled and not has_ready_plan and self._automation_dirty:
+            status_text = self._texts().automation_plan_required
+        elif state.automation_schedule_id is None:
+            status_text = self._texts().automation_not_configured
+        elif reconciliation_state in {None, "PENDING", "CLAIMED"}:
+            status_text = self._texts().automation_pending
+        elif reconciliation_state == "BLOCKED":
+            status_text = self._texts().automation_blocked
+            if state.automation_reconciliation_error_code is not None:
+                status_text = (
+                    f"{status_text}: {state.automation_reconciliation_error_code}"
+                )
+        elif not state.automation_enabled:
+            status_text = self._texts().automation_disabled
+        else:
+            status_text = self._texts().automation_in_sync
+        status_label.setText(self._display(status_text))
+
+    def _automation_controls_changed(self, _value: object = None) -> None:
+        self._apply_automation_controls(self._job_detail_state)
+
+    def _save_selected_job_automation(self) -> bool:
+        state = self._job_detail_state
+        enabled_control = self._jobs_automation_enabled
+        time_control = self._jobs_automation_time
+        if (
+            self._engine_client is None
+            or not hasattr(self._engine_client, "configure_daily_backup_schedule")
+            or enabled_control is None
+            or time_control is None
+            or not state.found
+            or state.job_id is None
+            or state.job_revision_id is None
+            or state.lifecycle_state != "ACTIVE"
+            or self._job_detail_query_pending
+            or self._automation_command_pending
+            or self._command_worker_active()
+            or not self._automation_dirty
+        ):
+            return False
+        enabled = enabled_control.isChecked()
+        local_time = time_control.time().toString("HH:mm")
+        if enabled and not (
+            state.plan_state == "SEALED"
+            and state.plan_runnable
+            and state.plan_id is not None
+            and state.plan_checksum is not None
+        ):
+            return False
+        if not enabled and state.automation_schedule_id is None:
+            return False
+        job_id = state.job_id
+        job_revision_id = state.job_revision_id
+        assert job_id is not None
+        assert job_revision_id is not None
+        command_key = (
+            job_id,
+            job_revision_id,
+            state.lifecycle_row_version,
+            state.automation_schedule_row_version,
+            enabled,
+            local_time,
+        )
+        if (
+            self._automation_command_key != command_key
+            or self._automation_request_id is None
+            or self._automation_idempotency_key is None
+        ):
+            self._automation_command_key = command_key
+            self._automation_request_id = str(uuid4())
+            self._automation_idempotency_key = str(uuid4())
+        request_id = self._automation_request_id
+        idempotency_key = self._automation_idempotency_key
+        assert request_id is not None
+        assert idempotency_key is not None
+        self._automation_command_pending = True
+        self._refresh_command_buttons()
+
+        def command(client: object) -> object:
+            return cast(
+                AutomationScheduleProvider,
+                client,
+            ).configure_daily_backup_schedule(
+                job_id=job_id,
+                expected_job_revision_id=job_revision_id,
+                expected_lifecycle_row_version=state.lifecycle_row_version,
+                expected_schedule_row_version=state.automation_schedule_row_version,
+                enabled=enabled,
+                local_time=local_time,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+            )
+
+        def accept(value: object) -> None:
+            self._automation_command_pending = False
+            self._apply_automation_schedule_response(
+                cast(IpcResponse, value),
+                job_id=job_id,
+            )
+
+        def reject(_error: Exception) -> None:
+            self._automation_command_pending = False
+            self._apply_command_transport_failure(
+                self._texts().automation_save_failed
+            )
+            self._refresh_command_buttons()
+
+        submitted = self._submit_engine_command(
+            name="configure-daily-backup-schedule",
+            operation=command,
+            on_result=accept,
+            on_error=reject,
+        )
+        if not submitted:
+            self._automation_command_pending = False
+            self._refresh_command_buttons()
+        return submitted
+
+    def _apply_automation_schedule_response(
+        self,
+        response: IpcResponse,
+        *,
+        job_id: str,
+    ) -> None:
+        if response.status is IpcStatus.REJECTED:
+            validation_code = response.payload.get("validation_code")
+            detail = self._texts().automation_save_failed
+            if isinstance(validation_code, str):
+                detail = f"{detail}: {validation_code}"
+            self.apply_engine_status(
+                replace(
+                    self._engine_status_state,
+                    detail=self._display(detail),
+                    status_kind="warning",
+                )
+            )
+        else:
+            self.apply_engine_status(
+                replace(
+                    self._engine_status_state,
+                    detail=self._texts().automation_saved,
+                    status_kind="ready",
+                )
+            )
+        self._automation_command_key = None
+        self._automation_request_id = None
+        self._automation_idempotency_key = None
+        self._automation_loaded_key = None
+        self._automation_dirty = False
+        self._refresh_backup_job_detail(job_id)
+        self._refresh_command_buttons()
 
     def _invoke_primary_backup_action(self) -> None:
         if self._job_detail_query_pending:
@@ -8621,18 +8875,66 @@ class MediaSyncWindow(QMainWindow):
             self._jobs_detail_target_rows.append(target_row)
             layout.addWidget(target_row, 6 + index, 1, 1, 2)
 
+        automation_label = QLabel(texts.automatic_backup)
+        automation_label.setObjectName("mutedLabel")
+        self._jobs_automation_label = automation_label
+        layout.addWidget(automation_label, 9, 0, 1, 3)
+
+        automation_controls = QWidget()
+        automation_controls.setObjectName("jobsAutomationControls")
+        automation_layout = QGridLayout(automation_controls)
+        automation_layout.setContentsMargins(0, 0, 0, 0)
+        automation_layout.setHorizontalSpacing(8)
+        automation_layout.setVerticalSpacing(8)
+        automation_enabled = QCheckBox(texts.automatic_backup_enabled)
+        automation_enabled.setObjectName("jobsAutomationEnabled")
+        automation_enabled.toggled.connect(self._automation_controls_changed)
+        self._jobs_automation_enabled = automation_enabled
+        automation_layout.addWidget(automation_enabled, 0, 0)
+        automation_time = QTimeEdit()
+        automation_time.setObjectName("jobsAutomationTime")
+        automation_time.setDisplayFormat("HH:mm")
+        automation_time.setFixedWidth(92)
+        automation_time.setToolTip(texts.automatic_backup_time_tooltip)
+        automation_time.setAccessibleName(texts.automatic_backup_time_tooltip)
+        automation_time.timeChanged.connect(self._automation_controls_changed)
+        self._jobs_automation_time = automation_time
+        automation_layout.addWidget(automation_time, 0, 1)
+        automation_save = QPushButton(texts.save_automation)
+        automation_save.setObjectName("jobsAutomationSaveButton")
+        automation_save.setIcon(self._icons.icon("save"))
+        automation_save.setToolTip(texts.save_automation_tooltip)
+        automation_save.clicked.connect(self._save_selected_job_automation)
+        self._jobs_automation_save_button = automation_save
+        automation_layout.addWidget(
+            automation_save,
+            1,
+            0,
+            1,
+            3,
+            alignment=Qt.AlignmentFlag.AlignLeft,
+        )
+        automation_layout.setColumnStretch(2, 1)
+        layout.addWidget(automation_controls, 10, 0, 1, 3)
+
+        automation_status = QLabel(texts.automation_not_configured)
+        automation_status.setObjectName("jobsAutomationStatus")
+        _configure_responsive_label(automation_status)
+        self._jobs_automation_status = automation_status
+        layout.addWidget(automation_status, 11, 0, 1, 3)
+
         progress_title = QLabel(texts.run_progress)
         progress_title.setObjectName("mutedLabel")
         progress_title.setVisible(False)
         self._jobs_run_progress_title = progress_title
-        layout.addWidget(progress_title, 9, 0)
+        layout.addWidget(progress_title, 13, 0)
 
         progress_state = QLabel()
         progress_state.setObjectName("jobsRunProgressState")
         progress_state.setVisible(False)
         _configure_responsive_label(progress_state)
         self._jobs_run_progress_state = progress_state
-        layout.addWidget(progress_state, 9, 1, 1, 2)
+        layout.addWidget(progress_state, 13, 1, 1, 2)
 
         progress_bar = QProgressBar()
         progress_bar.setObjectName("jobsRunProgressBar")
@@ -8642,21 +8944,21 @@ class MediaSyncWindow(QMainWindow):
         progress_bar.setFixedHeight(16)
         progress_bar.setVisible(False)
         self._jobs_run_progress_bar = progress_bar
-        layout.addWidget(progress_bar, 10, 0, 1, 3)
+        layout.addWidget(progress_bar, 14, 0, 1, 3)
 
         progress_detail = QLabel()
         progress_detail.setObjectName("jobsRunProgressDetail")
         progress_detail.setVisible(False)
         _configure_responsive_label(progress_detail)
         self._jobs_run_progress_detail = progress_detail
-        layout.addWidget(progress_detail, 11, 0, 1, 3)
+        layout.addWidget(progress_detail, 15, 0, 1, 3)
 
         active_file = QLabel()
         active_file.setObjectName("jobsRunActiveFile")
         active_file.setVisible(False)
         _configure_responsive_label(active_file, selectable=True)
         self._jobs_run_active_file = active_file
-        layout.addWidget(active_file, 12, 0, 1, 3)
+        layout.addWidget(active_file, 16, 0, 1, 3)
 
         for index in range(3):
             row = QLabel()
@@ -8664,7 +8966,7 @@ class MediaSyncWindow(QMainWindow):
             row.setVisible(False)
             _configure_responsive_label(row)
             self._jobs_run_target_rows.append(row)
-            layout.addWidget(row, 13 + index, 0, 1, 3)
+            layout.addWidget(row, 17 + index, 0, 1, 3)
 
         stop_button = QPushButton(texts.stop_after_active_file)
         stop_button.setObjectName("jobsStopBackupButton")
@@ -8674,7 +8976,7 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_stop_button = stop_button
         layout.addWidget(
             stop_button,
-            16,
+            20,
             0,
             alignment=Qt.AlignmentFlag.AlignLeft,
         )
@@ -8687,7 +8989,7 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_pause_button = pause_button
         layout.addWidget(
             pause_button,
-            16,
+            20,
             1,
             alignment=Qt.AlignmentFlag.AlignRight,
         )
@@ -8700,7 +9002,7 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_resume_button = resume_button
         layout.addWidget(
             resume_button,
-            16,
+            20,
             2,
             alignment=Qt.AlignmentFlag.AlignRight,
         )
@@ -8709,7 +9011,7 @@ class MediaSyncWindow(QMainWindow):
         retry_target_combo.setObjectName("jobsRetryTargetCombo")
         retry_target_combo.setVisible(False)
         self._jobs_retry_target_combo = retry_target_combo
-        layout.addWidget(retry_target_combo, 16, 0, 1, 2)
+        layout.addWidget(retry_target_combo, 20, 0, 1, 2)
 
         retry_target_button = QPushButton(texts.retry_target)
         retry_target_button.setObjectName("jobsRetryTargetButton")
@@ -8717,7 +9019,7 @@ class MediaSyncWindow(QMainWindow):
         retry_target_button.setVisible(False)
         retry_target_button.clicked.connect(self._retry_selected_target)
         self._jobs_retry_target_button = retry_target_button
-        layout.addWidget(retry_target_button, 16, 2)
+        layout.addWidget(retry_target_button, 20, 2)
 
         start_backup = QPushButton(texts.start_backup)
         start_backup.setObjectName("jobsStartBackupButton")
@@ -8747,7 +9049,7 @@ class MediaSyncWindow(QMainWindow):
         actions_layout.addWidget(lifecycle_button)
         actions_layout.addStretch(1)
         actions_layout.addWidget(start_backup)
-        layout.addWidget(actions, 17, 0, 1, 3)
+        layout.addWidget(actions, 21, 0, 1, 3)
         layout.setColumnStretch(1, 1)
         return panel
 
@@ -10398,6 +10700,19 @@ class MediaSyncWindow(QMainWindow):
             combo = self._jobs_lifecycle_filter_combo
             combo.setItemText(combo.findData("ACTIVE"), texts.active_jobs)
             combo.setItemText(combo.findData("ARCHIVED"), texts.archived_jobs)
+        if self._jobs_automation_enabled is not None:
+            self._jobs_automation_enabled.setText(texts.automatic_backup_enabled)
+        if self._jobs_automation_time is not None:
+            self._jobs_automation_time.setToolTip(
+                texts.automatic_backup_time_tooltip
+            )
+            self._jobs_automation_time.setAccessibleName(
+                texts.automatic_backup_time_tooltip
+            )
+        if self._jobs_automation_save_button is not None:
+            self._jobs_automation_save_button.setToolTip(
+                texts.save_automation_tooltip
+            )
         if self._changes_title_label is not None:
             self._changes_title_label.setText(texts.changes)
         if self._changes_list is not None:
@@ -10450,6 +10765,7 @@ class MediaSyncWindow(QMainWindow):
             (self._jobs_detail_revision_label, texts.revision),
             (self._jobs_detail_plan_label, texts.plan),
             (self._jobs_detail_target_heading, texts.job_detail_targets_heading),
+            (self._jobs_automation_label, texts.automatic_backup),
             (self._engine_title_label, texts.engine_host),
             (self._engine_scope_label, texts.scope),
             (self._engine_contract_label, texts.contract),

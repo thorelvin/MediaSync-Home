@@ -9,6 +9,7 @@ from mediasync_home.application.job_creation import JobCreationCommandName
 from mediasync_home.application.job_draft_saving import JobDraftCommandName
 from mediasync_home.application.job_drafts import DraftTarget, StandardBackupJobDraft
 from mediasync_home.application.job_editing import JobEditingCommandName
+from mediasync_home.application.job_scheduling import JobSchedulingCommandName
 from mediasync_home.application.runs import RunCommandName
 from mediasync_home.application.writable_endpoint_registration import (
     WritableEndpointRegistrationCommandName,
@@ -159,6 +160,37 @@ def test_engine_client_submits_revision_bound_standard_backup_edit() -> None:
             "extra_files": "KEEP_ON_TARGET",
             "performance": "AUTO",
         },
+    }
+    assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
+
+
+def test_engine_client_submits_revision_bound_daily_schedule() -> None:
+    ipc_client = _RecordingIpcClient()
+    client = EngineClient(ipc_client)  # type: ignore[arg-type]
+
+    response = client.configure_daily_backup_schedule(
+        job_id="job-a",
+        expected_job_revision_id="job-revision-a",
+        expected_lifecycle_row_version=3,
+        expected_schedule_row_version=2,
+        enabled=True,
+        local_time="21:30",
+        request_id="44444444-4444-4444-8444-444444444444",
+        idempotency_key="66666666-6666-4666-8666-666666666666",
+    )
+
+    assert response.reason is None
+    assert (
+        ipc_client.command_name
+        == JobSchedulingCommandName.CONFIGURE_DAILY_BACKUP_SCHEDULE.value
+    )
+    assert ipc_client.payload == {
+        "job_id": "job-a",
+        "expected_job_revision_id": "job-revision-a",
+        "expected_lifecycle_row_version": 3,
+        "expected_schedule_row_version": 2,
+        "enabled": True,
+        "local_time": "21:30",
     }
     assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
 

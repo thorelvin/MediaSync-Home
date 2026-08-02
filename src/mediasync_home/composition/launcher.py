@@ -699,6 +699,13 @@ def _run_local_preview_desktop_from_args(
         environ=os.environ,
     )
     executable, role_runner, application_root = _current_product_process_layout()
+    packaged_runtime = role_runner is None
+    reconcile_task_scheduler_resources = (
+        args.reconcile_task_scheduler_resources or packaged_runtime
+    )
+    task_scheduler_executable_path = args.task_scheduler_executable_path
+    if packaged_runtime and task_scheduler_executable_path is None:
+        task_scheduler_executable_path = executable
     launch = build_local_preview_desktop_launch(
         host_descriptor=descriptor,
         executable=executable,
@@ -708,8 +715,8 @@ def _run_local_preview_desktop_from_args(
         run_executor_cycle_interval_ms=args.run_executor_cycle_interval_ms,
         run_executor_cycle_max_interval_ms=args.run_executor_cycle_max_interval_ms,
         run_executor_staging_backend=args.run_executor_staging_backend,
-        reconcile_task_scheduler_resources=args.reconcile_task_scheduler_resources,
-        task_scheduler_executable_path=args.task_scheduler_executable_path,
+        reconcile_task_scheduler_resources=reconcile_task_scheduler_resources,
+        task_scheduler_executable_path=task_scheduler_executable_path,
         task_scheduler_reconciliation_interval_ms=(
             args.task_scheduler_reconciliation_interval_ms
         ),

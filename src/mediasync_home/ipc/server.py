@@ -39,7 +39,10 @@ from mediasync_home.application.command_receipts import (
     transition_command_receipt,
 )
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
-from mediasync_home.application.external_resources import ExternalResourceStateStore
+from mediasync_home.application.external_resources import (
+    ExternalResourceStateStore,
+    ExternalResourceType,
+)
 from mediasync_home.application.history_read_models import (
     HistoryTimelineQueryError,
     HistoryTimelineReadModelStore,
@@ -110,6 +113,15 @@ from mediasync_home.application.job_read_models import (
     StandardBackupJobReadModelStore,
     query_backup_job_detail,
     query_backup_overview,
+)
+from mediasync_home.application.job_scheduling import (
+    ConfigureDailyBackupScheduleCommand,
+    JobSchedulingCommandName,
+    JobSchedulingOutcome,
+    JobSchedulingPayloadError,
+    configure_daily_backup_schedule,
+    daily_backup_schedule_id,
+    parse_configure_daily_backup_schedule_command,
 )
 from mediasync_home.application.initial_backup_planning import (
     InitialBackupPlanRefreshReport,
@@ -216,7 +228,7 @@ from mediasync_home.application.trigger_occurrences import (
 )
 from mediasync_home.application.trigger_runs import (
     TriggerRunEnqueueOutcome,
-    enqueue_trigger_occurrence_run,
+    enqueue_trigger_occurrence_analysis,
 )
 from mediasync_home.application.writable_endpoint_registration import (
     RegisterWritableTargetsCommand,
@@ -372,6 +384,8 @@ class EngineHostIpcService:
     run_control_store: RunControlStore | None = None
     run_id_factory: RunIdFactory | None = None
     schedule_store: ScheduleStore | None = None
+    task_scheduler_executable_path: str | None = None
+    task_scheduler_time_zone_id: str | None = None
     trigger_occurrence_store: TriggerOccurrenceStore | None = None
     external_resource_state_store: ExternalResourceStateStore | None = None
     command_receipt_store: CommandReceiptStore | None = None
@@ -851,6 +865,11 @@ class EngineHostIpcService:
             return self._handle_controlled_endpoint_takeover(command, identity)
         if command.command_name == BackupAnalysisCommandName.CHECK_BACKUP.value:
             return self._handle_check_backup(command, identity)
+        if (
+            command.command_name
+            == JobSchedulingCommandName.CONFIGURE_DAILY_BACKUP_SCHEDULE.value
+        ):
+            return self._handle_configure_daily_backup_schedule(command, identity)
         if command.command_name in {
             JobLifecycleCommandName.ARCHIVE_STANDARD_BACKUP_JOB.value,
             JobLifecycleCommandName.REACTIVATE_STANDARD_BACKUP_JOB.value,
@@ -1149,9 +1168,8 @@ class EngineHostIpcService:
             self.command_receipt_store is None
             or self.schedule_store is None
             or self.trigger_occurrence_store is None
-            or self.plan_store is None
-            or self.run_store is None
-            or self.run_id_factory is None
+            or self.standard_backup_job_detail_store is None
+            or self.backup_analysis_request_store is None
         ):
             return self._reject_config_missing_trigger_occurrence(
                 envelope, identity, command
@@ -1169,20 +1187,15 @@ class EngineHostIpcService:
 
         receipt = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
         self.command_receipt_store.update_command_receipt(receipt)
-        outcome = enqueue_trigger_occurrence_run(
+        outcome = enqueue_trigger_occurrence_analysis(
             command=command,
             installation_id=self.installation_id,
             schedules=self.schedule_store,
             occurrences=self.trigger_occurrence_store,
-            plans=self.plan_store,
-            runs=self.run_store,
-            id_factory=self.run_id_factory,
+            jobs=self.standard_backup_job_detail_store,
+            analysis_requests=self.backup_analysis_request_store,
         )
-        if (
-            not outcome.enqueued
-            or outcome.run_start is None
-            or outcome.run_start.run is None
-        ):
+        if not outcome.enqueued or outcome.analysis_request is None:
             receipt = transition_command_receipt(
                 receipt,
                 CommandReceiptState.REJECTED,
@@ -1202,15 +1215,15 @@ class EngineHostIpcService:
         receipt = transition_command_receipt(
             receipt,
             CommandReceiptState.EFFECT_PREPARED,
-            result_entity_type="run",
-            result_entity_id=outcome.run_start.run.run_id,
+            result_entity_type="backup_analysis_request",
+            result_entity_id=outcome.analysis_request.request_id,
         )
         self.command_receipt_store.update_command_receipt(receipt)
         receipt = transition_command_receipt(receipt, CommandReceiptState.ACCEPTED)
         self.command_receipt_store.update_command_receipt(receipt)
         receipt = transition_command_receipt(receipt, CommandReceiptState.SUCCEEDED)
         self.command_receipt_store.update_command_receipt(receipt)
-        if outcome.run_start.created:
+        if not outcome.deduplicated:
             self._enqueue_command_effect_outbox(receipt)
 
         payload = _trigger_occurrence_response_payload(
@@ -1256,15 +1269,32 @@ class EngineHostIpcService:
     ) -> IpcResponse | None:
         if receipt.state is CommandReceiptState.RECEIVED:
             return None
+        analysis_request = None
         run = None
-        if receipt.result_entity_id is not None and self.run_store is not None:
-            run = self.run_store.load_started_run(receipt.result_entity_id)
+        if (
+            receipt.result_entity_id is not None
+            and self.backup_analysis_request_store is not None
+        ):
+            analysis_request = (
+                self.backup_analysis_request_store.load_backup_analysis_request(
+                    receipt.result_entity_id
+                )
+            )
+            if (
+                analysis_request is not None
+                and analysis_request.started_run_id is not None
+                and self.run_store is not None
+            ):
+                run = self.run_store.load_started_run(
+                    analysis_request.started_run_id
+                )
         payload = _trigger_occurrence_response_payload(
             envelope=envelope,
             command=command,
             mutations_enabled=True,
             recognized=True,
             outcome=None,
+            analysis_request=analysis_request,
             run=run,
         )
         payload["enqueued"] = receipt.state is CommandReceiptState.SUCCEEDED
@@ -2116,6 +2146,181 @@ class EngineHostIpcService:
         self._add_receipt_payload(payload, envelope.idempotency_key)
         return IpcResponse.rejected(
             IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED, payload
+        )
+
+    def _handle_configure_daily_backup_schedule(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+    ) -> IpcResponse:
+        try:
+            command = parse_configure_daily_backup_schedule_command(
+                request_id=envelope.request_id,
+                idempotency_key=envelope.idempotency_key,
+                payload=envelope.payload,
+            )
+        except JobSchedulingPayloadError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        if not self.status.mutations_enabled:
+            receipt_response = self._record_terminal_rejected_receipt(
+                envelope,
+                identity,
+                rejection_reason=IpcReason.MUTATING_COMMANDS_DISABLED.value,
+            )
+            if receipt_response is not None:
+                return receipt_response
+            payload = _job_scheduling_response_payload(
+                envelope=envelope,
+                mutations_enabled=False,
+                outcome=None,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, payload)
+        return self._run_command_effect_transaction(
+            lambda: self._dispatch_configure_daily_backup_schedule_in_transaction(
+                envelope,
+                identity,
+                command,
+            )
+        )
+
+    def _dispatch_configure_daily_backup_schedule_in_transaction(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: ConfigureDailyBackupScheduleCommand,
+    ) -> IpcResponse:
+        if (
+            self.command_receipt_store is None
+            or self.standard_backup_job_detail_store is None
+            or self.schedule_store is None
+            or self.external_resource_state_store is None
+            or self.task_scheduler_executable_path is None
+            or self.task_scheduler_time_zone_id is None
+        ):
+            return self._reject_config_missing_job_scheduling(envelope, identity)
+        receipt, conflict_response = self._record_received_receipt(envelope, identity)
+        if conflict_response is not None:
+            return conflict_response
+        if receipt is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+        if receipt.state is not CommandReceiptState.RECEIVED:
+            outcome = self._replay_job_scheduling(command, receipt)
+            payload = _job_scheduling_response_payload(
+                envelope=envelope,
+                mutations_enabled=True,
+                outcome=outcome,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            if receipt.state is CommandReceiptState.REJECTED:
+                return IpcResponse.rejected(_receipt_rejection_reason(receipt), payload)
+            return IpcResponse.accepted(payload)
+
+        receipt = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        outcome = configure_daily_backup_schedule(
+            command=command,
+            jobs=self.standard_backup_job_detail_store,
+            schedules=self.schedule_store,
+            installation_id=self.installation_id,
+            executable_path=self.task_scheduler_executable_path,
+            time_zone_id=self.task_scheduler_time_zone_id,
+        )
+        if not outcome.configured or outcome.schedule is None:
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.REJECTED,
+                result_entity_type="backup_automation_validation",
+                result_entity_id=outcome.validation_code,
+                rejection_reason=IpcReason.COMMAND_PRECONDITION_FAILED.value,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+            payload = _job_scheduling_response_payload(
+                envelope=envelope,
+                mutations_enabled=True,
+                outcome=outcome,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(IpcReason.COMMAND_PRECONDITION_FAILED, payload)
+
+        resource = self.external_resource_state_store.upsert_desired_resource_state(
+            resource_type=ExternalResourceType.TASK_SCHEDULER,
+            resource_id=outcome.schedule.schedule_id,
+            desired_generation=outcome.schedule.definition_generation,
+            desired_hash=outcome.schedule.desired_definition_hash,
+        )
+        receipt = transition_command_receipt(
+            receipt,
+            CommandReceiptState.EFFECT_PREPARED,
+            result_entity_type="backup_automation_schedule",
+            result_entity_id=outcome.schedule.schedule_id,
+        )
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.ACCEPTED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.SUCCEEDED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        self._enqueue_command_effect_outbox(receipt)
+        payload = _job_scheduling_response_payload(
+            envelope=envelope,
+            mutations_enabled=True,
+            outcome=outcome,
+            reconciliation_state=resource.state.value,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.accepted(payload)
+
+    def _replay_job_scheduling(
+        self,
+        command: ConfigureDailyBackupScheduleCommand,
+        receipt: CommandReceipt,
+    ) -> JobSchedulingOutcome:
+        if receipt.state is CommandReceiptState.REJECTED:
+            validation_code = (
+                receipt.result_entity_id
+                if receipt.result_entity_type == "backup_automation_validation"
+                and receipt.result_entity_id is not None
+                else "BACKUP_AUTOMATION_COMMAND_REJECTED"
+            )
+            return JobSchedulingOutcome(
+                configured=False,
+                validation_code=validation_code,
+                next_action="Refresh the job before changing automation.",
+                idempotent_replay=True,
+            )
+        assert self.schedule_store is not None
+        schedule = self.schedule_store.load_schedule(
+            receipt.result_entity_id or daily_backup_schedule_id(command.job_id)
+        )
+        return JobSchedulingOutcome(
+            configured=True,
+            validation_code="BACKUP_AUTOMATION_SCHEDULE_UPDATED",
+            next_action="Windows Task Scheduler reconciliation is pending.",
+            schedule=schedule,
+            idempotent_replay=True,
+        )
+
+    def _reject_config_missing_job_scheduling(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+    ) -> IpcResponse:
+        receipt_response = self._record_terminal_rejected_receipt(
+            envelope,
+            identity,
+            rejection_reason=IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED.value,
+        )
+        if receipt_response is not None:
+            return receipt_response
+        payload = _job_scheduling_response_payload(
+            envelope=envelope,
+            mutations_enabled=True,
+            outcome=None,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.rejected(
+            IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED,
+            payload,
         )
 
     def _handle_job_lifecycle(
@@ -4094,6 +4299,25 @@ def _job_lifecycle_response_payload(
     return payload
 
 
+def _job_scheduling_response_payload(
+    *,
+    envelope: IpcCommandEnvelope,
+    mutations_enabled: bool,
+    outcome: JobSchedulingOutcome | None,
+    reconciliation_state: str | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "command_name": envelope.command_name,
+        "recognized": True,
+        "mutations_enabled": mutations_enabled,
+    }
+    if outcome is not None:
+        payload.update(outcome.to_dict())
+    if reconciliation_state is not None:
+        payload["reconciliation_state"] = reconciliation_state
+    return payload
+
+
 def _version_restore_protection_response_payload(
     *,
     envelope: IpcCommandEnvelope,
@@ -4232,6 +4456,7 @@ def _trigger_occurrence_response_payload(
     mutations_enabled: bool,
     recognized: bool,
     outcome: TriggerRunEnqueueOutcome | None,
+    analysis_request: BackupAnalysisRequest | None = None,
     run: StartedRun | None = None,
 ) -> dict[str, Any]:
     result = {
@@ -4262,6 +4487,12 @@ def _trigger_occurrence_response_payload(
             result["idempotent_replay"] = outcome.run_start.idempotent_replay
             result["readiness"] = outcome.run_start.readiness.to_dict()
             run = outcome.run_start.run
+        if outcome.analysis_request is not None:
+            analysis_request = outcome.analysis_request
+            result["created"] = not outcome.deduplicated
+            result["idempotent_replay"] = outcome.deduplicated
+    if analysis_request is not None:
+        result["analysis_request"] = analysis_request.to_dict()
     if run is not None:
         result["run"] = {
             "run_id": run.run_id,

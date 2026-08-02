@@ -18,6 +18,7 @@ ICON_COLORS = {
     "next": "#94a3b8",
     "refresh": "#475569",
     "remove-target": "#ef4444",
+    "save": "#0f766e",
     "settings": "#64748b",
     "status-blocked": "#b42318",
     "status-ready": "#1f7a4d",
@@ -95,6 +96,10 @@ class IconRegistry:
             painter.drawRect(8, 8, 8, 11)
             painter.drawLine(11, 11, 11, 17)
             painter.drawLine(14, 11, 14, 17)
+        elif name == "save":
+            painter.drawRect(5, 4, 14, 16)
+            painter.drawRect(8, 5, 7, 5)
+            painter.drawRect(8, 13, 8, 5)
         elif name == "back":
             painter.drawLine(19, 12, 6, 12)
             painter.drawLine(6, 12, 11, 7)

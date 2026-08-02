@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import pytest
 
+from mediasync_home.application.runs import RunState
 from mediasync_home.application.trigger_occurrences import (
     TriggerDeliveryContext,
     TriggerKind,
     TriggerOccurrenceConflict,
     TriggerOccurrencePayloadError,
+    TriggerOccurrenceState,
     build_enqueue_trigger_occurrence_payload,
     build_trigger_occurrence,
     ensure_trigger_occurrence_compatible,
     parse_enqueue_trigger_occurrence_command,
     payload_hash,
+    terminal_trigger_occurrence_state_for_run,
 )
 
 
@@ -46,7 +49,9 @@ def test_enqueue_trigger_occurrence_payload_round_trips_to_command() -> None:
     assert len(payload_hash(payload)) == 64
 
 
-def test_enqueue_trigger_occurrence_requires_delivery_id_to_match_idempotency_key() -> None:
+def test_enqueue_trigger_occurrence_requires_delivery_id_to_match_idempotency_key() -> (
+    None
+):
     payload = build_enqueue_trigger_occurrence_payload(
         schedule_id="schedule-a",
         schedule_revision_hash="a" * 64,
@@ -114,7 +119,9 @@ def test_trigger_occurrence_key_factory_coalesces_scheduled_retry_delivery() -> 
 
 
 def test_trigger_occurrence_key_factory_keeps_manual_deliveries_distinct() -> None:
-    first = _parsed_command(delivery_id=DELIVERY_ID, trigger_kind=TriggerKind.MANUAL_LOCAL_PREVIEW)
+    first = _parsed_command(
+        delivery_id=DELIVERY_ID, trigger_kind=TriggerKind.MANUAL_LOCAL_PREVIEW
+    )
     second = _parsed_command(
         delivery_id="22222222-2222-4222-8222-222222222222",
         trigger_kind=TriggerKind.MANUAL_LOCAL_PREVIEW,
@@ -159,6 +166,27 @@ def test_trigger_occurrence_compatibility_rejects_same_key_payload_drift() -> No
                 ),
             ),
         )
+
+
+@pytest.mark.parametrize(
+    ("run_state", "expected"),
+    (
+        (RunState.COMPLETED, TriggerOccurrenceState.SUCCEEDED),
+        (RunState.COMPLETED_WITH_WARNINGS, TriggerOccurrenceState.SUCCEEDED),
+        (RunState.PARTIAL_FAILURE, TriggerOccurrenceState.FAILED),
+        (RunState.FAILED, TriggerOccurrenceState.FAILED),
+        (RunState.CANCELLED, TriggerOccurrenceState.CANCELLED),
+        (RunState.BLOCKED_BY_SAFETY, TriggerOccurrenceState.REJECTED),
+        (RunState.RECOVERY_REQUIRED, TriggerOccurrenceState.FAILED),
+        (RunState.QUEUED, None),
+        (RunState.EXECUTING, None),
+    ),
+)
+def test_terminal_trigger_occurrence_state_follows_run_outcome(
+    run_state: RunState,
+    expected: TriggerOccurrenceState | None,
+) -> None:
+    assert terminal_trigger_occurrence_state_for_run(run_state) is expected
 
 
 def _parsed_command(

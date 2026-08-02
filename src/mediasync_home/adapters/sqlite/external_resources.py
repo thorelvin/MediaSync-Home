@@ -36,6 +36,7 @@ class SqliteExternalResourceStateStore(ExternalResourceStateStore):
         desired_generation: int,
         desired_hash: str,
     ) -> ExternalResourceRecord:
+        outer_transaction = self._connection.in_transaction
         try:
             validate_desired_external_resource_state(
                 resource_type=resource_type,
@@ -43,7 +44,8 @@ class SqliteExternalResourceStateStore(ExternalResourceStateStore):
                 desired_generation=desired_generation,
                 desired_hash=desired_hash,
             )
-            self._connection.execute("BEGIN IMMEDIATE")
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
             existing = self.load_external_resource_state(
                 resource_type=resource_type,
                 resource_id=resource_id,
@@ -99,10 +101,11 @@ class SqliteExternalResourceStateStore(ExternalResourceStateStore):
             )
             if loaded is None:
                 raise SqliteExternalResourceStateStoreError("EXTERNAL_RESOURCE_LOAD_FAILED")
-            self._connection.execute("COMMIT")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
             return loaded
         except (sqlite3.Error, ExternalResourceViolation, SqliteExternalResourceStateStoreError) as exc:
-            if self._connection.in_transaction:
+            if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
             if isinstance(exc, SqliteExternalResourceStateStoreError):
                 raise

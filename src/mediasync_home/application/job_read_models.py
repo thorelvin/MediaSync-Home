@@ -150,6 +150,38 @@ class BackupAnalysisRequestSummary:
 
 
 @dataclass(frozen=True)
+class BackupAutomationScheduleSummary:
+    schedule_id: str
+    trigger_type: str
+    enabled: bool
+    row_version: int
+    definition_generation: int
+    daily_local_time: str | None
+    time_zone_id: str | None
+    task_logon_type: str
+    requires_network: bool
+    run_only_when_logged_on: bool
+    reconciliation_state: str | None = None
+    reconciliation_error_code: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schedule_id": self.schedule_id,
+            "trigger_type": self.trigger_type,
+            "enabled": self.enabled,
+            "row_version": self.row_version,
+            "definition_generation": self.definition_generation,
+            "daily_local_time": self.daily_local_time,
+            "time_zone_id": self.time_zone_id,
+            "task_logon_type": self.task_logon_type,
+            "requires_network": self.requires_network,
+            "run_only_when_logged_on": self.run_only_when_logged_on,
+            "reconciliation_state": self.reconciliation_state,
+            "reconciliation_error_code": self.reconciliation_error_code,
+        }
+
+
+@dataclass(frozen=True)
 class StandardBackupJobDetail:
     job_id: str
     job_revision_id: str
@@ -161,6 +193,7 @@ class StandardBackupJobDetail:
     filter_set_version: int = 1
     initial_plan: InitialBackupPlanSummary | None = None
     latest_analysis_request: BackupAnalysisRequestSummary | None = None
+    automation_schedule: BackupAutomationScheduleSummary | None = None
     lifecycle_state: JobLifecycleState = JobLifecycleState.ACTIVE
     lifecycle_row_version: int = 1
     archived_utc: str | None = None
@@ -194,6 +227,11 @@ class StandardBackupJobDetail:
             None
             if self.latest_analysis_request is None
             else self.latest_analysis_request.to_dict()
+        )
+        payload["automation_schedule"] = (
+            None
+            if self.automation_schedule is None
+            else self.automation_schedule.to_dict()
         )
         return payload
 

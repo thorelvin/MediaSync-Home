@@ -250,6 +250,90 @@ class ShellText:
         return "Rediger denne backupjobben"
 
     @property
+    def automatic_backup(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Automatic backup"
+        return "Automatisk backup"
+
+    @property
+    def automatic_backup_enabled(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Daily"
+        return "Daglig"
+
+    @property
+    def automatic_backup_time_tooltip(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Local time for the daily backup"
+        return "Lokal tid for den daglige backupen"
+
+    @property
+    def save_automation(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Save schedule"
+        return "Lagre tidsplan"
+
+    @property
+    def save_automation_tooltip(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Save this job's automatic backup schedule"
+        return "Lagre tidsplanen for automatisk backup"
+
+    @property
+    def saving_automation(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Saving..."
+        return "Lagrer..."
+
+    @property
+    def automation_saved(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Automatic backup schedule saved"
+        return "Tidsplan for automatisk backup er lagret"
+
+    @property
+    def automation_save_failed(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "The automatic backup schedule could not be saved"
+        return "Tidsplanen for automatisk backup kunne ikke lagres"
+
+    @property
+    def automation_not_configured(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Not configured"
+        return "Ikke konfigurert"
+
+    @property
+    def automation_pending(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Waiting for Windows"
+        return "Venter på Windows"
+
+    @property
+    def automation_in_sync(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Active in Windows"
+        return "Aktiv i Windows"
+
+    @property
+    def automation_disabled(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Disabled in Windows"
+        return "Deaktivert i Windows"
+
+    @property
+    def automation_plan_required(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Check this backup before enabling automation"
+        return "Kontroller backupen før du aktiverer automatikk"
+
+    @property
+    def automation_blocked(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Windows needs attention"
+        return "Windows trenger oppfølging"
+
+    @property
     def edit_setup_title(self) -> str:
         return "Edit backup job" if self.language_tooltip_prefix == "Language" else "Rediger backupjobb"
 

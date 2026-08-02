@@ -1,5 +1,26 @@
 # Implementeringsstatus
 
+Update 2026-08-02: `AUTO-001` daily backup automation is now user-configurable
+in the Jobs workspace for the accepted local same-user scope. The localized Qt
+controls expose an enabled checkbox, local `HH:MM` time, Save action and
+reconciliation status without horizontal clipping at 900x560. The strict
+revision-bound command atomically persists its durable receipt, one
+deterministic schedule per job and pending Task Scheduler desired resource.
+Enabled schedules require an active job and runnable sealed plan, use the
+current Windows time-zone ID, `INTERACTIVE_TOKEN`, least privilege and
+run-only-when-logged-on; UNC source or target roots set the network requirement.
+The packaged trigger path can start the same-user Engine Host when no live
+publication exists. Each accepted delivery records one deduplicated occurrence
+and queues a fresh safe analysis against the current job revision instead of
+executing the plan captured when the schedule was created. A bounded executor
+reconciliation maps the persisted terminal run outcome back to a terminal
+occurrence with a deterministic effect hash. A real-filesystem
+SQLite integration test creates a file after schedule configuration, triggers
+the schedule, completes the resulting run, verifies exact target contents and
+then verifies schedule/receipt persistence after restart. Password/S4U modes
+and signed clean-machine release evidence remain outside the accepted local
+scope.
+
 Update 2026-08-02: `SAF-005` and `UX-006` now have local draft-time physical
 storage identity feedback. After source or target selection, the Qt setup asks
 the Engine Host to inspect at most four directories on its bounded latest-wins

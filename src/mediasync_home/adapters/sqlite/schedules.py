@@ -22,8 +22,11 @@ class SqliteScheduleStore(ScheduleStore):
         self._connection = connection
 
     def save_schedule(self, schedule: ScheduleDefinition) -> None:
+        outer_transaction = self._connection.in_transaction
         try:
             validate_schedule_definition(schedule)
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
             self._connection.execute(
                 """
                 INSERT INTO schedules (
@@ -68,11 +71,14 @@ class SqliteScheduleStore(ScheduleStore):
                 """,
                 _schedule_parameters(schedule),
             )
-            self._connection.commit()
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
         except ScheduleViolation as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
             raise SqliteScheduleStoreError("SCHEDULE_VALIDATION_FAILED") from exc
         except sqlite3.Error as exc:
-            if self._connection.in_transaction:
+            if not outer_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
             raise SqliteScheduleStoreError("SCHEDULE_SAVE_FAILED") from exc
 

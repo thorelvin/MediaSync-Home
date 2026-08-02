@@ -10,7 +10,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QTimer, Qt  # noqa: E402
+from PySide6.QtCore import QTime, QTimer, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QBoxLayout,
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QSizePolicy,
     QStackedWidget,
     QToolButton,
+    QTimeEdit,
     QWidget,
 )
 
@@ -1972,6 +1973,74 @@ def test_jobs_workspace_filters_archived_jobs_and_reactivates_without_clipping(
         assert (
             lifecycle_button.geometry().right() <= detail_panel.contentsRect().right()
         )
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_jobs_workspace_saves_daily_automation_without_clipping(qapp) -> None:
+    provider = _FakeAutomationDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(760, 520)
+        window.show()
+        window.refresh_engine_status()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+        enabled = window.findChild(QCheckBox, "jobsAutomationEnabled")
+        time_edit = window.findChild(QTimeEdit, "jobsAutomationTime")
+        save_button = window.findChild(QPushButton, "jobsAutomationSaveButton")
+        status = window.findChild(QLabel, "jobsAutomationStatus")
+        scroll = window.findChild(QScrollArea, "jobsScrollArea")
+        panel = window.findChild(QFrame, "jobsDetailPanel")
+
+        assert enabled is not None
+        assert enabled.text() == "Daglig"
+        assert enabled.isChecked() is False
+        assert time_edit is not None
+        assert time_edit.isEnabled() is False
+        assert save_button is not None
+        assert save_button.isEnabled() is False
+        assert status is not None
+        assert status.text() == "Ikke konfigurert"
+
+        enabled.setChecked(True)
+        time_edit.setTime(QTime(22, 15))
+        qapp.processEvents()
+        assert time_edit.isEnabled() is True
+        assert save_button.isEnabled() is True
+        QTest.mouseClick(save_button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert len(provider.automation_commands) == 1
+        command = provider.automation_commands[0]
+        assert command["job_id"] == "job-a"
+        assert command["expected_job_revision_id"] == "job-rev-a"
+        assert command["expected_lifecycle_row_version"] == 1
+        assert command["expected_schedule_row_version"] == 0
+        assert command["enabled"] is True
+        assert command["local_time"] == "22:15"
+        assert window._job_detail_state.automation_schedule_row_version == 1
+        assert status.text() == "Venter på Windows"
+
+        language = window.findChild(QToolButton, "languageSelectorButton")
+        assert language is not None and language.menu() is not None
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+        assert enabled.text() == "Daily"
+        assert save_button.text() == "Save schedule"
+        assert status.text() == "Waiting for Windows"
+        assert scroll is not None
+        assert scroll.horizontalScrollBar().maximum() == 0
+        assert panel is not None
+        assert save_button.geometry().right() <= save_button.parentWidget().contentsRect().right()
+        assert not enabled.geometry().intersects(time_edit.geometry())
+        assert not time_edit.geometry().intersects(save_button.geometry())
     finally:
         window.close()
         window.deleteLater()
@@ -5806,6 +5875,52 @@ class _FakeJobLifecycleDashboardEngineClient(_FakeDashboardEngineClient):
     def reactivate_standard_backup_job(self, **_kwargs: object) -> IpcResponse:
         self.lifecycle_commands.append("REACTIVATE")
         return IpcResponse.accepted({"applied": True})
+
+
+class _FakeAutomationDashboardEngineClient(_FakeDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.automation_schedule: dict[str, object] | None = None
+        self.automation_commands: list[dict[str, object]] = []
+
+    def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        response = super().get_backup_job_detail(job_id=job_id)
+        payload = dict(response.payload)
+        detail = dict(payload["backup_job_detail"])
+        job = dict(detail["job"])
+        initial_plan = dict(job["initial_plan"])
+        initial_plan["plan_runnable"] = True
+        job["initial_plan"] = initial_plan
+        job["automation_schedule"] = self.automation_schedule
+        detail["job"] = job
+        payload["backup_job_detail"] = detail
+        return IpcResponse.accepted(payload)
+
+    def configure_daily_backup_schedule(self, **kwargs: object) -> IpcResponse:
+        self.automation_commands.append(dict(kwargs))
+        row_version = int(kwargs["expected_schedule_row_version"]) + 1
+        self.automation_schedule = {
+            "schedule_id": "daily-job-a",
+            "trigger_type": "scheduled_time",
+            "enabled": kwargs["enabled"],
+            "row_version": row_version,
+            "definition_generation": row_version,
+            "daily_local_time": kwargs["local_time"],
+            "time_zone_id": "W. Europe Standard Time",
+            "task_logon_type": "INTERACTIVE_TOKEN",
+            "requires_network": False,
+            "run_only_when_logged_on": True,
+            "reconciliation_state": "PENDING",
+            "reconciliation_error_code": None,
+        }
+        return IpcResponse.accepted(
+            {
+                "configured": True,
+                "validation_code": "BACKUP_AUTOMATION_SCHEDULE_UPDATED",
+                "reconciliation_state": "PENDING",
+                "schedule": self.automation_schedule,
+            }
+        )
 
 
 class _FakeChangesDashboardEngineClient(_FakeDashboardEngineClient):

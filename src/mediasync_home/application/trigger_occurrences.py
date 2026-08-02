@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
+from mediasync_home.application.runs import RunState
 
 
 HEX_256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -52,6 +53,8 @@ TERMINAL_TRIGGER_OCCURRENCE_STATES = {
     TriggerOccurrenceState.FAILED,
     TriggerOccurrenceState.CANCELLED,
 }
+
+MAX_TRIGGER_RUN_RECONCILIATION_BATCH = 100
 
 
 @dataclass(frozen=True)
@@ -125,9 +128,13 @@ class TriggerOccurrenceRegistration:
 
 
 class TriggerOccurrenceStore(Protocol):
-    def record_received(self, occurrence: TriggerOccurrence) -> TriggerOccurrenceRegistration: ...
+    def record_received(
+        self, occurrence: TriggerOccurrence
+    ) -> TriggerOccurrenceRegistration: ...
 
-    def load_trigger_occurrence(self, occurrence_id: str) -> TriggerOccurrence | None: ...
+    def load_trigger_occurrence(
+        self, occurrence_id: str
+    ) -> TriggerOccurrence | None: ...
 
     def load_trigger_occurrence_by_deduplication_key(
         self,
@@ -140,6 +147,21 @@ class TriggerOccurrenceStore(Protocol):
         deduplication_key: str,
         run_id: str,
     ) -> TriggerOccurrence: ...
+
+    def mark_terminal(
+        self,
+        *,
+        deduplication_key: str,
+        state: TriggerOccurrenceState,
+        terminal_effect_hash: str,
+        run_id: str | None = None,
+    ) -> TriggerOccurrence: ...
+
+    def list_run_enqueued_trigger_occurrences(
+        self,
+        *,
+        limit: int,
+    ) -> tuple[TriggerOccurrence, ...]: ...
 
 
 def build_enqueue_trigger_occurrence_payload(
@@ -230,6 +252,20 @@ def ensure_trigger_occurrence_compatible(
     return existing
 
 
+def terminal_trigger_occurrence_state_for_run(
+    run_state: RunState,
+) -> TriggerOccurrenceState | None:
+    return {
+        RunState.COMPLETED: TriggerOccurrenceState.SUCCEEDED,
+        RunState.COMPLETED_WITH_WARNINGS: TriggerOccurrenceState.SUCCEEDED,
+        RunState.PARTIAL_FAILURE: TriggerOccurrenceState.FAILED,
+        RunState.FAILED: TriggerOccurrenceState.FAILED,
+        RunState.CANCELLED: TriggerOccurrenceState.CANCELLED,
+        RunState.BLOCKED_BY_SAFETY: TriggerOccurrenceState.REJECTED,
+        RunState.RECOVERY_REQUIRED: TriggerOccurrenceState.FAILED,
+    }.get(run_state)
+
+
 def parse_enqueue_trigger_occurrence_command(
     *,
     request_id: str,
@@ -248,7 +284,9 @@ def parse_enqueue_trigger_occurrence_command(
         raise TriggerOccurrencePayloadError("ENQUEUE_TRIGGER_REQUIRES_DELIVERY_CONTEXT")
     delivery_id = _uuid_string(delivery_payload.get("delivery_id"), "delivery_id")
     if delivery_id != idempotency_key:
-        raise TriggerOccurrencePayloadError("ENQUEUE_TRIGGER_DELIVERY_ID_MUST_MATCH_IDEMPOTENCY_KEY")
+        raise TriggerOccurrencePayloadError(
+            "ENQUEUE_TRIGGER_DELIVERY_ID_MUST_MATCH_IDEMPOTENCY_KEY"
+        )
     return EnqueueTriggerOccurrenceCommand(
         request_id=request_id,
         idempotency_key=idempotency_key,
@@ -266,7 +304,9 @@ def parse_enqueue_trigger_occurrence_command(
                 "task_definition_hash",
             ),
             task_instance_id=_optional_text(delivery_payload.get("task_instance_id")),
-            scheduled_slot_utc=_optional_utc_text(delivery_payload.get("scheduled_slot_utc")),
+            scheduled_slot_utc=_optional_utc_text(
+                delivery_payload.get("scheduled_slot_utc")
+            ),
             event_identity=_optional_text(delivery_payload.get("event_identity")),
         ),
     )
@@ -274,26 +314,36 @@ def parse_enqueue_trigger_occurrence_command(
 
 def _required_identifier(value: object, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise TriggerOccurrencePayloadError(f"ENQUEUE_TRIGGER_REQUIRES_{field_name.upper()}")
+        raise TriggerOccurrencePayloadError(
+            f"ENQUEUE_TRIGGER_REQUIRES_{field_name.upper()}"
+        )
     normalized = value.strip()
     if IDENTIFIER_PATTERN.fullmatch(normalized) is None:
-        raise TriggerOccurrencePayloadError(f"ENQUEUE_TRIGGER_INVALID_{field_name.upper()}")
+        raise TriggerOccurrencePayloadError(
+            f"ENQUEUE_TRIGGER_INVALID_{field_name.upper()}"
+        )
     return normalized
 
 
 def _required_hash(value: object, field_name: str) -> str:
     if not isinstance(value, str) or HEX_256_PATTERN.fullmatch(value) is None:
-        raise TriggerOccurrencePayloadError(f"ENQUEUE_TRIGGER_INVALID_{field_name.upper()}")
+        raise TriggerOccurrencePayloadError(
+            f"ENQUEUE_TRIGGER_INVALID_{field_name.upper()}"
+        )
     return value
 
 
 def _uuid_string(value: object, field_name: str) -> str:
     if not isinstance(value, str):
-        raise TriggerOccurrencePayloadError(f"ENQUEUE_TRIGGER_INVALID_{field_name.upper()}")
+        raise TriggerOccurrencePayloadError(
+            f"ENQUEUE_TRIGGER_INVALID_{field_name.upper()}"
+        )
     try:
         UUID(value)
     except ValueError as exc:
-        raise TriggerOccurrencePayloadError(f"ENQUEUE_TRIGGER_INVALID_{field_name.upper()}") from exc
+        raise TriggerOccurrencePayloadError(
+            f"ENQUEUE_TRIGGER_INVALID_{field_name.upper()}"
+        ) from exc
     return value
 
 
@@ -303,13 +353,17 @@ def _trigger_kind(value: object) -> TriggerKind:
     try:
         return TriggerKind(value)
     except ValueError as exc:
-        raise TriggerOccurrencePayloadError("ENQUEUE_TRIGGER_INVALID_TRIGGER_KIND") from exc
+        raise TriggerOccurrencePayloadError(
+            "ENQUEUE_TRIGGER_INVALID_TRIGGER_KIND"
+        ) from exc
 
 
 def _required_utc_text(value: object, field_name: str) -> str:
     text = _optional_utc_text(value)
     if text is None:
-        raise TriggerOccurrencePayloadError(f"ENQUEUE_TRIGGER_REQUIRES_{field_name.upper()}")
+        raise TriggerOccurrencePayloadError(
+            f"ENQUEUE_TRIGGER_REQUIRES_{field_name.upper()}"
+        )
     return text
 
 

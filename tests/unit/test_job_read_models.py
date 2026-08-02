@@ -125,6 +125,7 @@ def test_backup_job_detail_query_returns_exact_job_revision_payload() -> None:
                 },
                     "initial_plan": None,
                     "latest_analysis_request": None,
+                    "automation_schedule": None,
                     "targets": [
                 {
                     "name": "USB",

@@ -66,6 +66,22 @@ def test_sqlite_schedule_store_upserts_current_desired_definition(tmp_path: Path
         assert _row_count(connection, "schedules") == 1
 
 
+def test_sqlite_schedule_store_preserves_caller_transaction(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        connection.commit()
+        store = SqliteScheduleStore(connection)
+
+        connection.execute("BEGIN IMMEDIATE")
+        store.save_schedule(_schedule())
+        assert connection.in_transaction is True
+        connection.execute("ROLLBACK")
+
+        assert store.load_schedule("schedule-a") is None
+
+
 def test_sqlite_schedule_store_lists_schedules_for_reconciliation_bounded(
     tmp_path: Path,
 ) -> None:

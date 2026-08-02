@@ -325,6 +325,20 @@ def test_backup_job_detail_view_model_renders_exact_job_revision() -> None:
                         "plan_id": None,
                         "row_version": 2,
                     },
+                    "automation_schedule": {
+                        "schedule_id": "daily-job-a",
+                        "trigger_type": "scheduled_time",
+                        "enabled": True,
+                        "row_version": 4,
+                        "definition_generation": 4,
+                        "daily_local_time": "21:30",
+                        "time_zone_id": "W. Europe Standard Time",
+                        "task_logon_type": "INTERACTIVE_TOKEN",
+                        "requires_network": True,
+                        "run_only_when_logged_on": True,
+                        "reconciliation_state": "PENDING",
+                        "reconciliation_error_code": None,
+                    },
                 },
             }
         }
@@ -352,6 +366,13 @@ def test_backup_job_detail_view_model_renders_exact_job_revision() -> None:
     assert state.analysis_id == "analysis-a"
     assert state.analysis_request_id == "request-a"
     assert state.analysis_request_state == "RUNNING"
+    assert state.automation_schedule_id == "daily-job-a"
+    assert state.automation_enabled is True
+    assert state.automation_daily_local_time == "21:30"
+    assert state.automation_schedule_row_version == 4
+    assert state.automation_reconciliation_state == "PENDING"
+    assert state.automation_time_zone_id == "W. Europe Standard Time"
+    assert state.automation_requires_network is True
     assert state.plan_summary_label == (
         "3 operasjoner fra plan-a. · 256 B · Kun forhåndsvisning"
     )

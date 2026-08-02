@@ -2,6 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from mediasync_home.application.backup_analysis import (
+    BackupAnalysisRequest,
+    BackupAnalysisRequestState,
+    BackupAnalysisRequestStore,
+)
+from mediasync_home.application.job_lifecycle import JobLifecycleState
+from mediasync_home.application.job_read_models import (
+    StandardBackupJobDetailReadModelStore,
+)
 from mediasync_home.application.plans import PlanStore
 from mediasync_home.application.runs import (
     RunIdFactory,
@@ -34,6 +43,103 @@ class TriggerRunEnqueueOutcome:
     next_action: str
     occurrence: TriggerOccurrence | None = None
     run_start: RunStartOutcome | None = None
+    analysis_request: BackupAnalysisRequest | None = None
+
+
+def enqueue_trigger_occurrence_analysis(
+    *,
+    command: EnqueueTriggerOccurrenceCommand,
+    installation_id: str,
+    schedules: ScheduleStore,
+    occurrences: TriggerOccurrenceStore,
+    jobs: StandardBackupJobDetailReadModelStore,
+    analysis_requests: BackupAnalysisRequestStore,
+) -> TriggerRunEnqueueOutcome:
+    resolution = resolve_schedule_for_trigger(
+        schedules=schedules,
+        schedule_id=command.schedule_id,
+        schedule_revision_hash=command.schedule_revision_hash,
+    )
+    if resolution.kind is not ScheduleTriggerResolutionKind.READY:
+        return _schedule_not_ready(resolution.kind)
+
+    schedule = resolution.schedule
+    if schedule is None:
+        return _schedule_not_ready(ScheduleTriggerResolutionKind.NOT_FOUND)
+    if schedule.trigger_type is not command.delivery.trigger_kind:
+        return TriggerRunEnqueueOutcome(
+            enqueued=False,
+            deduplicated=False,
+            compacted=False,
+            schedule_resolution_kind=resolution.kind,
+            validation_codes=("TRIGGER_SCHEDULE_KIND_MISMATCH",),
+            next_action=(
+                "Refresh the trigger registration because the schedule trigger "
+                "kind changed."
+            ),
+        )
+    job = jobs.load_standard_backup_job_detail(schedule.job_id)
+    if job is None:
+        return TriggerRunEnqueueOutcome(
+            enqueued=False,
+            deduplicated=False,
+            compacted=False,
+            schedule_resolution_kind=resolution.kind,
+            validation_codes=("TRIGGER_JOB_NOT_FOUND",),
+            next_action="Refresh or remove the schedule for the missing backup job.",
+        )
+    if job.lifecycle_state is not JobLifecycleState.ACTIVE:
+        return TriggerRunEnqueueOutcome(
+            enqueued=False,
+            deduplicated=False,
+            compacted=False,
+            schedule_resolution_kind=resolution.kind,
+            validation_codes=("TRIGGER_JOB_ARCHIVED",),
+            next_action="Reactivate the backup job before automation can run.",
+        )
+
+    registration = occurrences.record_received(
+        build_trigger_occurrence(
+            installation_id=installation_id,
+            job_id=schedule.job_id,
+            command=command,
+        )
+    )
+    occurrence = registration.occurrence
+    if occurrence.state in TERMINAL_TRIGGER_OCCURRENCE_STATES:
+        return TriggerRunEnqueueOutcome(
+            enqueued=False,
+            deduplicated=registration.deduplicated,
+            compacted=registration.compacted,
+            schedule_resolution_kind=resolution.kind,
+            validation_codes=("TRIGGER_OCCURRENCE_ALREADY_TERMINAL",),
+            next_action=(
+                "Treat the trigger occurrence as already complete and do not queue "
+                "another analysis."
+            ),
+            occurrence=occurrence,
+        )
+    analysis_request = analysis_requests.enqueue_backup_analysis(
+        BackupAnalysisRequest(
+            request_id=occurrence.occurrence_id,
+            command_idempotency_key=occurrence.first_delivery_id,
+            job_id=job.job_id,
+            job_revision_id=job.job_revision_id,
+            state=BackupAnalysisRequestState.QUEUED,
+            requested_utc=command.delivery.observed_start_utc,
+            start_when_safe=True,
+        )
+    )
+    return TriggerRunEnqueueOutcome(
+        enqueued=True,
+        deduplicated=registration.deduplicated,
+        compacted=registration.compacted,
+        schedule_resolution_kind=resolution.kind,
+        validation_codes=(),
+        next_action="A fresh backup check is queued for this trigger occurrence.",
+        occurrence=occurrence,
+        analysis_request=analysis_request,
+    )
 
 
 def enqueue_trigger_occurrence_run(

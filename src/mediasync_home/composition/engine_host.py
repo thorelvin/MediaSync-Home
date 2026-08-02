@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sqlite3
@@ -48,6 +49,10 @@ from mediasync_home.adapters.version_restore import LocalRetainedVersionRestoreA
 from mediasync_home.adapters.writable_endpoint_registration import (
     LocalWritableEndpointControlAreaProvisioner,
     LocalWritableEndpointRootOverlapGuard,
+)
+from mediasync_home.adapters.windows_time_zone import (
+    WindowsTimeZoneLookupError,
+    current_windows_time_zone_id,
 )
 from mediasync_home.adapters.sqlite.catalog_handoffs import (
     SqliteFinalFileCatalogHandoffStore,
@@ -157,8 +162,15 @@ from mediasync_home.application.run_executor import (
 )
 from mediasync_home.application.backup_analysis import (
     BackupAnalysisRequest,
+    BackupAnalysisRequestState,
     BackupAnalysisRequestStore,
     execute_next_backup_analysis,
+)
+from mediasync_home.application.trigger_occurrences import (
+    MAX_TRIGGER_RUN_RECONCILIATION_BATCH,
+    TriggerOccurrenceState,
+    TriggerOccurrenceStore,
+    terminal_trigger_occurrence_state_for_run,
 )
 from mediasync_home.application.clocks import ClockPort
 from mediasync_home.application.endpoint_retry import MonotonicEndpointRetryScheduler
@@ -499,6 +511,7 @@ class EngineHostRuntime:
     backup_analysis_snapshot_refresher: SqliteJobSnapshotMaterializer | None = None
     backup_analysis_hash_refresher: SqliteCurrentReadHashEvidenceRefresher | None = None
     backup_analysis_plan_refresher: SqliteInitialBackupPlanMaterializer | None = None
+    trigger_occurrence_store: TriggerOccurrenceStore | None = None
     catalog_connection: sqlite3.Connection | None = None
     recovery_connection: sqlite3.Connection | None = None
 
@@ -535,7 +548,7 @@ class EngineHostRuntime:
         ):
             return None
         endpoint_refresher = self.backup_analysis_endpoint_refresher
-        return execute_next_backup_analysis(
+        completed = execute_next_backup_analysis(
             requests=self.backup_analysis_request_store,
             runs=self.run_executor_queue_store,
             refresh_endpoint_classifications=lambda: (
@@ -550,6 +563,85 @@ class EngineHostRuntime:
             run_id_factory=UuidRunIdFactory(),
             utc_now=self.clock.utc_now,
         )
+        if completed is not None:
+            self._reconcile_trigger_analysis(completed)
+        return completed
+
+    def _reconcile_trigger_analysis(self, request: BackupAnalysisRequest) -> None:
+        store = self.trigger_occurrence_store
+        if store is None or not request.request_id.startswith("trigger:"):
+            return
+        occurrence = store.load_trigger_occurrence(request.request_id)
+        if occurrence is None:
+            return
+        if request.started_run_id is not None:
+            store.mark_run_enqueued(
+                deduplication_key=occurrence.deduplication_key,
+                run_id=request.started_run_id,
+            )
+            return
+        if not request.terminal:
+            return
+        terminal_state = {
+            BackupAnalysisRequestState.NO_CHANGES: TriggerOccurrenceState.SUCCEEDED,
+            BackupAnalysisRequestState.BLOCKED: TriggerOccurrenceState.REJECTED,
+            BackupAnalysisRequestState.FAILED: TriggerOccurrenceState.FAILED,
+            BackupAnalysisRequestState.SUCCEEDED: TriggerOccurrenceState.REJECTED,
+        }[request.state]
+        effect_hash = hashlib.sha256(
+            json.dumps(
+                request.to_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        store.mark_terminal(
+            deduplication_key=occurrence.deduplication_key,
+            state=terminal_state,
+            terminal_effect_hash=effect_hash,
+        )
+
+    def _reconcile_terminal_trigger_runs(self) -> None:
+        occurrences = self.trigger_occurrence_store
+        runs = self.run_executor_queue_store
+        if occurrences is None or runs is None:
+            return
+        for occurrence in occurrences.list_run_enqueued_trigger_occurrences(
+            limit=MAX_TRIGGER_RUN_RECONCILIATION_BATCH
+        ):
+            if occurrence.run_id is None:
+                raise RuntimeError("TRIGGER_OCCURRENCE_RUN_BINDING_MISSING")
+            run = runs.load_started_run(occurrence.run_id)
+            if run is None:
+                raise RuntimeError("TRIGGER_OCCURRENCE_RUN_NOT_FOUND")
+            if run.trigger_occurrence_id != occurrence.occurrence_id:
+                raise RuntimeError("TRIGGER_OCCURRENCE_RUN_BINDING_MISMATCH")
+            terminal_state = terminal_trigger_occurrence_state_for_run(run.state)
+            if terminal_state is None:
+                continue
+            effect_hash = hashlib.sha256(
+                json.dumps(
+                    {
+                        "error_count": run.error_count,
+                        "job_id": run.job_id,
+                        "job_revision_id": run.job_revision_id,
+                        "occurrence_id": occurrence.occurrence_id,
+                        "plan_checksum": run.plan_checksum,
+                        "plan_id": run.plan_id,
+                        "run_id": run.run_id,
+                        "run_state": run.state.value,
+                        "warning_count": run.warning_count,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            occurrences.mark_terminal(
+                deduplication_key=occurrence.deduplication_key,
+                state=terminal_state,
+                terminal_effect_hash=effect_hash,
+                run_id=run.run_id,
+            )
 
     def compact_state_stores(
         self,
@@ -820,11 +912,12 @@ class EngineHostRuntime:
             )
         if max_steps > MAX_RUN_EXECUTOR_PUMP_STEPS:
             raise RunExecutorViolation("RUN_EXECUTOR_CYCLE_STEP_LIMIT_TOO_LARGE")
+        self._reconcile_terminal_trigger_runs()
         capacity_block = self._run_capacity_block()
         if capacity_block is not None:
             return capacity_block
         try:
-            return execute_bounded_run_executor_cycle(
+            outcome = execute_bounded_run_executor_cycle(
                 runs=self.run_executor_queue_store,
                 leases=self.run_executor_lease_authority,
                 lease_registry=self.run_executor_lease_registry,
@@ -849,6 +942,8 @@ class EngineHostRuntime:
                 ),
                 operation_audits=self.run_executor_operation_audit_store,
             )
+            self._reconcile_terminal_trigger_runs()
+            return outcome
         except Exception as exc:
             if (
                 self.state_capacity_gate is None
@@ -1647,6 +1742,7 @@ def build_engine_host_runtime(
     staging_retry_scheduler: MonotonicStagingRetryScheduler | None = None,
     recover_interrupted_analyses: bool = True,
     task_scheduler_executable_path: str | None = None,
+    task_scheduler_time_zone_id: str | None = None,
 ) -> EngineHostRuntime:
     runtime_clock = clock or SystemClock()
     runtime_endpoint_retry_scheduler = (
@@ -1655,6 +1751,15 @@ def build_engine_host_runtime(
     runtime_staging_retry_scheduler = (
         staging_retry_scheduler or MonotonicStagingRetryScheduler(runtime_clock)
     )
+    resolved_task_scheduler_time_zone_id = task_scheduler_time_zone_id
+    if (
+        task_scheduler_executable_path is not None
+        and resolved_task_scheduler_time_zone_id is None
+    ):
+        try:
+            resolved_task_scheduler_time_zone_id = current_windows_time_zone_id()
+        except WindowsTimeZoneLookupError:
+            resolved_task_scheduler_time_zone_id = None
     if state_root is None:
         return EngineHostRuntime(
             service=EngineHostIpcService(
@@ -1664,6 +1769,8 @@ def build_engine_host_runtime(
                 selected_directory_identity_probe=(
                     LocalSelectedDirectoryIdentityProbe()
                 ),
+                task_scheduler_executable_path=task_scheduler_executable_path,
+                task_scheduler_time_zone_id=resolved_task_scheduler_time_zone_id,
             ),
             clock=runtime_clock,
         )
@@ -1942,6 +2049,8 @@ def build_engine_host_runtime(
             run_activity_read_store=runs,
             run_progress_snapshot_store=run_progress,
             schedule_store=schedules,
+            task_scheduler_executable_path=task_scheduler_executable_path,
+            task_scheduler_time_zone_id=resolved_task_scheduler_time_zone_id,
             trigger_occurrence_store=trigger_occurrences,
             external_resource_state_store=external_resource_state,
             cataloged_file_read_store=catalog_handoffs,
@@ -2008,6 +2117,7 @@ def build_engine_host_runtime(
         backup_analysis_snapshot_refresher=job_snapshot_materializer,
         backup_analysis_hash_refresher=current_read_hash_refresher,
         backup_analysis_plan_refresher=initial_backup_plan_materializer,
+        trigger_occurrence_store=trigger_occurrences,
         catalog_connection=catalog_connection,
         recovery_connection=recovery_connection,
     )
