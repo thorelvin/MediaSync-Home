@@ -947,9 +947,7 @@ def test_close_flushes_pending_setup_autosave(qapp) -> None:
 
         qapp.processEvents()
         assert len(provider.saved_drafts) == 1
-        assert provider.saved_drafts[0].source_path_label == (
-            "C:/Users/Ada/Pictures"
-        )
+        assert provider.saved_drafts[0].source_path_label == ("C:/Users/Ada/Pictures")
     finally:
         window.close()
         window.deleteLater()
@@ -2058,7 +2056,10 @@ def test_jobs_workspace_saves_daily_automation_without_clipping(qapp) -> None:
         assert scroll is not None
         assert scroll.horizontalScrollBar().maximum() == 0
         assert panel is not None
-        assert save_button.geometry().right() <= save_button.parentWidget().contentsRect().right()
+        assert (
+            save_button.geometry().right()
+            <= save_button.parentWidget().contentsRect().right()
+        )
         assert not enabled.geometry().intersects(time_edit.geometry())
         assert not time_edit.geometry().intersects(save_button.geometry())
     finally:
@@ -4632,7 +4633,10 @@ def test_jobs_page_labels_deferred_automation_result_as_action_required(qapp) ->
         qapp.processEvents()
 
         assert result_state.text() == "Fullført - handling nødvendig"
-        assert "Trygge endringer er fullført. Kontroller utsatte handlinger." in detail.text()
+        assert (
+            "Trygge endringer er fullført. Kontroller utsatte handlinger."
+            in detail.text()
+        )
         assert "1 utsatt handling (1.0 KiB)" in detail.text()
         assert jobs_scroll.horizontalScrollBar().maximum() == 0
         assert detail.height() >= detail.heightForWidth(detail.width())
@@ -5180,6 +5184,94 @@ def _ready_state() -> EngineStatusViewState:
             {"host_status": startup_status(ProcessRole.ENGINE_HOST).to_dict()}
         )
     )
+
+
+def test_duplicate_scan_panel_is_responsive_bilingual_and_interactive(qapp) -> None:
+    provider = _FakeDuplicateScanDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        qapp.processEvents()
+        window.refresh_engine_status()
+        navigation = window.findChild(QListWidget, "navigationRail")
+        panel = window.findChild(QFrame, "duplicateScanPanel")
+        status = window.findChild(QLabel, "duplicateScanStatus")
+        start = window.findChild(QPushButton, "duplicateScanStartButton")
+        pause = window.findChild(QPushButton, "duplicateScanPauseButton")
+        resume = window.findChild(QPushButton, "duplicateScanResumeButton")
+        groups = window.findChild(BoundedVirtualTableView, "duplicateGroupList")
+        members = window.findChild(BoundedVirtualTableView, "duplicateMemberList")
+        jobs_scroll = window.findChild(QScrollArea, "jobsScrollArea")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert navigation is not None
+        navigation.setCurrentRow(1)
+        qapp.processEvents()
+        assert panel is not None
+        assert panel.isVisible() is True
+        assert status is not None
+        assert status.text() == (
+            "En full innholdsskanning er ikke kjørt for denne backupen."
+        )
+        assert start is not None
+        assert start.isVisible() is True
+        assert start.isEnabled() is True
+        assert pause is not None
+        assert pause.isHidden() is True
+        assert resume is not None
+        assert resume.isHidden() is True
+        assert groups is not None
+        assert _virtual_row_count(groups) == 1
+        assert groups.isColumnHidden(2) is True
+        assert groups.isColumnHidden(3) is True
+        assert members is not None
+        assert _virtual_row_count(members) == 2
+        assert groups.horizontalScrollBar().maximum() == 0
+        assert members.horizontalScrollBar().maximum() == 0
+        assert jobs_scroll is not None
+        assert jobs_scroll.horizontalScrollBar().maximum() == 0
+
+        QTest.mouseClick(start, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert provider.scan_state == "RUNNING"
+        assert pause.isVisible() is True
+        assert pause.isEnabled() is True
+        assert "2/3" in status.text()
+
+        QTest.mouseClick(pause, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert provider.scan_state == "PAUSED"
+        assert resume.isVisible() is True
+        assert resume.isEnabled() is True
+
+        QTest.mouseClick(resume, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert provider.scan_state == "RUNNING"
+        assert language is not None
+        assert language.menu() is not None
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+        assert status.text().startswith("Verifying matching contents")
+        assert start.text() == "Scan files"
+        assert (
+            groups.bounded_model.headerData(
+                1,
+                Qt.Orientation.Horizontal,
+            )
+            == "Files"
+        )
+        assert provider.calls.count("start_duplicate_scan") == 1
+        assert provider.calls.count("pause_duplicate_scan") == 1
+        assert provider.calls.count("resume_duplicate_scan") == 1
+    finally:
+        window.close()
+        window.deleteLater()
 
 
 class _FakeEngineClient:
@@ -5776,6 +5868,158 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
         )
 
 
+class _FakeDuplicateScanDashboardEngineClient(_FakeDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.scan_state: str | None = None
+
+    def get_duplicate_scan(self, *, analysis_id: str) -> IpcResponse:
+        self.calls.append("get_duplicate_scan")
+        return IpcResponse.accepted(
+            {
+                "duplicate_scan": {
+                    "analysis_id": analysis_id,
+                    "available": True,
+                    "scan": (
+                        None
+                        if self.scan_state is None
+                        else self._duplicate_scan_payload(analysis_id)
+                    ),
+                }
+            }
+        )
+
+    def get_duplicate_groups(
+        self,
+        *,
+        analysis_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        relationship_classes: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        del limit, after, relationship_classes
+        self.calls.append("get_duplicate_groups")
+        return IpcResponse.accepted(
+            {
+                "duplicate_groups": {
+                    "analysis_id": analysis_id,
+                    "groups": [
+                        {
+                            "group_id": "group-a",
+                            "relationship_class": "INTRA_ENDPOINT_DUPLICATE",
+                            "full_hash": "a" * 64,
+                            "size_bytes": 4096,
+                            "member_count": 2,
+                            "physical_object_count": 2,
+                            "expected_replica_count": 0,
+                            "potential_savings_bytes": 4096,
+                            "review_state": "UNREVIEWED",
+                            "created_utc": "2026-08-02T10:00:00Z",
+                        }
+                    ],
+                    "next_cursor": None,
+                    "has_more": False,
+                }
+            }
+        )
+
+    def get_duplicate_members(
+        self,
+        *,
+        group_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        del limit, after
+        self.calls.append("get_duplicate_members")
+        return IpcResponse.accepted(
+            {
+                "duplicate_members": {
+                    "group_id": group_id,
+                    "members": [
+                        {
+                            "group_id": group_id,
+                            "snapshot_id": "snapshot-source",
+                            "endpoint_id": "source-a",
+                            "file_entry_id": "file-a",
+                            "relative_path": "Photos/A.jpg",
+                            "member_role": "ORIGINAL",
+                            "physical_object_key": "physical-a",
+                        },
+                        {
+                            "group_id": group_id,
+                            "snapshot_id": "snapshot-source",
+                            "endpoint_id": "source-a",
+                            "file_entry_id": "file-b",
+                            "relative_path": "Photos/Copy of A.jpg",
+                            "member_role": "DUPLICATE",
+                            "physical_object_key": "physical-b",
+                        },
+                    ],
+                    "next_cursor": None,
+                    "has_more": False,
+                }
+            }
+        )
+
+    def start_duplicate_scan(
+        self,
+        *,
+        analysis_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        assert request_id and idempotency_key
+        self.calls.append("start_duplicate_scan")
+        self.scan_state = "RUNNING"
+        return IpcResponse.accepted(
+            {"duplicate_scan": self._duplicate_scan_payload(analysis_id)}
+        )
+
+    def pause_duplicate_scan(
+        self,
+        *,
+        analysis_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        assert request_id and idempotency_key
+        self.calls.append("pause_duplicate_scan")
+        self.scan_state = "PAUSED"
+        return IpcResponse.accepted(
+            {"duplicate_scan": self._duplicate_scan_payload(analysis_id)}
+        )
+
+    def resume_duplicate_scan(
+        self,
+        *,
+        analysis_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        assert request_id and idempotency_key
+        self.calls.append("resume_duplicate_scan")
+        self.scan_state = "RUNNING"
+        return IpcResponse.accepted(
+            {"duplicate_scan": self._duplicate_scan_payload(analysis_id)}
+        )
+
+    def _duplicate_scan_payload(self, analysis_id: str) -> dict[str, object]:
+        state = self.scan_state or "QUEUED"
+        return {
+            "scan_id": "scan-a",
+            "analysis_id": analysis_id,
+            "state": state,
+            "stage": "FULL_HASH",
+            "candidate_file_count": 2,
+            "quick_completed_count": 2,
+            "full_hash_candidate_count": 1,
+            "full_hash_completed_count": 0,
+            "issue_count": 0,
+            "reason_code": "USER_REQUESTED" if state == "PAUSED" else None,
+        }
+
+
 class _RestoredDraftDashboardEngineClient(_FakeDashboardEngineClient):
     def __init__(self) -> None:
         super().__init__()
@@ -5902,9 +6146,7 @@ class _FakeJobEditingDashboardEngineClient(_FakeDashboardEngineClient):
         )
 
 
-class _AliasingJobEditingDashboardEngineClient(
-    _FakeJobEditingDashboardEngineClient
-):
+class _AliasingJobEditingDashboardEngineClient(_FakeJobEditingDashboardEngineClient):
     def __init__(self) -> None:
         super().__init__()
         self.identity_queries: list[tuple[str, ...]] = []
@@ -7742,9 +7984,7 @@ class _FakeRetainedVersionHistoryEngineClient(_FakeHistoryEngineClient):
                                 "RESTORE_REQUESTED" if self.protected else None
                             ),
                             "hold_created_utc": (
-                                "2026-08-01T10:00:00.000Z"
-                                if self.protected
-                                else None
+                                "2026-08-01T10:00:00.000Z" if self.protected else None
                             ),
                         }
                     ],

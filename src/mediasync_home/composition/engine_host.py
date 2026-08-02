@@ -72,6 +72,7 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     recovery_writer_policy,
 )
 from mediasync_home.adapters.sqlite.duplicates import SqliteDuplicateRelationStore
+from mediasync_home.adapters.sqlite.duplicate_scanning import SqliteDuplicateScanner
 from mediasync_home.adapters.sqlite.installation_state import (
     SqliteInstallationStateStore,
 )
@@ -167,6 +168,7 @@ from mediasync_home.application.backup_analysis import (
     BackupAnalysisRequestStore,
     execute_next_backup_analysis,
 )
+from mediasync_home.application.duplicate_scanning import DuplicateScanCycleReport
 from mediasync_home.application.trigger_occurrences import (
     MAX_TRIGGER_RUN_RECONCILIATION_BATCH,
     TriggerOccurrenceState,
@@ -513,6 +515,7 @@ class EngineHostRuntime:
     backup_analysis_hash_refresher: SqliteCurrentReadHashEvidenceRefresher | None = None
     backup_analysis_duplicate_relations: SqliteDuplicateRelationStore | None = None
     backup_analysis_plan_refresher: SqliteInitialBackupPlanMaterializer | None = None
+    duplicate_scanner: SqliteDuplicateScanner | None = None
     trigger_occurrence_store: TriggerOccurrenceStore | None = None
     catalog_connection: sqlite3.Connection | None = None
     recovery_connection: sqlite3.Connection | None = None
@@ -570,6 +573,28 @@ class EngineHostRuntime:
         if completed is not None:
             self._reconcile_trigger_analysis(completed)
         return completed
+
+    def run_duplicate_scan_cycle(self) -> DuplicateScanCycleReport | None:
+        if self.duplicate_scanner is None:
+            return None
+        return self.duplicate_scanner.run_cycle(
+            observed_utc=self.clock.utc_now(),
+            active_backup=self._has_active_backup_io(),
+        )
+
+    def _has_active_backup_io(self) -> bool:
+        if self.catalog_connection is None:
+            return False
+        row = self.catalog_connection.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM runs
+                WHERE state IN ('EXECUTING', 'PAUSING')
+            )
+            """
+        ).fetchone()
+        return row is not None and int(row[0]) == 1
 
     def _reconcile_trigger_analysis(self, request: BackupAnalysisRequest) -> None:
         store = self.trigger_occurrence_store
@@ -1107,6 +1132,7 @@ class ExecutorMaintenanceLoop:
                 try:
                     _run_backup_analysis_cycle_if_configured(runtime)
                     outcome = runtime.run_executor_cycle(max_steps=self._max_steps)
+                    _run_duplicate_scan_cycle_if_configured(runtime)
                     _run_version_restore_rollback_cycle_if_configured(runtime)
                     _run_version_restore_cycle_if_configured(runtime)
                     _run_version_retention_cycle_if_configured(runtime)
@@ -1896,6 +1922,14 @@ def build_engine_host_runtime(
             catalog_connection
         )
         duplicate_relations = SqliteDuplicateRelationStore(catalog_connection)
+        duplicate_scanner = SqliteDuplicateScanner(
+            catalog_connection,
+            relations=duplicate_relations,
+            current_evidence=current_read_hash_refresher,
+        )
+        duplicate_scanner.recover_interrupted_requests(
+            observed_utc=runtime_clock.utc_now()
+        )
         for snapshot_result in snapshot_materialization_refresh.results:
             if (
                 snapshot_result.state in {"SEALED", "REUSED"}
@@ -2074,6 +2108,8 @@ def build_engine_host_runtime(
             external_resource_state_store=external_resource_state,
             cataloged_file_read_store=catalog_handoffs,
             duplicate_analysis_read_store=duplicate_relations,
+            duplicate_scan_store=duplicate_scanner,
+            duplicate_scan_utc_now=runtime_clock.utc_now,
             backup_analysis_request_store=backup_analysis_requests,
             job_lifecycle_store=job_lifecycle,
             job_schedule_invalidator=job_lifecycle,
@@ -2138,6 +2174,7 @@ def build_engine_host_runtime(
         backup_analysis_hash_refresher=current_read_hash_refresher,
         backup_analysis_duplicate_relations=duplicate_relations,
         backup_analysis_plan_refresher=initial_backup_plan_materializer,
+        duplicate_scanner=duplicate_scanner,
         trigger_occurrence_store=trigger_occurrences,
         catalog_connection=catalog_connection,
         recovery_connection=recovery_connection,
@@ -2287,6 +2324,7 @@ def _build_after_request_executor_cycle(
     def run_cycle() -> None:
         _run_backup_analysis_cycle_if_configured(runtime)
         outcome = runtime.run_executor_cycle(max_steps=max_steps)
+        _run_duplicate_scan_cycle_if_configured(runtime)
         _run_version_restore_rollback_cycle_if_configured(runtime)
         _run_version_restore_cycle_if_configured(runtime)
         _run_version_retention_cycle_if_configured(runtime)
@@ -2302,6 +2340,12 @@ def _build_after_request_executor_cycle(
 
 def _run_backup_analysis_cycle_if_configured(runtime: EngineHostRuntime) -> None:
     cycle = getattr(runtime, "run_backup_analysis_cycle", None)
+    if callable(cycle):
+        cycle()
+
+
+def _run_duplicate_scan_cycle_if_configured(runtime: EngineHostRuntime) -> None:
+    cycle = getattr(runtime, "run_duplicate_scan_cycle", None)
     if callable(cycle):
         cycle()
 

@@ -25,6 +25,8 @@ class DuplicateRelationMaterializationReport:
     expected_replica_group_count: int
     expected_replica_count: int
     idempotent_replay: bool
+    internal_duplicate_group_count: int = 0
+    internal_duplicate_file_count: int = 0
 
 
 class DuplicateRelationMaterializer(Protocol):
@@ -45,6 +47,8 @@ class DuplicateAnalysisSummary:
     expected_replica_count: int = 0
     same_file_alias_group_count: int = 0
     same_file_alias_path_count: int = 0
+    internal_duplicate_group_count: int = 0
+    internal_duplicate_file_count: int = 0
     potential_savings_bytes: int = 0
 
     def to_dict(self) -> dict[str, object]:
@@ -56,6 +60,8 @@ class DuplicateAnalysisSummary:
             "expected_replica_count": self.expected_replica_count,
             "same_file_alias_group_count": self.same_file_alias_group_count,
             "same_file_alias_path_count": self.same_file_alias_path_count,
+            "internal_duplicate_group_count": self.internal_duplicate_group_count,
+            "internal_duplicate_file_count": self.internal_duplicate_file_count,
             "potential_savings_bytes": self.potential_savings_bytes,
         }
 

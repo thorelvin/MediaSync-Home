@@ -367,6 +367,25 @@ invariants:
     hash_schema_version: 1
     fingerprint_must_be_stable: true
     immutable: true
+    cache_table: hash_cache
+    cache_evidence_kinds:
+      - CURRENT_READ_HASH
+      - USN_CONTINUITY_VALIDATED_HASH
+      - METADATA_REVALIDATED_CACHED_HASH
+      - STALE_HASH_HINT
+      - QUICK_SIGNATURE_ONLY
+    strong_skip_evidence_kinds:
+      - CURRENT_READ_HASH
+      - USN_CONTINUITY_VALIDATED_HASH
+    quick_signature_schema_version: 1
+    quick_signature_requires_stable_before_after_fingerprint: true
+    maximum_active_cache_rows: 1000000
+    maximum_history_rows_per_identity: 2
+    duplicate_scan_table: duplicate_scans
+    hash_request_table: hash_requests
+    maximum_persisted_hash_requests: 1000000
+    maximum_attempts_per_hash_request: 3
+    interrupted_running_requests_return_to_pending: true
   - id: DUP-001_TRUTHFUL_DUPLICATE_RELATIONS
     requirement_id: DUP-001
     related_requirement_ids: [SYNC-003]
@@ -390,6 +409,12 @@ invariants:
     same_file_potential_savings_bytes: 0
     expected_replica_relationship: EXPECTED_REPLICA
     expected_replica_potential_savings_bytes: 0
+    internal_duplicate_relationship: INTRA_ENDPOINT_DUPLICATE
+    internal_duplicate_requires_separate_physical_objects: true
+    duplicate_scan_candidate_limit: 1000000
+    duplicate_group_page_limit: 200
+    duplicate_member_page_limit: 200
+    pauses_while_backup_is_active: true
     immutable_relation_identity: true
     automatic_mutation_allowed: false
   - id: SRC-001_SOURCE_FILE_PRECONDITION

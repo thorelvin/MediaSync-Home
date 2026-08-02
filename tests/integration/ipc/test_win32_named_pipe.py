@@ -14,6 +14,17 @@ from mediasync_home.application.selected_directory_identity import (
     SelectedDirectoryProbeEvidence,
     StorageIdentityTrust,
 )
+from mediasync_home.application.duplicate_scanning import (
+    DuplicateGroupCursor,
+    DuplicateGroupPage,
+    DuplicateGroupReadModel,
+    DuplicateMemberCursor,
+    DuplicateMemberPage,
+    DuplicateMemberReadModel,
+    DuplicateScanStage,
+    DuplicateScanState,
+    DuplicateScanStatus,
+)
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.protocol import (
     MAX_FRAME_BYTES,
@@ -27,7 +38,9 @@ from mediasync_home.ipc.protocol import (
 from mediasync_home.ipc.server import EngineHostIpcService, IpcResourceLimits
 
 
-pytestmark = pytest.mark.skipif(os.name != "nt", reason="Win32 named-pipe adapter is Windows-only")
+pytestmark = pytest.mark.skipif(
+    os.name != "nt", reason="Win32 named-pipe adapter is Windows-only"
+)
 
 
 if os.name == "nt":
@@ -75,13 +88,17 @@ def _roundtrip(
     return response
 
 
-def test_named_pipe_handshake_uses_impersonated_client_identity_not_payload_claim() -> None:
+def test_named_pipe_handshake_uses_impersonated_client_identity_not_payload_claim() -> (
+    None
+):
     server, client = _server_and_client()
     expected_identity = win32_named_pipe.current_process_identity()
 
     response = _roundtrip(
         server,
-        lambda: client.connect(claimed_user_sid_hash="payload-identity-must-not-authorize"),
+        lambda: client.connect(
+            claimed_user_sid_hash="payload-identity-must-not-authorize"
+        ),
     )
 
     assert response.status is IpcStatus.ACCEPTED
@@ -174,6 +191,153 @@ def test_named_pipe_backup_job_detail_query_succeeds_after_handshake() -> None:
     assert detail.payload["backup_job_detail"]["job_id"] == "job-a"
     assert detail.payload["backup_job_detail"]["read_model_available"] is False
     assert detail.payload["backup_job_detail"]["found"] is False
+
+
+def test_named_pipe_duplicate_scan_queries_roundtrip_after_handshake() -> None:
+    service = EngineHostIpcService(win32_named_pipe.current_user_policy())
+    service.duplicate_scan_store = _DuplicateScanReadStore()
+    pipe_name = win32_named_pipe.make_pipe_name(
+        installation_id="duplicate-scan-test",
+        suffix=uuid4().hex,
+    )
+    server = win32_named_pipe.Win32NamedPipeServer(
+        pipe_name=pipe_name,
+        service=service,
+    )
+    client = win32_named_pipe.Win32NamedPipeClient(pipe_name=pipe_name)
+
+    handshake = _roundtrip(server, client.connect)
+    status = _roundtrip(
+        server,
+        lambda: client.query_duplicate_scan(analysis_id="analysis-a"),
+    )
+    groups = _roundtrip(
+        server,
+        lambda: client.query_duplicate_groups(
+            analysis_id="analysis-a",
+            limit=1,
+        ),
+    )
+    members = _roundtrip(
+        server,
+        lambda: client.query_duplicate_members(group_id="group-a", limit=1),
+    )
+
+    assert handshake.status is IpcStatus.ACCEPTED
+    assert status.status is IpcStatus.ACCEPTED
+    assert status.payload["duplicate_scan"]["scan"]["state"] == "COMPLETED"
+    assert groups.status is IpcStatus.ACCEPTED
+    assert groups.payload["duplicate_groups"]["groups"][0]["group_id"] == ("group-a")
+    assert members.status is IpcStatus.ACCEPTED
+    assert (
+        members.payload["duplicate_members"]["members"][0]["relative_path"]
+        == "Photos/A.jpg"
+    )
+
+
+class _DuplicateScanReadStore:
+    def prepare_scan(self, *, analysis_id: str, observed_utc: str) -> None:
+        del analysis_id, observed_utc
+
+    def start_scan(
+        self,
+        *,
+        analysis_id: str,
+        requested_utc: str,
+    ) -> DuplicateScanStatus:
+        del requested_utc
+        status = self.load_duplicate_scan(analysis_id)
+        assert status is not None
+        return status
+
+    def pause_scan(
+        self,
+        *,
+        analysis_id: str,
+        observed_utc: str,
+    ) -> DuplicateScanStatus | None:
+        del observed_utc
+        return self.load_duplicate_scan(analysis_id)
+
+    def resume_scan(
+        self,
+        *,
+        analysis_id: str,
+        observed_utc: str,
+    ) -> DuplicateScanStatus | None:
+        del observed_utc
+        return self.load_duplicate_scan(analysis_id)
+
+    def load_duplicate_scan(self, analysis_id: str) -> DuplicateScanStatus | None:
+        return DuplicateScanStatus(
+            scan_id="scan-a",
+            analysis_id=analysis_id,
+            state=DuplicateScanState.COMPLETED,
+            stage=DuplicateScanStage.DONE,
+            candidate_file_count=2,
+            quick_completed_count=2,
+            full_hash_candidate_count=2,
+            full_hash_completed_count=2,
+            issue_count=0,
+            requested_utc="2026-08-02T10:00:00Z",
+            updated_utc="2026-08-02T10:01:00Z",
+            started_utc="2026-08-02T10:00:00Z",
+            completed_utc="2026-08-02T10:01:00Z",
+        )
+
+    def page_duplicate_groups(
+        self,
+        *,
+        analysis_id: str,
+        limit: int,
+        after: DuplicateGroupCursor | None = None,
+        relationship_classes: tuple[str, ...] = (),
+    ) -> DuplicateGroupPage:
+        del limit, after, relationship_classes
+        return DuplicateGroupPage(
+            analysis_id=analysis_id,
+            groups=(
+                DuplicateGroupReadModel(
+                    group_id="group-a",
+                    relationship_class="INTRA_ENDPOINT_DUPLICATE",
+                    full_hash="a" * 64,
+                    size_bytes=4096,
+                    member_count=2,
+                    physical_object_count=2,
+                    expected_replica_count=0,
+                    potential_savings_bytes=4096,
+                    review_state="UNREVIEWED",
+                    created_utc="2026-08-02T10:01:00Z",
+                ),
+            ),
+            next_cursor=None,
+            has_more=False,
+        )
+
+    def page_duplicate_members(
+        self,
+        *,
+        group_id: str,
+        limit: int,
+        after: DuplicateMemberCursor | None = None,
+    ) -> DuplicateMemberPage:
+        del limit, after
+        return DuplicateMemberPage(
+            group_id=group_id,
+            members=(
+                DuplicateMemberReadModel(
+                    group_id=group_id,
+                    snapshot_id="snapshot-a",
+                    endpoint_id="source-a",
+                    file_entry_id="file-a",
+                    relative_path="Photos/A.jpg",
+                    member_role="ORIGINAL",
+                    physical_object_key="physical-a",
+                ),
+            ),
+            next_cursor=None,
+            has_more=False,
+        )
 
 
 def test_named_pipe_activity_overview_query_succeeds_after_handshake() -> None:
@@ -305,7 +469,9 @@ def test_named_pipe_snapshot_entries_query_succeeds_after_handshake() -> None:
     server, client = _server_and_client()
 
     handshake = _roundtrip(server, client.connect)
-    page = _roundtrip(server, lambda: client.query_snapshot_entries(snapshot_id="snapshot-a"))
+    page = _roundtrip(
+        server, lambda: client.query_snapshot_entries(snapshot_id="snapshot-a")
+    )
 
     assert handshake.status is IpcStatus.ACCEPTED
     assert page.status is IpcStatus.ACCEPTED
@@ -336,7 +502,9 @@ def test_named_pipe_snapshot_issues_query_succeeds_after_handshake() -> None:
     handshake = _roundtrip(server, client.connect)
     page = _roundtrip(
         server,
-        lambda: client.query_snapshot_issues(snapshot_id="snapshot-a", blocking_only=True),
+        lambda: client.query_snapshot_issues(
+            snapshot_id="snapshot-a", blocking_only=True
+        ),
     )
 
     assert handshake.status is IpcStatus.ACCEPTED
@@ -351,7 +519,9 @@ def test_named_pipe_cataloged_files_query_succeeds_after_handshake() -> None:
     handshake = _roundtrip(server, client.connect)
     page = _roundtrip(
         server,
-        lambda: client.query_cataloged_files(run_id="run-a", target_endpoint_id="target-a"),
+        lambda: client.query_cataloged_files(
+            run_id="run-a", target_endpoint_id="target-a"
+        ),
     )
 
     assert handshake.status is IpcStatus.ACCEPTED
@@ -615,7 +785,9 @@ def test_named_pipe_does_not_wait_indefinitely_for_response_acknowledgment() -> 
 
     assert response["reason"] == IpcReason.HANDSHAKE_REQUIRED.value
     assert response["request_id"] == request_id
-    assert not thread.is_alive(), "missing response acknowledgment pinned the pipe server"
+    assert not thread.is_alive(), (
+        "missing response acknowledgment pinned the pipe server"
+    )
     if errors:
         raise errors[0]
 

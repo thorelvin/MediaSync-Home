@@ -1,5 +1,23 @@
 # Implementeringsstatus
 
+Update 2026-08-02: Milestone 7 now has a persistent, bounded identical-file
+scanner and evidence-typed hash cache. Catalog migration 55 adds immutable
+cache evidence, one deterministic duplicate scan per analysis and one durable
+request per physical candidate. Quick signatures use canonical first/last
+1 MiB segments plus a versioned middle segment for large files; full streaming
+BLAKE3 is limited to surviving groups. Exact snapshot fingerprints govern
+cache reuse, aliases collapse before savings arithmetic, expected backup
+replicas remain excluded, retries are capped at three, interrupted requests
+recover to pending, and scanning pauses while a backup is active. The
+authenticated pipe exposes bounded status/group/member pages and receipted
+start/pause/resume commands. Jobs renders bilingual progress and virtualized
+group/location tables with no horizontal overflow at 900x560. Real-file tests
+prove restart recovery, a quick-signature collision that full hashing rejects,
+source/target non-mutation, and actual backup copies through local and Robocopy
+staging. Ordinary backup comparison does not yet consume the general cache;
+unrelated cross-location relations, report/review/open/copy actions and selected
+file preview remain Milestone 7 work.
+
 Update 2026-08-02: `AUTO-002` automation policy is now part of every standard
 backup revision and immutable sealed-plan checksum. The supported policy values
 are `NEW_FILES_ONLY` (the safe UI default),

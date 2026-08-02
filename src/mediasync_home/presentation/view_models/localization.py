@@ -104,6 +104,110 @@ class ShellText:
         return "Identiske filer"
 
     @property
+    def full_duplicate_scan(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Full identical-file scan"
+        return "Full skanning etter identiske filer"
+
+    @property
+    def start_duplicate_scan(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Scan files"
+        return "Skann filer"
+
+    @property
+    def start_duplicate_scan_tooltip(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Find identical files using verified file contents"
+        return "Finn identiske filer ved å verifisere filinnholdet"
+
+    @property
+    def pause_duplicate_scan(self) -> str:
+        return (
+            "Pause scan"
+            if self.language_tooltip_prefix == "Language"
+            else "Pause skanning"
+        )
+
+    @property
+    def resume_duplicate_scan(self) -> str:
+        return (
+            "Resume scan"
+            if self.language_tooltip_prefix == "Language"
+            else "Fortsett skanning"
+        )
+
+    @property
+    def duplicate_groups(self) -> str:
+        return "Groups" if self.language_tooltip_prefix == "Language" else "Grupper"
+
+    @property
+    def duplicate_locations(self) -> str:
+        return (
+            "File locations"
+            if self.language_tooltip_prefix == "Language"
+            else "Filplasseringer"
+        )
+
+    @property
+    def duplicate_group_type(self) -> str:
+        return "Type" if self.language_tooltip_prefix == "Language" else "Type"
+
+    @property
+    def files(self) -> str:
+        return "Files" if self.language_tooltip_prefix == "Language" else "Filer"
+
+    @property
+    def size(self) -> str:
+        return "Size" if self.language_tooltip_prefix == "Language" else "Størrelse"
+
+    @property
+    def possible_savings(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Possible savings"
+        return "Mulig besparelse"
+
+    @property
+    def location(self) -> str:
+        return (
+            "Location" if self.language_tooltip_prefix == "Language" else "Plassering"
+        )
+
+    @property
+    def role(self) -> str:
+        return "Role" if self.language_tooltip_prefix == "Language" else "Rolle"
+
+    @property
+    def duplicate_scan_not_run(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "A full content scan has not been run for this backup."
+        return "En full innholdsskanning er ikke kjørt for denne backupen."
+
+    @property
+    def duplicate_scan_unavailable(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Identical-file scanning is not available."
+        return "Skanning etter identiske filer er ikke tilgjengelig."
+
+    @property
+    def duplicate_scan_requires_plan(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Check this backup before scanning for identical files."
+        return "Kontroller backupen før du skanner etter identiske filer."
+
+    @property
+    def no_duplicate_groups(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "No identical-file groups found."
+        return "Ingen grupper med identiske filer funnet."
+
+    @property
+    def select_duplicate_group(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Select a group to see its file locations."
+        return "Velg en gruppe for å se filplasseringene."
+
+    @property
     def start_backup_tooltip(self) -> str:
         if self.language_tooltip_prefix == "Language":
             return "Start the sealed backup plan"
@@ -201,15 +305,27 @@ class ShellText:
 
     @property
     def archive_job(self) -> str:
-        return "Archive job" if self.language_tooltip_prefix == "Language" else "Arkiver jobb"
+        return (
+            "Archive job"
+            if self.language_tooltip_prefix == "Language"
+            else "Arkiver jobb"
+        )
 
     @property
     def reactivate_job(self) -> str:
-        return "Reactivate" if self.language_tooltip_prefix == "Language" else "Aktiver igjen"
+        return (
+            "Reactivate"
+            if self.language_tooltip_prefix == "Language"
+            else "Aktiver igjen"
+        )
 
     @property
     def archive_job_title(self) -> str:
-        return "Archive backup job?" if self.language_tooltip_prefix == "Language" else "Arkivere backupjobb?"
+        return (
+            "Archive backup job?"
+            if self.language_tooltip_prefix == "Language"
+            else "Arkivere backupjobb?"
+        )
 
     @property
     def archive_job_confirmation(self) -> str:
@@ -225,7 +341,11 @@ class ShellText:
 
     @property
     def reactivate_job_title(self) -> str:
-        return "Reactivate backup job?" if self.language_tooltip_prefix == "Language" else "Aktivere backupjobb igjen?"
+        return (
+            "Reactivate backup job?"
+            if self.language_tooltip_prefix == "Language"
+            else "Aktivere backupjobb igjen?"
+        )
 
     @property
     def reactivate_job_confirmation(self) -> str:
@@ -235,19 +355,33 @@ class ShellText:
 
     @property
     def job_archived(self) -> str:
-        return "Job archived" if self.language_tooltip_prefix == "Language" else "Jobben er arkivert"
+        return (
+            "Job archived"
+            if self.language_tooltip_prefix == "Language"
+            else "Jobben er arkivert"
+        )
 
     @property
     def job_reactivated(self) -> str:
-        return "Job reactivated; full check queued" if self.language_tooltip_prefix == "Language" else "Jobben er aktivert; full kontroll er lagt i kø"
+        return (
+            "Job reactivated; full check queued"
+            if self.language_tooltip_prefix == "Language"
+            else "Jobben er aktivert; full kontroll er lagt i kø"
+        )
 
     @property
     def job_lifecycle_failed(self) -> str:
-        return "The job could not be changed" if self.language_tooltip_prefix == "Language" else "Jobben kunne ikke endres"
+        return (
+            "The job could not be changed"
+            if self.language_tooltip_prefix == "Language"
+            else "Jobben kunne ikke endres"
+        )
 
     @property
     def edit_job(self) -> str:
-        return "Edit job" if self.language_tooltip_prefix == "Language" else "Rediger jobb"
+        return (
+            "Edit job" if self.language_tooltip_prefix == "Language" else "Rediger jobb"
+        )
 
     @property
     def edit_job_tooltip(self) -> str:
@@ -341,7 +475,11 @@ class ShellText:
 
     @property
     def edit_setup_title(self) -> str:
-        return "Edit backup job" if self.language_tooltip_prefix == "Language" else "Rediger backupjobb"
+        return (
+            "Edit backup job"
+            if self.language_tooltip_prefix == "Language"
+            else "Rediger backupjobb"
+        )
 
     @property
     def edit_setup_subtitle(self) -> str:
@@ -373,7 +511,11 @@ class ShellText:
 
     @property
     def save_changes(self) -> str:
-        return "Save changes" if self.language_tooltip_prefix == "Language" else "Lagre endringer"
+        return (
+            "Save changes"
+            if self.language_tooltip_prefix == "Language"
+            else "Lagre endringer"
+        )
 
     @property
     def discard_edit(self) -> str:
@@ -457,7 +599,11 @@ class ShellText:
 
     @property
     def unsaved_edit_title(self) -> str:
-        return "Unsaved job changes" if self.language_tooltip_prefix == "Language" else "Ulagrede jobbendringer"
+        return (
+            "Unsaved job changes"
+            if self.language_tooltip_prefix == "Language"
+            else "Ulagrede jobbendringer"
+        )
 
     @property
     def unsaved_edit_message(self) -> str:
@@ -467,11 +613,19 @@ class ShellText:
 
     @property
     def continue_editing(self) -> str:
-        return "Continue editing" if self.language_tooltip_prefix == "Language" else "Fortsett å redigere"
+        return (
+            "Continue editing"
+            if self.language_tooltip_prefix == "Language"
+            else "Fortsett å redigere"
+        )
 
     @property
     def discard_changes(self) -> str:
-        return "Discard changes" if self.language_tooltip_prefix == "Language" else "Forkast endringer"
+        return (
+            "Discard changes"
+            if self.language_tooltip_prefix == "Language"
+            else "Forkast endringer"
+        )
 
     @property
     def job_edit_saved(self) -> str:
@@ -781,7 +935,11 @@ class ShellText:
 
     @property
     def empty_folder(self) -> str:
-        return "Empty folder" if self.language_tooltip_prefix == "Language" else "Tom mappe"
+        return (
+            "Empty folder"
+            if self.language_tooltip_prefix == "Language"
+            else "Tom mappe"
+        )
 
     @property
     def version_saved(self) -> str:
@@ -875,7 +1033,11 @@ class ShellText:
 
     @property
     def version_restored(self) -> str:
-        return "Restored" if self.language_tooltip_prefix == "Language" else "Gjenopprettet"
+        return (
+            "Restored"
+            if self.language_tooltip_prefix == "Language"
+            else "Gjenopprettet"
+        )
 
     @property
     def version_restore_needs_attention(self) -> str:

@@ -106,7 +106,9 @@ QListWidget#jobsList,
 QListWidget#historyAttemptList,
 QTableView#changesList,
 QTableView#historyList,
-QTableView#historyOperationList {{
+QTableView#historyOperationList,
+QTableView#duplicateGroupList,
+QTableView#duplicateMemberList {{
     background: {tokens.surface};
     border: {tokens.border_hairline}px solid {tokens.border};
     border-radius: {tokens.radius_sm}px;
@@ -127,21 +129,27 @@ QListWidget#jobsList::item:selected {{
 
 QTableView#changesList::item,
 QTableView#historyList::item,
-QTableView#historyOperationList::item {{
+QTableView#historyOperationList::item,
+QTableView#duplicateGroupList::item,
+QTableView#duplicateMemberList::item {{
     padding: {tokens.space_2}px {tokens.space_3}px;
     border-bottom: {tokens.border_hairline}px solid {tokens.border};
 }}
 
 QTableView#changesList::item:selected,
 QTableView#historyList::item:selected,
-QTableView#historyOperationList::item:selected {{
+QTableView#historyOperationList::item:selected,
+QTableView#duplicateGroupList::item:selected,
+QTableView#duplicateMemberList::item:selected {{
     background: {tokens.selection};
     color: {tokens.text};
 }}
 
 QTableView#changesList QHeaderView::section,
 QTableView#historyList QHeaderView::section,
-QTableView#historyOperationList QHeaderView::section {{
+QTableView#historyOperationList QHeaderView::section,
+QTableView#duplicateGroupList QHeaderView::section,
+QTableView#duplicateMemberList QHeaderView::section {{
     background: {tokens.surface_alt};
     color: {tokens.text_muted};
     padding: {tokens.space_2}px {tokens.space_3}px;
@@ -159,6 +167,7 @@ QFrame#engineStatusPanel,
 QFrame#standardBackupPanel,
 QFrame#backupJobDetailPanel,
 QFrame#jobsDetailPanel,
+QFrame#duplicateScanPanel,
 QFrame#changesPanel,
 QFrame#historyDetailPanel,
 QFrame#settingsSectionPanel,
@@ -484,13 +493,15 @@ QLabel#jobsAutomationStatus {{
     color: {tokens.text_muted};
 }}
 
-QProgressBar#jobsRunProgressBar {{
+QProgressBar#jobsRunProgressBar,
+QProgressBar#duplicateScanProgressBar {{
     border: {tokens.border_hairline}px solid {tokens.border};
     border-radius: {tokens.radius_sm}px;
     background: {tokens.surface_alt};
 }}
 
-QProgressBar#jobsRunProgressBar::chunk {{
+QProgressBar#jobsRunProgressBar::chunk,
+QProgressBar#duplicateScanProgressBar::chunk {{
     border-radius: {tokens.radius_sm}px;
     background: {tokens.accent};
 }}

@@ -87,6 +87,48 @@ class InProcessIpcClient:
             )
         )
 
+    def query_duplicate_scan(self, *, analysis_id: str) -> IpcResponse:
+        return self._correlated_response(
+            self.service.query_duplicate_scan(
+                self.client_instance_id,
+                analysis_id=analysis_id,
+            )
+        )
+
+    def query_duplicate_groups(
+        self,
+        *,
+        analysis_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        relationship_classes: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        return self._correlated_response(
+            self.service.query_duplicate_groups(
+                self.client_instance_id,
+                analysis_id=analysis_id,
+                limit=limit,
+                after=after,
+                relationship_classes=relationship_classes,
+            )
+        )
+
+    def query_duplicate_members(
+        self,
+        *,
+        group_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        return self._correlated_response(
+            self.service.query_duplicate_members(
+                self.client_instance_id,
+                group_id=group_id,
+                limit=limit,
+                after=after,
+            )
+        )
+
     def query_activity_overview(
         self,
         *,

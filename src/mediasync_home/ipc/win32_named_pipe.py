@@ -831,6 +831,28 @@ class Win32NamedPipeServer:
                 str(request["client_instance_id"]),
                 job_id=str(request["job_id"]),
             )
+        if message_type == "QUERY_DUPLICATE_SCAN":
+            return self.service.query_duplicate_scan(
+                str(request["client_instance_id"]),
+                analysis_id=str(request["analysis_id"]),
+            )
+        if message_type == "QUERY_DUPLICATE_GROUPS":
+            return self.service.query_duplicate_groups(
+                str(request["client_instance_id"]),
+                analysis_id=str(request["analysis_id"]),
+                limit=_optional_query_int(request.get("limit")),
+                after=_optional_query_object(request.get("after")),
+                relationship_classes=_optional_query_str_tuple(
+                    request.get("relationship_classes")
+                ),
+            )
+        if message_type == "QUERY_DUPLICATE_MEMBERS":
+            return self.service.query_duplicate_members(
+                str(request["client_instance_id"]),
+                group_id=str(request["group_id"]),
+                limit=_optional_query_int(request.get("limit")),
+                after=_optional_query_object(request.get("after")),
+            )
         if message_type == "QUERY_ACTIVITY_OVERVIEW":
             return self.service.query_activity_overview(
                 str(request["client_instance_id"]),
@@ -1016,6 +1038,54 @@ class Win32NamedPipeClient:
                 "job_id": job_id,
             }
         )
+
+    def query_duplicate_scan(self, *, analysis_id: str) -> IpcResponse:
+        return self._roundtrip(
+            {
+                "message_type": "QUERY_DUPLICATE_SCAN",
+                "client_instance_id": self.client_instance_id,
+                "analysis_id": analysis_id,
+            }
+        )
+
+    def query_duplicate_groups(
+        self,
+        *,
+        analysis_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        relationship_classes: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        request: dict[str, Any] = {
+            "message_type": "QUERY_DUPLICATE_GROUPS",
+            "client_instance_id": self.client_instance_id,
+            "analysis_id": analysis_id,
+        }
+        if limit is not None:
+            request["limit"] = limit
+        if after is not None:
+            request["after"] = after
+        if relationship_classes:
+            request["relationship_classes"] = list(relationship_classes)
+        return self._roundtrip(request)
+
+    def query_duplicate_members(
+        self,
+        *,
+        group_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        request: dict[str, Any] = {
+            "message_type": "QUERY_DUPLICATE_MEMBERS",
+            "client_instance_id": self.client_instance_id,
+            "group_id": group_id,
+        }
+        if limit is not None:
+            request["limit"] = limit
+        if after is not None:
+            request["after"] = after
+        return self._roundtrip(request)
 
     def query_activity_overview(
         self,

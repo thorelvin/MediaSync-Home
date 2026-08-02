@@ -31,6 +31,18 @@ from mediasync_home.application.command_receipts import (
 )
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.duplicates import DuplicateAnalysisSummary
+from mediasync_home.application.duplicate_scanning import (
+    DuplicateGroupCursor,
+    DuplicateGroupPage,
+    DuplicateGroupReadModel,
+    DuplicateMemberCursor,
+    DuplicateMemberPage,
+    DuplicateMemberReadModel,
+    DuplicateScanCommandName,
+    DuplicateScanStage,
+    DuplicateScanState,
+    DuplicateScanStatus,
+)
 from mediasync_home.application.endpoint_registration import (
     EndpointClassificationRefreshReport,
 )
@@ -556,6 +568,141 @@ class _DuplicateAnalysisReadStore:
             same_file_alias_path_count=2,
             potential_savings_bytes=0,
         )
+
+
+class _DuplicateScanStore:
+    def __init__(self) -> None:
+        self.status: DuplicateScanStatus | None = None
+        self.start_calls = 0
+
+    def prepare_scan(self, *, analysis_id: str, observed_utc: str) -> None:
+        del analysis_id, observed_utc
+
+    def start_scan(
+        self,
+        *,
+        analysis_id: str,
+        requested_utc: str,
+    ) -> DuplicateScanStatus:
+        self.start_calls += 1
+        if self.status is None:
+            self.status = _duplicate_scan_status(
+                analysis_id=analysis_id,
+                requested_utc=requested_utc,
+            )
+        return self.status
+
+    def pause_scan(
+        self,
+        *,
+        analysis_id: str,
+        observed_utc: str,
+    ) -> DuplicateScanStatus | None:
+        del analysis_id
+        if self.status is not None:
+            self.status = replace(
+                self.status,
+                state=DuplicateScanState.PAUSED,
+                reason_code="USER_REQUESTED",
+                updated_utc=observed_utc,
+            )
+        return self.status
+
+    def resume_scan(
+        self,
+        *,
+        analysis_id: str,
+        observed_utc: str,
+    ) -> DuplicateScanStatus | None:
+        del analysis_id
+        if self.status is not None:
+            self.status = replace(
+                self.status,
+                state=DuplicateScanState.RUNNING,
+                reason_code=None,
+                started_utc=observed_utc,
+                updated_utc=observed_utc,
+            )
+        return self.status
+
+    def load_duplicate_scan(self, analysis_id: str) -> DuplicateScanStatus | None:
+        if self.status is None or self.status.analysis_id != analysis_id:
+            return None
+        return self.status
+
+    def page_duplicate_groups(
+        self,
+        *,
+        analysis_id: str,
+        limit: int,
+        after: DuplicateGroupCursor | None = None,
+        relationship_classes: tuple[str, ...] = (),
+    ) -> DuplicateGroupPage:
+        del limit, after, relationship_classes
+        return DuplicateGroupPage(
+            analysis_id=analysis_id,
+            groups=(
+                DuplicateGroupReadModel(
+                    group_id="group-a",
+                    relationship_class="INTRA_ENDPOINT_DUPLICATE",
+                    full_hash="a" * 64,
+                    size_bytes=128,
+                    member_count=2,
+                    physical_object_count=2,
+                    expected_replica_count=0,
+                    potential_savings_bytes=128,
+                    review_state="UNREVIEWED",
+                    created_utc="2026-08-02T10:00:00Z",
+                ),
+            ),
+            next_cursor=None,
+            has_more=False,
+        )
+
+    def page_duplicate_members(
+        self,
+        *,
+        group_id: str,
+        limit: int,
+        after: DuplicateMemberCursor | None = None,
+    ) -> DuplicateMemberPage:
+        del limit, after
+        return DuplicateMemberPage(
+            group_id=group_id,
+            members=(
+                DuplicateMemberReadModel(
+                    group_id=group_id,
+                    snapshot_id="snapshot-a",
+                    endpoint_id="endpoint-a",
+                    file_entry_id="entry-a",
+                    relative_path="A.bin",
+                    member_role="DUPLICATE",
+                    physical_object_key="object-a",
+                ),
+            ),
+            next_cursor=None,
+            has_more=False,
+        )
+
+
+def _duplicate_scan_status(
+    *,
+    analysis_id: str = "analysis-a",
+    requested_utc: str = "2026-08-02T10:00:00Z",
+) -> DuplicateScanStatus:
+    return DuplicateScanStatus(
+        scan_id="duplicate-scan-a",
+        analysis_id=analysis_id,
+        state=DuplicateScanState.QUEUED,
+        stage=DuplicateScanStage.QUICK_SIGNATURE,
+        candidate_file_count=2,
+        quick_completed_count=0,
+        full_hash_candidate_count=0,
+        full_hash_completed_count=0,
+        issue_count=0,
+        requested_utc=requested_utc,
+        updated_utc=requested_utc,
+    )
 
 
 class _InMemoryExternalResourceStateStore:
@@ -1482,6 +1629,72 @@ def test_backup_job_detail_query_includes_truthful_duplicate_summary() -> None:
     assert summary["expected_replica_count"] == 1
     assert summary["same_file_alias_path_count"] == 2
     assert summary["potential_savings_bytes"] == 0
+
+
+def test_duplicate_scan_queries_return_bounded_status_groups_and_members() -> None:
+    store = _DuplicateScanStore()
+    store.status = _duplicate_scan_status()
+    service = _service()
+    service.duplicate_scan_store = store
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    status = ipc_client.query_duplicate_scan(analysis_id="analysis-a")
+    groups = ipc_client.query_duplicate_groups(
+        analysis_id="analysis-a",
+        limit=1,
+        relationship_classes=("INTRA_ENDPOINT_DUPLICATE",),
+    )
+    members = ipc_client.query_duplicate_members(group_id="group-a", limit=1)
+
+    assert status.status is IpcStatus.ACCEPTED
+    assert status.payload["duplicate_scan"]["scan"]["candidate_file_count"] == 2
+    assert groups.status is IpcStatus.ACCEPTED
+    assert groups.payload["duplicate_groups"]["groups"][0][
+        "relationship_class"
+    ] == "INTRA_ENDPOINT_DUPLICATE"
+    assert members.status is IpcStatus.ACCEPTED
+    assert members.payload["duplicate_members"]["members"][0][
+        "relative_path"
+    ] == "A.bin"
+
+
+def test_duplicate_scan_command_is_receipted_and_replayed_once() -> None:
+    store = _DuplicateScanStore()
+    receipts = _InMemoryCommandReceiptStore()
+    service = _service(mutations_enabled=True)
+    service.duplicate_scan_store = store
+    service.duplicate_scan_utc_now = lambda: "2026-08-02T10:00:00Z"
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    payload: dict[str, object] = {"analysis_id": "analysis-a"}
+    payload_hash = canonical_command_payload_hash(payload)
+
+    first = ipc_client.submit_command(
+        DuplicateScanCommandName.START_DUPLICATE_SCAN.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=payload,
+        payload_hash=payload_hash,
+    )
+    replay = ipc_client.submit_command(
+        DuplicateScanCommandName.START_DUPLICATE_SCAN.value,
+        request_id=REQUEST_ID_B,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=payload,
+        payload_hash=payload_hash,
+    )
+
+    receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
+    assert first.status is IpcStatus.ACCEPTED
+    assert first.payload["duplicate_scan"]["state"] == "QUEUED"
+    assert replay.status is IpcStatus.ACCEPTED
+    assert replay.payload["idempotent_replay"] is True
+    assert store.start_calls == 1
+    assert receipt is not None
+    assert receipt.state is CommandReceiptState.SUCCEEDED
+    assert receipt.result_entity_type == "duplicate_scan"
 
 
 def test_activity_overview_query_requires_prior_handshake() -> None:

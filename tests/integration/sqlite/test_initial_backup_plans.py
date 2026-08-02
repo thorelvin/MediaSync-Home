@@ -13,6 +13,10 @@ from tests.support.sqlite_catalog import insert_default_filter_set_version
 from mediasync_home.adapters.local_endpoint_classifier import (
     LocalEndpointControlAreaClassifier,
 )
+from mediasync_home.adapters.current_read_hash import (
+    CurrentReadHashRequest,
+    LocalCurrentReadHasher,
+)
 from mediasync_home.adapters.local_snapshot_scanner import (
     LocalFilesystemSnapshotScanner,
 )
@@ -21,6 +25,7 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     catalog_critical_writer_policy,
 )
 from mediasync_home.adapters.sqlite.duplicates import SqliteDuplicateRelationStore
+from mediasync_home.adapters.sqlite.duplicate_scanning import SqliteDuplicateScanner
 from mediasync_home.adapters.sqlite.endpoint_classifications import (
     SqliteEndpointClassificationRefresher,
 )
@@ -624,6 +629,341 @@ def test_duplicate_relations_exclude_expected_replicas_and_hardlink_aliases_from
                 """,
                 ("a" * 64,),
             )
+
+
+def test_duplicate_relations_classify_distinct_same_content_files_with_real_hashes(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    content = b"two distinct files with the same current bytes"
+    (source / "First.bin").write_bytes(content)
+    (source / "Second.bin").write_bytes(content)
+
+    with sqlite3.connect(database) as connection:
+        _prepare_registered_snapshots(
+            connection,
+            database=database,
+            source=source,
+            target=target,
+        )
+        rows = connection.execute(
+            """
+            SELECT id, relative_path, size_bytes
+            FROM file_entries
+            WHERE snapshot_id = 'snapshot-source'
+                AND object_type = 'file'
+            ORDER BY relative_path
+            """
+        ).fetchall()
+        hasher = LocalCurrentReadHasher()
+        evidence = tuple(
+            hasher.hash_file(
+                CurrentReadHashRequest(
+                    snapshot_id="snapshot-source",
+                    entry_id=str(row[0]),
+                    endpoint_id=SOURCE_ENDPOINT_ID,
+                    root=source,
+                    relative_path=str(row[1]),
+                    expected_size_bytes=int(row[2]),
+                    computed_utc="2026-07-31T16:02:45Z",
+                )
+            )
+            for row in rows
+        )
+        SqliteCurrentReadHashEvidenceRefresher(
+            connection
+        ).persist_current_read_hash_evidence(
+            analysis_id="analysis-a",
+            evidence=evidence,
+        )
+        relations = SqliteDuplicateRelationStore(connection)
+
+        first = relations.materialize_known_duplicate_relations(
+            analysis_id="analysis-a",
+            observed_utc="2026-07-31T16:02:46Z",
+        )
+        replay = relations.materialize_known_duplicate_relations(
+            analysis_id="analysis-a",
+            observed_utc="2026-07-31T16:02:47Z",
+        )
+        summary = relations.load_duplicate_analysis_summary("analysis-a")
+
+        assert len(evidence) == 2
+        assert evidence[0].content_hash == evidence[1].content_hash
+        assert first.alias_group_count == 0
+        assert first.expected_replica_group_count == 0
+        assert first.internal_duplicate_group_count == 1
+        assert first.internal_duplicate_file_count == 2
+        assert first.idempotent_replay is False
+        assert replay.idempotent_replay is True
+        assert summary is not None
+        assert summary.duplicate_group_count == 1
+        assert summary.internal_duplicate_group_count == 1
+        assert summary.internal_duplicate_file_count == 2
+        assert summary.potential_savings_bytes == len(content)
+        assert connection.execute(
+            """
+            SELECT
+                relationship_class,
+                member_count,
+                physical_object_count,
+                expected_replica_count,
+                potential_savings_bytes
+            FROM duplicate_groups
+            """
+        ).fetchall() == [
+            ("INTRA_ENDPOINT_DUPLICATE", 2, 2, 0, len(content))
+        ]
+        members = connection.execute(
+            """
+            SELECT member_role, relative_path, physical_object_key
+            FROM duplicate_members
+            ORDER BY relative_path
+            """
+        ).fetchall()
+        assert [row[:2] for row in members] == [
+            ("DUPLICATE", "First.bin"),
+            ("DUPLICATE", "Second.bin"),
+        ]
+        assert len({str(row[2]) for row in members}) == 2
+
+
+def test_duplicate_scan_resumes_bounded_real_file_hashing_and_pages_results(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    duplicate_content = b"duplicate scan reads these complete bytes"
+    first_path = source / "First.bin"
+    second_path = source / "Second.bin"
+    unique_path = source / "Unique.bin"
+    first_path.write_bytes(duplicate_content)
+    second_path.write_bytes(duplicate_content)
+    unique_path.write_bytes(b"different bytes with the same byte length!!!")
+    before = {
+        path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in (first_path, second_path, unique_path)
+    }
+
+    with sqlite3.connect(database) as connection:
+        _prepare_registered_snapshots(
+            connection,
+            database=database,
+            source=source,
+            target=target,
+        )
+        scanner = SqliteDuplicateScanner(
+            connection,
+            work_batch_size=1,
+            max_persisted_requests=2,
+        )
+        started = scanner.start_scan(
+            analysis_id="analysis-a",
+            requested_utc="2026-07-31T16:02:45Z",
+        )
+
+        assert started.state.value == "QUEUED"
+        assert started.candidate_file_count == 2
+        first_cycle = scanner.run_cycle(
+            observed_utc="2026-07-31T16:02:46Z",
+            max_files=1,
+        )
+        assert first_cycle.files_attempted == 1
+        interrupted_id = connection.execute(
+            """
+            SELECT id
+            FROM hash_requests
+            WHERE state = 'SUCCEEDED'
+            LIMIT 1
+            """
+        ).fetchone()
+        assert interrupted_id is not None
+        connection.execute(
+            """
+            UPDATE hash_requests
+            SET state = 'RUNNING', completed_utc = NULL
+            WHERE id = ?
+            """,
+            (str(interrupted_id[0]),),
+        )
+        connection.commit()
+
+        restarted = SqliteDuplicateScanner(
+            connection,
+            work_batch_size=1,
+            max_persisted_requests=2,
+        )
+        assert restarted.recover_interrupted_requests(
+            observed_utc="2026-07-31T16:02:47Z"
+        ) == 1
+        latest = restarted.load_duplicate_scan("analysis-a")
+        for cycle_no in range(20):
+            if latest is not None and latest.terminal:
+                break
+            restarted.run_cycle(
+                observed_utc=f"2026-07-31T16:03:{cycle_no:02d}Z",
+                max_files=1,
+            )
+            latest = restarted.load_duplicate_scan("analysis-a")
+
+        assert latest is not None
+        assert latest.state.value == "COMPLETED"
+        assert latest.stage.value == "DONE"
+        assert latest.candidate_file_count == 2
+        assert latest.quick_completed_count == 2
+        assert latest.full_hash_candidate_count == 2
+        assert latest.full_hash_completed_count == 2
+        assert latest.issue_count == 0
+        assert connection.execute("SELECT count(*) FROM hash_requests").fetchone() == (
+            0,
+        )
+        assert connection.execute(
+            "SELECT count(*) FROM current_read_hash_evidence"
+        ).fetchone() == (2,)
+        assert connection.execute(
+            """
+            SELECT evidence_kind, active, count(*)
+            FROM hash_cache
+            GROUP BY evidence_kind, active
+            ORDER BY evidence_kind, active
+            """
+        ).fetchall() == [
+            ("CURRENT_READ_HASH", 1, 2),
+            ("QUICK_SIGNATURE_ONLY", 0, 2),
+        ]
+
+        group_page = restarted.page_duplicate_groups(
+            analysis_id="analysis-a",
+            limit=1,
+            relationship_classes=("INTRA_ENDPOINT_DUPLICATE",),
+        )
+        assert len(group_page.groups) == 1
+        assert group_page.has_more is False
+        group = group_page.groups[0]
+        assert group.physical_object_count == 2
+        assert group.potential_savings_bytes == len(duplicate_content)
+        member_page = restarted.page_duplicate_members(
+            group_id=group.group_id,
+            limit=1,
+        )
+        assert len(member_page.members) == 1
+        assert member_page.has_more is True
+        assert member_page.next_cursor is not None
+        remaining = restarted.page_duplicate_members(
+            group_id=group.group_id,
+            limit=1,
+            after=member_page.next_cursor,
+        )
+        assert len(remaining.members) == 1
+        assert remaining.has_more is False
+
+    assert {
+        path.name: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in (first_path, second_path, unique_path)
+    } == before
+    assert [path for path in target.iterdir() if path.name != ".mediasync"] == []
+
+
+def test_duplicate_scan_pauses_for_active_backup_and_resumes_automatically(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    (source / "A.bin").write_bytes(b"matching")
+    (source / "B.bin").write_bytes(b"matching")
+
+    with sqlite3.connect(database) as connection:
+        _prepare_registered_snapshots(
+            connection,
+            database=database,
+            source=source,
+            target=target,
+        )
+        scanner = SqliteDuplicateScanner(connection, work_batch_size=1)
+        scanner.start_scan(
+            analysis_id="analysis-a",
+            requested_utc="2026-07-31T16:02:45Z",
+        )
+
+        paused = scanner.run_cycle(
+            observed_utc="2026-07-31T16:02:46Z",
+            active_backup=True,
+            max_files=1,
+        )
+        resumed = scanner.run_cycle(
+            observed_utc="2026-07-31T16:02:47Z",
+            active_backup=False,
+            max_files=1,
+        )
+
+        assert paused.scan is not None
+        assert paused.scan.state.value == "PAUSED"
+        assert paused.scan.reason_code == "ACTIVE_BACKUP"
+        assert paused.files_attempted == 0
+        assert resumed.scan is not None
+        assert resumed.scan.state.value == "RUNNING"
+        assert resumed.files_attempted == 1
+
+
+def test_duplicate_scan_full_hash_rejects_matching_quick_signature_collision(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    prefix = b"a" * (1024 * 1024)
+    suffix = b"z" * (1024 * 1024)
+    (source / "A.bin").write_bytes(prefix + b"x" * (1024 * 1024) + suffix)
+    (source / "B.bin").write_bytes(prefix + b"y" * (1024 * 1024) + suffix)
+
+    with sqlite3.connect(database) as connection:
+        _prepare_registered_snapshots(
+            connection,
+            database=database,
+            source=source,
+            target=target,
+        )
+        scanner = SqliteDuplicateScanner(connection)
+        scanner.start_scan(
+            analysis_id="analysis-a",
+            requested_utc="2026-07-31T16:02:45Z",
+        )
+        latest = scanner.load_duplicate_scan("analysis-a")
+        for cycle_no in range(10):
+            if latest is not None and latest.terminal:
+                break
+            scanner.run_cycle(
+                observed_utc=f"2026-07-31T16:03:{cycle_no:02d}Z"
+            )
+            latest = scanner.load_duplicate_scan("analysis-a")
+
+        assert latest is not None
+        assert latest.state.value == "COMPLETED"
+        assert latest.full_hash_candidate_count == 2
+        hashes = connection.execute(
+            """
+            SELECT content_hash
+            FROM current_read_hash_evidence
+            ORDER BY entry_id
+            """
+        ).fetchall()
+        assert len(hashes) == 2
+        assert hashes[0] != hashes[1]
+        assert connection.execute(
+            "SELECT count(*) FROM duplicate_groups"
+        ).fetchone() == (0,)
 
 
 def test_duplicate_relations_do_not_collapse_hint_only_file_ids(

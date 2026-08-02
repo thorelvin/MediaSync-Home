@@ -163,6 +163,8 @@ class BackupJobDetailViewState:
     duplicate_summary_available: bool = False
     expected_replica_count: int = 0
     same_file_alias_path_count: int = 0
+    internal_duplicate_group_count: int = 0
+    internal_duplicate_file_count: int = 0
     potential_savings_bytes: int = 0
     job_revision_id: str | None = None
     writable_target_registration_required: bool = False
@@ -722,10 +724,7 @@ def _job_list_item_from_payload(
             f"{_count_label(independent_device_count, 'uavhengig enhet', 'uavhengige enheter')}"
         ),
         lifecycle_state=_lifecycle_state(payload.get("lifecycle_state")),
-        lifecycle_row_version=_positive_int(
-            payload.get("lifecycle_row_version")
-        )
-        or 1,
+        lifecycle_row_version=_positive_int(payload.get("lifecycle_row_version")) or 1,
     )
 
 
@@ -760,15 +759,13 @@ def _job_detail_from_payload(
         automation_schedule if isinstance(automation_schedule, dict) else {}
     )
     duplicate_summary = payload.get("duplicate_summary")
-    duplicate_payload = (
-        duplicate_summary if isinstance(duplicate_summary, dict) else {}
-    )
-    automation_local_time = _optional_text(
-        automation_payload.get("daily_local_time")
-    )
-    if automation_local_time is None or re.fullmatch(
-        r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", automation_local_time
-    ) is None:
+    duplicate_payload = duplicate_summary if isinstance(duplicate_summary, dict) else {}
+    automation_local_time = _optional_text(automation_payload.get("daily_local_time"))
+    if (
+        automation_local_time is None
+        or re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", automation_local_time)
+        is None
+    ):
         automation_local_time = "21:00"
     return BackupJobDetailViewState(
         job_id=_required_text(payload.get("job_id")) or job_id,
@@ -810,9 +807,14 @@ def _job_detail_from_payload(
             _non_negative_int(duplicate_payload.get("expected_replica_count")) or 0
         ),
         same_file_alias_path_count=(
-            _non_negative_int(
-                duplicate_payload.get("same_file_alias_path_count")
-            )
+            _non_negative_int(duplicate_payload.get("same_file_alias_path_count")) or 0
+        ),
+        internal_duplicate_group_count=(
+            _non_negative_int(duplicate_payload.get("internal_duplicate_group_count"))
+            or 0
+        ),
+        internal_duplicate_file_count=(
+            _non_negative_int(duplicate_payload.get("internal_duplicate_file_count"))
             or 0
         ),
         potential_savings_bytes=(
@@ -836,14 +838,9 @@ def _job_detail_from_payload(
         ),
         target_details=targets,
         lifecycle_state=_lifecycle_state(payload.get("lifecycle_state")),
-        lifecycle_row_version=_positive_int(
-            payload.get("lifecycle_row_version")
-        )
-        or 1,
+        lifecycle_row_version=_positive_int(payload.get("lifecycle_row_version")) or 1,
         archived_utc=_optional_text(payload.get("archived_utc")),
-        automation_schedule_id=_optional_text(
-            automation_payload.get("schedule_id")
-        ),
+        automation_schedule_id=_optional_text(automation_payload.get("schedule_id")),
         automation_enabled=automation_payload.get("enabled") is True,
         automation_daily_local_time=automation_local_time,
         automation_schedule_row_version=(
@@ -855,9 +852,7 @@ def _job_detail_from_payload(
         automation_reconciliation_error_code=_optional_text(
             automation_payload.get("reconciliation_error_code")
         ),
-        automation_time_zone_id=_optional_text(
-            automation_payload.get("time_zone_id")
-        ),
+        automation_time_zone_id=_optional_text(automation_payload.get("time_zone_id")),
         automation_requires_network=(
             automation_payload.get("requires_network") is True
         ),

@@ -43,10 +43,6 @@ class SqliteDuplicateRelationStore:
         analysis_id: str,
         observed_utc: str,
     ) -> DuplicateRelationMaterializationReport:
-        if self._connection.in_transaction:
-            raise SqliteDuplicateRelationError(
-                "DUPLICATE_RELATION_MATERIALIZATION_REQUIRES_IDLE_CONNECTION"
-            )
         if not analysis_id.strip() or not observed_utc.strip():
             raise ValueError("duplicate relation materialization identity is invalid")
         endpoints = self._load_analysis_endpoints(analysis_id)
@@ -57,10 +53,12 @@ class SqliteDuplicateRelationStore:
                 "DUPLICATE_RELATION_ENDPOINT_SET_INVALID"
             )
 
+        owns_transaction = not self._connection.in_transaction
         try:
-            self._connection.execute("BEGIN IMMEDIATE")
+            if owns_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
             before_alias_groups = self._count_alias_groups(analysis_id)
-            before_duplicate_groups = self._count_expected_groups(analysis_id)
+            before_duplicate_groups = self._count_duplicate_groups(analysis_id)
             for endpoint in endpoints:
                 if endpoint.file_ids_stable:
                     self._materialize_alias_groups(
@@ -75,15 +73,21 @@ class SqliteDuplicateRelationStore:
                 observed_utc=observed_utc,
             )
             self._materialize_expected_replica_members(analysis_id)
+            self._materialize_internal_duplicate_groups(
+                analysis_id=analysis_id,
+                observed_utc=observed_utc,
+            )
+            self._materialize_internal_duplicate_members(analysis_id)
             report = self._load_materialization_report(
                 analysis_id,
                 before_alias_groups=before_alias_groups,
                 before_duplicate_groups=before_duplicate_groups,
             )
-            self._connection.execute("COMMIT")
+            if owns_transaction:
+                self._connection.execute("COMMIT")
             return report
         except Exception:
-            if self._connection.in_transaction:
+            if owns_transaction and self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
             raise
 
@@ -117,11 +121,19 @@ class SqliteDuplicateRelationStore:
                 (SELECT COALESCE(sum(member_count), 0)
                  FROM file_object_alias_groups
                  WHERE analysis_id = ?),
+                (SELECT count(*)
+                 FROM duplicate_groups
+                 WHERE analysis_id = ?
+                   AND relationship_class = 'INTRA_ENDPOINT_DUPLICATE'),
+                (SELECT COALESCE(sum(physical_object_count), 0)
+                 FROM duplicate_groups
+                 WHERE analysis_id = ?
+                   AND relationship_class = 'INTRA_ENDPOINT_DUPLICATE'),
                 (SELECT COALESCE(sum(potential_savings_bytes), 0)
                  FROM duplicate_groups
                  WHERE analysis_id = ?)
             """,
-            (analysis_id,) * 6,
+            (analysis_id,) * 8,
         ).fetchone()
         if row is None:
             raise SqliteDuplicateRelationError("DUPLICATE_SUMMARY_READ_FAILED")
@@ -133,7 +145,9 @@ class SqliteDuplicateRelationStore:
             expected_replica_count=_required_int(row[2]),
             same_file_alias_group_count=_required_int(row[3]),
             same_file_alias_path_count=_required_int(row[4]),
-            potential_savings_bytes=_required_int(row[5]),
+            internal_duplicate_group_count=_required_int(row[5]),
+            internal_duplicate_file_count=_required_int(row[6]),
+            potential_savings_bytes=_required_int(row[7]),
         )
 
     def _load_analysis_endpoints(
@@ -499,6 +513,84 @@ class SqliteDuplicateRelationStore:
             (analysis_id,),
         )
 
+    def _materialize_internal_duplicate_groups(
+        self,
+        *,
+        analysis_id: str,
+        observed_utc: str,
+    ) -> None:
+        self._connection.execute(
+            f"""
+            {_INTERNAL_DUPLICATES_CTE}
+            INSERT INTO duplicate_groups (
+                id,
+                analysis_id,
+                relation_key,
+                full_hash,
+                size_bytes,
+                member_count,
+                physical_object_count,
+                expected_replica_count,
+                relationship_class,
+                potential_savings_bytes,
+                review_state,
+                created_utc
+            )
+            SELECT
+                'internal:' || groups.analysis_id || ':'
+                    || groups.snapshot_id || ':' || groups.content_hash,
+                groups.analysis_id,
+                groups.snapshot_id || ':' || groups.content_hash,
+                groups.content_hash,
+                groups.size_bytes,
+                groups.member_count,
+                groups.physical_object_count,
+                0,
+                'INTRA_ENDPOINT_DUPLICATE',
+                groups.size_bytes * (groups.physical_object_count - 1),
+                'UNREVIEWED',
+                ?
+            FROM internal_groups AS groups
+            WHERE true
+            ON CONFLICT DO NOTHING
+            """,
+            (analysis_id, observed_utc),
+        )
+
+    def _materialize_internal_duplicate_members(self, analysis_id: str) -> None:
+        self._connection.execute(
+            f"""
+            {_INTERNAL_DUPLICATES_CTE}
+            INSERT INTO duplicate_members (
+                group_id,
+                snapshot_id,
+                endpoint_id,
+                file_entry_id,
+                relative_path,
+                member_role,
+                physical_object_key
+            )
+            SELECT
+                'internal:' || entries.analysis_id || ':'
+                    || entries.snapshot_id || ':' || entries.content_hash,
+                entries.snapshot_id,
+                entries.endpoint_id,
+                entries.file_entry_id,
+                entries.relative_path,
+                'DUPLICATE',
+                entries.physical_object_key
+            FROM eligible_entries AS entries
+            INNER JOIN internal_groups AS groups
+                ON groups.analysis_id = entries.analysis_id
+                AND groups.snapshot_id = entries.snapshot_id
+                AND groups.content_hash = entries.content_hash
+                AND groups.size_bytes = entries.size_bytes
+            WHERE true
+            ON CONFLICT DO NOTHING
+            """,
+            (analysis_id,),
+        )
+
     def _load_materialization_report(
         self,
         analysis_id: str,
@@ -526,9 +618,17 @@ class SqliteDuplicateRelationStore:
                  INNER JOIN duplicate_groups AS groups
                     ON groups.id = members.group_id
                  WHERE groups.analysis_id = ?
-                   AND members.member_role = 'EXPECTED_REPLICA')
+                   AND members.member_role = 'EXPECTED_REPLICA'),
+                (SELECT count(*)
+                 FROM duplicate_groups
+                 WHERE analysis_id = ?
+                   AND relationship_class = 'INTRA_ENDPOINT_DUPLICATE'),
+                (SELECT COALESCE(sum(physical_object_count), 0)
+                 FROM duplicate_groups
+                 WHERE analysis_id = ?
+                   AND relationship_class = 'INTRA_ENDPOINT_DUPLICATE')
             """,
-            (analysis_id,) * 4,
+            (analysis_id,) * 6,
         ).fetchone()
         if row is None:
             raise SqliteDuplicateRelationError(
@@ -544,8 +644,11 @@ class SqliteDuplicateRelationStore:
             expected_replica_count=_required_int(row[3]),
             idempotent_replay=(
                 alias_groups == before_alias_groups
-                and expected_groups == before_duplicate_groups
+                and self._count_duplicate_groups(analysis_id)
+                == before_duplicate_groups
             ),
+            internal_duplicate_group_count=_required_int(row[4]),
+            internal_duplicate_file_count=_required_int(row[5]),
         )
 
     def _count_alias_groups(self, analysis_id: str) -> int:
@@ -555,13 +658,12 @@ class SqliteDuplicateRelationStore:
         ).fetchone()
         return 0 if row is None else _required_int(row[0])
 
-    def _count_expected_groups(self, analysis_id: str) -> int:
+    def _count_duplicate_groups(self, analysis_id: str) -> int:
         row = self._connection.execute(
             """
             SELECT count(*)
             FROM duplicate_groups
             WHERE analysis_id = ?
-                AND relationship_class = 'EXPECTED_REPLICA'
             """,
             (analysis_id,),
         ).fetchone()
@@ -626,6 +728,71 @@ WITH matches AS (
         AND target_alias_members.file_entry_id = target_entries.id
     WHERE source_keys.analysis_id = ?
         AND source_keys.endpoint_role = 'SOURCE'
+)
+"""
+
+
+_INTERNAL_DUPLICATES_CTE = """
+WITH eligible_entries AS (
+    SELECT
+        snapshots.analysis_id,
+        entries.snapshot_id,
+        entries.endpoint_id,
+        entries.id AS file_entry_id,
+        entries.relative_path,
+        hashes.content_hash,
+        hashes.size_bytes,
+        COALESCE(
+            alias_members.group_id,
+            'entry:' || entries.snapshot_id || ':' || entries.id
+        ) AS physical_object_key
+    FROM snapshots
+    INNER JOIN file_entries AS entries
+        ON entries.snapshot_id = snapshots.id
+        AND entries.endpoint_id = snapshots.endpoint_id
+        AND entries.object_type = 'file'
+    INNER JOIN current_read_hash_evidence AS hashes
+        ON hashes.snapshot_id = entries.snapshot_id
+        AND hashes.entry_id = entries.id
+        AND hashes.endpoint_id = entries.endpoint_id
+        AND hashes.evidence_kind = 'CURRENT_READ_HASH'
+        AND hashes.algorithm = 'BLAKE3-256'
+        AND hashes.hash_schema_version = 1
+    LEFT JOIN file_object_alias_members AS alias_members
+        ON alias_members.snapshot_id = entries.snapshot_id
+        AND alias_members.file_entry_id = entries.id
+    WHERE snapshots.analysis_id = ?
+        AND snapshots.complete = 1
+        AND snapshots.immutable = 1
+        AND NOT EXISTS (
+            SELECT 1
+            FROM duplicate_members AS replica_members
+            INNER JOIN duplicate_groups AS replica_groups
+                ON replica_groups.id = replica_members.group_id
+                AND replica_groups.analysis_id = snapshots.analysis_id
+                AND replica_groups.relationship_class = 'EXPECTED_REPLICA'
+            WHERE replica_members.snapshot_id = entries.snapshot_id
+                AND replica_members.file_entry_id = entries.id
+                AND replica_members.member_role = 'EXPECTED_REPLICA'
+        )
+),
+internal_groups AS (
+    SELECT
+        analysis_id,
+        snapshot_id,
+        endpoint_id,
+        content_hash,
+        size_bytes,
+        count(*) AS member_count,
+        count(DISTINCT physical_object_key) AS physical_object_count
+    FROM eligible_entries
+    GROUP BY
+        analysis_id,
+        snapshot_id,
+        endpoint_id,
+        content_hash,
+        size_bytes
+    HAVING count(DISTINCT physical_object_key) >= 2
 )
 """
 

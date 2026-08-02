@@ -1099,6 +1099,41 @@ separat og merger bare en bounded kandidatmengde i den synkende totalrekkefølge
 
 Fil-ID er et hint. Cachegjenbruk krever identitetskombinasjonen og evidensreglene i §6/§13.8. `METADATA_REVALIDATED_CACHED_HASH` kan ikke oppgraderes til `CURRENT_READ_HASH` uten ny full lesing. Hurtigsignaturer med ulike `signature_schema_version` er ikke sammenlignbare. En transaksjon som aktiverer en ny post deaktiverer den gamle aktive posten for samme logiske cacheidentitet; konkurrerende beregninger løses deterministisk etter evidensstyrke og generation, ikke last-write-wins.
 
+0B-implementasjonsnote: Catalog migration 55 realiserer den evidenstypede
+`hash_cache` med maksimalt 1 000 000 aktive rader og høyst to inaktive
+historikkrader per identitet. Eksakt evidensreplay er idempotent selv når
+beregningstidspunktet varierer; motstridende evidens feiler lukket. Bare
+`CURRENT_READ_HASH` og fremtidig journalbevist
+`USN_CONTINUITY_VALIDATED_HASH` er sterke skipbevis. En
+`QUICK_SIGNATURE_ONLY`-rad krever lik non-null fingerprint før og etter lesing
+og kan aldri inneholde full hash.
+
+#### `duplicate_scans`
+
+- én deterministisk rad per analyse;
+- tilstander `QUEUED`, `RUNNING`, `PAUSED`, `COMPLETED`, `FAILED`;
+- trinn `QUICK_SIGNATURE`, `FULL_HASH`, `MATERIALIZE`, `DONE`;
+- vedvarende keysetcursor og fremdriftsteller;
+- maksimalt 1 000 000 fysiske kandidater og fire aktive skanninger;
+- terminal tid kreves bare for terminal tilstand.
+
+#### `hash_requests`
+
+- én vedvarende rad per fysisk duplikatkandidat, ikke én rad per trinn;
+- trinn `QUICK_SIGNATURE`, `FULL_HASH`, `DONE`;
+- tilstander `PENDING`, `RUNNING`, `SUCCEEDED`, `FAILED`;
+- maksimalt tre forsøk per fil og 1 000 000 vedvarende forespørsler;
+- avbrutte `RUNNING`-rader går tilbake til `PENDING` ved oppstart;
+- sammensatte FK-er binder forespørselen til nøyaktig snapshot, endepunkt og
+  filpost.
+
+Duplikatskanneren velger én kanonisk representant per bevist fysisk filobjekt,
+beregner hurtigsignatur i bounded segmenter og full BLAKE3 bare i fortsatt
+matchende grupper. Den deler verifisert full hash med stabile aliasmedlemmer,
+gjenbruker bare eksakt fingerprintbundet cacheevidens og pauses mens en backup
+er i muterende kjøretilstand. Ferdige request-rader fjernes etter materialisering;
+skannhistorikk og cachehistorikk beskjæres innen de eksplisitte grensene.
+
 #### `duplicate_relation_path_keys`
 
 - `analysis_id TEXT NOT NULL REFERENCES analyses(id) ON DELETE RESTRICT`
@@ -1174,7 +1209,7 @@ Klassifiserer flere snapshotstier som peker til samme underliggende filobjekt. D
 
 Aliasgrupper er endpointlokale. De brukes aldri som identitetsbevis mellom to endepunkter, og MediaSync forsøker ikke å gjenskape hardlinktopologi på backupmålet som standard.
 
-0B-implementasjonsnote: Catalog migration 54 materialiserer aliasgrupper bare når det lagrede endpointprofilet beviser `supports_file_ids` med `file_id_reliability = stable`. Snapshotets path-uavhengige identitetsfingerprint, som binder volum-/filobjektidentitet og relevante stat-felt, lagres som den ugjennomsiktige `file_id`-nøkkelen; endpoint-ID avgrenser volumkonteksten og hindrer cross-endpoint-identitet. Forventede replikaer materialiseres bare for konfigurert kilde-/målsti under målets casekontekst når begge snapshotposter har lik størrelse og immutable `CURRENT_READ_HASH` med BLAKE3-256. De immutable, målkontekst-normaliserte stinøklene bruker `idx_duplicate_relation_path_keys_match` for en indeksert likhetsjoin. Databaseconstraints krever 0 byte mulig besparelse for `EXPECTED_REPLICA`, og aliasgrupper inngår ikke i spareberegningen. Relasjonsidentitet og medlemmer er immutable; bare review-state kan endres. Materialiseringen flytter, sletter eller hardlinker ingen brukerfiler.
+0B-implementasjonsnote: Catalog migration 54 materialiserer aliasgrupper bare når det lagrede endpointprofilet beviser `supports_file_ids` med `file_id_reliability = stable`. Snapshotets path-uavhengige identitetsfingerprint, som binder volum-/filobjektidentitet og relevante stat-felt, lagres som den ugjennomsiktige `file_id`-nøkkelen; endpoint-ID avgrenser volumkonteksten og hindrer cross-endpoint-identitet. Forventede replikaer materialiseres bare for konfigurert kilde-/målsti under målets casekontekst når begge snapshotposter har lik størrelse og immutable `CURRENT_READ_HASH` med BLAKE3-256. De immutable, målkontekst-normaliserte stinøklene bruker `idx_duplicate_relation_path_keys_match` for en indeksert likhetsjoin. Databaseconstraints krever 0 byte mulig besparelse for `EXPECTED_REPLICA`, og aliasgrupper inngår ikke i spareberegningen. Relasjonsidentitet og medlemmer er immutable; bare review-state kan endres. Migration 55 materialiserer i tillegg `INTRA_ENDPOINT_DUPLICATE` fra nåværende fullhash, kollapser stabile aliaser før fysisk spareberegning og utelukker forventede replikaer. Materialiseringen flytter, sletter eller hardlinker ingen brukerfiler.
 
 #### `managed_objects`
 

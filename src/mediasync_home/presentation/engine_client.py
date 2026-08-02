@@ -6,6 +6,7 @@ from typing import Protocol
 
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.backup_analysis import BackupAnalysisCommandName
+from mediasync_home.application.duplicate_scanning import DuplicateScanCommandName
 from mediasync_home.application.endpoint_takeover import EndpointTakeoverCommandName
 from mediasync_home.application.job_creation import JobCreationCommandName
 from mediasync_home.application.job_draft_saving import JobDraftCommandName
@@ -46,6 +47,28 @@ class StatusIpcClient(Protocol):
         pass
 
     def query_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        pass
+
+    def query_duplicate_scan(self, *, analysis_id: str) -> IpcResponse:
+        pass
+
+    def query_duplicate_groups(
+        self,
+        *,
+        analysis_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        relationship_classes: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        pass
+
+    def query_duplicate_members(
+        self,
+        *,
+        group_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
         pass
 
     def query_activity_overview(
@@ -221,6 +244,43 @@ class EngineClient:
     def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
         return self._request_with_handshake_retry(
             lambda: self._ipc_client.query_backup_job_detail(job_id=job_id)
+        )
+
+    def get_duplicate_scan(self, *, analysis_id: str) -> IpcResponse:
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_duplicate_scan(analysis_id=analysis_id)
+        )
+
+    def get_duplicate_groups(
+        self,
+        *,
+        analysis_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        relationship_classes: tuple[str, ...] = (),
+    ) -> IpcResponse:
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_duplicate_groups(
+                analysis_id=analysis_id,
+                limit=limit,
+                after=after,
+                relationship_classes=relationship_classes,
+            )
+        )
+
+    def get_duplicate_members(
+        self,
+        *,
+        group_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_duplicate_members(
+                group_id=group_id,
+                limit=limit,
+                after=after,
+            )
         )
 
     def get_activity_overview(
@@ -682,6 +742,67 @@ class EngineClient:
         return self._request_with_handshake_retry(
             lambda: self._ipc_client.submit_command(
                 BackupAnalysisCommandName.CHECK_BACKUP.value,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                payload_hash=canonical_command_payload_hash(payload),
+            )
+        )
+
+    def start_duplicate_scan(
+        self,
+        *,
+        analysis_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        return self._submit_duplicate_scan_command(
+            DuplicateScanCommandName.START_DUPLICATE_SCAN,
+            analysis_id=analysis_id,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
+
+    def pause_duplicate_scan(
+        self,
+        *,
+        analysis_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        return self._submit_duplicate_scan_command(
+            DuplicateScanCommandName.PAUSE_DUPLICATE_SCAN,
+            analysis_id=analysis_id,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
+
+    def resume_duplicate_scan(
+        self,
+        *,
+        analysis_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        return self._submit_duplicate_scan_command(
+            DuplicateScanCommandName.RESUME_DUPLICATE_SCAN,
+            analysis_id=analysis_id,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
+
+    def _submit_duplicate_scan_command(
+        self,
+        command_name: DuplicateScanCommandName,
+        *,
+        analysis_id: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        payload: dict[str, object] = {"analysis_id": analysis_id}
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.submit_command(
+                command_name.value,
                 request_id=request_id,
                 idempotency_key=idempotency_key,
                 payload=payload,

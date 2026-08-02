@@ -308,6 +308,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_duplicate_relation_materialization",
                 statements=CATALOG_DUPLICATE_RELATION_MATERIALIZATION,
             ),
+            SqliteMigration(
+                version=55,
+                name="catalog_evidence_typed_hash_cache",
+                statements=CATALOG_EVIDENCE_TYPED_HASH_CACHE,
+            ),
         ),
     )
 
@@ -3318,6 +3323,372 @@ CATALOG_DUPLICATE_RELATION_MATERIALIZATION = (
     BEGIN
         SELECT RAISE(ABORT, 'DUPLICATE_MEMBER_IMMUTABLE');
     END
+    """,
+)
+
+
+CATALOG_EVIDENCE_TYPED_HASH_CACHE = (
+    """
+    CREATE TABLE hash_cache (
+        id INTEGER PRIMARY KEY,
+        cache_identity_hash TEXT NOT NULL CHECK (
+            length(cache_identity_hash) = 64
+            AND cache_identity_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        evidence_hash TEXT NOT NULL CHECK (
+            length(evidence_hash) = 64
+            AND evidence_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        endpoint_id TEXT NOT NULL,
+        endpoint_generation INTEGER NOT NULL CHECK (endpoint_generation >= 1),
+        volume_identity TEXT,
+        relative_path TEXT NOT NULL,
+        comparison_key TEXT NOT NULL,
+        comparison_key_version INTEGER NOT NULL CHECK (
+            comparison_key_version >= 1
+        ),
+        parent_case_context_hash TEXT NOT NULL CHECK (
+            length(parent_case_context_hash) = 64
+            AND parent_case_context_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        entry_type TEXT NOT NULL CHECK (entry_type = 'file'),
+        size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+        mtime_ns INTEGER NOT NULL CHECK (mtime_ns >= 0),
+        birthtime_ns INTEGER CHECK (birthtime_ns IS NULL OR birthtime_ns >= 0),
+        attributes INTEGER,
+        reparse_tag INTEGER,
+        file_id TEXT,
+        file_id_reliability TEXT NOT NULL CHECK (
+            file_id_reliability IN ('stable', 'hint', 'unavailable')
+        ),
+        link_count INTEGER CHECK (link_count IS NULL OR link_count >= 1),
+        quick_hash TEXT CHECK (
+            quick_hash IS NULL
+            OR (
+                length(quick_hash) = 64
+                AND quick_hash NOT GLOB '*[^0-9a-f]*'
+            )
+        ),
+        full_hash TEXT CHECK (
+            full_hash IS NULL
+            OR (
+                length(full_hash) = 64
+                AND full_hash NOT GLOB '*[^0-9a-f]*'
+            )
+        ),
+        algorithm TEXT NOT NULL CHECK (algorithm = 'BLAKE3-256'),
+        evidence_kind TEXT NOT NULL CHECK (
+            evidence_kind IN (
+                'CURRENT_READ_HASH',
+                'USN_CONTINUITY_VALIDATED_HASH',
+                'METADATA_REVALIDATED_CACHED_HASH',
+                'STALE_HASH_HINT',
+                'QUICK_SIGNATURE_ONLY'
+            )
+        ),
+        hash_schema_version INTEGER NOT NULL CHECK (hash_schema_version = 1),
+        signature_schema_version INTEGER CHECK (
+            signature_schema_version IS NULL
+            OR signature_schema_version = 1
+        ),
+        read_started_fingerprint_hash TEXT CHECK (
+            read_started_fingerprint_hash IS NULL
+            OR (
+                length(read_started_fingerprint_hash) = 64
+                AND read_started_fingerprint_hash NOT GLOB '*[^0-9a-f]*'
+            )
+        ),
+        read_completed_fingerprint_hash TEXT CHECK (
+            read_completed_fingerprint_hash IS NULL
+            OR (
+                length(read_completed_fingerprint_hash) = 64
+                AND read_completed_fingerprint_hash NOT GLOB '*[^0-9a-f]*'
+            )
+        ),
+        usn_journal_id TEXT,
+        usn_first_record TEXT,
+        usn_last_record TEXT,
+        evidence_generation INTEGER NOT NULL CHECK (evidence_generation >= 1),
+        active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+        computed_utc TEXT NOT NULL,
+        UNIQUE (cache_identity_hash, evidence_hash),
+        UNIQUE (cache_identity_hash, evidence_generation),
+        FOREIGN KEY (endpoint_id) REFERENCES endpoints (id) ON DELETE RESTRICT,
+        FOREIGN KEY (endpoint_id, endpoint_generation)
+            REFERENCES endpoint_revisions (endpoint_id, generation)
+            ON DELETE RESTRICT,
+        CHECK (
+            (
+                evidence_kind = 'QUICK_SIGNATURE_ONLY'
+                AND quick_hash IS NOT NULL
+                AND full_hash IS NULL
+                AND signature_schema_version = 1
+                AND read_started_fingerprint_hash IS NOT NULL
+                AND read_started_fingerprint_hash =
+                    read_completed_fingerprint_hash
+            )
+            OR (
+                evidence_kind <> 'QUICK_SIGNATURE_ONLY'
+                AND full_hash IS NOT NULL
+            )
+        ),
+        CHECK (
+            evidence_kind <> 'CURRENT_READ_HASH'
+            OR (
+                read_started_fingerprint_hash IS NOT NULL
+                AND read_started_fingerprint_hash =
+                    read_completed_fingerprint_hash
+            )
+        ),
+        CHECK (
+            evidence_kind <> 'USN_CONTINUITY_VALIDATED_HASH'
+            OR (
+                usn_journal_id IS NOT NULL
+                AND usn_first_record IS NOT NULL
+                AND usn_last_record IS NOT NULL
+            )
+        )
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX uq_hash_cache_active_identity
+        ON hash_cache (cache_identity_hash)
+        WHERE active = 1
+    """,
+    """
+    CREATE INDEX idx_hash_cache_identity_history
+        ON hash_cache (
+            cache_identity_hash,
+            active DESC,
+            evidence_generation DESC,
+            id DESC
+        )
+    """,
+    """
+    CREATE INDEX idx_hash_cache_metadata_lookup
+        ON hash_cache (
+            endpoint_id,
+            endpoint_generation,
+            comparison_key,
+            comparison_key_version,
+            size_bytes,
+            mtime_ns,
+            active
+        )
+    """,
+    """
+    CREATE INDEX idx_hash_cache_quick_candidates
+        ON hash_cache (
+            size_bytes,
+            quick_hash,
+            signature_schema_version,
+            active
+        )
+        WHERE quick_hash IS NOT NULL
+    """,
+    """
+    CREATE INDEX idx_hash_cache_full_candidates
+        ON hash_cache (full_hash, size_bytes, evidence_kind, active)
+        WHERE full_hash IS NOT NULL
+    """,
+    """
+    CREATE INDEX idx_hash_cache_reclaim
+        ON hash_cache (active, computed_utc, id)
+    """,
+    """
+    CREATE TRIGGER trg_hash_cache_identity_immutable
+    BEFORE UPDATE ON hash_cache
+    WHEN
+        NEW.id IS NOT OLD.id
+        OR NEW.cache_identity_hash IS NOT OLD.cache_identity_hash
+        OR NEW.evidence_hash IS NOT OLD.evidence_hash
+        OR NEW.endpoint_id IS NOT OLD.endpoint_id
+        OR NEW.endpoint_generation IS NOT OLD.endpoint_generation
+        OR NEW.volume_identity IS NOT OLD.volume_identity
+        OR NEW.relative_path IS NOT OLD.relative_path
+        OR NEW.comparison_key IS NOT OLD.comparison_key
+        OR NEW.comparison_key_version IS NOT OLD.comparison_key_version
+        OR NEW.parent_case_context_hash IS NOT OLD.parent_case_context_hash
+        OR NEW.entry_type IS NOT OLD.entry_type
+        OR NEW.size_bytes IS NOT OLD.size_bytes
+        OR NEW.mtime_ns IS NOT OLD.mtime_ns
+        OR NEW.birthtime_ns IS NOT OLD.birthtime_ns
+        OR NEW.attributes IS NOT OLD.attributes
+        OR NEW.reparse_tag IS NOT OLD.reparse_tag
+        OR NEW.file_id IS NOT OLD.file_id
+        OR NEW.file_id_reliability IS NOT OLD.file_id_reliability
+        OR NEW.link_count IS NOT OLD.link_count
+        OR NEW.quick_hash IS NOT OLD.quick_hash
+        OR NEW.full_hash IS NOT OLD.full_hash
+        OR NEW.algorithm IS NOT OLD.algorithm
+        OR NEW.evidence_kind IS NOT OLD.evidence_kind
+        OR NEW.hash_schema_version IS NOT OLD.hash_schema_version
+        OR NEW.signature_schema_version IS NOT OLD.signature_schema_version
+        OR NEW.read_started_fingerprint_hash IS NOT OLD.read_started_fingerprint_hash
+        OR NEW.read_completed_fingerprint_hash IS NOT OLD.read_completed_fingerprint_hash
+        OR NEW.usn_journal_id IS NOT OLD.usn_journal_id
+        OR NEW.usn_first_record IS NOT OLD.usn_first_record
+        OR NEW.usn_last_record IS NOT OLD.usn_last_record
+        OR NEW.evidence_generation IS NOT OLD.evidence_generation
+        OR NEW.computed_utc IS NOT OLD.computed_utc
+    BEGIN
+        SELECT RAISE(ABORT, 'HASH_CACHE_EVIDENCE_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_hash_cache_active_transition
+    BEFORE UPDATE OF active ON hash_cache
+    WHEN OLD.active <> 1 OR NEW.active <> 0
+    BEGIN
+        SELECT RAISE(ABORT, 'HASH_CACHE_ACTIVE_TRANSITION_INVALID');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_hash_cache_delete_only_inactive
+    BEFORE DELETE ON hash_cache
+    WHEN OLD.active <> 0
+    BEGIN
+        SELECT RAISE(ABORT, 'HASH_CACHE_ACTIVE_DELETE_FORBIDDEN');
+    END
+    """,
+    """
+    CREATE TABLE duplicate_scans (
+        id TEXT PRIMARY KEY,
+        analysis_id TEXT NOT NULL UNIQUE
+            REFERENCES analyses (id) ON DELETE RESTRICT,
+        state TEXT NOT NULL CHECK (
+            state IN ('QUEUED', 'RUNNING', 'PAUSED', 'COMPLETED', 'FAILED')
+        ),
+        stage TEXT NOT NULL CHECK (
+            stage IN ('QUICK_SIGNATURE', 'FULL_HASH', 'MATERIALIZE', 'DONE')
+        ),
+        quick_cursor_snapshot_id TEXT,
+        quick_cursor_entry_id TEXT,
+        quick_enumeration_complete INTEGER NOT NULL DEFAULT 0 CHECK (
+            quick_enumeration_complete IN (0, 1)
+        ),
+        candidate_file_count INTEGER NOT NULL CHECK (
+            candidate_file_count BETWEEN 0 AND 1000000
+        ),
+        quick_completed_count INTEGER NOT NULL DEFAULT 0 CHECK (
+            quick_completed_count >= 0
+            AND quick_completed_count <= candidate_file_count
+        ),
+        full_hash_candidate_count INTEGER NOT NULL DEFAULT 0 CHECK (
+            full_hash_candidate_count >= 0
+            AND full_hash_candidate_count <= candidate_file_count
+        ),
+        full_hash_completed_count INTEGER NOT NULL DEFAULT 0 CHECK (
+            full_hash_completed_count >= 0
+            AND full_hash_completed_count <= full_hash_candidate_count
+        ),
+        issue_count INTEGER NOT NULL DEFAULT 0 CHECK (issue_count >= 0),
+        reason_code TEXT,
+        requested_utc TEXT NOT NULL,
+        started_utc TEXT,
+        updated_utc TEXT NOT NULL,
+        completed_utc TEXT,
+        CHECK (
+            (quick_cursor_snapshot_id IS NULL) =
+                (quick_cursor_entry_id IS NULL)
+        ),
+        CHECK (
+            (state IN ('COMPLETED', 'FAILED')) = (completed_utc IS NOT NULL)
+        ),
+        CHECK (stage <> 'DONE' OR state IN ('COMPLETED', 'FAILED'))
+    )
+    """,
+    """
+    CREATE INDEX idx_duplicate_scans_runnable
+        ON duplicate_scans (state, requested_utc, id)
+        WHERE state IN ('QUEUED', 'RUNNING')
+    """,
+    """
+    CREATE INDEX idx_duplicate_scans_history
+        ON duplicate_scans (completed_utc, id)
+        WHERE state IN ('COMPLETED', 'FAILED')
+    """,
+    """
+    CREATE TABLE hash_requests (
+        id TEXT PRIMARY KEY,
+        scan_id TEXT NOT NULL REFERENCES duplicate_scans (id) ON DELETE RESTRICT,
+        request_scope TEXT NOT NULL CHECK (request_scope = 'DUPLICATE_SCAN'),
+        snapshot_id TEXT NOT NULL,
+        endpoint_id TEXT NOT NULL,
+        file_entry_id TEXT NOT NULL,
+        physical_object_key TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+        request_stage TEXT NOT NULL CHECK (
+            request_stage IN ('QUICK_SIGNATURE', 'FULL_HASH', 'DONE')
+        ),
+        state TEXT NOT NULL CHECK (
+            state IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED')
+        ),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (
+            attempt_count BETWEEN 0 AND 3
+        ),
+        quick_cache_identity_hash TEXT CHECK (
+            quick_cache_identity_hash IS NULL
+            OR (
+                length(quick_cache_identity_hash) = 64
+                AND quick_cache_identity_hash NOT GLOB '*[^0-9a-f]*'
+            )
+        ),
+        quick_hash TEXT CHECK (
+            quick_hash IS NULL
+            OR (
+                length(quick_hash) = 64
+                AND quick_hash NOT GLOB '*[^0-9a-f]*'
+            )
+        ),
+        full_hash TEXT CHECK (
+            full_hash IS NULL
+            OR (
+                length(full_hash) = 64
+                AND full_hash NOT GLOB '*[^0-9a-f]*'
+            )
+        ),
+        last_error_code TEXT,
+        requested_utc TEXT NOT NULL,
+        updated_utc TEXT NOT NULL,
+        completed_utc TEXT,
+        UNIQUE (scan_id, snapshot_id, file_entry_id),
+        FOREIGN KEY (snapshot_id, endpoint_id)
+            REFERENCES snapshots (id, endpoint_id) ON DELETE RESTRICT,
+        FOREIGN KEY (snapshot_id, file_entry_id)
+            REFERENCES file_entries (snapshot_id, id) ON DELETE RESTRICT,
+        CHECK (
+            request_stage = 'QUICK_SIGNATURE'
+            OR (
+                quick_cache_identity_hash IS NOT NULL
+                AND quick_hash IS NOT NULL
+            )
+            OR (request_stage = 'DONE' AND state = 'FAILED')
+        ),
+        CHECK (
+            full_hash IS NULL
+            OR request_stage = 'FULL_HASH'
+        ),
+        CHECK (
+            (state IN ('SUCCEEDED', 'FAILED')) = (completed_utc IS NOT NULL)
+        )
+    )
+    """,
+    """
+    CREATE INDEX idx_hash_requests_runnable
+        ON hash_requests (scan_id, request_stage, state, id)
+        WHERE state IN ('PENDING', 'RUNNING')
+    """,
+    """
+    CREATE INDEX idx_hash_requests_quick_groups
+        ON hash_requests (scan_id, size_bytes, quick_hash, state, id)
+        WHERE quick_hash IS NOT NULL
+    """,
+    """
+    CREATE INDEX idx_file_entries_size_snapshot_id
+        ON file_entries (size_bytes, snapshot_id, id)
+        WHERE object_type = 'file'
     """,
 )
 

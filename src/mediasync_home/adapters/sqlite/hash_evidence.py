@@ -113,7 +113,7 @@ class SqliteCurrentReadHashEvidenceRefresher:
             )
 
         try:
-            self._persist_evidence(
+            self.persist_current_read_hash_evidence(
                 analysis_id=analysis_id,
                 evidence=tuple(new_evidence),
             )
@@ -261,7 +261,7 @@ class SqliteCurrentReadHashEvidenceRefresher:
             result[(item.snapshot_id, item.entry_id)] = item
         return result
 
-    def _persist_evidence(
+    def persist_current_read_hash_evidence(
         self,
         *,
         analysis_id: str,
@@ -271,61 +271,161 @@ class SqliteCurrentReadHashEvidenceRefresher:
             return
         self._connection.execute("BEGIN IMMEDIATE")
         try:
-            row = self._connection.execute(
-                """
-                SELECT count(*)
-                FROM snapshots
-                WHERE analysis_id = ?
-                    AND complete = 1
-                    AND immutable = 1
-                """,
-                (analysis_id,),
-            ).fetchone()
-            if row is None or _required_int(row[0]) < 1:
-                raise SqliteCurrentReadHashEvidenceError(
-                    "CURRENT_READ_HASH_ANALYSIS_CHANGED"
-                )
-            self._connection.executemany(
-                """
-                INSERT INTO current_read_hash_evidence (
-                    snapshot_id,
-                    entry_id,
-                    endpoint_id,
-                    content_hash,
-                    size_bytes,
-                    algorithm,
-                    hash_schema_version,
-                    evidence_kind,
-                    read_started_fingerprint_hash,
-                    read_completed_fingerprint_hash,
-                    computed_utc
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (snapshot_id, entry_id)
-                DO NOTHING
-                """,
-                tuple(
-                    (
-                        item.snapshot_id,
-                        item.entry_id,
-                        item.endpoint_id,
-                        item.content_hash,
-                        item.size_bytes,
-                        item.algorithm,
-                        item.hash_schema_version,
-                        item.evidence_kind.value,
-                        item.read_started_fingerprint_hash,
-                        item.read_completed_fingerprint_hash,
-                        item.computed_utc,
+            seen: dict[tuple[str, str], CurrentReadHashEvidence] = {}
+            for item in evidence:
+                key = (item.snapshot_id, item.entry_id)
+                prior = seen.get(key)
+                if prior is not None and not _equivalent_current_read_evidence(
+                    prior,
+                    item,
+                ):
+                    raise SqliteCurrentReadHashEvidenceError(
+                        "CURRENT_READ_HASH_EVIDENCE_CONFLICT"
                     )
-                    for item in evidence
-                ),
-            )
+                seen[key] = item
+            for item in seen.values():
+                self._validate_evidence_parent(analysis_id, item)
+                existing = self._load_evidence_row(
+                    snapshot_id=item.snapshot_id,
+                    entry_id=item.entry_id,
+                )
+                if existing is not None:
+                    if not _equivalent_current_read_evidence(existing, item):
+                        raise SqliteCurrentReadHashEvidenceError(
+                            "CURRENT_READ_HASH_EVIDENCE_CONFLICT"
+                        )
+                    continue
+                self._insert_evidence(item)
             self._connection.execute("COMMIT")
         except Exception:
             if self._connection.in_transaction:
                 self._connection.execute("ROLLBACK")
             raise
+
+    def _validate_evidence_parent(
+        self,
+        analysis_id: str,
+        evidence: CurrentReadHashEvidence,
+    ) -> None:
+        row = self._connection.execute(
+            """
+            SELECT entries.endpoint_id, entries.size_bytes
+            FROM snapshots
+            INNER JOIN file_entries AS entries
+                ON entries.snapshot_id = snapshots.id
+            WHERE snapshots.analysis_id = ?
+                AND snapshots.id = ?
+                AND snapshots.complete = 1
+                AND snapshots.immutable = 1
+                AND entries.id = ?
+                AND entries.object_type = 'file'
+            """,
+            (analysis_id, evidence.snapshot_id, evidence.entry_id),
+        ).fetchone()
+        if (
+            row is None
+            or str(row[0]) != evidence.endpoint_id
+            or row[1] is None
+            or _required_int(row[1]) != evidence.size_bytes
+        ):
+            raise SqliteCurrentReadHashEvidenceError(
+                "CURRENT_READ_HASH_ANALYSIS_CHANGED"
+            )
+
+    def _load_evidence_row(
+        self,
+        *,
+        snapshot_id: str,
+        entry_id: str,
+    ) -> CurrentReadHashEvidence | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                snapshot_id,
+                entry_id,
+                endpoint_id,
+                content_hash,
+                size_bytes,
+                algorithm,
+                hash_schema_version,
+                evidence_kind,
+                read_started_fingerprint_hash,
+                read_completed_fingerprint_hash,
+                computed_utc
+            FROM current_read_hash_evidence
+            WHERE snapshot_id = ?
+                AND entry_id = ?
+            """,
+            (snapshot_id, entry_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return CurrentReadHashEvidence(
+            snapshot_id=str(row[0]),
+            entry_id=str(row[1]),
+            endpoint_id=str(row[2]),
+            content_hash=str(row[3]),
+            size_bytes=_required_int(row[4]),
+            algorithm=str(row[5]),
+            hash_schema_version=_required_int(row[6]),
+            evidence_kind=HashEvidenceKind(str(row[7])),
+            read_started_fingerprint_hash=str(row[8]),
+            read_completed_fingerprint_hash=str(row[9]),
+            computed_utc=str(row[10]),
+        )
+
+    def _insert_evidence(self, item: CurrentReadHashEvidence) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO current_read_hash_evidence (
+                snapshot_id,
+                entry_id,
+                endpoint_id,
+                content_hash,
+                size_bytes,
+                algorithm,
+                hash_schema_version,
+                evidence_kind,
+                read_started_fingerprint_hash,
+                read_completed_fingerprint_hash,
+                computed_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item.snapshot_id,
+                item.entry_id,
+                item.endpoint_id,
+                item.content_hash,
+                item.size_bytes,
+                item.algorithm,
+                item.hash_schema_version,
+                item.evidence_kind.value,
+                item.read_started_fingerprint_hash,
+                item.read_completed_fingerprint_hash,
+                item.computed_utc,
+            ),
+        )
+
+
+def _equivalent_current_read_evidence(
+    left: CurrentReadHashEvidence,
+    right: CurrentReadHashEvidence,
+) -> bool:
+    return (
+        left.snapshot_id == right.snapshot_id
+        and left.entry_id == right.entry_id
+        and left.endpoint_id == right.endpoint_id
+        and left.content_hash == right.content_hash
+        and left.size_bytes == right.size_bytes
+        and left.algorithm == right.algorithm
+        and left.hash_schema_version == right.hash_schema_version
+        and left.evidence_kind is right.evidence_kind
+        and left.read_started_fingerprint_hash
+        == right.read_started_fingerprint_hash
+        and left.read_completed_fingerprint_hash
+        == right.read_completed_fingerprint_hash
+    )
 
 
 def _candidate_pairs(
