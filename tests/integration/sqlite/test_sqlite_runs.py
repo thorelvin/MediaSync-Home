@@ -1184,6 +1184,68 @@ def test_sqlite_run_store_records_successful_run_target_completion(
         assert _run_target_finished_utc(connection, "run-a-target-0000") is not None
 
 
+def test_sqlite_run_completion_reports_deferred_automation_action_required(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        _insert_receipt(connection)
+        plans = SqlitePlanStore(connection)
+        runs = SqliteRunStore(connection)
+        plan = _deferred_action_plan()
+        lease = FixedLiveLease()
+        registry = HeldRunTargetLeaseRegistry()
+        plans.save_sealed_plan(plan)
+        start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        preflight = execute_one_run_target_preflight_step(
+            runs=runs,
+            leases=FixedLeaseAuthority(lease),
+        )
+        assert preflight.lease is lease
+        registry.retain_run_target_lease(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            lease=lease,
+        )
+        execute_one_run_target_execution_start_step(
+            runs=runs,
+            lease_registry=registry,
+        )
+
+        outcome = complete_run_target_success(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+            runs=runs,
+            completed_operations=1,
+            completed_bytes=128,
+        )
+        activity = runs.list_recent_run_activity_summaries(limit=1, offset=0)[0]
+        progress = runs.load_run_progress_snapshot("run-a")
+
+        assert outcome.run is not None
+        assert outcome.run.state is RunState.COMPLETED_WITH_WARNINGS
+        assert outcome.run.warning_count == 0
+        assert outcome.run.summary["action_required"] is True
+        assert activity.action_required is True
+        assert activity.deferred_operation_count == 1
+        assert activity.deferred_planned_bytes == 64
+        assert progress is not None
+        assert progress.action_required is True
+        assert progress.deferred_operation_count == 1
+        assert progress.deferred_planned_bytes == 64
+
+
 def test_sqlite_run_store_records_recovery_required_run_target_completion(
     tmp_path: Path,
 ) -> None:
@@ -1864,6 +1926,38 @@ def _sealed_plan(*, plan_id: str = "plan-a") -> SealedPlan:
                 risk_level=PlanRiskLevel.LOW,
             ),
         ),
+    )
+
+
+def _deferred_action_plan() -> SealedPlan:
+    base = _sealed_plan()
+    deferred = PlanOperation(
+        operation_id="op-deferred",
+        operation_type=PlanOperationType.DEFER_AUTOMATION_POLICY,
+        deferred_operation_type=PlanOperationType.REPLACE_CHANGED,
+        sequence_no=20,
+        execution_phase=20,
+        stable_order_key="020:Pictures/Changed.jpg",
+        target_precondition_kind=TargetPreconditionKind.MATCH_FINGERPRINT,
+        target_endpoint_id="target-a",
+        target_relative_path="Pictures/Changed.jpg",
+        source_relative_path="Pictures/Changed.jpg",
+        source_precondition_json=source_precondition_json(
+            relative_path="Pictures/Changed.jpg",
+            size_bytes=64,
+        ),
+        planned_bytes=64,
+        reason_code="REPLACE_WITH_VERSION",
+        risk_level=PlanRiskLevel.MEDIUM,
+    )
+    return seal_plan(
+        plan_id=base.plan_id,
+        analysis_id=base.analysis_id,
+        job_id=base.job_id,
+        job_revision_id=base.job_revision_id,
+        endpoints=base.endpoints,
+        operations=(*base.operations, deferred),
+        execution_policy="NEW_FILES_ONLY",
     )
 
 

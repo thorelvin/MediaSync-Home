@@ -17,6 +17,7 @@ class PlanOperationPreviewRow:
     risk_level: str | None = None
     reason_code: str | None = None
     target_precondition_kind: str | None = None
+    deferred_operation_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -107,8 +108,11 @@ def plan_operation_preview_from_response(response: IpcResponse | None) -> PlanOp
 def _preview_row(payload: dict[object, object]) -> PlanOperationPreviewRow:
     operation_id = _required_text(payload.get("operation_id")) or "operation"
     operation_type_code = _required_text(payload.get("operation_type"))
+    deferred_operation_type = _required_text(payload.get("deferred_operation_type"))
     risk_level = _required_text(payload.get("risk_level"))
     operation_type = _operation_label(operation_type_code)
+    if operation_type_code == "DEFER_AUTOMATION_POLICY" and deferred_operation_type:
+        operation_type = f"{operation_type}: {_operation_label(deferred_operation_type)}"
     risk = _risk_label(payload.get("risk_level"))
     path = _required_text(payload.get("target_relative_path")) or _required_text(payload.get("reason_code")) or "item"
     target_endpoint_id = _required_text(payload.get("target_endpoint_id"))
@@ -128,6 +132,7 @@ def _preview_row(payload: dict[object, object]) -> PlanOperationPreviewRow:
         target_precondition_kind=_required_text(
             payload.get("target_precondition_kind")
         ),
+        deferred_operation_type=deferred_operation_type,
     )
 
 
@@ -181,6 +186,7 @@ def _operation_label(value: object) -> str:
         return "Operation"
     return {
         "COPY_NEW": "Copy new",
+        "REPLACE_CHANGED": "Replace changed",
         "CREATE_DIRECTORY": "Create folder",
         "SKIP_IDENTICAL": "Already current",
         "DEFER_AUTOMATION_POLICY": "Deferred",

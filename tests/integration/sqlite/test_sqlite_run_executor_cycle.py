@@ -824,6 +824,118 @@ def test_sqlite_run_executor_cycle_completes_bound_operations_for_two_targets(
         recovery_connection.close()
 
 
+def test_new_files_only_cycle_copies_new_file_and_defers_changed_target(
+    tmp_path: Path,
+) -> None:
+    new_payload = b"new-file-payload"
+    changed_source_payload = b"changed-source-payload"
+    original_target_payload = b"original-target-payload"
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    staging_root = tmp_path / "staging"
+    (source_root / "Pictures").mkdir(parents=True)
+    (target_root / "Pictures").mkdir(parents=True)
+    new_source_file = source_root / "Pictures" / "New.jpg"
+    changed_source_file = source_root / "Pictures" / "Changed.jpg"
+    changed_target_file = target_root / "Pictures" / "Changed.jpg"
+    new_source_file.write_bytes(new_payload)
+    changed_source_file.write_bytes(changed_source_payload)
+    changed_target_file.write_bytes(original_target_payload)
+    _write_endpoint_marker(target_root)
+
+    catalog_connection = _prepared_catalog_connection(tmp_path)
+    recovery_connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _insert_plan_parent_rows(
+            catalog_connection,
+            source_root=source_root,
+            target_root=target_root,
+        )
+        _insert_receipt(catalog_connection)
+        plans = SqlitePlanStore(catalog_connection)
+        runs = SqliteRunStore(catalog_connection)
+        recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
+        intent_segments = SqliteRecoveryIntentSegmentStore(recovery_connection)
+        catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
+        lease = FixedLiveLease()
+        registry = HeldRunTargetLeaseRegistry()
+        final_commit = LocalResolvingFinalCommitAdapter(
+            root_resolver=SqliteEndpointRootResolver(catalog_connection),
+            staging_root=staging_root,
+            permit_validator=lease,
+        )
+        staging = LocalFileStagingTransferAdapter(
+            root_resolver=SqliteEndpointRootResolver(catalog_connection),
+            staging_root=staging_root,
+        )
+        plan = _new_files_only_mixed_plan(
+            new_source_file=new_source_file,
+            changed_source_file=changed_source_file,
+        )
+        plans.save_sealed_plan(plan)
+        started = start_run_from_sealed_plan(
+            command=parse_start_run_command(
+                request_id="request-a",
+                idempotency_key="idempotency-a",
+                payload={"plan_id": plan.plan_id, "plan_checksum": plan.plan_checksum},
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=FixedRunIdFactory(),
+        )
+        assert started.created is True
+        assert started.run is not None
+        assert started.run.planned_operations == 1
+        assert started.run.planned_bytes == len(new_payload)
+        _register_resource_lease(recovery_connection)
+
+        outcome = execute_bounded_run_executor_cycle(
+            runs=runs,
+            leases=FixedLeaseAuthority(lease),
+            lease_registry=registry,
+            plans=plans,
+            recovery_operations=recovery_operations,
+            intent_segments=intent_segments,
+            catalog_handoffs=catalog_handoffs,
+            final_commit_port=final_commit,
+            old_target_preservation_port=final_commit,
+            recovery_object_cleanup_port=final_commit,
+            staging_transfer_port=staging,
+            process_instance_id="host-a",
+            max_steps=25,
+        )
+
+        loaded_run = runs.load_started_run("run-a")
+        progress = runs.load_run_progress_snapshot("run-a")
+        assert outcome.stopped_reason is RunExecutorPumpStopReason.IDLE
+        assert loaded_run is not None
+        assert loaded_run.state is RunState.COMPLETED_WITH_WARNINGS
+        assert loaded_run.targets[0].completed_operations == 1
+        assert loaded_run.targets[0].completed_bytes == len(new_payload)
+        assert progress is not None
+        assert progress.action_required is True
+        assert progress.deferred_operation_count == 1
+        assert progress.deferred_planned_bytes == len(changed_source_payload)
+        summary_row = catalog_connection.execute(
+            "SELECT summary_json FROM runs WHERE id = 'run-a'"
+        ).fetchone()
+        assert summary_row is not None
+        assert json.loads(str(summary_row[0]))["automation_policy"] == "NEW_FILES_ONLY"
+        assert (target_root / "Pictures" / "New.jpg").read_bytes() == new_payload
+        assert changed_target_file.read_bytes() == original_target_payload
+        assert recovery_operations.load_operation(
+            run_id="run-a",
+            operation_id="op-new",
+        ) is not None
+        assert recovery_operations.load_operation(
+            run_id="run-a",
+            operation_id="op-changed",
+        ) is None
+    finally:
+        catalog_connection.close()
+        recovery_connection.close()
+
+
 def test_sqlite_run_executor_cycle_replaces_existing_target_from_match_fingerprint_plan(
     tmp_path: Path,
 ) -> None:
@@ -1321,6 +1433,64 @@ def _sealed_plan(
                 planned_bytes=planned_bytes,
                 reason_code=reason_code,
                 risk_level=PlanRiskLevel.LOW,
+            ),
+        ),
+    )
+
+
+def _new_files_only_mixed_plan(
+    *,
+    new_source_file: Path,
+    changed_source_file: Path,
+) -> SealedPlan:
+    return seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        execution_policy="NEW_FILES_ONLY",
+        endpoints=(
+            _source_endpoint(),
+            _target_endpoint(
+                planned_bytes=len(new_source_file.read_bytes()),
+                planned_operations=1,
+            ),
+        ),
+        operations=(
+            PlanOperation(
+                operation_id="op-new",
+                operation_type=PlanOperationType.COPY_NEW,
+                sequence_no=10,
+                execution_phase=20,
+                stable_order_key="020:Pictures/New.jpg",
+                target_precondition_kind=TargetPreconditionKind.ABSENT,
+                target_relative_path="Pictures/New.jpg",
+                source_relative_path="Pictures/New.jpg",
+                source_precondition_json=source_precondition_for_file(
+                    new_source_file,
+                    relative_path="Pictures/New.jpg",
+                ),
+                planned_bytes=new_source_file.stat().st_size,
+                reason_code="COPY_NEW",
+                risk_level=PlanRiskLevel.LOW,
+            ),
+            PlanOperation(
+                operation_id="op-changed",
+                operation_type=PlanOperationType.DEFER_AUTOMATION_POLICY,
+                deferred_operation_type=PlanOperationType.REPLACE_CHANGED,
+                sequence_no=20,
+                execution_phase=20,
+                stable_order_key="020:Pictures/Changed.jpg",
+                target_precondition_kind=TargetPreconditionKind.MATCH_FINGERPRINT,
+                target_relative_path="Pictures/Changed.jpg",
+                source_relative_path="Pictures/Changed.jpg",
+                source_precondition_json=source_precondition_for_file(
+                    changed_source_file,
+                    relative_path="Pictures/Changed.jpg",
+                ),
+                planned_bytes=changed_source_file.stat().st_size,
+                reason_code="REPLACE_WITH_VERSION",
+                risk_level=PlanRiskLevel.MEDIUM,
             ),
         ),
     )

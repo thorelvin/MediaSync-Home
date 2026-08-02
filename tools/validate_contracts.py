@@ -764,6 +764,47 @@ def _validate_source_file_precondition_invariant(
         fail(f"SRC-001 source-file precondition contract drifted: {drifted}")
 
 
+def _validate_automation_policy_invariant(invariant: dict[str, Any]) -> None:
+    expected = {
+        "requirement_id": "AUTO-002",
+        "job_revision_table": "standard_backup_job_revision_details",
+        "job_defaults_json_column": "defaults_json",
+        "plan_table": "plan_seal_details",
+        "plan_execution_policy_column": "execution_policy",
+        "operation_table": "plan_operation_seal_details",
+        "deferred_row_type": "DEFER_AUTOMATION_POLICY",
+        "deferred_operation_type_column": "deferred_operation_type",
+        "checksum_bound_from_operation_schema_version": 4,
+        "immutable_after_seal": True,
+        "mixed_safe_terminal_state": "COMPLETED_WITH_WARNINGS",
+        "action_required_summary_field": "action_required",
+    }
+    drifted = sorted(
+        key
+        for key, expected_value in expected.items()
+        if invariant.get(key) != expected_value
+    )
+    if drifted:
+        fail(f"AUTO-002 automation policy contract drifted: {drifted}")
+    policies = set(
+        _column_tuple(invariant.get("supported_policies"), "AUTO-002 supported_policies")
+    )
+    if policies != {
+        "NEW_FILES_ONLY",
+        "NEW_AND_CHANGED_WITH_VERSIONS",
+        "ANALYZE_ONLY",
+    }:
+        fail("AUTO-002 automation policies drifted")
+    original_types = set(
+        _column_tuple(
+            invariant.get("deferred_original_types"),
+            "AUTO-002 deferred_original_types",
+        )
+    )
+    if original_types != {"COPY_NEW", "REPLACE_CHANGED", "CREATE_DIRECTORY"}:
+        fail("AUTO-002 deferred operation types drifted")
+
+
 def _validate_windows_birthtime_invariant(invariant: dict[str, Any]) -> None:
     expected = {
         "requirement_id": "META-001",
@@ -1219,6 +1260,7 @@ def validate_database_contract(document: dict[str, Any]) -> int:
     invariant_by_id = _indexed_mappings(invariants, "database-contract.yaml invariants")
     required_ids = {
         "ARC-005_IMMUTABLE_REVISION_GUARDS",
+        "AUTO-002_IMMUTABLE_AUTOMATION_POLICY",
         "CTRL-001_WRITABLE_ENDPOINT_REGISTRATION",
         "DB-001_FILE_ENTRIES_COMPARISON_KEY_IS_NON_UNIQUE",
         "DB-004_RETAINED_VERSION_EXPIRY",
@@ -1272,6 +1314,9 @@ def validate_database_contract(document: dict[str, Any]) -> int:
     )
     _validate_source_file_precondition_invariant(
         invariant_by_id["SRC-001_SOURCE_FILE_PRECONDITION"]
+    )
+    _validate_automation_policy_invariant(
+        invariant_by_id["AUTO-002_IMMUTABLE_AUTOMATION_POLICY"]
     )
     _validate_windows_birthtime_invariant(
         invariant_by_id["META-001_WINDOWS_BIRTHTIME"]

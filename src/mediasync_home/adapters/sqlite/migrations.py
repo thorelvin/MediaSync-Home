@@ -298,6 +298,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_snapshot_filter_decisions",
                 statements=CATALOG_SNAPSHOT_FILTER_DECISIONS,
             ),
+            SqliteMigration(
+                version=53,
+                name="catalog_deferred_automation_plan_operations",
+                statements=CATALOG_DEFERRED_AUTOMATION_PLAN_OPERATIONS,
+            ),
         ),
     )
 
@@ -3035,6 +3040,22 @@ CATALOG_CONTROLLED_ENDPOINT_TAKEOVERS = (
     BEGIN
         SELECT RAISE(ABORT, 'CONTROLLED_ENDPOINT_TAKEOVER_IMMUTABLE');
     END
+    """,
+)
+
+
+CATALOG_DEFERRED_AUTOMATION_PLAN_OPERATIONS = (
+    """
+    ALTER TABLE plan_operation_seal_details
+        ADD COLUMN deferred_operation_type TEXT
+            CHECK (
+                deferred_operation_type IS NULL
+                OR deferred_operation_type IN (
+                    'COPY_NEW',
+                    'REPLACE_CHANGED',
+                    'CREATE_DIRECTORY'
+                )
+            )
     """,
 )
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -30,7 +31,7 @@ from mediasync_home.application.job_creation import (
     create_standard_backup_job_from_draft,
     parse_create_standard_backup_job_command,
 )
-from mediasync_home.application.job_drafts import StandardBackupJobDraft
+from mediasync_home.application.job_drafts import AutomationPolicy, StandardBackupJobDraft
 from mediasync_home.application.job_scheduling import daily_backup_schedule_id
 from mediasync_home.application.schedules import ScheduleDefinition
 from mediasync_home.application.trigger_occurrences import TriggerKind
@@ -83,6 +84,13 @@ def test_sqlite_catalog_persists_standard_backup_job_from_draft(tmp_path: Path) 
         assert _row_count(connection, "job_revision_filter_bindings") == 1
         assert _row_count(connection, "job_heads") == 1
         assert _row_count(connection, "standard_backup_job_revision_details") == 1
+        defaults_json = _scalar(
+            connection,
+            "SELECT defaults_json FROM standard_backup_job_revision_details WHERE job_id = 'job-a'",
+        )
+        assert json.loads(str(defaults_json))["automation_policy"] == (
+            AutomationPolicy.NEW_FILES_ONLY.value
+        )
         assert connection.execute(
             """
             SELECT version, rules_hash, rules_json
@@ -329,6 +337,7 @@ def test_sqlite_catalog_loads_active_standard_backup_job_detail(tmp_path: Path) 
         assert detail.filter_set_version == 1
         assert detail.source_path_label == "C:/Users/Ada/Pictures"
         assert detail.defaults.retention.value == "THIRTY_DAYS"
+        assert detail.defaults.automation_policy is AutomationPolicy.NEW_FILES_ONLY
         assert detail.targets[0].name == "USB 1"
         assert detail.targets[0].independent_device_id == "disk-a"
         assert missing is None

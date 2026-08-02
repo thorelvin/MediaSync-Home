@@ -866,5 +866,6 @@ def _standard_backup_draft_payload(
             "retention": draft.defaults.retention.value,
             "extra_files": draft.defaults.extra_files.value,
             "performance": draft.defaults.performance.value,
+            "automation_policy": draft.defaults.automation_policy.value,
         },
     }

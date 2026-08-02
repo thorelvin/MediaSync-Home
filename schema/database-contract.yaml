@@ -330,6 +330,32 @@ invariants:
     checksum_bound_from_operation_schema_version: 2
     legacy_single_target_backfill: true
     immutable_after_seal: true
+  - id: AUTO-002_IMMUTABLE_AUTOMATION_POLICY
+    requirement_id: AUTO-002
+    assertion: >
+      Every standard-backup revision selects one automation policy, the exact
+      policy is checksum-bound into its immutable sealed plan, and work excluded
+      by that policy remains an explicit immutable plan row with its original
+      operation type and preconditions.
+    job_revision_table: standard_backup_job_revision_details
+    job_defaults_json_column: defaults_json
+    supported_policies:
+      - NEW_FILES_ONLY
+      - NEW_AND_CHANGED_WITH_VERSIONS
+      - ANALYZE_ONLY
+    plan_table: plan_seal_details
+    plan_execution_policy_column: execution_policy
+    operation_table: plan_operation_seal_details
+    deferred_row_type: DEFER_AUTOMATION_POLICY
+    deferred_operation_type_column: deferred_operation_type
+    deferred_original_types:
+      - COPY_NEW
+      - REPLACE_CHANGED
+      - CREATE_DIRECTORY
+    checksum_bound_from_operation_schema_version: 4
+    immutable_after_seal: true
+    mixed_safe_terminal_state: COMPLETED_WITH_WARNINGS
+    action_required_summary_field: action_required
   - id: HASH-001_CURRENT_READ_HASH_EVIDENCE
     requirement_id: HASH-001
     table: current_read_hash_evidence

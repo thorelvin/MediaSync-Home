@@ -1007,6 +1007,87 @@ def test_start_run_blocks_plan_with_blocked_risk() -> None:
     assert outcome.readiness.validation_codes == ("PLAN_BLOCKED",)
 
 
+def test_start_run_executes_safe_rows_and_records_deferred_action_metadata() -> None:
+    plan = seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(_target_endpoint(),),
+        operations=(
+            replace(_copy_operation(), target_endpoint_id="target-a"),
+            replace(
+                _copy_operation(),
+                operation_id="op-deferred",
+                operation_type=PlanOperationType.DEFER_AUTOMATION_POLICY,
+                deferred_operation_type=PlanOperationType.REPLACE_CHANGED,
+                sequence_no=20,
+                stable_order_key="020:Pictures/Changed.jpg",
+                target_precondition_kind=TargetPreconditionKind.MATCH_FINGERPRINT,
+                target_endpoint_id="target-a",
+                target_relative_path="Pictures/Changed.jpg",
+                source_relative_path="Pictures/Changed.jpg",
+                source_precondition_json=source_precondition_json(
+                    relative_path="Pictures/Changed.jpg",
+                    size_bytes=256,
+                ),
+                planned_bytes=256,
+                reason_code="REPLACE_WITH_VERSION",
+                risk_level=PlanRiskLevel.MEDIUM,
+            ),
+        ),
+        execution_policy="NEW_FILES_ONLY",
+    )
+
+    outcome = start_run_from_sealed_plan(
+        command=_start_command(plan),
+        plans=InMemoryPlanStore(plan),
+        runs=InMemoryRunStore(),
+        id_factory=FixedRunIdFactory(),
+    )
+
+    assert outcome.created is True
+    assert outcome.run is not None
+    assert outcome.run.planned_operations == 1
+    assert outcome.run.planned_bytes == 128
+    assert outcome.run.summary["action_required"] is True
+    assert outcome.run.summary["deferred_operation_count"] == 1
+    assert outcome.run.summary["deferred_planned_bytes"] == 256
+
+
+def test_start_run_rejects_plan_with_only_deferred_operations() -> None:
+    plan = seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(
+            replace(_target_endpoint(), planned_operations=0, planned_bytes=0),
+        ),
+        operations=(
+            replace(
+                _copy_operation(),
+                operation_type=PlanOperationType.DEFER_AUTOMATION_POLICY,
+                deferred_operation_type=PlanOperationType.COPY_NEW,
+                target_endpoint_id="target-a",
+            ),
+        ),
+        execution_policy="ANALYZE_ONLY",
+    )
+
+    outcome = start_run_from_sealed_plan(
+        command=_start_command(plan),
+        plans=InMemoryPlanStore(plan),
+        runs=InMemoryRunStore(),
+        id_factory=FixedRunIdFactory(),
+    )
+
+    assert outcome.created is False
+    assert outcome.readiness.validation_codes == (
+        "PLAN_REQUIRES_EXECUTABLE_OPERATIONS",
+    )
+
+
 def test_start_run_accepts_journaled_directory_operations() -> None:
     plan = seal_plan(
         plan_id="plan-a",

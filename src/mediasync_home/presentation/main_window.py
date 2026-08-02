@@ -4329,6 +4329,8 @@ class MediaSyncWindow(QMainWindow):
             self._jobs_run_progress_state.setText(
                 self._texts().stopping_after_active_file
                 if state.stop_requested
+                else self._action_required_run_label()
+                if state.terminal and state.action_required
                 else self._history_state_label(state.state or "CREATED")
             )
         if self._jobs_run_progress_bar is not None:
@@ -4361,10 +4363,15 @@ class MediaSyncWindow(QMainWindow):
                     details.append(target_summary)
                 details.extend(
                     (
-                        self._terminal_run_summary(state.state),
+                        self._terminal_run_summary(
+                            state.state,
+                            action_required=state.action_required,
+                        ),
                         self._terminal_run_issue_counts(state),
                     )
                 )
+                if state.action_required:
+                    details.append(self._deferred_run_summary(state))
             else:
                 if state.bytes_per_second is not None:
                     details.append(_format_rate(state.bytes_per_second))
@@ -4579,8 +4586,26 @@ class MediaSyncWindow(QMainWindow):
             and hasattr(self._engine_client, "start_backup")
         )
 
-    def _terminal_run_summary(self, state: str | None) -> str:
+    def _action_required_run_label(self) -> str:
+        return (
+            "Completed - action required"
+            if self._selected_language_code is LanguageCode.ENGLISH
+            else "Fullført - handling nødvendig"
+        )
+
+    def _terminal_run_summary(
+        self,
+        state: str | None,
+        *,
+        action_required: bool = False,
+    ) -> str:
         english = self._selected_language_code is LanguageCode.ENGLISH
+        if action_required:
+            return (
+                "Safe changes completed. Review the deferred actions."
+                if english
+                else "Trygge endringer er fullført. Kontroller utsatte handlinger."
+            )
         summaries: dict[str, tuple[str, str]] = {
             "COMPLETED": (
                 "Backup completed and verified.",
@@ -4619,6 +4644,18 @@ class MediaSyncWindow(QMainWindow):
             ),
         )
         return pair[0] if english else pair[1]
+
+    def _deferred_run_summary(self, state: RunProgressViewState) -> str:
+        count = state.deferred_operation_count
+        noun = (
+            "deferred action" if count == 1 else "deferred actions"
+        )
+        if self._selected_language_code is LanguageCode.ENGLISH:
+            return f"{count} {noun} ({_format_bytes(state.deferred_planned_bytes)})"
+        return (
+            f"{count} utsatt{' handling' if count == 1 else 'e handlinger'} "
+            f"({_format_bytes(state.deferred_planned_bytes)})"
+        )
 
     def _terminal_run_issue_counts(self, state: RunProgressViewState) -> str:
         if self._selected_language_code is LanguageCode.ENGLISH:

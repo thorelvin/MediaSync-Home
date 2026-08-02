@@ -12,6 +12,7 @@ from mediasync_home.application.job_creation import (
     StandardBackupJobCatalog,
 )
 from mediasync_home.application.job_drafts import (
+    AutomationPolicy,
     BackupBehavior,
     ExtraFilesPreset,
     FileSelectionPreset,
@@ -848,6 +849,7 @@ def _serialize_defaults(defaults: StandardBackupDefaults) -> str:
             "retention": defaults.retention.value,
             "extra_files": defaults.extra_files.value,
             "performance": defaults.performance.value,
+            "automation_policy": defaults.automation_policy.value,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -871,6 +873,9 @@ def _deserialize_defaults(payload: str) -> StandardBackupDefaults:
             retention=RetentionPreset(str(data["retention"])),
             extra_files=ExtraFilesPreset(str(data["extra_files"])),
             performance=PerformancePreset(str(data["performance"])),
+            automation_policy=AutomationPolicy(
+                str(data.get("automation_policy", AutomationPolicy.NEW_FILES_ONLY.value))
+            ),
         )
     except (KeyError, ValueError) as exc:
         raise SqliteJobCatalogError(

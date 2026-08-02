@@ -130,9 +130,10 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
                         target_relative_path,
                         source_relative_path,
                         source_precondition_json,
+                        deferred_operation_type,
                         planned_bytes
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         plan.plan_id,
@@ -147,6 +148,11 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
                         operation.target_relative_path,
                         operation.source_relative_path,
                         operation.source_precondition_json,
+                        (
+                            None
+                            if operation.deferred_operation_type is None
+                            else operation.deferred_operation_type.value
+                        ),
                         operation.planned_bytes,
                     ),
                 )
@@ -265,7 +271,10 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
                 risk_level=PlanRiskLevel(str(row[7])),
                 target_endpoint_id=None if row[8] is None else str(row[8]),
                 target_relative_path=None if row[9] is None else str(row[9]),
-                planned_bytes=int(row[10]),
+                deferred_operation_type=(
+                    None if row[10] is None else PlanOperationType(str(row[10]))
+                ),
+                planned_bytes=int(row[11]),
             )
             for row in page_rows
         )
@@ -410,6 +419,7 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
                 details.target_relative_path,
                 details.source_relative_path,
                 details.source_precondition_json,
+                details.deferred_operation_type,
                 details.planned_bytes
             FROM plan_operation_seal_details AS details
             INNER JOIN planned_operations AS operations
@@ -434,7 +444,10 @@ class SqlitePlanStore(PlanStore, PlanOperationReadModelStore, PlanEndpointReadMo
                 target_relative_path=None if row[9] is None else str(row[9]),
                 source_relative_path=None if row[10] is None else str(row[10]),
                 source_precondition_json=None if row[11] is None else str(row[11]),
-                planned_bytes=int(row[12]),
+                deferred_operation_type=(
+                    None if row[12] is None else PlanOperationType(str(row[12]))
+                ),
+                planned_bytes=int(row[13]),
             )
             for row in rows
         )
@@ -508,6 +521,7 @@ def _plan_operation_page_sql(query: PlanOperationPageQuery) -> str:
             details.risk_level,
             details.target_endpoint_id,
             details.target_relative_path,
+            details.deferred_operation_type,
             details.planned_bytes
         FROM plan_operation_seal_details AS details
         INNER JOIN planned_operations AS operations

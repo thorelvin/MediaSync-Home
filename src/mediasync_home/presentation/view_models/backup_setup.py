@@ -65,6 +65,7 @@ class BackupDefaultsViewState:
     retention_label: str = "Tidligere versjoner beholdes i 30 dager"
     extra_files_label: str = "Ekstra filer på målet beholdes"
     performance_label: str = "Auto - anbefalt"
+    automation_policy_label: str = "Automatisk: bare nye filer"
 
     def summary(self) -> tuple[str, ...]:
         return (
@@ -74,6 +75,7 @@ class BackupDefaultsViewState:
             self.retention_label,
             self.extra_files_label,
             self.performance_label,
+            self.automation_policy_label,
         )
 
 
@@ -945,6 +947,16 @@ def _defaults_summary_from_payload(payload: object) -> str:
             payload.get("file_selection"), {"ALL_USER_FILES": "Alle brukerfiler"}
         ),
         _enum_label(payload.get("verification"), {"STANDARD": "Standard kontroll"}),
+        _enum_label(
+            payload.get("automation_policy", "NEW_FILES_ONLY"),
+            {
+                "NEW_FILES_ONLY": "Automatisk: bare nye filer",
+                "NEW_AND_CHANGED_WITH_VERSIONS": (
+                    "Automatisk: nye og endrede filer med versjoner"
+                ),
+                "ANALYZE_ONLY": "Automatisk: kontroller bare",
+            },
+        ),
     )
     return " - ".join(label for label in labels if label)
 
@@ -973,6 +985,7 @@ def _activity_status_from_run_payload(
     payload: dict[object, object],
 ) -> BackupJobStatusViewState:
     state = _run_state(payload.get("state"))
+    action_required = payload.get("action_required") is True
     targets_payload = payload.get("targets")
     targets: list[TargetStatusViewState] = []
     if isinstance(targets_payload, list):
@@ -1002,7 +1015,10 @@ def _activity_status_from_run_payload(
         activity=_run_activity(state),
         attention=_run_attention(state),
         target_statuses=tuple(targets),
-        recommended_action=_run_next_action(state),
+        recommended_action=_run_next_action(
+            state,
+            action_required=action_required,
+        ),
     )
 
 
@@ -1066,7 +1082,13 @@ def _run_attention(state: RunState) -> AttentionState:
     return AttentionState.NORMAL
 
 
-def _run_next_action(state: RunState) -> str:
+def _run_next_action(
+    state: RunState,
+    *,
+    action_required: bool = False,
+) -> str:
+    if action_required:
+        return "Kontroller utsatte handlinger før neste backup."
     if state is RunState.QUEUED:
         return "Venter på lokal 0B-kjøringsmotor."
     if state is RunState.PREFLIGHT:

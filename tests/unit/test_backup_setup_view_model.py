@@ -39,6 +39,7 @@ def test_standard_backup_setup_has_four_steps_and_safe_defaults() -> None:
         "Tidligere versjoner beholdes i 30 dager",
         "Ekstra filer på målet beholdes",
         "Auto - anbefalt",
+        "Automatisk: bare nye filer",
     )
 
 
@@ -357,7 +358,7 @@ def test_backup_job_detail_view_model_renders_exact_job_revision() -> None:
     assert state.target_summary_label == "1 mål / 1 uavhengig enhet"
     assert (
         state.defaults_summary_label
-        == "Oppdater backup - Alle brukerfiler - Standard kontroll"
+        == "Oppdater backup - Alle brukerfiler - Standard kontroll - Automatisk: bare nye filer"
     )
     assert state.target_lines == ("USB 1: E:/Backup",)
     assert state.plan_id == "plan-a"

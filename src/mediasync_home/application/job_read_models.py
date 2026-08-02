@@ -461,4 +461,5 @@ def _defaults_to_dict(defaults: StandardBackupDefaults) -> dict[str, object]:
         "retention": defaults.retention.value,
         "extra_files": defaults.extra_files.value,
         "performance": defaults.performance.value,
+        "automation_policy": defaults.automation_policy.value,
     }

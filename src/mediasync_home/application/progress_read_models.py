@@ -7,7 +7,7 @@ from typing import Protocol
 from mediasync_home.application.runs import RunState, RunTargetState
 
 
-PROGRESS_SNAPSHOT_SCHEMA_VERSION = 4
+PROGRESS_SNAPSHOT_SCHEMA_VERSION = 5
 MAX_PROGRESS_SNAPSHOT_TARGETS = 32
 MAX_PROGRESS_QUERY_ID_LENGTH = 256
 MAX_PROGRESS_ACTIVE_PATH_LENGTH = 32767
@@ -111,6 +111,9 @@ class RunProgressSnapshot:
     warning_count: int
     error_count: int
     targets: tuple[RunTargetProgressSnapshot, ...]
+    action_required: bool = False
+    deferred_operation_count: int = 0
+    deferred_planned_bytes: int = 0
     transferred_operations: int = 0
     transferred_bytes: int = 0
     active_relative_path: str | None = None
@@ -154,6 +157,8 @@ class RunProgressSnapshot:
             self.error_count,
             self.transferred_operations,
             self.transferred_bytes,
+            self.deferred_operation_count,
+            self.deferred_planned_bytes,
         )
         if self.active_relative_path is not None and (
             not self.active_relative_path
@@ -211,6 +216,9 @@ class RunProgressSnapshot:
             "completed_bytes": self.completed_bytes,
             "warning_count": self.warning_count,
             "error_count": self.error_count,
+            "action_required": self.action_required,
+            "deferred_operation_count": self.deferred_operation_count,
+            "deferred_planned_bytes": self.deferred_planned_bytes,
             "targets": [target.to_dict() for target in self.targets],
             "transferred_operations": self.transferred_operations,
             "transferred_bytes": self.transferred_bytes,

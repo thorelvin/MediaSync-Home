@@ -157,6 +157,67 @@ def test_execute_next_backup_analysis_stops_review_plan_before_run() -> None:
     assert runs.started is None
 
 
+def test_execute_next_backup_analysis_starts_safe_subset_with_deferred_actions() -> None:
+    requests = _RequestStore(start_when_safe=True)
+    runs = _Runs()
+    plan = _mixed_safe_and_deferred_plan()
+    clock_values = iter(
+        f"2026-07-31T10:00:0{second}Z" for second in range(8)
+    )
+
+    completed = execute_next_backup_analysis(
+        requests=requests,
+        runs=runs,
+        refresh_endpoint_classifications=lambda: None,
+        snapshots=_SnapshotRefresher(),
+        hash_evidence=_HashRefresher(),
+        plans=_PlanRefresher(
+            plan_checksum=plan.plan_checksum,
+            operation_count=plan.operation_count,
+        ),
+        plan_store=_PlanStore(plan),
+        run_id_factory=_RunIds(),
+        utc_now=lambda: next(clock_values),
+    )
+
+    assert completed is not None
+    assert completed.reason_code == "BACKUP_ANALYSIS_SAFE_RUN_QUEUED"
+    assert completed.started_run_id == "run-a"
+    assert runs.started is not None
+    assert runs.started.planned_operations == 1
+    assert runs.started.summary["action_required"] is True
+    assert runs.started.summary["deferred_operation_count"] == 1
+
+
+def test_execute_next_backup_analysis_never_starts_analyze_only_plan() -> None:
+    requests = _RequestStore(start_when_safe=True)
+    runs = _Runs()
+    plan = _analyze_only_plan()
+    clock_values = iter(
+        f"2026-07-31T10:00:0{second}Z" for second in range(8)
+    )
+
+    completed = execute_next_backup_analysis(
+        requests=requests,
+        runs=runs,
+        refresh_endpoint_classifications=lambda: None,
+        snapshots=_SnapshotRefresher(),
+        hash_evidence=_HashRefresher(),
+        plans=_PlanRefresher(
+            plan_checksum=plan.plan_checksum,
+            operation_count=plan.operation_count,
+        ),
+        plan_store=_PlanStore(plan),
+        run_id_factory=_RunIds(),
+        utc_now=lambda: next(clock_values),
+    )
+
+    assert completed is not None
+    assert completed.reason_code == "INITIAL_BACKUP_PLAN_READY_FOR_REVIEW"
+    assert completed.started_run_id is None
+    assert runs.started is None
+
+
 class _RequestStore:
     def __init__(self, *, start_when_safe: bool = False) -> None:
         self.request = BackupAnalysisRequest(
@@ -374,6 +435,56 @@ def _review_plan() -> SealedPlan:
         risk_level=PlanRiskLevel.MEDIUM,
         target_precondition_kind=TargetPreconditionKind.MATCH_FINGERPRINT,
         reason_code="REPLACE_WITH_VERSION",
+    )
+
+
+def _mixed_safe_and_deferred_plan() -> SealedPlan:
+    safe = _safe_plan()
+    deferred = replace(
+        safe.operations[0],
+        operation_id="operation-deferred",
+        operation_type=PlanOperationType.DEFER_AUTOMATION_POLICY,
+        deferred_operation_type=PlanOperationType.REPLACE_CHANGED,
+        sequence_no=2,
+        stable_order_key="020:target-a:changed.txt",
+        target_precondition_kind=TargetPreconditionKind.MATCH_FINGERPRINT,
+        target_relative_path="Changed.txt",
+        source_relative_path="Changed.txt",
+        source_precondition_json=source_precondition_json(
+            relative_path="Changed.txt",
+            size_bytes=50,
+        ),
+        planned_bytes=50,
+        reason_code="REPLACE_WITH_VERSION",
+        risk_level=PlanRiskLevel.MEDIUM,
+    )
+    return seal_plan(
+        plan_id=safe.plan_id,
+        analysis_id=safe.analysis_id,
+        job_id=safe.job_id,
+        job_revision_id=safe.job_revision_id,
+        endpoints=safe.endpoints,
+        operations=(*safe.operations, deferred),
+        execution_policy="NEW_FILES_ONLY",
+    )
+
+
+def _analyze_only_plan() -> SealedPlan:
+    safe = _safe_plan()
+    return seal_plan(
+        plan_id=safe.plan_id,
+        analysis_id=safe.analysis_id,
+        job_id=safe.job_id,
+        job_revision_id=safe.job_revision_id,
+        endpoints=(replace(safe.endpoints[1], planned_operations=0, planned_bytes=0),),
+        operations=(
+            replace(
+                safe.operations[0],
+                operation_type=PlanOperationType.DEFER_AUTOMATION_POLICY,
+                deferred_operation_type=PlanOperationType.COPY_NEW,
+            ),
+        ),
+        execution_policy="ANALYZE_ONLY",
     )
 
 

@@ -1382,6 +1382,14 @@ _NB_TO_EN = {
     ),
     "Kontroller målet og prøv igjen.": "Check the target and retry.",
     "Kontroller resultatet før neste backup.": "Check the result before the next backup.",
+    "Kontroller utsatte handlinger før neste backup.": (
+        "Review the deferred actions before the next backup."
+    ),
+    "Automatisk: bare nye filer": "Automatic: new files only",
+    "Automatisk: nye og endrede filer med versjoner": (
+        "Automatic: new and changed files with versions"
+    ),
+    "Automatisk: kontroller bare": "Automatic: analyze only",
     "Kontrollerer": "Checking",
     "Klar til kontroll": "Ready for review",
     "Kontrollerer mål før lease og revalidering.": "Checking targets before lease and revalidation.",

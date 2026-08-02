@@ -20,6 +20,7 @@ from mediasync_home.application.hash_evidence import (
     CurrentReadHashEvidence,
     HashEvidenceKind,
 )
+from mediasync_home.application.job_drafts import AutomationPolicy
 from mediasync_home.application.endpoint_capabilities import (
     DurabilityLevel,
     EndpointCapabilityEvidence,
@@ -42,6 +43,7 @@ class _JobCandidate:
     analysis_id: str | None
     snapshot_state: str | None
     snapshot_reason_code: str | None
+    automation_policy: AutomationPolicy
 
 
 class SqliteInitialBackupPlanMaterializer:
@@ -103,7 +105,8 @@ class SqliteInitialBackupPlanMaterializer:
                 heads.active_revision_id,
                 snapshots.analysis_id,
                 snapshots.state,
-                snapshots.reason_code
+                snapshots.reason_code,
+                details.defaults_json
             FROM job_heads AS heads
             INNER JOIN jobs
                 ON jobs.id = heads.job_id
@@ -111,6 +114,9 @@ class SqliteInitialBackupPlanMaterializer:
             LEFT JOIN standard_backup_job_snapshot_materializations AS snapshots
                 ON snapshots.job_id = heads.job_id
                 AND snapshots.job_revision_id = heads.active_revision_id
+            INNER JOIN standard_backup_job_revision_details AS details
+                ON details.job_id = heads.job_id
+                AND details.job_revision_id = heads.active_revision_id
             ORDER BY heads.job_id
             """
         ).fetchall()
@@ -121,6 +127,7 @@ class SqliteInitialBackupPlanMaterializer:
                 analysis_id=None if row[2] is None else str(row[2]),
                 snapshot_state=None if row[3] is None else str(row[3]),
                 snapshot_reason_code=None if row[4] is None else str(row[4]),
+                automation_policy=_automation_policy_from_defaults(str(row[5])),
             )
             for row in rows
         )
@@ -159,6 +166,7 @@ class SqliteInitialBackupPlanMaterializer:
                 job_id=candidate.job_id,
                 job_revision_id=candidate.job_revision_id,
                 endpoints=endpoints,
+                automation_policy=candidate.automation_policy,
             )
         except InitialBackupPlanningError as exc:
             return self._save_nonplan_result(
@@ -919,6 +927,22 @@ def _profile_supports_named_streams(
     except EndpointCapabilityEvidenceError:
         return False
     return profile.supports_named_streams
+
+
+def _automation_policy_from_defaults(payload: str) -> AutomationPolicy:
+    try:
+        defaults = json.loads(payload)
+        if not isinstance(defaults, dict):
+            raise ValueError
+        value = defaults.get(
+            "automation_policy",
+            AutomationPolicy.NEW_FILES_ONLY.value,
+        )
+        return AutomationPolicy(str(value))
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise SqliteInitialBackupPlanMaterializationError(
+            "STANDARD_BACKUP_AUTOMATION_POLICY_INVALID"
+        ) from exc
 
 
 def _materialization_id(

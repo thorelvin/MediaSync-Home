@@ -72,6 +72,64 @@ def test_plan_checksum_changes_when_operation_payload_changes() -> None:
     assert changed.plan_checksum != base.plan_checksum
 
 
+def test_plan_checksum_covers_automation_policy_and_deferred_type() -> None:
+    deferred = replace(
+        _copy_operation(),
+        operation_type=PlanOperationType.DEFER_AUTOMATION_POLICY,
+        deferred_operation_type=PlanOperationType.COPY_NEW,
+    )
+    new_only = seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        operations=(deferred,),
+        execution_policy="NEW_FILES_ONLY",
+    )
+    analyze_only = seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        operations=(deferred,),
+        execution_policy="ANALYZE_ONLY",
+    )
+    changed_type = seal_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        operations=(
+            replace(deferred, deferred_operation_type=PlanOperationType.REPLACE_CHANGED),
+        ),
+        execution_policy="NEW_FILES_ONLY",
+    )
+
+    assert new_only.plan_checksum != analyze_only.plan_checksum
+    assert new_only.plan_checksum != changed_type.plan_checksum
+    assert verify_plan_checksum(new_only) is True
+
+
+def test_deferred_operation_requires_supported_original_type() -> None:
+    with pytest.raises(
+        PlanSealViolation,
+        match="DEFERRED_PLAN_OPERATION_TYPE_INVALID",
+    ):
+        seal_plan(
+            plan_id="plan-a",
+            analysis_id="analysis-a",
+            job_id="job-a",
+            job_revision_id="job-rev-a",
+            operations=(
+                replace(
+                    _copy_operation(),
+                    operation_type=PlanOperationType.DEFER_AUTOMATION_POLICY,
+                    deferred_operation_type=None,
+                ),
+            ),
+        )
+
+
 def test_plan_checksum_covers_source_file_identity() -> None:
     base = seal_plan(
         plan_id="plan-a",

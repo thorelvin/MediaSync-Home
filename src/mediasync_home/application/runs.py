@@ -10,6 +10,7 @@ from mediasync_home.application.plans import (
     PlanEndpoint,
     PlanEndpointRole,
     PlanOperation,
+    PlanOperationType,
     PlanStore,
     SealedPlan,
     verify_plan_checksum,
@@ -1633,21 +1634,24 @@ def _readiness_for_plan(
         for operation in selected_operations
     ):
         validation_codes.append("PLAN_OPERATION_SCOPE_TARGET_MISMATCH")
-    if _selected_scope_is_blocked(
+    scope_blocked = _selected_scope_is_blocked(
         plan,
         command.target_endpoint_ids,
         command.selected_plan_operation_ids,
-    ):
+    )
+    if scope_blocked:
         validation_codes.append("PLAN_BLOCKED")
+    executable_operations = _executable_operations_for_endpoints(
+        plan,
+        target_endpoints,
+    )
     selected_operation_count = (
         len(selected_operations)
         if command.selected_plan_operation_ids
-        else plan.operation_count
-        if not command.target_endpoint_ids
-        else sum(endpoint.planned_operations for endpoint in target_endpoints)
+        else len(executable_operations)
     )
-    if selected_operation_count < 1:
-        validation_codes.append("PLAN_REQUIRES_OPERATIONS")
+    if selected_operation_count < 1 and target_endpoints and not scope_blocked:
+        validation_codes.append("PLAN_REQUIRES_EXECUTABLE_OPERATIONS")
     if not target_endpoints:
         validation_codes.append("PLAN_REQUIRES_TARGET_ENDPOINT")
 
@@ -1680,6 +1684,17 @@ def _started_run_from_plan(
         plan,
         command.selected_plan_operation_ids,
     )
+    executable_operations = _executable_operations_for_endpoints(
+        plan,
+        target_endpoints,
+    )
+    deferred_operations = tuple(
+        operation
+        for operation in plan.operations
+        if operation.operation_type is PlanOperationType.DEFER_AUTOMATION_POLICY
+        and operation.target_endpoint_id
+        in {endpoint.endpoint_id for endpoint in target_endpoints}
+    )
     operation_scoped = bool(command.selected_plan_operation_ids)
     scoped = bool(command.target_endpoint_ids) or operation_scoped
     return StartedRun(
@@ -1702,16 +1717,12 @@ def _started_run_from_plan(
         planned_operations=(
             len(selected_operations)
             if operation_scoped
-            else sum(endpoint.planned_operations for endpoint in target_endpoints)
-            if scoped
-            else plan.operation_count
+            else len(executable_operations)
         ),
         planned_bytes=(
             sum(operation.planned_bytes for operation in selected_operations)
             if operation_scoped
-            else sum(endpoint.planned_bytes for endpoint in target_endpoints)
-            if scoped
-            else plan.planned_bytes
+            else sum(operation.planned_bytes for operation in executable_operations)
         ),
         trigger_occurrence_id=command.trigger_occurrence_id,
         resumed_from_run_id=command.resumed_from_run_id,
@@ -1725,6 +1736,12 @@ def _started_run_from_plan(
         ),
         summary={
             "executor_pending": True,
+            "action_required": bool(deferred_operations),
+            "automation_policy": plan.execution_policy,
+            "deferred_operation_count": len(deferred_operations),
+            "deferred_planned_bytes": sum(
+                operation.planned_bytes for operation in deferred_operations
+            ),
             "scope": (
                 "OPERATION_RETRY"
                 if command.source_operation_ids
@@ -1838,6 +1855,19 @@ def _selected_plan_operations(
         operation
         for operation in plan.operations
         if operation.operation_id in selected
+    )
+
+
+def _executable_operations_for_endpoints(
+    plan: SealedPlan,
+    endpoints: tuple[PlanEndpoint, ...],
+) -> tuple[PlanOperation, ...]:
+    endpoint_ids = {endpoint.endpoint_id for endpoint in endpoints}
+    return tuple(
+        operation
+        for operation in plan.operations
+        if operation.operation_type in MUTATING_OPERATION_TYPES
+        and operation.target_endpoint_id in endpoint_ids
     )
 
 

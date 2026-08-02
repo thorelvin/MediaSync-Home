@@ -109,7 +109,8 @@ def test_plan_operation_query_returns_bounded_serializable_page() -> None:
                     "risk_level": "LOW",
                     "target_endpoint_id": None,
                     "target_relative_path": "Pictures/op-a.jpg",
-                "planned_bytes": 128,
+                    "deferred_operation_type": None,
+                    "planned_bytes": 128,
             }
         ],
     }

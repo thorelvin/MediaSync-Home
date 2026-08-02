@@ -13,7 +13,7 @@ from mediasync_home.application.source_preconditions import (
 
 
 PLAN_SCHEMA_VERSION = 1
-OPERATION_SCHEMA_VERSION = 3
+OPERATION_SCHEMA_VERSION = 4
 PLANNER_VERSION = "0B-plan-sealer-skeleton"
 PLAN_CHECKSUM_ALGORITHM = "SHA-256"
 PLAN_SERIALIZER_VERSION = "0B-CANONICAL-JSON-V1"
@@ -27,6 +27,7 @@ class PlanSealViolation(ValueError):
 
 class PlanOperationType(str, Enum):
     COPY_NEW = "COPY_NEW"
+    REPLACE_CHANGED = "REPLACE_CHANGED"
     CREATE_DIRECTORY = "CREATE_DIRECTORY"
     SKIP_IDENTICAL = "SKIP_IDENTICAL"
     DEFER_AUTOMATION_POLICY = "DEFER_AUTOMATION_POLICY"
@@ -73,6 +74,7 @@ class PlanOperation:
     target_relative_path: str | None = None
     source_relative_path: str | None = None
     source_precondition_json: str | None = None
+    deferred_operation_type: PlanOperationType | None = None
     planned_bytes: int = 0
 
 
@@ -167,6 +169,7 @@ class PlanOperationReadModel:
     target_relative_path: str | None
     planned_bytes: int
     target_endpoint_id: str | None = None
+    deferred_operation_type: PlanOperationType | None = None
 
 
 @dataclass(frozen=True)
@@ -451,6 +454,7 @@ def _validate_operations(
                 raise PlanSealViolation("PLAN_OPERATION_TARGET_ENDPOINT_NOT_WRITABLE")
         elif operation.operation_type in MUTATING_OPERATION_TYPES and writable_endpoint_ids:
             raise PlanSealViolation("MUTATING_PLAN_OPERATION_REQUIRES_TARGET_ENDPOINT")
+        _validate_deferred_operation(operation)
         _validate_target_precondition(operation)
         _validate_source_precondition(operation)
 
@@ -504,7 +508,11 @@ def _validate_endpoint_text(value: str | None, reason: str) -> None:
 
 
 def _validate_target_precondition(operation: PlanOperation) -> None:
-    if operation.operation_type in MUTATING_OPERATION_TYPES:
+    requires_target_precondition = (
+        operation.operation_type in MUTATING_OPERATION_TYPES
+        or operation.operation_type is PlanOperationType.DEFER_AUTOMATION_POLICY
+    )
+    if requires_target_precondition:
         if operation.target_precondition_kind is TargetPreconditionKind.NONE:
             raise PlanSealViolation("MUTATING_PLAN_OPERATION_REQUIRES_TARGET_PRECONDITION")
         if operation.target_relative_path is None or not operation.target_relative_path.strip():
@@ -514,7 +522,15 @@ def _validate_target_precondition(operation: PlanOperation) -> None:
 
 
 def _validate_source_precondition(operation: PlanOperation) -> None:
-    if operation.operation_type is not PlanOperationType.COPY_NEW:
+    effective_type = (
+        operation.deferred_operation_type
+        if operation.operation_type is PlanOperationType.DEFER_AUTOMATION_POLICY
+        else operation.operation_type
+    )
+    if effective_type not in {
+        PlanOperationType.COPY_NEW,
+        PlanOperationType.REPLACE_CHANGED,
+    }:
         if operation.source_relative_path is not None or operation.source_precondition_json is not None:
             raise PlanSealViolation("NONCOPY_PLAN_OPERATION_HAS_SOURCE_PRECONDITION")
         return
@@ -531,6 +547,19 @@ def _validate_source_precondition(operation: PlanOperation) -> None:
         or precondition.size_bytes != operation.planned_bytes
     ):
         raise PlanSealViolation("PLAN_OPERATION_SOURCE_PRECONDITION_MISMATCH")
+
+
+def _validate_deferred_operation(operation: PlanOperation) -> None:
+    if operation.operation_type is PlanOperationType.DEFER_AUTOMATION_POLICY:
+        if operation.deferred_operation_type not in {
+            PlanOperationType.COPY_NEW,
+            PlanOperationType.REPLACE_CHANGED,
+            PlanOperationType.CREATE_DIRECTORY,
+        }:
+            raise PlanSealViolation("DEFERRED_PLAN_OPERATION_TYPE_INVALID")
+        return
+    if operation.deferred_operation_type is not None:
+        raise PlanSealViolation("NONDEFERRED_PLAN_OPERATION_HAS_DEFERRED_TYPE")
 
 
 def _looks_absolute_path(path: str) -> bool:
@@ -632,6 +661,7 @@ def _canonical_payload(
                 operation,
                 include_target_endpoint=operation_schema_version >= 2,
                 include_source_precondition=operation_schema_version >= 3,
+                include_deferred_operation_type=operation_schema_version >= 4,
             )
             for operation in operations
         ],
@@ -650,6 +680,7 @@ def _operation_payload(
     *,
     include_target_endpoint: bool,
     include_source_precondition: bool,
+    include_deferred_operation_type: bool,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "execution_phase": operation.execution_phase,
@@ -668,6 +699,12 @@ def _operation_payload(
     if include_source_precondition:
         payload["source_relative_path"] = operation.source_relative_path
         payload["source_precondition_json"] = operation.source_precondition_json
+    if include_deferred_operation_type:
+        payload["deferred_operation_type"] = (
+            None
+            if operation.deferred_operation_type is None
+            else operation.deferred_operation_type.value
+        )
     return payload
 
 

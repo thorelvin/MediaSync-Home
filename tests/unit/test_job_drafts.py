@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from mediasync_home.application.job_drafts import (
+    AutomationPolicy,
     BackupBehavior,
     DraftTarget,
     DraftValidationCode,
@@ -32,6 +33,7 @@ def test_standard_backup_draft_starts_with_safe_defaults() -> None:
     assert draft.defaults.behavior is BackupBehavior.UPDATE_BACKUP
     assert draft.defaults.file_selection is FileSelectionPreset.ALL_USER_FILES
     assert draft.defaults.verification is VerificationPreset.STANDARD
+    assert draft.defaults.automation_policy is AutomationPolicy.NEW_FILES_ONLY
     assert draft.can_create() is False
     assert [issue.code for issue in draft.validation_issues()] == [
         DraftValidationCode.SOURCE_REQUIRED,

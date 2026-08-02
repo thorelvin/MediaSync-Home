@@ -153,6 +153,26 @@ def test_database_contract_rejects_unbound_source_precondition() -> None:
         validate_contracts.validate_database_contract(document)
 
 
+def test_database_contract_rejects_unbound_automation_policy() -> None:
+    yaml = _yaml_loader()
+    document = validate_contracts.load_yaml(
+        validate_contracts.ROOT / "schema/database-contract.yaml",
+        yaml,
+    )
+    document = copy.deepcopy(document)
+    invariant = _database_invariant(
+        document,
+        "AUTO-002_IMMUTABLE_AUTOMATION_POLICY",
+    )
+    invariant["checksum_bound_from_operation_schema_version"] = 0
+
+    with pytest.raises(
+        validate_contracts.ContractValidationError,
+        match="automation policy contract drifted",
+    ):
+        validate_contracts.validate_database_contract(document)
+
+
 def test_database_contract_rejects_ctime_birthtime_fallback() -> None:
     yaml = _yaml_loader()
     document = validate_contracts.load_yaml(

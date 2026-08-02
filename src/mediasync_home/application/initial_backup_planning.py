@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
+from mediasync_home.application.job_drafts import AutomationPolicy
 from mediasync_home.application.hash_evidence import (
     CurrentReadHashEvidence,
     compatible_current_read_hashes,
@@ -139,6 +140,7 @@ def build_initial_backup_plan(
     job_id: str,
     job_revision_id: str,
     endpoints: tuple[InitialBackupPlanningEndpoint, ...],
+    automation_policy: AutomationPolicy = AutomationPolicy.NEW_FILES_ONLY,
 ) -> InitialBackupPlanBuild:
     source = _single_endpoint(endpoints, PlanEndpointRole.SOURCE)
     targets = tuple(
@@ -172,6 +174,7 @@ def build_initial_backup_plan(
             source=source,
             target=target,
             first_sequence_no=len(operations) + 1,
+            automation_policy=automation_policy,
         )
         operations.extend(target_operations)
         dependencies.extend(target_dependencies)
@@ -207,7 +210,7 @@ def build_initial_backup_plan(
         endpoints=tuple(plan_endpoints),
         operations=tuple(operations),
         dependencies=tuple(dependencies),
-        execution_policy="MANUAL_REVIEW_REQUIRED",
+        execution_policy=automation_policy.value,
     )
     blocked = plan.risk_summary.get("highest") == PlanRiskLevel.BLOCKED.value
     return InitialBackupPlanBuild(
@@ -238,7 +241,13 @@ def endpoint_capabilities_hash(payload: dict[str, object]) -> str:
 
 
 def initial_backup_plan_runnable(plan: SealedPlan) -> bool:
-    return plan.risk_summary.get("highest") != PlanRiskLevel.BLOCKED.value
+    return (
+        plan.risk_summary.get("highest") != PlanRiskLevel.BLOCKED.value
+        and any(
+            operation.operation_type in MUTATING_OPERATION_TYPES
+            for operation in plan.operations
+        )
+    )
 
 
 def _plan_target(
@@ -247,6 +256,7 @@ def _plan_target(
     source: InitialBackupPlanningEndpoint,
     target: InitialBackupPlanningEndpoint,
     first_sequence_no: int,
+    automation_policy: AutomationPolicy,
 ) -> tuple[tuple[PlanOperation, ...], tuple[PlanDependency, ...]]:
     if target.root_case_mode not in {"CASE_SENSITIVE", "CASE_INSENSITIVE"}:
         raise InitialBackupPlanningError(
@@ -308,6 +318,10 @@ def _plan_target(
         )
         if operation is None:
             continue
+        operation = _apply_automation_policy(
+            policy=automation_policy,
+            operation=operation,
+        )
         operations.append(operation)
         if (
             operation.operation_type is PlanOperationType.CREATE_DIRECTORY
@@ -321,6 +335,52 @@ def _plan_target(
         target_case_mode=target.root_case_mode,
     )
     return tuple(operations), dependencies
+
+
+def _apply_automation_policy(
+    *,
+    policy: AutomationPolicy,
+    operation: PlanOperation,
+) -> PlanOperation:
+    if operation.risk_level is PlanRiskLevel.BLOCKED:
+        return operation
+    if _automation_policy_allows(policy=policy, operation=operation):
+        return operation
+    deferred_type = operation.operation_type
+    if (
+        operation.operation_type is PlanOperationType.COPY_NEW
+        and operation.target_precondition_kind is not TargetPreconditionKind.ABSENT
+    ):
+        deferred_type = PlanOperationType.REPLACE_CHANGED
+    return replace(
+        operation,
+        operation_type=PlanOperationType.DEFER_AUTOMATION_POLICY,
+        deferred_operation_type=deferred_type,
+    )
+
+
+def _automation_policy_allows(
+    *,
+    policy: AutomationPolicy,
+    operation: PlanOperation,
+) -> bool:
+    if policy is AutomationPolicy.ANALYZE_ONLY:
+        return False
+    if operation.operation_type is PlanOperationType.CREATE_DIRECTORY:
+        return operation.risk_level is PlanRiskLevel.LOW
+    if operation.operation_type is not PlanOperationType.COPY_NEW:
+        return False
+    if (
+        operation.target_precondition_kind is TargetPreconditionKind.ABSENT
+        and operation.risk_level is PlanRiskLevel.LOW
+    ):
+        return True
+    return (
+        policy is AutomationPolicy.NEW_AND_CHANGED_WITH_VERSIONS
+        and operation.target_precondition_kind is TargetPreconditionKind.MATCH_FINGERPRINT
+        and operation.reason_code == "REPLACE_WITH_VERSION"
+        and operation.risk_level is PlanRiskLevel.MEDIUM
+    )
 
 
 def _single_endpoint(

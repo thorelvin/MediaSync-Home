@@ -73,6 +73,7 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
             50,
             51,
             52,
+            53,
         ]
     assert [migration.version for migration in recovery.migrations] == [
         1,

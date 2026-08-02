@@ -50,6 +50,12 @@ class PerformancePreset(str, Enum):
     AUTO = "AUTO"
 
 
+class AutomationPolicy(str, Enum):
+    NEW_FILES_ONLY = "NEW_FILES_ONLY"
+    NEW_AND_CHANGED_WITH_VERSIONS = "NEW_AND_CHANGED_WITH_VERSIONS"
+    ANALYZE_ONLY = "ANALYZE_ONLY"
+
+
 @dataclass(frozen=True)
 class StandardBackupDefaults:
     behavior: BackupBehavior = BackupBehavior.UPDATE_BACKUP
@@ -58,6 +64,7 @@ class StandardBackupDefaults:
     retention: RetentionPreset = RetentionPreset.THIRTY_DAYS
     extra_files: ExtraFilesPreset = ExtraFilesPreset.KEEP_ON_TARGET
     performance: PerformancePreset = PerformancePreset.AUTO
+    automation_policy: AutomationPolicy = AutomationPolicy.NEW_FILES_ONLY
 
 
 @dataclass(frozen=True)

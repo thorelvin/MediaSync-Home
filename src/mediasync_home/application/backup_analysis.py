@@ -11,8 +11,10 @@ from mediasync_home.application.hash_evidence import (
 from mediasync_home.application.initial_backup_planning import (
     InitialBackupPlanRefresher,
 )
+from mediasync_home.application.job_drafts import AutomationPolicy
 from mediasync_home.application.plans import (
     MUTATING_OPERATION_TYPES,
+    PlanOperation,
     PlanOperationType,
     PlanRiskLevel,
     SealedPlan,
@@ -472,23 +474,48 @@ def _safe_for_automatic_start(plan: SealedPlan) -> bool:
         for operation in plan.operations
         if operation.operation_type in MUTATING_OPERATION_TYPES
     )
-    return (
-        bool(mutating)
-        and plan.risk_summary.get("highest") == PlanRiskLevel.LOW.value
-        and all(
-            operation.risk_level is PlanRiskLevel.LOW
-            and (
-                operation.operation_type is PlanOperationType.CREATE_DIRECTORY
-                or (
-                    operation.operation_type is PlanOperationType.COPY_NEW
-                    and operation.target_precondition_kind
-                    is TargetPreconditionKind.ABSENT
-                    and operation.reason_code == "COPY_NEW"
-                )
-            )
-            for operation in mutating
+    try:
+        policy = AutomationPolicy(plan.execution_policy)
+    except ValueError:
+        return (
+            bool(mutating)
+            and plan.risk_summary.get("highest") == PlanRiskLevel.LOW.value
+            and all(_new_file_operation_is_safe(operation) for operation in mutating)
+            and len(mutating) == len(plan.operations)
         )
-        and len(mutating) == len(plan.operations)
+    if policy is AutomationPolicy.ANALYZE_ONLY or not mutating:
+        return False
+    if plan.risk_summary.get("highest") == PlanRiskLevel.BLOCKED.value:
+        return False
+    if any(
+        operation.operation_type
+        not in {*MUTATING_OPERATION_TYPES, PlanOperationType.DEFER_AUTOMATION_POLICY}
+        for operation in plan.operations
+    ):
+        return False
+    if policy is AutomationPolicy.NEW_FILES_ONLY:
+        return all(_new_file_operation_is_safe(operation) for operation in mutating)
+    return all(
+        _new_file_operation_is_safe(operation)
+        or (
+            operation.operation_type is PlanOperationType.COPY_NEW
+            and operation.target_precondition_kind
+            is TargetPreconditionKind.MATCH_FINGERPRINT
+            and operation.reason_code == "REPLACE_WITH_VERSION"
+            and operation.risk_level is PlanRiskLevel.MEDIUM
+        )
+        for operation in mutating
+    )
+
+
+def _new_file_operation_is_safe(operation: PlanOperation) -> bool:
+    return operation.risk_level is PlanRiskLevel.LOW and (
+        operation.operation_type is PlanOperationType.CREATE_DIRECTORY
+        or (
+            operation.operation_type is PlanOperationType.COPY_NEW
+            and operation.target_precondition_kind is TargetPreconditionKind.ABSENT
+            and operation.reason_code == "COPY_NEW"
+        )
     )
 
 

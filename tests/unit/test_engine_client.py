@@ -103,6 +103,7 @@ def test_engine_client_submits_incomplete_standard_backup_draft() -> None:
                 "retention": "THIRTY_DAYS",
                 "extra_files": "KEEP_ON_TARGET",
                 "performance": "AUTO",
+                "automation_policy": "NEW_FILES_ONLY",
             },
         },
     }
@@ -159,6 +160,7 @@ def test_engine_client_submits_revision_bound_standard_backup_edit() -> None:
             "retention": "THIRTY_DAYS",
             "extra_files": "KEEP_ON_TARGET",
             "performance": "AUTO",
+            "automation_policy": "NEW_FILES_ONLY",
         },
     }
     assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)

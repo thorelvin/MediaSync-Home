@@ -273,6 +273,11 @@ def _operation_to_dict(operation: PlanOperationReadModel) -> dict[str, object]:
         "execution_phase": operation.execution_phase,
         "stable_order_key": operation.stable_order_key,
         "target_precondition_kind": operation.target_precondition_kind.value,
+        "deferred_operation_type": (
+            None
+            if operation.deferred_operation_type is None
+            else operation.deferred_operation_type.value
+        ),
         "reason_code": operation.reason_code,
         "risk_level": operation.risk_level.value,
         "target_endpoint_id": operation.target_endpoint_id,

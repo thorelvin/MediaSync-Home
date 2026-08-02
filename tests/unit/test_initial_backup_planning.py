@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from mediasync_home.application.job_drafts import AutomationPolicy
 from mediasync_home.application.hash_evidence import (
     CURRENT_READ_HASH_ALGORITHM,
     CURRENT_READ_HASH_SCHEMA_VERSION,
@@ -72,7 +73,7 @@ def test_initial_backup_plan_orders_directories_and_conservative_file_changes() 
             "Photos",
         ),
         (
-            PlanOperationType.COPY_NEW,
+            PlanOperationType.DEFER_AUTOMATION_POLICY,
             TargetPreconditionKind.MATCH_FINGERPRINT,
             "Readme.txt",
         ),
@@ -89,8 +90,12 @@ def test_initial_backup_plan_orders_directories_and_conservative_file_changes() 
         for endpoint in result.plan.endpoints
         if endpoint.role is PlanEndpointRole.TARGET_WRITABLE
     )
-    assert writable_target.planned_operations == 3
-    assert writable_target.planned_bytes == 135
+    assert result.plan.execution_policy == AutomationPolicy.NEW_FILES_ONLY.value
+    assert result.plan.operations[1].deferred_operation_type is (
+        PlanOperationType.REPLACE_CHANGED
+    )
+    assert writable_target.planned_operations == 2
+    assert writable_target.planned_bytes == 128
     assert result.plan.risk_summary["highest"] == PlanRiskLevel.MEDIUM.value
     assert initial_backup_plan_runnable(result.plan) is True
 
@@ -330,7 +335,73 @@ def test_current_read_hash_evidence_keeps_changed_same_size_file_for_review() ->
 
     assert result.plan is not None
     assert result.plan.operations[0].reason_code == "REPLACE_WITH_VERSION"
+    assert result.plan.operations[0].operation_type is (
+        PlanOperationType.DEFER_AUTOMATION_POLICY
+    )
+    assert result.plan.operations[0].deferred_operation_type is (
+        PlanOperationType.REPLACE_CHANGED
+    )
     assert result.plan.risk_summary["highest"] == PlanRiskLevel.MEDIUM.value
+
+
+def test_versioned_automation_policy_keeps_verified_replacement_executable() -> None:
+    result = build_initial_backup_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(
+            _endpoint(
+                role=PlanEndpointRole.SOURCE,
+                endpoint_id="source-a",
+                entries=(_entry("Changed.txt", "changed.txt", "file", size=5),),
+            ),
+            _endpoint(
+                role=PlanEndpointRole.TARGET_WRITABLE,
+                endpoint_id="target-a",
+                target_ordinal=1,
+                entries=(_entry("Changed.txt", "changed.txt", "file", size=2),),
+            ),
+        ),
+        automation_policy=AutomationPolicy.NEW_AND_CHANGED_WITH_VERSIONS,
+    )
+
+    assert result.plan is not None
+    operation = result.plan.operations[0]
+    assert operation.operation_type is PlanOperationType.COPY_NEW
+    assert operation.target_precondition_kind is TargetPreconditionKind.MATCH_FINGERPRINT
+    assert operation.deferred_operation_type is None
+    assert initial_backup_plan_runnable(result.plan) is True
+
+
+def test_analyze_only_policy_seals_visible_non_runnable_deferred_rows() -> None:
+    result = build_initial_backup_plan(
+        plan_id="plan-a",
+        analysis_id="analysis-a",
+        job_id="job-a",
+        job_revision_id="job-rev-a",
+        endpoints=(
+            _endpoint(
+                role=PlanEndpointRole.SOURCE,
+                endpoint_id="source-a",
+                entries=(_entry("New.txt", "new.txt", "file", size=5),),
+            ),
+            _endpoint(
+                role=PlanEndpointRole.TARGET_WRITABLE,
+                endpoint_id="target-a",
+                target_ordinal=1,
+                entries=(),
+            ),
+        ),
+        automation_policy=AutomationPolicy.ANALYZE_ONLY,
+    )
+
+    assert result.plan is not None
+    operation = result.plan.operations[0]
+    assert operation.operation_type is PlanOperationType.DEFER_AUTOMATION_POLICY
+    assert operation.deferred_operation_type is PlanOperationType.COPY_NEW
+    assert operation.target_precondition_kind is TargetPreconditionKind.ABSENT
+    assert initial_backup_plan_runnable(result.plan) is False
 
 
 def test_initial_backup_plan_rejects_case_collision_in_sealed_input() -> None:

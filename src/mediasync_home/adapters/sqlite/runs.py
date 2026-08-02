@@ -879,7 +879,8 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                     planned_operations,
                     planned_bytes,
                     warning_count,
-                    error_count
+                    error_count,
+                    summary_json
                 FROM runs
                 ORDER BY started_utc DESC, id DESC
                 LIMIT ? OFFSET ?
@@ -901,7 +902,8 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                     planned_operations,
                     planned_bytes,
                     warning_count,
-                    error_count
+                    error_count,
+                    summary_json
                 FROM runs
                 WHERE job_id = ?
                 ORDER BY started_utc DESC, id DESC
@@ -909,23 +911,32 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                 """,
                 (job_id, limit, offset),
             ).fetchall()
-        return tuple(
-            RunActivitySummary(
-                run_id=str(row[0]),
-                job_id=str(row[1]),
-                job_revision_id=str(row[2]),
-                plan_id=str(row[3]),
-                trigger_type=RunTriggerType(str(row[4])),
-                state=RunState(str(row[5])),
-                started_utc=str(row[6]),
-                finished_utc=None if row[7] is None else str(row[7]),
-                planned_operations=int(row[8]),
-                planned_bytes=int(row[9]),
-                warning_count=int(row[10]),
-                error_count=int(row[11]),
-                targets=self._load_target_activity_summaries(str(row[0])),
-            )
-            for row in rows
+        return tuple(self._run_activity_summary(row) for row in rows)
+
+    def _run_activity_summary(
+        self,
+        row: sqlite3.Row | tuple[Any, ...],
+    ) -> RunActivitySummary:
+        action_required, deferred_count, deferred_bytes = _run_action_metadata(
+            str(row[12])
+        )
+        return RunActivitySummary(
+            run_id=str(row[0]),
+            job_id=str(row[1]),
+            job_revision_id=str(row[2]),
+            plan_id=str(row[3]),
+            trigger_type=RunTriggerType(str(row[4])),
+            state=RunState(str(row[5])),
+            started_utc=str(row[6]),
+            finished_utc=None if row[7] is None else str(row[7]),
+            planned_operations=int(row[8]),
+            planned_bytes=int(row[9]),
+            warning_count=int(row[10]),
+            error_count=int(row[11]),
+            action_required=action_required,
+            deferred_operation_count=deferred_count,
+            deferred_planned_bytes=deferred_bytes,
+            targets=self._load_target_activity_summaries(str(row[0])),
         )
 
     def load_run_progress_snapshot(self, run_id: str) -> RunProgressSnapshot | None:
@@ -996,7 +1007,8 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                     FROM run_target_endpoint_wait_events AS wait_events
                     WHERE wait_events.run_id = run_targets.run_id
                         AND wait_events.run_target_id = run_targets.id
-                )
+                ),
+                runs.summary_json
             FROM runs
             LEFT JOIN run_targets ON run_targets.run_id = runs.id
             WHERE runs.id = ?
@@ -1052,6 +1064,9 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
         )
         row = rows[0]
         state = RunState(str(row[4]))
+        action_required, deferred_count, deferred_bytes = _run_action_metadata(
+            str(row[29])
+        )
         return RunProgressSnapshot(
             run_id=str(row[0]),
             job_id=str(row[1]),
@@ -1072,6 +1087,9 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
             completed_bytes=sum(target.completed_bytes for target in targets),
             warning_count=int(row[9]),
             error_count=int(row[10]),
+            action_required=action_required,
+            deferred_operation_count=deferred_count,
+            deferred_planned_bytes=deferred_bytes,
             targets=targets,
             stop_requested=stop_requested,
         )
@@ -1641,6 +1659,11 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
                                 )
                         )
                         THEN CASE
+                            WHEN instr(
+                                summary_json,
+                                '"action_required":true'
+                            ) > 0
+                            THEN 'COMPLETED_WITH_WARNINGS'
                             WHEN NOT EXISTS (
                                 SELECT 1
                                 FROM run_targets
@@ -2218,6 +2241,26 @@ def _json_object(payload: str) -> dict[str, object]:
     if not isinstance(data, dict):
         raise SqliteRunStoreError("RUN_JSON_INVALID")
     return data
+
+
+def _run_action_metadata(payload: str) -> tuple[bool, int, int]:
+    summary = _json_object(payload)
+    action_value = summary.get("action_required", False)
+    deferred_count_value = summary.get("deferred_operation_count", 0)
+    deferred_bytes_value = summary.get("deferred_planned_bytes", 0)
+    if not isinstance(action_value, bool):
+        raise SqliteRunStoreError("RUN_ACTION_REQUIRED_METADATA_INVALID")
+    if (
+        isinstance(deferred_count_value, bool)
+        or not isinstance(deferred_count_value, int)
+        or deferred_count_value < 0
+        or isinstance(deferred_bytes_value, bool)
+        or not isinstance(deferred_bytes_value, int)
+        or deferred_bytes_value < 0
+        or action_value != (deferred_count_value > 0)
+    ):
+        raise SqliteRunStoreError("RUN_ACTION_REQUIRED_METADATA_INVALID")
+    return action_value, deferred_count_value, deferred_bytes_value
 
 
 _TERMINAL_RUN_STATES = frozenset(

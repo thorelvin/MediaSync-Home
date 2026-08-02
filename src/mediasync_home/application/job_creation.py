@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any, Protocol
 
 from mediasync_home.application.job_drafts import (
+    AutomationPolicy,
     BackupBehavior,
     DraftValidationError,
     DraftTarget,
@@ -217,6 +218,9 @@ def _parse_inline_defaults(payload: object) -> StandardBackupDefaults:
             retention=RetentionPreset(str(payload["retention"])),
             extra_files=ExtraFilesPreset(str(payload["extra_files"])),
             performance=PerformancePreset(str(payload["performance"])),
+            automation_policy=AutomationPolicy(
+                str(payload.get("automation_policy", AutomationPolicy.NEW_FILES_ONLY.value))
+            ),
         )
     except (KeyError, ValueError) as exc:
         raise JobCreationPayloadError("CREATE_STANDARD_BACKUP_JOB_DEFAULTS_INVALID") from exc

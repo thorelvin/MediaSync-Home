@@ -1635,7 +1635,7 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert job_detail_defaults is not None
         assert (
             job_detail_defaults.text()
-            == "Oppdater backup - Alle brukerfiler - Standard kontroll"
+            == "Oppdater backup - Alle brukerfiler - Standard kontroll - Automatisk: bare nye filer"
         )
         assert job_detail_revision is not None
         assert job_detail_revision.text() == "Revisjon: job-rev-a - Filter: filter-a"
@@ -1703,7 +1703,7 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert job_detail_targets.text() == "1 target / 1 independent device"
         assert (
             job_detail_defaults.text()
-            == "Update backup - All user files - Standard verification"
+            == "Update backup - All user files - Standard verification - Automatic: new files only"
         )
         assert job_detail_revision.text() == "Revision: job-rev-a - Filter: filter-a"
         assert job_detail_plan.text().startswith("2 operations from plan-a.")
@@ -1757,7 +1757,7 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert job_detail_targets.text() == "1 mål / 1 uavhengig enhet"
         assert (
             job_detail_defaults.text()
-            == "Oppdater backup - Alle brukerfiler - Standard kontroll"
+            == "Oppdater backup - Alle brukerfiler - Standard kontroll - Automatisk: bare nye filer"
         )
         assert job_detail_revision.text() == "Revisjon: job-rev-a - Filter: filter-a"
         assert job_detail_plan.text().startswith("2 operasjoner fra plan-a.")
@@ -4571,6 +4571,56 @@ def test_jobs_page_localizes_terminal_partial_failure_summary(qapp) -> None:
         window.deleteLater()
 
 
+def test_jobs_page_labels_deferred_automation_result_as_action_required(qapp) -> None:
+    provider = _FakeTerminalRunDashboardEngineClient(
+        run_state="COMPLETED_WITH_WARNINGS",
+        action_required=True,
+        deferred_operation_count=1,
+        deferred_planned_bytes=1024,
+    )
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+        user_preferences=UserPreferences(language=UserLanguage.ENGLISH),
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        window.refresh_engine_status()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+
+        result_state = window.findChild(QLabel, "jobsRunProgressState")
+        detail = window.findChild(QLabel, "jobsRunProgressDetail")
+        jobs_scroll = window.findChild(QScrollArea, "jobsScrollArea")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+
+        assert result_state is not None
+        assert result_state.text() == "Completed - action required"
+        assert detail is not None
+        assert "Safe changes completed. Review the deferred actions." in detail.text()
+        assert "1 deferred action (1.0 KiB)" in detail.text()
+        assert jobs_scroll is not None
+        assert jobs_scroll.horizontalScrollBar().maximum() == 0
+        assert detail.height() >= detail.heightForWidth(detail.width())
+        assert language is not None
+        assert language.menu() is not None
+
+        language.menu().actions()[0].trigger()
+        qapp.processEvents()
+
+        assert result_state.text() == "Fullført - handling nødvendig"
+        assert "Trygge endringer er fullført. Kontroller utsatte handlinger." in detail.text()
+        assert "1 utsatt handling (1.0 KiB)" in detail.text()
+        assert jobs_scroll.horizontalScrollBar().maximum() == 0
+        assert detail.height() >= detail.heightForWidth(detail.width())
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_jobs_page_rechecks_then_retries_only_selected_failed_target(qapp) -> None:
     provider = _FakeTargetRetryDashboardEngineClient()
     window = build_main_window(
@@ -6673,6 +6723,9 @@ class _FakeTerminalRunDashboardEngineClient(_FakeBackupStartDashboardEngineClien
         warning_count: int = 0,
         error_count: int = 0,
         target_states: tuple[str, ...] | None = None,
+        action_required: bool = False,
+        deferred_operation_count: int = 0,
+        deferred_planned_bytes: int = 0,
     ) -> None:
         super().__init__()
         self.run_state = run_state
@@ -6680,6 +6733,9 @@ class _FakeTerminalRunDashboardEngineClient(_FakeBackupStartDashboardEngineClien
         self.completed_bytes = completed_bytes
         self.warning_count = warning_count
         self.error_count = error_count
+        self.action_required = action_required
+        self.deferred_operation_count = deferred_operation_count
+        self.deferred_planned_bytes = deferred_planned_bytes
         self.target_states = (
             target_states
             if target_states is not None
@@ -6776,6 +6832,9 @@ class _FakeTerminalRunDashboardEngineClient(_FakeBackupStartDashboardEngineClien
                             "planned_bytes": 3072,
                             "warning_count": self.warning_count,
                             "error_count": self.error_count,
+                            "action_required": self.action_required,
+                            "deferred_operation_count": self.deferred_operation_count,
+                            "deferred_planned_bytes": self.deferred_planned_bytes,
                             "targets": self._target_payloads(),
                         }
                     ],
@@ -6816,6 +6875,9 @@ class _FakeTerminalRunDashboardEngineClient(_FakeBackupStartDashboardEngineClien
                             "transferred_bytes": self.completed_bytes,
                             "warning_count": self.warning_count,
                             "error_count": self.error_count,
+                            "action_required": self.action_required,
+                            "deferred_operation_count": self.deferred_operation_count,
+                            "deferred_planned_bytes": self.deferred_planned_bytes,
                             "active_relative_path": None,
                             "active_phase": None,
                             "active_planned_bytes": None,

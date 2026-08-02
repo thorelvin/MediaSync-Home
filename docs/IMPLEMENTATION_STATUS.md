@@ -1,5 +1,25 @@
 # Implementeringsstatus
 
+Update 2026-08-02: `AUTO-002` automation policy is now part of every standard
+backup revision and immutable sealed-plan checksum. The supported policy values
+are `NEW_FILES_ONLY` (the safe UI default),
+`NEW_AND_CHANGED_WITH_VERSIONS`, and `ANALYZE_ONLY`; legacy draft/job JSON that
+predates the field loads conservatively as new-files-only. Catalog migration 53
+adds the immutable deferred-operation type to sealed operation rows, and
+operation schema 4 checksum-binds that field together with the plan execution
+policy. The planner keeps hard safety blocks blocked, turns policy-excluded
+copy/create/replace work into explicit `DEFER_AUTOMATION_POLICY` rows with the
+original operation type and source/target preconditions, and admits only the
+remaining executable subset. Analyze-only plans never auto-start. A mixed safe
+run counts and executes only its safe operations, preserves deferred rows in the
+sealed plan, and terminates as `Completed - action required` / `Fullført -
+handling nødvendig` with exact deferred counts and bytes. A real SQLite and
+filesystem executor test proves that a new file is copied while a changed
+existing target remains byte-for-byte untouched and never enters the recovery
+journal. Unit, migration, persistence, IPC/read-model and compact Qt tests cover
+checksum drift, old JSON, policy admission, durable action metadata,
+localization, wrapping, and zero horizontal overflow.
+
 Update 2026-08-02: `UX-005` now has end-to-end policy and GUI evidence for the
 established-backup primary action. One click requests a fresh analysis with
 safe-start intent; an all-low-risk absent-target copy/create plan queues its run

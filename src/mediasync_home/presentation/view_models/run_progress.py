@@ -48,6 +48,9 @@ class RunProgressViewState:
     bytes_per_second: float | None
     eta_seconds: int | None
     stop_requested: bool
+    action_required: bool = False
+    deferred_operation_count: int = 0
+    deferred_planned_bytes: int = 0
     targets: tuple[RunTargetProgressViewState, ...] = ()
     read_model_available: bool = False
     run_found: bool = False
@@ -93,6 +96,9 @@ def empty_run_progress_state() -> RunProgressViewState:
         bytes_per_second=None,
         eta_seconds=None,
         stop_requested=False,
+        action_required=False,
+        deferred_operation_count=0,
+        deferred_planned_bytes=0,
     )
 
 
@@ -165,6 +171,13 @@ def run_progress_from_response(
         bytes_per_second=_non_negative_float(snapshot.get("bytes_per_second")),
         eta_seconds=_non_negative_int(snapshot.get("eta_seconds")),
         stop_requested=bool(snapshot.get("stop_requested", False)),
+        action_required=bool(snapshot.get("action_required", False)),
+        deferred_operation_count=(
+            _non_negative_int(snapshot.get("deferred_operation_count")) or 0
+        ),
+        deferred_planned_bytes=(
+            _non_negative_int(snapshot.get("deferred_planned_bytes")) or 0
+        ),
         targets=targets,
         read_model_available=available,
         run_found=found,

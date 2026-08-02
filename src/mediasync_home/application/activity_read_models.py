@@ -58,6 +58,9 @@ class RunActivitySummary:
     planned_bytes: int
     warning_count: int
     error_count: int
+    action_required: bool = False
+    deferred_operation_count: int = 0
+    deferred_planned_bytes: int = 0
     targets: tuple[RunTargetActivitySummary, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
@@ -74,6 +77,9 @@ class RunActivitySummary:
             "planned_bytes": self.planned_bytes,
             "warning_count": self.warning_count,
             "error_count": self.error_count,
+            "action_required": self.action_required,
+            "deferred_operation_count": self.deferred_operation_count,
+            "deferred_planned_bytes": self.deferred_planned_bytes,
             "targets": [target.to_dict() for target in self.targets],
         }
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -57,6 +58,49 @@ def test_sqlite_plan_store_persists_sealed_plan(tmp_path: Path) -> None:
             WHERE plan_id = 'plan-a' AND operation_id = 'op-copy'
             """
         ).fetchone() == ("target-a",)
+
+
+def test_sqlite_plan_store_round_trips_deferred_operation_type(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_plan_parent_rows(connection)
+        base = _sealed_plan()
+        deferred = replace(
+            base.operations[0],
+            operation_type=PlanOperationType.DEFER_AUTOMATION_POLICY,
+            deferred_operation_type=PlanOperationType.REPLACE_CHANGED,
+            target_precondition_kind=TargetPreconditionKind.MATCH_FINGERPRINT,
+            reason_code="REPLACE_WITH_VERSION",
+            risk_level=PlanRiskLevel.MEDIUM,
+        )
+        plan = seal_plan(
+            plan_id=base.plan_id,
+            analysis_id=base.analysis_id,
+            job_id=base.job_id,
+            job_revision_id=base.job_revision_id,
+            endpoints=(
+                replace(base.endpoints[0], planned_operations=0, planned_bytes=0),
+            ),
+            operations=(deferred,),
+            execution_policy="NEW_FILES_ONLY",
+        )
+        store = SqlitePlanStore(connection)
+
+        store.save_sealed_plan(plan)
+        loaded = store.load_sealed_plan(plan.plan_id)
+        page = store.page_plan_operations(
+            PlanOperationPageQuery(plan_id=plan.plan_id, limit=10)
+        )
+
+        assert loaded == plan
+        assert loaded is not None
+        assert loaded.operations[0].deferred_operation_type is (
+            PlanOperationType.REPLACE_CHANGED
+        )
+        assert page.operations[0].deferred_operation_type is (
+            PlanOperationType.REPLACE_CHANGED
+        )
 
 
 def test_sqlite_plan_store_joins_and_rolls_back_with_outer_transaction(
