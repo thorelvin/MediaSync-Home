@@ -45,6 +45,18 @@ QLabel#engineDetailLabel {{
     color: {tokens.text_muted};
 }}
 
+QLabel#setupEditConsequence[statusKind="ready"] {{
+    color: {tokens.success};
+}}
+
+QLabel#setupEditConsequence[statusKind="warning"] {{
+    color: {tokens.warning};
+}}
+
+QLabel#setupEditConsequence[statusKind="blocked"] {{
+    color: {tokens.danger};
+}}
+
 QLabel#engineStatusChip {{
     border: {tokens.border_hairline}px solid {tokens.border};
     border-radius: {tokens.radius_sm}px;

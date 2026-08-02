@@ -10,6 +10,10 @@ from uuid import uuid4
 
 import pytest
 
+from mediasync_home.application.selected_directory_identity import (
+    SelectedDirectoryProbeEvidence,
+    StorageIdentityTrust,
+)
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.protocol import (
     MAX_FRAME_BYTES,
@@ -108,6 +112,44 @@ def test_named_pipe_status_query_succeeds_after_handshake() -> None:
     assert status.request_id is not None
     assert handshake.request_id != status.request_id
     assert status.payload["host_status"]["role"] == ProcessRole.ENGINE_HOST.value
+
+
+def test_named_pipe_selected_directory_identity_query_roundtrips() -> None:
+    service = EngineHostIpcService(win32_named_pipe.current_user_policy())
+    service.selected_directory_identity_probe = _SelectedDirectoryIdentityProbe()
+    pipe_name = win32_named_pipe.make_pipe_name(
+        installation_id="directory-identity-test",
+        suffix=uuid4().hex,
+    )
+    server = win32_named_pipe.Win32NamedPipeServer(
+        pipe_name=pipe_name,
+        service=service,
+    )
+    client = win32_named_pipe.Win32NamedPipeClient(pipe_name=pipe_name)
+
+    handshake = _roundtrip(server, client.connect)
+    response = _roundtrip(
+        server,
+        lambda: client.query_selected_directory_identities(
+            path_labels=("C:/Pictures", "C:/Backup")
+        ),
+    )
+
+    assert handshake.status is IpcStatus.ACCEPTED
+    assert response.status is IpcStatus.ACCEPTED
+    identities = response.payload["selected_directory_identities"]
+    assert identities["relationships"][0]["kind"] == "SAME_PHYSICAL_DEVICE"
+
+
+class _SelectedDirectoryIdentityProbe:
+    def inspect_directory(self, path_label: str) -> SelectedDirectoryProbeEvidence:
+        suffix = path_label.rsplit("/", 1)[-1]
+        return SelectedDirectoryProbeEvidence(
+            object_identity_key=f"object:{suffix}",
+            final_path=rf"\\?\Volume{{shared}}\{suffix}",
+            storage_identity_key="disk-a",
+            storage_identity_trust=StorageIdentityTrust.CONFIRMED,
+        )
 
 
 def test_named_pipe_backup_overview_query_succeeds_after_handshake() -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from math import ceil
 from secrets import compare_digest
@@ -62,6 +62,7 @@ from mediasync_home.application.job_creation import (
     JobCreationOutcome,
     JobCreationCommandName,
     JobCreationPayloadError,
+    JobCreationReadiness,
     SealedStandardBackupJob,
     StandardBackupJobCatalog,
     StandardBackupJobIdFactory,
@@ -154,6 +155,12 @@ from mediasync_home.application.plans import (
     PlanStore,
 )
 from mediasync_home.application.runtime_status import RuntimeStatus, startup_status
+from mediasync_home.application.selected_directory_identity import (
+    SelectedDirectoryIdentityError,
+    SelectedDirectoryIdentityProbe,
+    bind_standard_backup_draft_directory_identities,
+    query_selected_directory_identities,
+)
 from mediasync_home.application.schedules import ScheduleStore
 from mediasync_home.application.runs import (
     RunCommandName,
@@ -307,6 +314,7 @@ class EngineHostIpcService:
         repr=False,
         compare=False,
     )
+    selected_directory_identity_probe: SelectedDirectoryIdentityProbe | None = None
     job_draft_store: JobDraftStore | None = None
     standard_backup_job_catalog: StandardBackupJobCatalog | None = None
     standard_backup_job_revision_catalog: (
@@ -429,6 +437,28 @@ class EngineHostIpcService:
         response_payload: dict[str, object] = {"host_status": self.status.to_dict()}
         self._add_state_capacity_payload(response_payload)
         return IpcResponse.accepted(response_payload)
+
+    def query_selected_directory_identities(
+        self,
+        client_instance_id: str,
+        *,
+        path_labels: tuple[str, ...],
+    ) -> IpcResponse:
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
+        if self.selected_directory_identity_probe is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+        try:
+            result = query_selected_directory_identities(
+                path_labels=path_labels,
+                probe=self.selected_directory_identity_probe,
+            )
+        except SelectedDirectoryIdentityError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        return IpcResponse.accepted(
+            {"selected_directory_identities": result.to_dict()}
+        )
 
     def query_backup_overview(
         self,
@@ -3012,12 +3042,34 @@ class EngineHostIpcService:
         identity: VerifiedClientIdentity,
         command: UpdateStandardBackupJobCommand,
     ) -> IpcResponse:
+        prepared_command = command
+        identity_validation_code: str | None = None
+        existing_receipt = (
+            self.command_receipt_store.load_command_receipt(
+                envelope.idempotency_key
+            )
+            if self.command_receipt_store is not None
+            else None
+        )
+        if (
+            self.selected_directory_identity_probe is not None
+            and self.standard_backup_job_revision_catalog is not None
+            and (
+                existing_receipt is None
+                or existing_receipt.state is CommandReceiptState.RECEIVED
+            )
+        ):
+            try:
+                prepared_command = self._bind_job_edit_directory_identities(command)
+            except SelectedDirectoryIdentityError as exc:
+                identity_validation_code = str(exc)
         try:
             response = self._run_command_effect_transaction(
                 lambda: self._dispatch_update_standard_backup_job_in_transaction(
                     envelope,
                     identity,
-                    command,
+                    prepared_command,
+                    identity_validation_code=identity_validation_code,
                 )
             )
         except (JobScheduleInvalidationError, ValueError) as exc:
@@ -3044,14 +3096,50 @@ class EngineHostIpcService:
         return self._enqueue_analysis_after_job_edit(
             response,
             envelope=envelope,
-            command=command,
+            command=prepared_command,
         )
+
+    def _bind_job_edit_directory_identities(
+        self,
+        command: UpdateStandardBackupJobCommand,
+    ) -> UpdateStandardBackupJobCommand:
+        assert self.standard_backup_job_revision_catalog is not None
+        assert self.selected_directory_identity_probe is not None
+        current = self.standard_backup_job_revision_catalog.load_standard_backup_job(
+            command.job_id
+        )
+        draft = command.draft
+        if (
+            current is not None
+            and current.job_revision_id == command.expected_job_revision_id
+            and current.source_path_label == draft.source_path_label
+            and tuple(target.path_label for target in current.targets)
+            == tuple(target.path_label for target in draft.targets)
+        ):
+            draft = replace(
+                draft,
+                targets=tuple(
+                    replace(
+                        target,
+                        independent_device_id=current.targets[index].independent_device_id,
+                    )
+                    for index, target in enumerate(draft.targets)
+                ),
+            )
+        else:
+            draft = bind_standard_backup_draft_directory_identities(
+                draft=draft,
+                probe=self.selected_directory_identity_probe,
+            )
+        return replace(command, draft=draft)
 
     def _dispatch_update_standard_backup_job_in_transaction(
         self,
         envelope: IpcCommandEnvelope,
         identity: VerifiedClientIdentity,
         command: UpdateStandardBackupJobCommand,
+        *,
+        identity_validation_code: str | None = None,
     ) -> IpcResponse:
         if (
             self.command_receipt_store is None
@@ -3073,6 +3161,24 @@ class EngineHostIpcService:
         if receipt is None:
             return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
         if receipt.state is not CommandReceiptState.RECEIVED:
+            if receipt.state is CommandReceiptState.REJECTED:
+                outcome = JobEditingOutcome(
+                    saved=False,
+                    validation_code=(
+                        receipt.rejection_reason
+                        or IpcReason.COMMAND_PRECONDITION_FAILED.value
+                    ),
+                    next_action="Refresh the job and retry saving the edit.",
+                    idempotent_replay=True,
+                )
+                payload = _job_editing_response_payload(
+                    envelope=envelope,
+                    command=command,
+                    mutations_enabled=True,
+                    outcome=outcome,
+                )
+                self._add_receipt_payload(payload, envelope.idempotency_key)
+                return IpcResponse.rejected(_receipt_rejection_reason(receipt), payload)
             outcome = update_standard_backup_job_from_draft(
                 command=command,
                 catalog=self.standard_backup_job_revision_catalog,
@@ -3089,12 +3195,32 @@ class EngineHostIpcService:
                 endpoint_set=self._load_job_edit_endpoint_set(outcome),
             )
             self._add_receipt_payload(payload, envelope.idempotency_key)
-            if receipt.state is CommandReceiptState.REJECTED:
-                return IpcResponse.rejected(_receipt_rejection_reason(receipt), payload)
             return IpcResponse.accepted(payload)
 
         receipt = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
         self.command_receipt_store.update_command_receipt(receipt)
+        if identity_validation_code is not None:
+            outcome = JobEditingOutcome(
+                saved=False,
+                validation_code=identity_validation_code,
+                next_action=(
+                    "Choose source and target folders that are not aliases or nested."
+                ),
+            )
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.REJECTED,
+                rejection_reason=identity_validation_code,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+            payload = _job_editing_response_payload(
+                envelope=envelope,
+                command=command,
+                mutations_enabled=True,
+                outcome=outcome,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(IpcReason.COMMAND_PRECONDITION_FAILED, payload)
         self.job_draft_store.save_standard_backup_draft(command.draft)
         outcome = update_standard_backup_job_from_draft(
             command=command,
@@ -3108,7 +3234,7 @@ class EngineHostIpcService:
             receipt = transition_command_receipt(
                 receipt,
                 CommandReceiptState.REJECTED,
-                rejection_reason=IpcReason.COMMAND_PRECONDITION_FAILED.value,
+                rejection_reason=outcome.validation_code,
             )
             self.command_receipt_store.update_command_receipt(receipt)
             payload = _job_editing_response_payload(
@@ -3266,9 +3392,39 @@ class EngineHostIpcService:
         identity: VerifiedClientIdentity,
         command: CreateStandardBackupJobCommand,
     ) -> IpcResponse:
+        prepared_command = command
+        identity_validation_code: str | None = None
+        existing_receipt = (
+            self.command_receipt_store.load_command_receipt(
+                envelope.idempotency_key
+            )
+            if self.command_receipt_store is not None
+            else None
+        )
+        if (
+            command.inline_draft is not None
+            and self.selected_directory_identity_probe is not None
+            and (
+                existing_receipt is None
+                or existing_receipt.state is CommandReceiptState.RECEIVED
+            )
+        ):
+            try:
+                prepared_command = replace(
+                    command,
+                    inline_draft=bind_standard_backup_draft_directory_identities(
+                        draft=command.inline_draft,
+                        probe=self.selected_directory_identity_probe,
+                    ),
+                )
+            except SelectedDirectoryIdentityError as exc:
+                identity_validation_code = str(exc)
         response = self._run_command_effect_transaction(
             lambda: self._dispatch_create_standard_backup_job_in_transaction(
-                envelope, identity, command
+                envelope,
+                identity,
+                prepared_command,
+                identity_validation_code=identity_validation_code,
             )
         )
         response = self._refresh_endpoint_classification_after_job_command(response)
@@ -3453,6 +3609,8 @@ class EngineHostIpcService:
         envelope: IpcCommandEnvelope,
         identity: VerifiedClientIdentity,
         command: CreateStandardBackupJobCommand,
+        *,
+        identity_validation_code: str | None = None,
     ) -> IpcResponse:
         if (
             self.command_receipt_store is None
@@ -3476,6 +3634,35 @@ class EngineHostIpcService:
 
         receipt = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
         self.command_receipt_store.update_command_receipt(receipt)
+        if identity_validation_code is not None:
+            outcome = JobCreationOutcome(
+                created=False,
+                idempotent_replay=False,
+                readiness=JobCreationReadiness(
+                    draft_id=command.draft_id,
+                    draft_found=True,
+                    draft_valid=False,
+                    validation_codes=(identity_validation_code,),
+                    next_action=(
+                        "Choose source and target folders that are not aliases or nested."
+                    ),
+                ),
+            )
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.REJECTED,
+                rejection_reason=IpcReason.COMMAND_PRECONDITION_FAILED.value,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+            payload = _create_standard_backup_job_response_payload(
+                envelope=envelope,
+                draft_id=command.draft_id,
+                mutations_enabled=True,
+                recognized=True,
+                outcome=outcome,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(IpcReason.COMMAND_PRECONDITION_FAILED, payload)
         if command.inline_draft is not None:
             self.job_draft_store.save_standard_backup_draft(command.inline_draft)
         outcome = create_standard_backup_job_from_draft(

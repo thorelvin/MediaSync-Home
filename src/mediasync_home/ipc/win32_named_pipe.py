@@ -813,6 +813,11 @@ class Win32NamedPipeServer:
             return self.service.handshake(request, identity)
         if message_type == "QUERY_STATUS":
             return self.service.query_status(str(request["client_instance_id"]))
+        if message_type == "QUERY_SELECTED_DIRECTORY_IDENTITIES":
+            return self.service.query_selected_directory_identities(
+                str(request["client_instance_id"]),
+                path_labels=_optional_query_str_tuple(request.get("path_labels")),
+            )
         if message_type == "QUERY_BACKUP_OVERVIEW":
             return self.service.query_backup_overview(
                 str(request["client_instance_id"]),
@@ -965,6 +970,19 @@ class Win32NamedPipeClient:
             {
                 "message_type": "QUERY_STATUS",
                 "client_instance_id": self.client_instance_id,
+            }
+        )
+
+    def query_selected_directory_identities(
+        self,
+        *,
+        path_labels: tuple[str, ...],
+    ) -> IpcResponse:
+        return self._roundtrip(
+            {
+                "message_type": "QUERY_SELECTED_DIRECTORY_IDENTITIES",
+                "client_instance_id": self.client_instance_id,
+                "path_labels": list(path_labels),
             }
         )
 

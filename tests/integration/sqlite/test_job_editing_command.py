@@ -6,6 +6,10 @@ from mediasync_home.application.job_drafts import (
     DraftTarget,
     StandardBackupJobDraft,
 )
+from mediasync_home.application.selected_directory_identity import (
+    SelectedDirectoryProbeEvidence,
+    StorageIdentityTrust,
+)
 from mediasync_home.application.runtime_status import local_writable_status
 from mediasync_home.composition.engine_host import build_engine_host_runtime
 from mediasync_home.domain.process_roles import ProcessRole
@@ -20,6 +24,25 @@ from mediasync_home.presentation.engine_client import EngineClient
 
 REQUEST_ID = "11111111-1111-4111-8111-111111111111"
 IDEMPOTENCY_KEY = "22222222-2222-4222-8222-222222222222"
+
+
+class _NeverSelectedDirectoryIdentityProbe:
+    def inspect_directory(self, path_label: str) -> SelectedDirectoryProbeEvidence:
+        raise AssertionError(f"unchanged roots must not be re-probed: {path_label}")
+
+
+class _AliasingSelectedDirectoryIdentityProbe:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def inspect_directory(self, path_label: str) -> SelectedDirectoryProbeEvidence:
+        self.calls += 1
+        return SelectedDirectoryProbeEvidence(
+            object_identity_key="same-directory-object",
+            final_path=path_label,
+            storage_identity_key="same-device",
+            storage_identity_trust=StorageIdentityTrust.CONFIRMED,
+        )
 
 
 def test_job_edit_command_rebinds_target_queues_check_and_replays_after_restart(
@@ -173,6 +196,179 @@ def test_job_edit_command_rebinds_target_queues_check_and_replays_after_restart(
         )
     finally:
         restarted.close()
+
+
+def test_job_edit_preserves_host_identity_for_unchanged_roots(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=local_writable_status(ProcessRole.ENGINE_HOST),
+        state_root=state_root,
+        installation_id="local-edit-identity-test",
+    )
+    try:
+        client = _client(runtime.service)
+        created = client.create_standard_backup_job(
+            draft=StandardBackupJobDraft(
+                draft_id="31313131-3131-4131-8131-313131313131",
+                source_name="Pictures",
+                source_path_label=str(source),
+                targets=(DraftTarget(name="Target", path_label=str(target)),),
+            ),
+            request_id="32323232-3232-4232-8232-323232323232",
+            idempotency_key="33333333-3333-4333-8333-333333333333",
+        )
+        assert created.status is IpcStatus.ACCEPTED
+        created_job = created.payload["job"]
+        assert isinstance(created_job, dict)
+        job_id = created_job["job_id"]
+        revision_id = created_job["job_revision_id"]
+        assert isinstance(job_id, str)
+        assert isinstance(revision_id, str)
+        catalog = runtime.service.standard_backup_job_revision_catalog
+        assert catalog is not None
+        current = catalog.load_standard_backup_job(job_id)
+        assert current is not None
+        authoritative_id = current.targets[0].independent_device_id
+        assert authoritative_id is not None
+        detail = client.get_backup_job_detail(job_id=job_id)
+        detail_job = detail.payload["backup_job_detail"]["job"]
+        assert isinstance(detail_job, dict)
+        row_version = detail_job["lifecycle_row_version"]
+        assert isinstance(row_version, int)
+        runtime.service.selected_directory_identity_probe = (
+            _NeverSelectedDirectoryIdentityProbe()
+        )
+
+        edited = client.update_standard_backup_job(
+            job_id=job_id,
+            expected_job_revision_id=revision_id,
+            expected_lifecycle_row_version=row_version,
+            draft=StandardBackupJobDraft(
+                draft_id="34343434-3434-4434-8434-343434343434",
+                source_name="Pictures renamed",
+                source_path_label=str(source),
+                targets=(
+                    DraftTarget(
+                        name="Target",
+                        path_label=str(target),
+                        independent_device_id="forged-client-device-id",
+                    ),
+                ),
+            ),
+            check_after_save=False,
+            request_id="35353535-3535-4535-8535-353535353535",
+            idempotency_key="36363636-3636-4636-8636-363636363636",
+        )
+
+        assert edited.status is IpcStatus.ACCEPTED
+        assert edited.payload["job_edit"]["changed_fields"] == ["name"]
+        assert edited.payload["job_edit"]["requires_full_check"] is False
+        saved = catalog.load_standard_backup_job(job_id)
+        assert saved is not None
+        assert saved.targets[0].independent_device_id == authoritative_id
+    finally:
+        runtime.close()
+
+
+def test_job_edit_durably_rejects_physical_alias_without_reprobe(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    source = tmp_path / "source"
+    first_target = tmp_path / "target-one"
+    alias_target = tmp_path / "target-alias"
+    source.mkdir()
+    first_target.mkdir()
+    alias_target.mkdir()
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=local_writable_status(ProcessRole.ENGINE_HOST),
+        state_root=state_root,
+        installation_id="local-edit-alias-test",
+    )
+    try:
+        client = _client(runtime.service)
+        created = client.create_standard_backup_job(
+            draft=StandardBackupJobDraft(
+                draft_id="37373737-3737-4737-8737-373737373737",
+                source_name="Pictures",
+                source_path_label=str(source),
+                targets=(
+                    DraftTarget(name="Target one", path_label=str(first_target)),
+                ),
+            ),
+            request_id="38383838-3838-4838-8838-383838383838",
+            idempotency_key="39393939-3939-4939-8939-393939393939",
+        )
+        assert created.status is IpcStatus.ACCEPTED
+        created_job = created.payload["job"]
+        assert isinstance(created_job, dict)
+        job_id = created_job["job_id"]
+        revision_id = created_job["job_revision_id"]
+        assert isinstance(job_id, str)
+        assert isinstance(revision_id, str)
+        detail = client.get_backup_job_detail(job_id=job_id)
+        detail_job = detail.payload["backup_job_detail"]["job"]
+        assert isinstance(detail_job, dict)
+        row_version = detail_job["lifecycle_row_version"]
+        assert isinstance(row_version, int)
+        assert runtime.catalog_connection is not None
+        revision_count = _count(runtime.catalog_connection, "job_revisions")
+        probe = _AliasingSelectedDirectoryIdentityProbe()
+        runtime.service.selected_directory_identity_probe = probe
+        edited_draft = StandardBackupJobDraft(
+            draft_id="40404040-4040-4040-8040-404040404040",
+            source_name="Pictures",
+            source_path_label=str(source),
+            targets=(DraftTarget(name="Alias", path_label=str(alias_target)),),
+        )
+
+        first = client.update_standard_backup_job(
+            job_id=job_id,
+            expected_job_revision_id=revision_id,
+            expected_lifecycle_row_version=row_version,
+            draft=edited_draft,
+            check_after_save=False,
+            request_id="41414141-4141-4141-8141-414141414141",
+            idempotency_key="42424242-4242-4242-8242-424242424242",
+        )
+        calls_after_first = probe.calls
+        replay = client.update_standard_backup_job(
+            job_id=job_id,
+            expected_job_revision_id=revision_id,
+            expected_lifecycle_row_version=row_version,
+            draft=edited_draft,
+            check_after_save=False,
+            request_id="43434343-4343-4343-8343-434343434343",
+            idempotency_key="42424242-4242-4242-8242-424242424242",
+        )
+
+        assert first.status is IpcStatus.REJECTED
+        assert first.payload["job_edit"]["validation_code"] == (
+            "STANDARD_BACKUP_JOB_PHYSICAL_ROOT_OVERLAP"
+        )
+        assert replay.status is IpcStatus.REJECTED
+        assert replay.payload["job_edit"]["validation_code"] == (
+            "STANDARD_BACKUP_JOB_PHYSICAL_ROOT_OVERLAP"
+        )
+        assert replay.payload["job_edit"]["idempotent_replay"] is True
+        assert calls_after_first == 2
+        assert probe.calls == calls_after_first
+        assert _count(runtime.catalog_connection, "job_revisions") == revision_count
+        assert runtime.service.job_draft_store is not None
+        assert (
+            runtime.service.job_draft_store.load_standard_backup_draft(
+                edited_draft.draft_id
+            )
+            is None
+        )
+    finally:
+        runtime.close()
 
 
 def test_job_edit_command_rejects_safety_changes_during_active_run(

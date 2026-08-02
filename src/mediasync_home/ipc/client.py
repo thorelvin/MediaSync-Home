@@ -49,6 +49,18 @@ class InProcessIpcClient:
     def query_status(self) -> IpcResponse:
         return self._correlated_response(self.service.query_status(self.client_instance_id))
 
+    def query_selected_directory_identities(
+        self,
+        *,
+        path_labels: tuple[str, ...],
+    ) -> IpcResponse:
+        return self._correlated_response(
+            self.service.query_selected_directory_identities(
+                self.client_instance_id,
+                path_labels=path_labels,
+            )
+        )
+
     def query_backup_overview(
         self,
         *,

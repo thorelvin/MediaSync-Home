@@ -31,6 +31,9 @@ from mediasync_home.adapters.local_snapshot_scanner import (
 )
 from mediasync_home.adapters.local_state_capacity import LocalStateCapacityProbe
 from mediasync_home.adapters.robocopy import RobocopyStagingTransferAdapter
+from mediasync_home.adapters.selected_directory_identity import (
+    LocalSelectedDirectoryIdentityProbe,
+)
 from mediasync_home.adapters.runtime_policy import current_process_runtime_policy
 from mediasync_home.adapters.staging import LocalFileStagingTransferAdapter
 from mediasync_home.adapters.system_clock import SystemClock
@@ -1658,6 +1661,9 @@ def build_engine_host_runtime(
                 authorization,
                 status=service_status,
                 installation_id=installation_id,
+                selected_directory_identity_probe=(
+                    LocalSelectedDirectoryIdentityProbe()
+                ),
             ),
             clock=runtime_clock,
         )
@@ -1892,6 +1898,7 @@ def build_engine_host_runtime(
             authorization,
             status=service_status,
             installation_id=installation_id,
+            selected_directory_identity_probe=LocalSelectedDirectoryIdentityProbe(),
             job_draft_store=job_drafts,
             standard_backup_job_catalog=standard_backup_jobs,
             standard_backup_job_revision_catalog=standard_backup_jobs,

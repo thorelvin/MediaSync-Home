@@ -308,6 +308,64 @@ class ShellText:
         return "En backup kjører. Du kan endre navnet, men kilde og mål er skrivebeskyttet til kjøringen er ferdig."
 
     @property
+    def setup_storage_checking(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Checking storage independence..."
+        return "Kontrollerer lagringsuavhengighet..."
+
+    @property
+    def setup_storage_overlap_blocked(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "A source or target folder is the same location, an alias, or nested. Remove the overlapping target to continue."
+        return "En kilde- eller målmappe er samme plassering, et alias eller nestet. Fjern det overlappende målet for å fortsette."
+
+    @property
+    def setup_storage_same_device_warning(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Some selected folders share one physical storage device. This reduces protection from device failure."
+        return "Noen valgte mapper deler én fysisk lagringsenhet. Dette gir svakere beskyttelse ved enhetsfeil."
+
+    @property
+    def setup_storage_same_logical_warning(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Some selected folders share one logical storage domain; physical independence is not confirmed."
+        return "Noen valgte mapper deler ett logisk lagringsområde; fysisk uavhengighet er ikke bekreftet."
+
+    @property
+    def setup_storage_unavailable(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Storage independence could not be confirmed yet."
+        return "Lagringsuavhengighet kunne ikke bekreftes ennå."
+
+    def setup_storage_summary(
+        self,
+        *,
+        target_count: int,
+        confirmed_device_count: int,
+        unknown_target_count: int,
+    ) -> str:
+        if self.language_tooltip_prefix == "Language":
+            targets = "target" if target_count == 1 else "targets"
+            devices = (
+                "confirmed independent storage device"
+                if confirmed_device_count == 1
+                else "confirmed independent storage devices"
+            )
+            return (
+                f"{target_count} {targets} | {confirmed_device_count} {devices} | "
+                f"{unknown_target_count} unknown"
+            )
+        devices = (
+            "bekreftet uavhengig lagringsenhet"
+            if confirmed_device_count == 1
+            else "bekreftede uavhengige lagringsenheter"
+        )
+        return (
+            f"{target_count} mål | {confirmed_device_count} {devices} | "
+            f"{unknown_target_count} ukjent"
+        )
+
+    @property
     def unsaved_edit_title(self) -> str:
         return "Unsaved job changes" if self.language_tooltip_prefix == "Language" else "Ulagrede jobbendringer"
 

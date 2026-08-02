@@ -28,6 +28,18 @@ def test_engine_client_forwards_background_cancellation_binding() -> None:
     assert ipc_client.bindings == [cancellation, None]
 
 
+def test_engine_client_queries_selected_directory_identities() -> None:
+    ipc_client = _DirectoryIdentityIpcClient()
+    client = EngineClient(ipc_client)  # type: ignore[arg-type]
+
+    response = client.get_selected_directory_identities(
+        path_labels=("C:/Pictures", "E:/Backup")
+    )
+
+    assert response.status.value == "ACCEPTED"
+    assert ipc_client.path_labels == ("C:/Pictures", "E:/Backup")
+
+
 def test_engine_client_submits_reviewed_standard_backup_draft() -> None:
     ipc_client = _RecordingIpcClient()
     client = EngineClient(ipc_client)  # type: ignore[arg-type]
@@ -377,6 +389,19 @@ class _CancellationBindingIpcClient:
 
     def bind_background_cancellation(self, cancellation: Event | None) -> None:
         self.bindings.append(cancellation)
+
+
+class _DirectoryIdentityIpcClient:
+    def __init__(self) -> None:
+        self.path_labels: tuple[str, ...] = ()
+
+    def query_selected_directory_identities(
+        self,
+        *,
+        path_labels: tuple[str, ...],
+    ) -> IpcResponse:
+        self.path_labels = path_labels
+        return IpcResponse.accepted({"selected_directory_identities": {}})
 
 
 class _RestartedHostIpcClient:

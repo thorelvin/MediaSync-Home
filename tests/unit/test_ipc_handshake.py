@@ -102,6 +102,10 @@ from mediasync_home.application.runs import (
     StartedRunTarget,
 )
 from mediasync_home.application.schedules import ScheduleDefinition, ScheduleStore
+from mediasync_home.application.selected_directory_identity import (
+    SelectedDirectoryProbeEvidence,
+    StorageIdentityTrust,
+)
 from mediasync_home.application.snapshot_scanning import (
     SnapshotMaterializationRefreshReport,
 )
@@ -197,6 +201,36 @@ def _trigger_payload(
     }
 
 
+def _inline_creation_payload(
+    *,
+    independent_device_id: str | None,
+) -> dict[str, object]:
+    return {
+        "draft_id": "draft-identity",
+        "draft": {
+            "draft_id": "draft-identity",
+            "schema_version": 1,
+            "source_name": "Pictures",
+            "source_path_label": "C:/Users/Ada/Pictures",
+            "targets": [
+                {
+                    "name": "Backup",
+                    "path_label": "E:/Backup",
+                    "independent_device_id": independent_device_id,
+                }
+            ],
+            "defaults": {
+                "behavior": "UPDATE_BACKUP",
+                "file_selection": "ALL_USER_FILES",
+                "verification": "STANDARD",
+                "retention": "THIRTY_DAYS",
+                "extra_files": "KEEP_ON_TARGET",
+                "performance": "AUTO",
+            },
+        },
+    }
+
+
 def _identity(
     *,
     user_sid_hash: str = EXPECTED_USER,
@@ -236,6 +270,32 @@ class _InMemoryJobDraftStore(JobDraftStore):
 
     def load_standard_backup_draft(self, draft_id: str) -> StandardBackupJobDraft | None:
         return self._drafts.get(draft_id)
+
+
+class _SelectedDirectoryIdentityProbe:
+    def inspect_directory(self, path_label: str) -> SelectedDirectoryProbeEvidence:
+        suffix = path_label.rsplit("/", 1)[-1]
+        return SelectedDirectoryProbeEvidence(
+            object_identity_key=f"object:{suffix}",
+            final_path=rf"\\?\Volume{{shared}}\{suffix}",
+            storage_identity_key="disk-a",
+            storage_identity_trust=StorageIdentityTrust.CONFIRMED,
+        )
+
+
+class _AliasingSelectedDirectoryIdentityProbe:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def inspect_directory(self, path_label: str) -> SelectedDirectoryProbeEvidence:
+        del path_label
+        self.calls += 1
+        return SelectedDirectoryProbeEvidence(
+            object_identity_key="same-object",
+            final_path=r"\\?\Volume{shared}\Pictures",
+            storage_identity_key="disk-a",
+            storage_identity_trust=StorageIdentityTrust.CONFIRMED,
+        )
 
 
 class _FailingCommandEffectTransaction:
@@ -1126,6 +1186,48 @@ def test_handshake_and_status_publish_current_state_capacity() -> None:
 
     assert handshake.payload["state_capacity"] == capacity
     assert status.payload["state_capacity"] == capacity
+
+
+def test_selected_directory_identity_query_is_authorized_bounded_and_opaque() -> None:
+    service = _service()
+    service.selected_directory_identity_probe = _SelectedDirectoryIdentityProbe()
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.query_selected_directory_identities(
+        path_labels=("C:/Pictures", "C:/Backup")
+    )
+
+    assert response.status is IpcStatus.ACCEPTED
+    identities = response.payload["selected_directory_identities"]
+    assert [item["ordinal"] for item in identities["items"]] == [0, 1]
+    assert identities["relationships"] == [
+        {
+            "left_ordinal": 0,
+            "right_ordinal": 1,
+            "kind": "SAME_PHYSICAL_DEVICE",
+            "blocking": False,
+        }
+    ]
+    assert "disk-a" not in repr(identities)
+
+    invalid = ipc_client.query_selected_directory_identities(
+        path_labels=("a", "b", "c", "d", "e")
+    )
+    assert invalid.status is IpcStatus.REJECTED
+    assert invalid.reason is IpcReason.INVALID_FRAME
+
+
+def test_selected_directory_identity_query_requires_prior_handshake() -> None:
+    service = _service()
+    service.selected_directory_identity_probe = _SelectedDirectoryIdentityProbe()
+
+    response = _client(service=service).query_selected_directory_identities(
+        path_labels=("C:/Pictures",)
+    )
+
+    assert response.status is IpcStatus.REJECTED
+    assert response.reason is IpcReason.HANDSHAKE_REQUIRED
 
 
 def test_backup_overview_query_requires_prior_handshake() -> None:
@@ -2476,6 +2578,86 @@ def test_enabled_create_standard_backup_job_persists_job_and_succeeds_receipt() 
     assert catalog.load_standard_backup_job("job-a") is not None
     assert drafts.load_standard_backup_draft("draft-a") == draft
     assert id_factory.calls == 1
+
+
+def test_inline_job_creation_binds_engine_host_device_identity() -> None:
+    drafts = _InMemoryJobDraftStore()
+    catalog = _InMemoryStandardBackupJobCatalog()
+    receipts = _InMemoryCommandReceiptStore()
+    service = _service(mutations_enabled=True)
+    service.selected_directory_identity_probe = _SelectedDirectoryIdentityProbe()
+    service.job_draft_store = drafts
+    service.standard_backup_job_catalog = catalog
+    service.standard_backup_job_id_factory = _FixedStandardBackupJobIdFactory()
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    payload = _inline_creation_payload(independent_device_id="untrusted-client")
+
+    response = ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=payload,
+        payload_hash=canonical_command_payload_hash(payload),
+    )
+
+    saved = drafts.load_standard_backup_draft("draft-identity")
+    job = catalog.load_standard_backup_job("job-a")
+    assert response.status is IpcStatus.ACCEPTED
+    assert saved is not None and job is not None
+    assert saved.targets[0].independent_device_id != "untrusted-client"
+    assert saved.targets[0].independent_device_id is not None
+    assert len(saved.targets[0].independent_device_id or "") == 64
+    assert job.targets[0].independent_device_id == (
+        saved.targets[0].independent_device_id
+    )
+
+
+def test_inline_job_creation_durably_rejects_physical_alias_before_saving() -> None:
+    drafts = _InMemoryJobDraftStore()
+    catalog = _InMemoryStandardBackupJobCatalog()
+    receipts = _InMemoryCommandReceiptStore()
+    probe = _AliasingSelectedDirectoryIdentityProbe()
+    service = _service(mutations_enabled=True)
+    service.selected_directory_identity_probe = probe
+    service.job_draft_store = drafts
+    service.standard_backup_job_catalog = catalog
+    service.standard_backup_job_id_factory = _FixedStandardBackupJobIdFactory()
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    payload = _inline_creation_payload(independent_device_id="untrusted-client")
+    payload_digest = canonical_command_payload_hash(payload)
+
+    first = ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=payload,
+        payload_hash=payload_digest,
+    )
+    calls_after_first = probe.calls
+    second = ipc_client.submit_command(
+        JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+        request_id=REQUEST_ID_B,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=payload,
+        payload_hash=payload_digest,
+    )
+
+    receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
+    assert first.status is IpcStatus.REJECTED
+    assert first.reason is IpcReason.COMMAND_PRECONDITION_FAILED
+    assert first.payload["readiness"]["validation_codes"] == [
+        "STANDARD_BACKUP_JOB_PHYSICAL_ROOT_OVERLAP"
+    ]
+    assert second.status is IpcStatus.REJECTED
+    assert second.payload["idempotent_replay"] is True
+    assert probe.calls == calls_after_first
+    assert receipt is not None and receipt.state is CommandReceiptState.REJECTED
+    assert drafts.load_standard_backup_draft("draft-identity") is None
+    assert catalog.load_standard_backup_job("job-a") is None
 
 
 def test_command_storage_failure_is_sanitized_and_not_retried() -> None:

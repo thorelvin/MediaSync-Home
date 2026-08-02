@@ -156,6 +156,10 @@ from mediasync_home.presentation.view_models.run_progress import (
     empty_run_progress_state,
     run_progress_from_response,
 )
+from mediasync_home.presentation.view_models.selected_directory_identity import (
+    SelectedDirectoryIdentityViewState,
+    selected_directory_identity_from_response,
+)
 from mediasync_home.ipc.protocol import IpcResponse, IpcStatus
 
 
@@ -441,6 +445,14 @@ class BackupDraftSavingProvider(Protocol):
     ) -> IpcResponse: ...
 
 
+class SelectedDirectoryIdentityProvider(Protocol):
+    def get_selected_directory_identities(
+        self,
+        *,
+        path_labels: tuple[str, ...],
+    ) -> IpcResponse: ...
+
+
 class BackupJobEditingProvider(Protocol):
     def update_standard_backup_job(
         self,
@@ -616,6 +628,10 @@ class MediaSyncWindow(QMainWindow):
         self._setup_autosave_timer = QTimer(self)
         self._setup_autosave_timer.setSingleShot(True)
         self._setup_autosave_timer.timeout.connect(self._save_setup_draft)
+        self._setup_identity_state = SelectedDirectoryIdentityViewState.unavailable()
+        self._setup_identity_query_pending = False
+        self._setup_identity_query_attempted = False
+        self._setup_identity_query_generation = 0
         self._setup_edit_original_draft: BackupSetupDraft | None = None
         self._setup_edit_previous_draft: BackupSetupDraft | None = None
         self._setup_edit_previous_state: StandardBackupSetupViewState | None = None
@@ -1398,6 +1414,7 @@ class MediaSyncWindow(QMainWindow):
             self._setup_state = state.setup
             self._apply_backup_setup_state(self._setup_state)
             self._apply_local_preview_job_detail()
+            self._refresh_setup_directory_identities()
         if self._selected_job_id is None:
             self.apply_backup_job_detail(empty_backup_job_detail_state())
             self._clear_selected_plan_previews()
@@ -5659,17 +5676,51 @@ class MediaSyncWindow(QMainWindow):
         if self._setup_consequence_label is not None:
             locked = self._setup_edit_safety_locked()
             dirty = self._setup_edit_dirty()
-            self._setup_consequence_label.setText(
-                texts.edit_active_run_lock
-                if locked
-                else texts.edit_full_check_consequence
-                if self._setup_edit_requires_full_check()
-                else texts.edit_name_only_consequence
+            identity_text = self._setup_storage_identity_text()
+            identity_attention = bool(identity_text) and (
+                self._setup_identity_query_pending
+                or self._setup_identity_state.blocking
+                or not self._setup_identity_state.read_model_available
+                or self._setup_identity_state.same_physical_device
+                or self._setup_identity_state.same_logical_storage
+                or self._setup_identity_state.unknown_target_count > 0
             )
-            self._setup_consequence_label.setVisible(
-                editing
-                and (locked or (state.current_step is BackupSetupStep.REVIEW and dirty))
-            )
+            if editing:
+                if locked:
+                    self._setup_consequence_label.setText(texts.edit_active_run_lock)
+                elif identity_attention:
+                    self._setup_consequence_label.setText(identity_text)
+                else:
+                    self._setup_consequence_label.setText(
+                        texts.edit_full_check_consequence
+                        if self._setup_edit_requires_full_check()
+                        else texts.edit_name_only_consequence
+                    )
+                self._setup_consequence_label.setProperty(
+                    "statusKind",
+                    "blocked" if self._setup_identity_state.blocking else "warning",
+                )
+                self._setup_consequence_label.setVisible(
+                    locked
+                    or identity_attention
+                    or (state.current_step is BackupSetupStep.REVIEW and dirty)
+                )
+            else:
+                self._setup_consequence_label.setText(identity_text)
+                self._setup_consequence_label.setProperty(
+                    "statusKind",
+                    "blocked"
+                    if self._setup_identity_state.blocking
+                    else "warning"
+                    if (
+                        not self._setup_identity_state.read_model_available
+                        or self._setup_identity_state.same_physical_device
+                        or self._setup_identity_state.same_logical_storage
+                    )
+                    else "ready",
+                )
+                self._setup_consequence_label.setVisible(bool(identity_text))
+            _refresh_style(self._setup_consequence_label)
         self._lay_out_setup_actions(compact=self.width() < 1040)
         self._refresh_dashboard_geometry()
         QTimer.singleShot(0, self._refresh_dashboard_geometry)
@@ -5718,6 +5769,8 @@ class MediaSyncWindow(QMainWindow):
             self._setup_command_pending
             or self._setup_edit_command_pending
             or self._command_worker_active()
+            or self._setup_identity_query_pending
+            or self._setup_identity_state.blocking
         ):
             return False
         if self._is_setup_editing():
@@ -5790,6 +5843,7 @@ class MediaSyncWindow(QMainWindow):
             )
             self._apply_local_preview_job_detail()
             self._queue_setup_autosave()
+            self._refresh_setup_directory_identities()
             return
         if step is BackupSetupStep.TARGETS:
             if not self._setup_state.can_continue:
@@ -5861,6 +5915,7 @@ class MediaSyncWindow(QMainWindow):
         )
         self._apply_local_preview_job_detail()
         self._queue_setup_autosave()
+        self._refresh_setup_directory_identities()
 
     def _remove_setup_target(self, index: int) -> None:
         if (
@@ -5885,6 +5940,7 @@ class MediaSyncWindow(QMainWindow):
         )
         self._apply_local_preview_job_detail()
         self._queue_setup_autosave()
+        self._refresh_setup_directory_identities()
 
     def _handle_setup_back_action(self) -> None:
         if self._setup_request_id is not None or self._setup_edit_command_pending:
@@ -5982,6 +6038,8 @@ class MediaSyncWindow(QMainWindow):
             or not self._setup_edit_dirty()
             or self._setup_edit_command_pending
             or self._command_worker_active()
+            or self._setup_identity_query_pending
+            or self._setup_identity_state.blocking
             or not (self._setup_draft.source_name or "").strip()
             or not self._setup_draft.source_path_label
             or not 1 <= len(self._setup_draft.targets) <= 3
@@ -6036,6 +6094,7 @@ class MediaSyncWindow(QMainWindow):
         self._setup_edit_idempotency_key = None
         self._setup_edit_navigation_after_save = None
         self._setup_draft = draft
+        self._reset_setup_directory_identity_query()
         self._force_navigation_row(0)
         self._apply_local_setup_draft(
             BackupSetupStep.SOURCE,
@@ -6075,6 +6134,7 @@ class MediaSyncWindow(QMainWindow):
             reveal_action=False,
         )
         self._apply_local_preview_job_detail()
+        self._refresh_setup_directory_identities()
 
     def _save_edited_job(self, *, check_after_save: bool) -> bool:
         job_id = self._setup_edit_job_id
@@ -6258,6 +6318,7 @@ class MediaSyncWindow(QMainWindow):
         self._setup_state = previous_state
         self._selected_job_id = selected_job_id
         self._apply_backup_setup_state(self._setup_state)
+        self._refresh_setup_directory_identities()
         if close_after_save:
             QTimer.singleShot(0, self.close)
             return
@@ -6269,6 +6330,173 @@ class MediaSyncWindow(QMainWindow):
             return False
         self._finish_job_edit(target_row=target_row)
         return True
+
+    def _setup_directory_paths(self) -> tuple[str, ...]:
+        source = self._setup_draft.source_path_label
+        if source is None:
+            return ()
+        return (source, *(target.path_label for target in self._setup_draft.targets))
+
+    def _reset_setup_directory_identity_query(self) -> None:
+        self._setup_identity_query_generation += 1
+        self._setup_identity_query_pending = False
+        self._setup_identity_query_attempted = False
+        self._setup_identity_state = SelectedDirectoryIdentityViewState.unavailable()
+        if self._background_queries is not None:
+            self._background_queries.cancel("setup-directory-identities")
+
+    def _apply_setup_identity_feedback(self) -> None:
+        self._apply_backup_setup_state(self._setup_state)
+        QTimer.singleShot(0, self._settle_setup_layout)
+
+    def _refresh_setup_directory_identities(self) -> None:
+        paths = self._setup_directory_paths()
+        self._reset_setup_directory_identity_query()
+        generation = self._setup_identity_query_generation
+        if not paths:
+            self._apply_setup_identity_feedback()
+            return
+        self._setup_identity_query_attempted = True
+        if (
+            self._engine_client is None
+            or not hasattr(
+                self._engine_client,
+                "get_selected_directory_identities",
+            )
+        ):
+            self._apply_setup_identity_feedback()
+            return
+
+        self._setup_identity_query_pending = True
+        self._apply_setup_identity_feedback()
+
+        def query(client: object) -> object:
+            return cast(
+                SelectedDirectoryIdentityProvider,
+                client,
+            ).get_selected_directory_identities(path_labels=paths)
+
+        def accept(value: object) -> None:
+            self._accept_setup_directory_identities(
+                cast(IpcResponse, value),
+                paths=paths,
+                generation=generation,
+            )
+
+        def reject(_error: Exception) -> None:
+            self._reject_setup_directory_identities(
+                paths=paths,
+                generation=generation,
+            )
+
+        if self._background_queries is not None:
+            submitted = self._background_queries.submit(
+                key="setup-directory-identities",
+                operation=query,
+                on_result=accept,
+                on_error=reject,
+            )
+            if not submitted:
+                reject(RuntimeError("setup directory identity query unavailable"))
+            return
+        try:
+            accept(query(self._engine_client))
+        except Exception as exc:
+            reject(exc)
+
+    def _accept_setup_directory_identities(
+        self,
+        response: IpcResponse,
+        *,
+        paths: tuple[str, ...],
+        generation: int,
+    ) -> None:
+        if (
+            generation != self._setup_identity_query_generation
+            or paths != self._setup_directory_paths()
+        ):
+            return
+        state = selected_directory_identity_from_response(
+            response,
+            expected_count=len(paths),
+        )
+        if not state.read_model_available:
+            self._reject_setup_directory_identities(
+                paths=paths,
+                generation=generation,
+            )
+            return
+        self._setup_identity_query_pending = False
+        self._setup_identity_state = state
+        identities = {item.ordinal: item.independent_device_id for item in state.items}
+        updated_targets = tuple(
+            replace(
+                target,
+                independent_device_id=identities.get(index + 1),
+            )
+            for index, target in enumerate(self._setup_draft.targets)
+        )
+        if updated_targets != self._setup_draft.targets:
+            self._setup_draft = replace(
+                self._setup_draft,
+                targets=updated_targets,
+            )
+            self._reset_setup_edit_command_identity()
+            self._setup_state = build_standard_backup_setup_state(
+                self._setup_draft,
+                current_step=self._setup_state.current_step,
+            )
+            self._queue_setup_autosave()
+            self._apply_local_preview_job_detail()
+        self._apply_setup_identity_feedback()
+
+    def _reject_setup_directory_identities(
+        self,
+        *,
+        paths: tuple[str, ...],
+        generation: int,
+    ) -> None:
+        if (
+            generation != self._setup_identity_query_generation
+            or paths != self._setup_directory_paths()
+        ):
+            return
+        self._setup_identity_query_pending = False
+        self._setup_identity_state = SelectedDirectoryIdentityViewState.unavailable()
+        self._apply_setup_identity_feedback()
+
+    def _setup_storage_identity_text(self) -> str:
+        target_count = len(self._setup_draft.targets)
+        if target_count == 0 or not self._setup_identity_query_attempted:
+            return ""
+        texts = self._texts()
+        if self._setup_identity_query_pending:
+            return texts.setup_storage_checking
+        state = self._setup_identity_state
+        confirmed_count = (
+            state.confirmed_target_device_count
+            if state.read_model_available
+            else 0
+        )
+        unknown_count = (
+            state.unknown_target_count
+            if state.read_model_available
+            else target_count
+        )
+        summary = texts.setup_storage_summary(
+            target_count=target_count,
+            confirmed_device_count=confirmed_count,
+            unknown_target_count=unknown_count,
+        )
+        if state.blocking:
+            return f"{summary}. {texts.setup_storage_overlap_blocked}"
+        if state.same_physical_device:
+            return f"{summary}. {texts.setup_storage_same_device_warning}"
+        if state.same_logical_storage:
+            return f"{summary}. {texts.setup_storage_same_logical_warning}"
+        if not state.read_model_available or unknown_count:
+            return f"{summary}. {texts.setup_storage_unavailable}"
+        return summary
 
     def _queue_setup_autosave(self, *, delay_ms: int = _SETUP_AUTOSAVE_DELAY_MS) -> None:
         if self._is_setup_editing():
@@ -6564,6 +6792,7 @@ class MediaSyncWindow(QMainWindow):
         self._setup_autosave_request_id = None
         self._setup_autosave_idempotency_key = None
         self._setup_autosave_retry_count = 0
+        self._reset_setup_directory_identity_query()
         self._setup_registration_retry_required = False
         self._selected_job_id = None
         self._jobs_page_offset = 0
@@ -9244,7 +9473,7 @@ class MediaSyncWindow(QMainWindow):
             QLayout.SizeConstraint.SetNoConstraint,
             QLayout.SizeConstraint.SetMinimumSize,
         )
-        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setContentsMargins(20, 15, 20, 15)
         layout.setHorizontalSpacing(18)
         layout.setVerticalSpacing(10)
 

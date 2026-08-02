@@ -1,5 +1,25 @@
 # Implementeringsstatus
 
+Update 2026-08-02: `SAF-005` and `UX-006` now have local draft-time physical
+storage identity feedback. After source or target selection, the Qt setup asks
+the Engine Host to inspect at most four directories on its bounded latest-wins
+query worker. The Windows adapter combines no-follow directory-handle identity,
+resolved final paths, and `IOCTL_STORAGE_GET_DEVICE_NUMBER` evidence; only a
+confirmed storage-device result becomes an opaque SHA-256 device ID across IPC.
+The setup blocks same-object aliases and resolved equal/nested roots, warns when
+separate roots share one confirmed physical device or only a logical storage
+domain, and separately renders configured targets, confirmed independent
+devices, and unknown targets in English and Norwegian. Missing probe evidence
+is shown as an unknown warning rather than being counted as independence.
+Engine Host create and edit commands ignore client-supplied device IDs, bind
+changed roots from fresh probe evidence before their SQLite transaction, and
+durably reject known physical overlap; unchanged-root edits preserve the
+previous Engine Host identity without requiring media to be online. Rejected
+edit replay is now side-effect free and does not re-probe. Unit, live Windows,
+IPC, named-pipe, SQLite, and compact 900x560 GUI tests cover the boundary and
+clipping behavior. SMB/NAS physical-topology equivalence beyond the confirmed
+local Windows evidence remains open.
+
 Update 2026-08-02: `UX-003` new-backup setup now has durable draft autosave
 and restart restoration. Source and target changes coalesce for 300 ms into one
 `SAVE_STANDARD_BACKUP_DRAFT` command at a time, with command-receipt
@@ -27,8 +47,8 @@ state, incomplete source context, reparse roots, or more than 1024 protected
 roots fail closed. The check runs again when a prepared registration intent is
 resumed, so a post-crash alias or root drift is blocked before filesystem
 mutation. Integration tests prove no control-area mutation, durable blocked
-reconciliation, and cross-job claim coverage. Draft-time physical identity
-feedback and the `UX-006` same-device warning remain open.
+reconciliation, and cross-job claim coverage. SMB/NAS alias and physical-device
+equivalence beyond local handle/device evidence remain open.
 
 Update 2026-08-02: `DB-003` scanner stability now includes bounded volatile-
 directory rescans. The local scanner retries an identity or metadata change at

@@ -1023,6 +1023,106 @@ def test_matching_autosaved_setup_is_restored_into_editable_state(qapp) -> None:
         window.deleteLater()
 
 
+def test_setup_warns_for_same_physical_device_without_blocking(qapp) -> None:
+    provider = _FakeSelectedDirectoryIdentityEngineClient(
+        relation_kind="SAME_PHYSICAL_DEVICE",
+        blocking=False,
+    )
+    window = build_main_window(
+        initial_state=_ready_state(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        qapp.processEvents()
+        choices = ["C:/Users/Ada/Pictures", "C:/MediaSyncBackup"]
+        window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
+        primary = window.findChild(QPushButton, "createBackupButton")
+        add_target = window.findChild(QToolButton, "addTargetButton")
+        identity_status = window.findChild(QLabel, "setupEditConsequence")
+        language = window.findChild(QToolButton, "languageSelectorButton")
+        dashboard_scroll = window.findChild(QScrollArea, "dashboardScrollArea")
+        assert primary is not None
+        assert add_target is not None
+        assert identity_status is not None
+        assert language is not None and language.menu() is not None
+        assert dashboard_scroll is not None
+
+        QTest.mouseClick(primary, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(add_target, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert primary.isEnabled() is True
+        assert identity_status.isVisible() is True
+        assert "1 bekreftet uavhengig lagringsenhet" in identity_status.text()
+        assert "deler én fysisk lagringsenhet" in identity_status.text()
+        assert window._setup_draft.targets[0].independent_device_id == "a" * 64
+        assert dashboard_scroll.horizontalScrollBar().maximum() == 0
+
+        language.menu().actions()[1].trigger()
+        qapp.processEvents()
+
+        assert "1 confirmed independent storage device" in identity_status.text()
+        assert "share one physical storage device" in identity_status.text()
+        assert dashboard_scroll.horizontalScrollBar().maximum() == 0
+
+        QTest.mouseClick(primary, Qt.MouseButton.LeftButton)
+        assert window._setup_state.current_step is BackupSetupStep.DEFAULTS
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_setup_blocks_handle_alias_and_recovers_after_target_removal(qapp) -> None:
+    provider = _FakeSelectedDirectoryIdentityEngineClient(
+        relation_kind="SAME_ROOT_ALIAS",
+        blocking=True,
+    )
+    window = build_main_window(
+        initial_state=_ready_state(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        qapp.processEvents()
+        choices = ["C:/Users/Ada/Pictures", "D:/PicturesAlias"]
+        window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
+        primary = window.findChild(QPushButton, "createBackupButton")
+        add_target = window.findChild(QToolButton, "addTargetButton")
+        remove_target = window.findChildren(QToolButton, "removeTargetButton")[0]
+        identity_status = window.findChild(QLabel, "setupEditConsequence")
+        dashboard_scroll = window.findChild(QScrollArea, "dashboardScrollArea")
+        assert primary is not None
+        assert add_target is not None
+        assert identity_status is not None
+        assert dashboard_scroll is not None
+
+        QTest.mouseClick(primary, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(add_target, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert primary.isEnabled() is False
+        assert "alias eller nestet" in identity_status.text()
+        assert identity_status.property("statusKind") == "blocked"
+        assert dashboard_scroll.horizontalScrollBar().maximum() == 0
+
+        QTest.mouseClick(remove_target, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert window._setup_draft.targets == ()
+        assert identity_status.isHidden() is True
+        assert dashboard_scroll.horizontalScrollBar().maximum() == 0
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_failed_target_registration_keeps_review_and_retry_without_clipping(
     qapp,
 ) -> None:
@@ -4695,6 +4795,42 @@ def test_job_editor_saves_name_only_change_without_full_check(qapp) -> None:
         window.deleteLater()
 
 
+def test_job_editor_explains_and_blocks_changed_root_alias(qapp) -> None:
+    provider = _AliasingJobEditingDashboardEngineClient()
+    window = _open_job_editor(qapp, provider)
+
+    try:
+        change_source = window.findChild(QToolButton, "changeSetupSourceButton")
+        primary = window.findChild(QPushButton, "createBackupButton")
+        identity_status = window.findChild(QLabel, "setupEditConsequence")
+        dashboard_scroll = window.findChild(QScrollArea, "dashboardScrollArea")
+        assert change_source is not None
+        assert primary is not None
+        assert identity_status is not None
+        assert dashboard_scroll is not None
+        assert provider.identity_queries == []
+        assert identity_status.isHidden()
+        window._choose_directory = lambda _title: "F:/PicturesAlias"
+
+        QTest.mouseClick(change_source, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert provider.identity_queries == [
+            ("F:/PicturesAlias", "E:/Backup"),
+        ]
+        assert primary.isEnabled() is False
+        assert identity_status.isVisible()
+        assert identity_status.property("statusKind") == "blocked"
+        assert "alias eller nestet" in identity_status.text()
+        assert dashboard_scroll.horizontalScrollBar().maximum() == 0
+        QTest.mouseClick(primary, Qt.MouseButton.LeftButton)
+        assert provider.edit_calls == []
+    finally:
+        window._setup_edit_original_draft = None
+        window.close()
+        window.deleteLater()
+
+
 def test_job_editor_target_change_stays_visible_and_can_save_without_check(
     qapp,
 ) -> None:
@@ -4955,6 +5091,50 @@ class _RejectingDraftAutosaveEngineClient(_FakeDraftAutosaveEngineClient):
             idempotency_key=idempotency_key,
         )
         return IpcResponse.accepted({"saved": False, "draft_id": draft.draft_id})
+
+
+class _FakeSelectedDirectoryIdentityEngineClient(_FakeBackupCreationEngineClient):
+    def __init__(self, *, relation_kind: str, blocking: bool) -> None:
+        super().__init__()
+        self.relation_kind = relation_kind
+        self.blocking = blocking
+        self.identity_queries: list[tuple[str, ...]] = []
+
+    def get_selected_directory_identities(
+        self,
+        *,
+        path_labels: tuple[str, ...],
+    ) -> IpcResponse:
+        self.identity_queries.append(path_labels)
+        relationships = (
+            [
+                {
+                    "left_ordinal": 0,
+                    "right_ordinal": 1,
+                    "kind": self.relation_kind,
+                    "blocking": self.blocking,
+                }
+            ]
+            if len(path_labels) > 1
+            else []
+        )
+        return IpcResponse.accepted(
+            {
+                "selected_directory_identities": {
+                    "items": [
+                        {
+                            "ordinal": ordinal,
+                            "status": "READY",
+                            "independent_device_id": "a" * 64,
+                            "storage_identity_trust": "CONFIRMED",
+                            "validation_code": None,
+                        }
+                        for ordinal in range(len(path_labels))
+                    ],
+                    "relationships": relationships,
+                }
+            }
+        )
 
 
 class _BlockingBackupCreationEngineClient(_FakeBackupCreationEngineClient):
@@ -5495,6 +5675,45 @@ class _FakeJobEditingDashboardEngineClient(_FakeDashboardEngineClient):
                     "job_revision_id": "job-rev-b",
                     "filter_set_id": "filter-a",
                 },
+            }
+        )
+
+
+class _AliasingJobEditingDashboardEngineClient(
+    _FakeJobEditingDashboardEngineClient
+):
+    def __init__(self) -> None:
+        super().__init__()
+        self.identity_queries: list[tuple[str, ...]] = []
+
+    def get_selected_directory_identities(
+        self,
+        *,
+        path_labels: tuple[str, ...],
+    ) -> IpcResponse:
+        self.identity_queries.append(path_labels)
+        return IpcResponse.accepted(
+            {
+                "selected_directory_identities": {
+                    "items": [
+                        {
+                            "ordinal": ordinal,
+                            "status": "READY",
+                            "independent_device_id": "b" * 64,
+                            "storage_identity_trust": "CONFIRMED",
+                            "validation_code": None,
+                        }
+                        for ordinal in range(len(path_labels))
+                    ],
+                    "relationships": [
+                        {
+                            "left_ordinal": 0,
+                            "right_ordinal": 1,
+                            "kind": "SAME_ROOT_ALIAS",
+                            "blocking": True,
+                        }
+                    ],
+                }
             }
         )
 

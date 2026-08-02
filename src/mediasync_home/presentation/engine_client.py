@@ -27,6 +27,13 @@ class StatusIpcClient(Protocol):
     def query_status(self) -> IpcResponse:
         pass
 
+    def query_selected_directory_identities(
+        self,
+        *,
+        path_labels: tuple[str, ...],
+    ) -> IpcResponse:
+        pass
+
     def query_backup_overview(
         self,
         *,
@@ -181,6 +188,17 @@ class EngineClient:
 
     def get_status(self) -> IpcResponse:
         return self._request_with_handshake_retry(self._ipc_client.query_status)
+
+    def get_selected_directory_identities(
+        self,
+        *,
+        path_labels: tuple[str, ...],
+    ) -> IpcResponse:
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_selected_directory_identities(
+                path_labels=path_labels,
+            )
+        )
 
     def get_backup_overview(
         self,
