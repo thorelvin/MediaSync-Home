@@ -868,6 +868,8 @@ def test_setup_target_controls_persist_multiple_reviewed_targets(qapp) -> None:
 
         assert provider.calls == ["connect", "create_standard_backup_job"]
         assert provider.draft is not None
+        assert provider.draft.draft_id != "local-setup-autosave-v1"
+        assert provider.autosave_draft_id == "local-setup-autosave-v1"
         assert provider.draft.source_path_label == "C:/Users/Ada/Pictures"
         assert [target.path_label for target in provider.draft.targets] == [
             "E:/MediaSyncBackup",
@@ -877,6 +879,145 @@ def test_setup_target_controls_persist_multiple_reviewed_targets(qapp) -> None:
         assert engine_detail.text() == (
             "Backupjobben og registreringen av skrivbart mål ble lagret."
         )
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_new_setup_autosaves_source_and_latest_target_selection(qapp) -> None:
+    provider = _FakeDraftAutosaveEngineClient()
+    window = build_main_window(
+        initial_state=_ready_state(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        choices = ["C:/Users/Ada/Pictures", "E:/MediaSyncBackup"]
+        window._choose_directory = lambda title: choices.pop(0)  # type: ignore[method-assign]
+        primary = window.findChild(QPushButton, "createBackupButton")
+        add_target = window.findChild(QToolButton, "addTargetButton")
+        assert primary is not None
+        assert add_target is not None
+
+        QTest.mouseClick(primary, Qt.MouseButton.LeftButton)
+        QTest.qWait(350)
+        qapp.processEvents()
+
+        assert len(provider.saved_drafts) == 1
+        assert provider.saved_drafts[0].draft_id == "local-setup-autosave-v1"
+        assert provider.saved_drafts[0].source_path_label == "C:/Users/Ada/Pictures"
+        assert provider.saved_drafts[0].targets == ()
+
+        QTest.mouseClick(add_target, Qt.MouseButton.LeftButton)
+        QTest.qWait(350)
+        qapp.processEvents()
+
+        assert len(provider.saved_drafts) == 2
+        assert tuple(
+            target.path_label for target in provider.saved_drafts[-1].targets
+        ) == ("E:/MediaSyncBackup",)
+        assert provider.save_identities[0] != provider.save_identities[1]
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_close_flushes_pending_setup_autosave(qapp) -> None:
+    provider = _FakeDraftAutosaveEngineClient()
+    window = build_main_window(
+        initial_state=_ready_state(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window._choose_directory = (  # type: ignore[method-assign]
+            lambda title: "C:/Users/Ada/Pictures"
+        )
+        primary = window.findChild(QPushButton, "createBackupButton")
+        assert primary is not None
+
+        QTest.mouseClick(primary, Qt.MouseButton.LeftButton)
+
+        assert window._setup_autosave_timer.isActive() is True
+        assert provider.saved_drafts == []
+        assert window.close() is True
+
+        qapp.processEvents()
+        assert len(provider.saved_drafts) == 1
+        assert provider.saved_drafts[0].source_path_label == (
+            "C:/Users/Ada/Pictures"
+        )
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_setup_autosave_retries_twice_then_surfaces_wrapped_warning(qapp) -> None:
+    provider = _RejectingDraftAutosaveEngineClient()
+    window = build_main_window(
+        initial_state=_ready_state(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(900, 560)
+        window.show()
+        qapp.processEvents()
+        window._choose_directory = (  # type: ignore[method-assign]
+            lambda title: "C:/Users/Ada/Pictures"
+        )
+        primary = window.findChild(QPushButton, "createBackupButton")
+        engine_detail = window.findChild(QLabel, "engineDetailLabel")
+        dashboard_scroll = window.findChild(QScrollArea, "dashboardScrollArea")
+        assert primary is not None
+        assert engine_detail is not None
+        assert dashboard_scroll is not None
+
+        QTest.mouseClick(primary, Qt.MouseButton.LeftButton)
+        window._setup_autosave_timer.stop()
+        for _ in range(3):
+            window._save_setup_draft()
+            window._setup_autosave_timer.stop()
+
+        assert len(provider.save_identities) == 3
+        assert len(set(provider.save_identities)) == 1
+        assert "Setup choices could not be saved yet" in engine_detail.text()
+        assert dashboard_scroll.horizontalScrollBar().maximum() == 0
+        assert window.close() is False
+        assert window.isVisible() is True
+    finally:
+        window.deleteLater()
+
+
+def test_matching_autosaved_setup_is_restored_into_editable_state(qapp) -> None:
+    provider = _RestoredDraftDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+    )
+
+    try:
+        window.show()
+        window.refresh_engine_status()
+        qapp.processEvents()
+        source = window.findChild(QLabel, "setupSourceValue")
+        target = window.findChild(QLabel, "setupTargetValue")
+        back = window.findChild(QToolButton, "setupBackButton")
+        assert provider.requested_draft_ids == ["local-setup-autosave-v1"]
+        assert source is not None and source.text() == "C:/Users/Ada/Pictures"
+        assert target is not None and target.text() == "1 mål: USB 1"
+        assert back is not None and back.isVisible()
+        assert window._setup_draft.source_path_label == "C:/Users/Ada/Pictures"
+        assert tuple(target.path_label for target in window._setup_draft.targets) == (
+            "E:/Backup",
+        )
+
+        QTest.mouseClick(back, Qt.MouseButton.LeftButton)
+        assert window._setup_state.current_step is BackupSetupStep.DEFAULTS
     finally:
         window.close()
         window.deleteLater()
@@ -4724,6 +4865,7 @@ class _FakeBackupCreationEngineClient(_FakeEngineClient):
     def __init__(self) -> None:
         super().__init__()
         self.draft: StandardBackupJobDraft | None = None
+        self.autosave_draft_id: str | None = None
 
     def create_standard_backup_job(
         self,
@@ -4731,11 +4873,13 @@ class _FakeBackupCreationEngineClient(_FakeEngineClient):
         draft: StandardBackupJobDraft,
         request_id: str,
         idempotency_key: str,
+        autosave_draft_id: str | None = None,
     ) -> IpcResponse:
         assert request_id
         assert idempotency_key
         self.calls.append("create_standard_backup_job")
         self.draft = draft
+        self.autosave_draft_id = autosave_draft_id
         return IpcResponse.accepted(
             {
                 "created": True,
@@ -4760,11 +4904,13 @@ class _FakeFailedRegistrationEngineClient(_FakeBackupCreationEngineClient):
         draft: StandardBackupJobDraft,
         request_id: str,
         idempotency_key: str,
+        autosave_draft_id: str | None = None,
     ) -> IpcResponse:
         response = super().create_standard_backup_job(
             draft=draft,
             request_id=request_id,
             idempotency_key=idempotency_key,
+            autosave_draft_id=autosave_draft_id,
         )
         payload = dict(response.payload)
         payload["writable_endpoint_registration"] = {
@@ -4774,6 +4920,41 @@ class _FakeFailedRegistrationEngineClient(_FakeBackupCreationEngineClient):
             "validation_codes": ["WRITABLE_ENDPOINT_PROBE_FAILED"],
         }
         return IpcResponse.accepted(payload)
+
+
+class _FakeDraftAutosaveEngineClient(_FakeBackupCreationEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.saved_drafts: list[StandardBackupJobDraft] = []
+        self.save_identities: list[tuple[str, str]] = []
+
+    def save_standard_backup_draft(
+        self,
+        *,
+        draft: StandardBackupJobDraft,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        self.calls.append("save_standard_backup_draft")
+        self.saved_drafts.append(draft)
+        self.save_identities.append((request_id, idempotency_key))
+        return IpcResponse.accepted({"saved": True, "draft_id": draft.draft_id})
+
+
+class _RejectingDraftAutosaveEngineClient(_FakeDraftAutosaveEngineClient):
+    def save_standard_backup_draft(
+        self,
+        *,
+        draft: StandardBackupJobDraft,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        super().save_standard_backup_draft(
+            draft=draft,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
+        return IpcResponse.accepted({"saved": False, "draft_id": draft.draft_id})
 
 
 class _BlockingBackupCreationEngineClient(_FakeBackupCreationEngineClient):
@@ -4790,6 +4971,7 @@ class _BlockingBackupCreationEngineClient(_FakeBackupCreationEngineClient):
         draft: StandardBackupJobDraft,
         request_id: str,
         idempotency_key: str,
+        autosave_draft_id: str | None = None,
     ) -> IpcResponse:
         self.attempted_calls += 1
         self.worker_thread_id = get_ident()
@@ -4800,6 +4982,7 @@ class _BlockingBackupCreationEngineClient(_FakeBackupCreationEngineClient):
             draft=draft,
             request_id=request_id,
             idempotency_key=idempotency_key,
+            autosave_draft_id=autosave_draft_id,
         )
 
 
@@ -5188,6 +5371,33 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                 }
             }
         )
+
+
+class _RestoredDraftDashboardEngineClient(_FakeDashboardEngineClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.requested_draft_ids: list[str | None] = []
+
+    def get_backup_overview(
+        self,
+        *,
+        draft_id: str | None = None,
+        lifecycle_state: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        self.requested_draft_ids.append(draft_id)
+        response = super().get_backup_overview(
+            draft_id=draft_id,
+            lifecycle_state=lifecycle_state,
+            limit=limit,
+            offset=offset,
+        )
+        payload = dict(response.payload)
+        overview = dict(payload["backup_overview"])
+        overview["requested_draft_id"] = draft_id
+        payload["backup_overview"] = overview
+        return IpcResponse.accepted(payload)
 
 
 class _FakeFilterDecisionDashboardEngineClient(_FakeDashboardEngineClient):

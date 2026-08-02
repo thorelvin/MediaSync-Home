@@ -92,6 +92,7 @@ from mediasync_home.presentation.view_models.backup_setup import (
     empty_backup_overview_state,
     empty_backup_job_detail_state,
     empty_backup_job_status_state,
+    setup_draft_from_backup_overview_response,
 )
 from mediasync_home.presentation.view_models.catalog_preview import (
     CatalogedFilesPreviewState,
@@ -144,6 +145,7 @@ from mediasync_home.presentation.view_models.snapshot_health import (
     empty_snapshot_health_preview_state,
     snapshot_health_preview_from_responses,
 )
+
 from mediasync_home.presentation.view_models.filter_decisions import (
     FilterDecisionPreviewState,
     empty_filter_decision_preview_state,
@@ -157,6 +159,9 @@ from mediasync_home.presentation.view_models.run_progress import (
 from mediasync_home.ipc.protocol import IpcResponse, IpcStatus
 
 
+_LOCAL_SETUP_AUTOSAVE_DRAFT_ID = "local-setup-autosave-v1"
+_SETUP_AUTOSAVE_DELAY_MS = 300
+_SETUP_AUTOSAVE_RETRY_DELAYS_MS = (1_000, 3_000)
 SNAPSHOT_HEALTH_COVERAGE_STATES = (
     "VOLATILE",
     "UNREADABLE",
@@ -422,6 +427,17 @@ class BackupJobCreationProvider(Protocol):
         draft: StandardBackupJobDraft,
         request_id: str,
         idempotency_key: str,
+        autosave_draft_id: str | None = None,
+    ) -> IpcResponse: ...
+
+
+class BackupDraftSavingProvider(Protocol):
+    def save_standard_backup_draft(
+        self,
+        *,
+        draft: StandardBackupJobDraft,
+        request_id: str,
+        idempotency_key: str,
     ) -> IpcResponse: ...
 
 
@@ -588,6 +604,18 @@ class MediaSyncWindow(QMainWindow):
         self._setup_request_id: str | None = None
         self._setup_idempotency_key: str | None = None
         self._setup_command_pending = False
+        self._setup_autosave_revision = 0
+        self._setup_autosave_saved_revision = 0
+        self._setup_autosave_pending = False
+        self._setup_autosave_pending_revision: int | None = None
+        self._setup_autosave_request_id: str | None = None
+        self._setup_autosave_idempotency_key: str | None = None
+        self._setup_autosave_retry_count = 0
+        self._setup_autosave_close_requested = False
+        self._setup_autosave_close_attempted = False
+        self._setup_autosave_timer = QTimer(self)
+        self._setup_autosave_timer.setSingleShot(True)
+        self._setup_autosave_timer.timeout.connect(self._save_setup_draft)
         self._setup_edit_original_draft: BackupSetupDraft | None = None
         self._setup_edit_previous_draft: BackupSetupDraft | None = None
         self._setup_edit_previous_state: StandardBackupSetupViewState | None = None
@@ -981,6 +1009,20 @@ class MediaSyncWindow(QMainWindow):
                     event.ignore()
                     return
             self._discard_job_edit(target_row=self._selected_navigation_index)
+        if (
+            not self._setup_autosave_close_attempted
+            and self._setup_autosave_saved_revision < self._setup_autosave_revision
+            and self._engine_client is not None
+            and hasattr(self._engine_client, "save_standard_backup_draft")
+        ):
+            self._setup_autosave_close_requested = True
+            self._setup_autosave_timer.stop()
+            if not self._setup_autosave_pending:
+                self._save_setup_draft()
+            if self._setup_autosave_saved_revision < self._setup_autosave_revision:
+                event.ignore()
+                return
+        self._setup_autosave_timer.stop()
         if self._background_queries is not None:
             self._background_queries.close()
         if self._page_prefetch_queries is not None:
@@ -1118,6 +1160,12 @@ class MediaSyncWindow(QMainWindow):
         self.apply_engine_status(engine_status_from_response(result.response))
         if result.connected:
             self._refresh_connected_read_models()
+            if (
+                self._setup_autosave_saved_revision
+                < self._setup_autosave_revision
+                and not self._setup_autosave_pending
+            ):
+                self._setup_autosave_timer.start(0)
 
     def _apply_background_status_failure(self) -> None:
         self._status_query_pending = False
@@ -1153,6 +1201,11 @@ class MediaSyncWindow(QMainWindow):
             engine_status_from_response(self._engine_client.get_status())
         )
         self._refresh_connected_read_models(background=False)
+        if (
+            self._setup_autosave_saved_revision < self._setup_autosave_revision
+            and not self._setup_autosave_pending
+        ):
+            self._setup_autosave_timer.start(0)
 
     def _refresh_connected_read_models(self, *, background: bool = True) -> None:
         self._refresh_backup_overview(background=background)
@@ -1226,6 +1279,7 @@ class MediaSyncWindow(QMainWindow):
             def query(client: object) -> object:
                 provider = cast(BackupOverviewProvider, client)
                 return provider.get_backup_overview(
+                    draft_id=_LOCAL_SETUP_AUTOSAVE_DRAFT_ID,
                     lifecycle_state=lifecycle_filter,
                     limit=page_limit,
                     offset=page_offset,
@@ -1267,6 +1321,7 @@ class MediaSyncWindow(QMainWindow):
         provider = cast(BackupOverviewProvider, self._engine_client)
         self._apply_backup_overview_response(
             provider.get_backup_overview(
+                draft_id=_LOCAL_SETUP_AUTOSAVE_DRAFT_ID,
                 lifecycle_state=lifecycle_filter,
                 limit=page_limit,
                 offset=page_offset,
@@ -1322,10 +1377,27 @@ class MediaSyncWindow(QMainWindow):
         background: bool,
     ) -> None:
         state = backup_overview_from_response(response)
+        restore_setup = not self._local_setup_in_progress()
+        restored_draft = (
+            setup_draft_from_backup_overview_response(
+                response,
+                expected_draft_id=_LOCAL_SETUP_AUTOSAVE_DRAFT_ID,
+            )
+            if restore_setup
+            else None
+        )
+        if restored_draft is not None:
+            self._setup_draft = restored_draft
+            self._setup_autosave_revision += 1
+            self._setup_autosave_saved_revision = self._setup_autosave_revision
         job_ids = {job.job_id for job in state.jobs}
         if self._selected_job_id not in job_ids:
             self._selected_job_id = state.selected_job_id
         self.apply_backup_overview(state)
+        if restored_draft is not None:
+            self._setup_state = state.setup
+            self._apply_backup_setup_state(self._setup_state)
+            self._apply_local_preview_job_detail()
         if self._selected_job_id is None:
             self.apply_backup_job_detail(empty_backup_job_detail_state())
             self._clear_selected_plan_previews()
@@ -5717,6 +5789,7 @@ class MediaSyncWindow(QMainWindow):
                 reveal_action=False,
             )
             self._apply_local_preview_job_detail()
+            self._queue_setup_autosave()
             return
         if step is BackupSetupStep.TARGETS:
             if not self._setup_state.can_continue:
@@ -5787,6 +5860,7 @@ class MediaSyncWindow(QMainWindow):
             reveal_action=False,
         )
         self._apply_local_preview_job_detail()
+        self._queue_setup_autosave()
 
     def _remove_setup_target(self, index: int) -> None:
         if (
@@ -5810,6 +5884,7 @@ class MediaSyncWindow(QMainWindow):
             reveal_action=False,
         )
         self._apply_local_preview_job_detail()
+        self._queue_setup_autosave()
 
     def _handle_setup_back_action(self) -> None:
         if self._setup_request_id is not None or self._setup_edit_command_pending:
@@ -6195,6 +6270,153 @@ class MediaSyncWindow(QMainWindow):
         self._finish_job_edit(target_row=target_row)
         return True
 
+    def _queue_setup_autosave(self, *, delay_ms: int = _SETUP_AUTOSAVE_DELAY_MS) -> None:
+        if self._is_setup_editing():
+            return
+        self._setup_autosave_revision += 1
+        self._setup_autosave_request_id = None
+        self._setup_autosave_idempotency_key = None
+        self._setup_autosave_retry_count = 0
+        self._setup_autosave_timer.start(max(0, delay_ms))
+
+    def _save_setup_draft(self) -> None:
+        if (
+            self._is_setup_editing()
+            or self._setup_autosave_pending
+            or self._setup_autosave_saved_revision >= self._setup_autosave_revision
+        ):
+            return
+        if (
+            self._engine_client is None
+            or not hasattr(self._engine_client, "save_standard_backup_draft")
+        ):
+            return
+        if self._command_worker_active():
+            self._setup_autosave_timer.start(_SETUP_AUTOSAVE_DELAY_MS)
+            return
+
+        revision = self._setup_autosave_revision
+        draft = self._durable_setup_draft()
+        request_id = self._setup_autosave_request_id or str(uuid4())
+        idempotency_key = self._setup_autosave_idempotency_key or str(uuid4())
+        self._setup_autosave_request_id = request_id
+        self._setup_autosave_idempotency_key = idempotency_key
+        needs_connect = not self._connected
+        self._setup_autosave_pending = True
+        self._setup_autosave_pending_revision = revision
+
+        def command(client: object) -> object:
+            if needs_connect:
+                handshake = cast(EngineStatusProvider, client).connect()
+                if handshake.reason is not None:
+                    return _CommandConnectResult(
+                        response=handshake,
+                        connected=False,
+                        command_submitted=False,
+                    )
+            response = cast(
+                BackupDraftSavingProvider,
+                client,
+            ).save_standard_backup_draft(
+                draft=draft,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+            )
+            return _CommandConnectResult(
+                response=response,
+                connected=True,
+                command_submitted=True,
+            )
+
+        def accept(value: object) -> None:
+            self._setup_autosave_pending = False
+            self._setup_autosave_pending_revision = None
+            result = cast(_CommandConnectResult, value)
+            self._connected = result.connected
+            if not result.command_submitted:
+                self.apply_engine_status(engine_status_from_response(result.response))
+                self._retry_setup_autosave(revision)
+            elif (
+                result.response.status is IpcStatus.ACCEPTED
+                and result.response.payload.get("saved") is True
+            ):
+                self._accept_setup_autosave(revision)
+            else:
+                self._retry_setup_autosave(revision)
+            self._refresh_command_buttons()
+
+        def reject(_error: Exception) -> None:
+            self._setup_autosave_pending = False
+            self._setup_autosave_pending_revision = None
+            self._retry_setup_autosave(revision)
+            self._refresh_command_buttons()
+
+        submitted = self._submit_engine_command(
+            name="save-setup-draft",
+            operation=command,
+            on_result=accept,
+            on_error=reject,
+        )
+        if not submitted:
+            self._setup_autosave_pending = False
+            self._setup_autosave_pending_revision = None
+            self._setup_autosave_timer.start(_SETUP_AUTOSAVE_DELAY_MS)
+
+    def _durable_setup_draft(self) -> StandardBackupJobDraft:
+        return StandardBackupJobDraft(
+            draft_id=_LOCAL_SETUP_AUTOSAVE_DRAFT_ID,
+            source_name=self._setup_draft.source_name,
+            source_path_label=self._setup_draft.source_path_label,
+            targets=tuple(
+                DraftTarget(
+                    name=target.name,
+                    path_label=target.path_label,
+                    independent_device_id=target.independent_device_id,
+                )
+                for target in self._setup_draft.targets
+            ),
+        )
+
+    def _accept_setup_autosave(self, revision: int) -> None:
+        self._setup_autosave_saved_revision = max(
+            self._setup_autosave_saved_revision,
+            revision,
+        )
+        if revision == self._setup_autosave_revision:
+            self._setup_autosave_request_id = None
+            self._setup_autosave_idempotency_key = None
+            self._setup_autosave_retry_count = 0
+            self._finish_close_after_setup_autosave()
+            return
+        self._setup_autosave_timer.start(0)
+
+    def _retry_setup_autosave(self, revision: int) -> None:
+        if revision != self._setup_autosave_revision:
+            self._setup_autosave_request_id = None
+            self._setup_autosave_idempotency_key = None
+            self._setup_autosave_retry_count = 0
+            self._setup_autosave_timer.start(0)
+            return
+        if self._setup_autosave_retry_count < len(
+            _SETUP_AUTOSAVE_RETRY_DELAYS_MS
+        ):
+            delay = _SETUP_AUTOSAVE_RETRY_DELAYS_MS[
+                self._setup_autosave_retry_count
+            ]
+            self._setup_autosave_retry_count += 1
+            self._setup_autosave_timer.start(delay)
+            return
+        self._apply_command_transport_failure(
+            "Setup choices could not be saved yet. They remain open in this window."
+        )
+        self._setup_autosave_close_requested = False
+
+    def _finish_close_after_setup_autosave(self) -> None:
+        if not self._setup_autosave_close_requested:
+            return
+        self._setup_autosave_close_attempted = True
+        QTimer.singleShot(0, self.close)
+
     def _create_standard_backup_job(self) -> None:
         if (
             self._engine_client is None
@@ -6248,6 +6470,7 @@ class MediaSyncWindow(QMainWindow):
                 draft=draft,
                 request_id=request_id,
                 idempotency_key=idempotency_key,
+                autosave_draft_id=_LOCAL_SETUP_AUTOSAVE_DRAFT_ID,
             )
             return _CommandConnectResult(
                 response=response,
@@ -6335,6 +6558,12 @@ class MediaSyncWindow(QMainWindow):
         self._setup_draft_id = None
         self._setup_request_id = None
         self._setup_idempotency_key = None
+        self._setup_autosave_timer.stop()
+        self._setup_autosave_revision += 1
+        self._setup_autosave_saved_revision = self._setup_autosave_revision
+        self._setup_autosave_request_id = None
+        self._setup_autosave_idempotency_key = None
+        self._setup_autosave_retry_count = 0
         self._setup_registration_retry_required = False
         self._selected_job_id = None
         self._jobs_page_offset = 0

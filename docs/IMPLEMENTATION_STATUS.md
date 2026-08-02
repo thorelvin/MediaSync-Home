@@ -1,5 +1,21 @@
 # Implementeringsstatus
 
+Update 2026-08-02: `UX-003` new-backup setup now has durable draft autosave
+and restart restoration. Source and target changes coalesce for 300 ms into one
+`SAVE_STANDARD_BACKUP_DRAFT` command at a time, with command-receipt
+idempotency and two bounded retries using the same command identity. The GUI
+queries one stable local autosave slot, restores it only when the Engine Host
+echoes that exact requested draft ID, and resumes source-only drafts at target
+selection or complete drafts at review. Normal window close flushes a pending
+debounced save and completes shutdown only after acceptance; terminal failure
+keeps the setup visible. A final create uses a fresh provenance
+draft ID and clears the autosave slot in the same SQLite transaction as the
+sealed job revision. A terminal autosave failure remains in memory and surfaces
+as a wrapped warning without horizontal clipping at 900x560. Unit, GUI, IPC,
+and real SQLite tests cover partial save, replay, retry, exact-ID restoration,
+and atomic create/reset. Editable defaults remain fixed safe presets; custom
+defaults UI is still future work.
+
 Update 2026-08-02: `SAF-005` writable-target registration now performs an
 authoritative physical-root overlap check before allocating an intent or
 creating `.mediasync`. OS-handle identity rejects aliases of the same directory;

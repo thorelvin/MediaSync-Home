@@ -17,6 +17,7 @@ from mediasync_home.presentation.view_models.backup_setup import (
     build_backup_job_status_state,
     build_standard_backup_setup_state,
     build_standard_backup_setup_state_from_job_draft,
+    setup_draft_from_backup_overview_response,
     target_status,
 )
 
@@ -236,6 +237,41 @@ def test_backup_overview_view_model_preserves_bounded_job_page_metadata() -> Non
     assert [job.job_id for job in state.jobs] == ["job-c"]
     assert state.jobs[0].target_summary_label == "2 mål / 1 uavhengig enhet"
     assert state.selected_job_id == "job-c"
+
+
+def test_backup_overview_restores_only_the_exact_requested_setup_draft() -> None:
+    response = IpcResponse.accepted(
+        {
+            "backup_overview": {
+                "read_model_available": True,
+                "requested_draft_id": "local-setup-autosave-v1",
+                "draft": {
+                    "draft_id": "local-setup-autosave-v1",
+                    "source_name": "Pictures",
+                    "source_path_label": "C:/Users/Ada/Pictures",
+                    "targets": [],
+                },
+                "jobs": [],
+            }
+        }
+    )
+
+    state = backup_overview_from_response(response)
+    restored = setup_draft_from_backup_overview_response(
+        response,
+        expected_draft_id="local-setup-autosave-v1",
+    )
+    mismatched = setup_draft_from_backup_overview_response(
+        response,
+        expected_draft_id="other-draft",
+    )
+
+    assert state.setup.current_step is BackupSetupStep.TARGETS
+    assert restored == BackupSetupDraft(
+        source_name="Pictures",
+        source_path_label="C:/Users/Ada/Pictures",
+    )
+    assert mismatched is None
 
 
 def test_backup_job_detail_view_model_renders_exact_job_revision() -> None:

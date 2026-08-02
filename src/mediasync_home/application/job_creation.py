@@ -37,6 +37,7 @@ class CreateStandardBackupJobCommand:
     idempotency_key: str
     draft_id: str
     inline_draft: StandardBackupJobDraft | None = None
+    autosave_draft_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -124,11 +125,27 @@ def parse_create_standard_backup_job_command(
         payload.get("draft"),
         draft_id=draft_id,
     )
+    autosave_draft_id = payload.get("autosave_draft_id")
+    if autosave_draft_id is not None:
+        if (
+            not isinstance(autosave_draft_id, str)
+            or not autosave_draft_id.strip()
+            or len(autosave_draft_id) > 128
+        ):
+            raise JobCreationPayloadError(
+                "CREATE_STANDARD_BACKUP_JOB_AUTOSAVE_DRAFT_ID_INVALID"
+            )
+        autosave_draft_id = autosave_draft_id.strip()
+        if autosave_draft_id == draft_id:
+            raise JobCreationPayloadError(
+                "CREATE_STANDARD_BACKUP_JOB_AUTOSAVE_DRAFT_ID_REUSED"
+            )
     return CreateStandardBackupJobCommand(
         request_id=request_id,
         idempotency_key=idempotency_key,
         draft_id=draft_id,
         inline_draft=inline_draft,
+        autosave_draft_id=autosave_draft_id,
     )
 
 

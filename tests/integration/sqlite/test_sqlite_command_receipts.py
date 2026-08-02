@@ -33,6 +33,7 @@ from mediasync_home.application.job_creation import (
     StandardBackupJobIdFactory,
     StandardBackupJobIds,
 )
+from mediasync_home.application.job_draft_saving import JobDraftCommandName
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
 from mediasync_home.application.outbox import OutboxMessage
 from mediasync_home.application.runtime_status import startup_status
@@ -399,6 +400,7 @@ def test_sqlite_enabled_ipc_command_persists_job_and_success_receipt(tmp_path: P
         assert loaded_receipt.result_entity_id == "job-a"
         assert loaded_job is not None
         assert loaded_job.idempotency_key == "66666666-6666-4666-8666-666666666666"
+        assert drafts.load_standard_backup_draft("draft-a") == _complete_draft()
         assert loaded_outbox is not None
         assert loaded_outbox.aggregate_type == "standard_backup_job"
         assert loaded_outbox.aggregate_id == "job-a"
@@ -406,6 +408,98 @@ def test_sqlite_enabled_ipc_command_persists_job_and_success_receipt(tmp_path: P
         assert _row_count(connection, "command_receipts") == 1
         assert _row_count(connection, "outbox_messages") == 1
         assert id_factory.calls == 1
+
+
+def test_sqlite_ipc_autosave_roundtrips_through_backup_overview(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        receipts = SqliteCommandReceiptStore(connection)
+        drafts = SqliteJobDraftStore(connection)
+        catalog = SqliteStandardBackupJobCatalog(connection)
+        id_factory = FixedStandardBackupJobIdFactory()
+        service = EngineHostIpcService(
+            ClientAuthorizationPolicy(
+                expected_user_sid_hash="same-user",
+                expected_session_id=42,
+            ),
+            status=replace(
+                startup_status(ProcessRole.ENGINE_HOST),
+                mutations_enabled=True,
+                scope="0B_LOCAL_MUTATION_PREVIEW",
+            ),
+            job_draft_store=drafts,
+            standard_backup_job_catalog=catalog,
+            standard_backup_job_read_store=catalog,
+            standard_backup_job_id_factory=id_factory,
+            command_receipt_store=receipts,
+            command_effect_transaction=SqliteImmediateTransactionRunner(connection),
+        )
+        ipc_client = InProcessIpcClient(
+            service=service,
+            identity=VerifiedClientIdentity(
+                user_sid_hash="same-user",
+                session_id=42,
+                is_remote=False,
+                transport="sqlite-draft-autosave-test",
+            ),
+            role=ProcessRole.GUI,
+            client_instance_id="55555555-5555-4555-8555-555555555555",
+        )
+        ipc_client.connect()
+        payload = _inline_draft_command_payload()
+        autosave_draft = dict(payload["draft"])
+        autosave_draft["draft_id"] = "local-setup-autosave-v1"
+        payload = {
+            "draft_id": "local-setup-autosave-v1",
+            "draft": autosave_draft,
+        }
+
+        saved = ipc_client.submit_command(
+            JobDraftCommandName.SAVE_STANDARD_BACKUP_DRAFT.value,
+            request_id="44444444-4444-4444-8444-444444444444",
+            idempotency_key="66666666-6666-4666-8666-666666666666",
+            payload=payload,
+            payload_hash=canonical_command_payload_hash(payload),
+        )
+        restored = ipc_client.query_backup_overview(
+            draft_id="local-setup-autosave-v1"
+        )
+        create_payload = {
+            **_inline_draft_command_payload(),
+            "autosave_draft_id": "local-setup-autosave-v1",
+        }
+        created = ipc_client.submit_command(
+            JobCreationCommandName.CREATE_STANDARD_BACKUP_JOB.value,
+            request_id="77777777-7777-4777-8777-777777777777",
+            idempotency_key="88888888-8888-4888-8888-888888888888",
+            payload=create_payload,
+            payload_hash=canonical_command_payload_hash(create_payload),
+        )
+
+        assert saved.status is IpcStatus.ACCEPTED
+        assert saved.payload["saved"] is True
+        assert restored.status is IpcStatus.ACCEPTED
+        overview = restored.payload["backup_overview"]
+        assert overview["requested_draft_id"] == "local-setup-autosave-v1"
+        assert overview["draft"]["source_path_label"] == "C:/Users/Ada/Pictures"
+        assert overview["draft"]["targets"][0]["path_label"] == "E:/Backup"
+        receipt = receipts.load_command_receipt(
+            "66666666-6666-4666-8666-666666666666"
+        )
+        assert receipt is not None
+        assert receipt.state is CommandReceiptState.SUCCEEDED
+        assert receipt.result_entity_type == "standard_backup_job_draft"
+        assert created.status is IpcStatus.ACCEPTED
+        assert drafts.load_standard_backup_draft("local-setup-autosave-v1") == (
+            StandardBackupJobDraft.new("local-setup-autosave-v1")
+        )
+        final_draft = drafts.load_standard_backup_draft("draft-a")
+        assert final_draft is not None
+        assert final_draft.source_path_label == "C:/Users/Ada/Pictures"
+        assert final_draft.targets[0].path_label == "E:/Backup"
+        assert final_draft.targets[0].independent_device_id is None
+        assert catalog.load_standard_backup_job("job-a") is not None
 
 
 def test_sqlite_enabled_ipc_command_replays_from_compacted_receipt_tombstone(

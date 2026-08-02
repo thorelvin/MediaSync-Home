@@ -42,6 +42,7 @@ from mediasync_home.application.job_creation import (
     StandardBackupJobIdFactory,
     StandardBackupJobIds,
 )
+from mediasync_home.application.job_draft_saving import JobDraftCommandName
 from mediasync_home.application.job_drafts import (
     JobDraftStore,
     StandardBackupDefaults,
@@ -2351,6 +2352,68 @@ def test_restore_state_command_requires_read_only_ipc_mode(
     assert calls == []
 
 
+def test_enabled_save_standard_backup_draft_is_idempotent() -> None:
+    drafts = _InMemoryJobDraftStore()
+    receipts = _InMemoryCommandReceiptStore()
+    service = _service(mutations_enabled=True)
+    service.job_draft_store = drafts
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+    payload = {
+        "draft_id": "setup-autosave",
+        "draft": {
+            "draft_id": "setup-autosave",
+            "schema_version": 1,
+            "source_name": "Pictures",
+            "source_path_label": "C:/Users/Ada/Pictures",
+            "targets": [],
+            "defaults": {
+                "behavior": "UPDATE_BACKUP",
+                "file_selection": "ALL_USER_FILES",
+                "verification": "STANDARD",
+                "retention": "THIRTY_DAYS",
+                "extra_files": "KEEP_ON_TARGET",
+                "performance": "AUTO",
+            },
+        },
+    }
+    payload_digest = canonical_command_payload_hash(payload)
+
+    first = ipc_client.submit_command(
+        JobDraftCommandName.SAVE_STANDARD_BACKUP_DRAFT.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=payload,
+        payload_hash=payload_digest,
+    )
+    second = ipc_client.submit_command(
+        JobDraftCommandName.SAVE_STANDARD_BACKUP_DRAFT.value,
+        request_id=REQUEST_ID_B,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=payload,
+        payload_hash=payload_digest,
+    )
+
+    assert first.status is IpcStatus.ACCEPTED
+    assert first.payload["saved"] is True
+    assert first.payload["idempotent_replay"] is False
+    assert second.status is IpcStatus.ACCEPTED
+    assert second.payload["saved"] is True
+    assert second.payload["idempotent_replay"] is True
+    assert drafts.load_standard_backup_draft("setup-autosave") == (
+        StandardBackupJobDraft.new("setup-autosave").with_source(
+            name="Pictures",
+            path_label="C:/Users/Ada/Pictures",
+        )
+    )
+    receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
+    assert receipt is not None
+    assert receipt.state is CommandReceiptState.SUCCEEDED
+    assert receipt.result_entity_type == "standard_backup_job_draft"
+    assert receipt.result_entity_id == "setup-autosave"
+
+
 def test_enabled_create_standard_backup_job_persists_job_and_succeeds_receipt() -> None:
     drafts = _InMemoryJobDraftStore()
     catalog = _InMemoryStandardBackupJobCatalog()
@@ -2411,6 +2474,7 @@ def test_enabled_create_standard_backup_job_persists_job_and_succeeds_receipt() 
     assert receipt is not None
     assert receipt.state is CommandReceiptState.SUCCEEDED
     assert catalog.load_standard_backup_job("job-a") is not None
+    assert drafts.load_standard_backup_draft("draft-a") == draft
     assert id_factory.calls == 1
 
 

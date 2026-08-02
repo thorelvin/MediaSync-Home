@@ -6,6 +6,7 @@ from typing import Any
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.endpoint_takeover import EndpointTakeoverCommandName
 from mediasync_home.application.job_creation import JobCreationCommandName
+from mediasync_home.application.job_draft_saving import JobDraftCommandName
 from mediasync_home.application.job_drafts import DraftTarget, StandardBackupJobDraft
 from mediasync_home.application.job_editing import JobEditingCommandName
 from mediasync_home.application.runs import RunCommandName
@@ -41,6 +42,7 @@ def test_engine_client_submits_reviewed_standard_backup_draft() -> None:
         draft=draft,
         request_id="44444444-4444-4444-8444-444444444444",
         idempotency_key="66666666-6666-4666-8666-666666666666",
+        autosave_draft_id="local-setup-autosave-v1",
     )
 
     assert response.reason is None
@@ -52,6 +54,45 @@ def test_engine_client_submits_reviewed_standard_backup_draft() -> None:
     assert ipc_client.idempotency_key == "66666666-6666-4666-8666-666666666666"
     assert ipc_client.payload is not None
     assert ipc_client.payload["draft_id"] == draft.draft_id
+    assert ipc_client.payload["autosave_draft_id"] == "local-setup-autosave-v1"
+    assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
+
+
+def test_engine_client_submits_incomplete_standard_backup_draft() -> None:
+    ipc_client = _RecordingIpcClient()
+    client = EngineClient(ipc_client)  # type: ignore[arg-type]
+    draft = StandardBackupJobDraft(
+        draft_id="setup-autosave",
+        source_name="Pictures",
+        source_path_label="C:/Users/Ada/Pictures",
+    )
+
+    response = client.save_standard_backup_draft(
+        draft=draft,
+        request_id="44444444-4444-4444-8444-444444444444",
+        idempotency_key="66666666-6666-4666-8666-666666666666",
+    )
+
+    assert response.reason is None
+    assert ipc_client.command_name == JobDraftCommandName.SAVE_STANDARD_BACKUP_DRAFT.value
+    assert ipc_client.payload == {
+        "draft_id": "setup-autosave",
+        "draft": {
+            "draft_id": "setup-autosave",
+            "schema_version": 1,
+            "source_name": "Pictures",
+            "source_path_label": "C:/Users/Ada/Pictures",
+            "targets": [],
+            "defaults": {
+                "behavior": "UPDATE_BACKUP",
+                "file_selection": "ALL_USER_FILES",
+                "verification": "STANDARD",
+                "retention": "THIRTY_DAYS",
+                "extra_files": "KEEP_ON_TARGET",
+                "performance": "AUTO",
+            },
+        },
+    }
     assert ipc_client.payload_hash == canonical_command_payload_hash(ipc_client.payload)
 
 

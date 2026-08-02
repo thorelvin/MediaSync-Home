@@ -381,9 +381,13 @@ def backup_overview_from_response(
     return BackupOverviewViewState(
         setup=build_standard_backup_setup_state(
             draft or BackupSetupDraft.empty(),
-            current_step=BackupSetupStep.REVIEW
-            if draft is not None and draft.targets
-            else BackupSetupStep.SOURCE,
+            current_step=(
+                BackupSetupStep.REVIEW
+                if draft is not None and draft.targets
+                else BackupSetupStep.TARGETS
+                if draft is not None and draft.source_path_label is not None
+                else BackupSetupStep.SOURCE
+            ),
         ),
         job_status=_job_status_from_payload(job_payloads[0])
         if job_payloads
@@ -396,6 +400,21 @@ def backup_overview_from_response(
         selected_job_id=selected_job_id,
         lifecycle_state=_lifecycle_state(overview.get("lifecycle_state")),
     )
+
+
+def setup_draft_from_backup_overview_response(
+    response: IpcResponse | None,
+    *,
+    expected_draft_id: str,
+) -> BackupSetupDraft | None:
+    if response is None or response.status is IpcStatus.REJECTED:
+        return None
+    overview = response.payload.get("backup_overview")
+    if not isinstance(overview, dict):
+        return None
+    if overview.get("requested_draft_id") != expected_draft_id:
+        return None
+    return _setup_draft_from_payload(overview.get("draft"))
 
 
 def backup_job_detail_from_response(

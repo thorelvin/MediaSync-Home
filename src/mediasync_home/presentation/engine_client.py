@@ -8,6 +8,7 @@ from mediasync_home.application.command_payloads import canonical_command_payloa
 from mediasync_home.application.backup_analysis import BackupAnalysisCommandName
 from mediasync_home.application.endpoint_takeover import EndpointTakeoverCommandName
 from mediasync_home.application.job_creation import JobCreationCommandName
+from mediasync_home.application.job_draft_saving import JobDraftCommandName
 from mediasync_home.application.job_drafts import StandardBackupJobDraft
 from mediasync_home.application.job_editing import JobEditingCommandName
 from mediasync_home.application.job_lifecycle import JobLifecycleCommandName
@@ -403,8 +404,11 @@ class EngineClient:
         draft: StandardBackupJobDraft,
         request_id: str,
         idempotency_key: str,
+        autosave_draft_id: str | None = None,
     ) -> IpcResponse:
         payload = _create_standard_backup_job_payload(draft)
+        if autosave_draft_id is not None:
+            payload["autosave_draft_id"] = autosave_draft_id
         payload_hash = canonical_command_payload_hash(payload)
         return self._request_with_handshake_retry(
             lambda: self._ipc_client.submit_command(
@@ -413,6 +417,27 @@ class EngineClient:
                 idempotency_key=idempotency_key,
                 payload=payload,
                 payload_hash=payload_hash,
+            )
+        )
+
+    def save_standard_backup_draft(
+        self,
+        *,
+        draft: StandardBackupJobDraft,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        payload: dict[str, object] = {
+            "draft_id": draft.draft_id,
+            "draft": _standard_backup_draft_payload(draft),
+        }
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.submit_command(
+                JobDraftCommandName.SAVE_STANDARD_BACKUP_DRAFT.value,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                payload_hash=canonical_command_payload_hash(payload),
             )
         )
 

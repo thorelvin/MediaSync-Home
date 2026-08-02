@@ -87,6 +87,7 @@ def test_parse_create_standard_backup_job_command_accepts_reviewed_inline_draft(
         idempotency_key="idempotency-a",
         payload={
             "draft_id": "draft-a",
+            "autosave_draft_id": "local-setup-autosave-v1",
             "draft": {
                 "draft_id": "draft-a",
                 "schema_version": 1,
@@ -108,6 +109,7 @@ def test_parse_create_standard_backup_job_command_accepts_reviewed_inline_draft(
     assert command.inline_draft.source_path_label == "C:/Users/Ada/Pictures"
     assert command.inline_draft.targets[0].path_label == "E:/Backup"
     assert command.inline_draft.can_create() is True
+    assert command.autosave_draft_id == "local-setup-autosave-v1"
 
 
 def test_parse_create_standard_backup_job_command_rejects_inline_draft_id_mismatch() -> None:
@@ -126,6 +128,21 @@ def test_parse_create_standard_backup_job_command_rejects_inline_draft_id_mismat
                     "source_path_label": "C:/Users/Ada/Pictures",
                     "targets": [],
                 },
+            },
+        )
+
+
+def test_parse_create_standard_backup_job_command_rejects_reused_autosave_id() -> None:
+    with pytest.raises(
+        JobCreationPayloadError,
+        match="CREATE_STANDARD_BACKUP_JOB_AUTOSAVE_DRAFT_ID_REUSED",
+    ):
+        parse_create_standard_backup_job_command(
+            request_id="request-a",
+            idempotency_key="idempotency-a",
+            payload={
+                "draft_id": "draft-a",
+                "autosave_draft_id": "draft-a",
             },
         )
 
