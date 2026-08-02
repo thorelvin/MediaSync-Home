@@ -39,6 +39,11 @@ from mediasync_home.application.command_receipts import (
     transition_command_receipt,
 )
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
+from mediasync_home.application.duplicates import (
+    DuplicateAnalysisReadStore,
+    DuplicateRelationError,
+    query_duplicate_analysis_summary,
+)
 from mediasync_home.application.external_resources import (
     ExternalResourceStateStore,
     ExternalResourceType,
@@ -370,6 +375,7 @@ class EngineHostIpcService:
     snapshot_issue_read_store: SnapshotIssueReadModelStore | None = None
     snapshot_filter_decision_read_store: SnapshotFilterDecisionReadModelStore | None = None
     cataloged_file_read_store: CatalogedFileReadModelStore | None = None
+    duplicate_analysis_read_store: DuplicateAnalysisReadStore | None = None
     backup_analysis_request_store: BackupAnalysisRequestStore | None = None
     job_lifecycle_store: JobLifecycleStore | None = None
     job_lifecycle_utc_now: Callable[[], str] | None = None
@@ -515,7 +521,23 @@ class EngineHostIpcService:
             )
         except BackupJobDetailQueryError:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
-        return IpcResponse.accepted({"backup_job_detail": detail.to_dict()})
+        payload = detail.to_dict()
+        if (
+            detail.job is not None
+            and detail.job.initial_plan is not None
+            and detail.job.initial_plan.analysis_id is not None
+        ):
+            try:
+                duplicate_summary = query_duplicate_analysis_summary(
+                    read_store=self.duplicate_analysis_read_store,
+                    analysis_id=detail.job.initial_plan.analysis_id,
+                )
+            except DuplicateRelationError:
+                return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+            job_payload = payload.get("job")
+            if isinstance(job_payload, dict):
+                job_payload["duplicate_summary"] = duplicate_summary.to_dict()
+        return IpcResponse.accepted({"backup_job_detail": payload})
 
     def query_activity_overview(
         self,

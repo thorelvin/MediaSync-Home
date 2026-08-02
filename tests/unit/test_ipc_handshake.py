@@ -30,6 +30,7 @@ from mediasync_home.application.command_receipts import (
     ensure_idempotency_compatible,
 )
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
+from mediasync_home.application.duplicates import DuplicateAnalysisSummary
 from mediasync_home.application.endpoint_registration import (
     EndpointClassificationRefreshReport,
 )
@@ -535,6 +536,25 @@ class _AutomationJobDetailStore:
                 plan_id="plan-a",
                 plan_checksum="a" * 64,
             ),
+        )
+
+
+class _DuplicateAnalysisReadStore:
+    def load_duplicate_analysis_summary(
+        self,
+        analysis_id: str,
+    ) -> DuplicateAnalysisSummary | None:
+        if analysis_id != "analysis-a":
+            return None
+        return DuplicateAnalysisSummary(
+            analysis_id=analysis_id,
+            read_model_available=True,
+            duplicate_group_count=1,
+            expected_replica_group_count=1,
+            expected_replica_count=1,
+            same_file_alias_group_count=1,
+            same_file_alias_path_count=2,
+            potential_savings_bytes=0,
         )
 
 
@@ -1446,6 +1466,22 @@ def test_backup_job_detail_query_returns_exact_active_job_revision() -> None:
     assert missing.payload["backup_job_detail"]["read_model_available"] is True
     assert missing.payload["backup_job_detail"]["found"] is False
     assert missing.payload["backup_job_detail"]["job"] is None
+
+
+def test_backup_job_detail_query_includes_truthful_duplicate_summary() -> None:
+    service = _service()
+    service.standard_backup_job_detail_store = _AutomationJobDetailStore()
+    service.duplicate_analysis_read_store = _DuplicateAnalysisReadStore()
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    response = ipc_client.query_backup_job_detail(job_id="job-a")
+
+    summary = response.payload["backup_job_detail"]["job"]["duplicate_summary"]
+    assert response.status is IpcStatus.ACCEPTED
+    assert summary["expected_replica_count"] == 1
+    assert summary["same_file_alias_path_count"] == 2
+    assert summary["potential_savings_bytes"] == 0
 
 
 def test_activity_overview_query_requires_prior_handshake() -> None:

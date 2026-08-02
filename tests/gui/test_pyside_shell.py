@@ -1560,6 +1560,9 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
     )
 
     try:
+        window.resize(900, 560)
+        window.show()
+        qapp.processEvents()
         window.refresh_engine_status()
         source = window.findChild(QLabel, "setupSourceValue")
         target = window.findChild(QLabel, "setupTargetValue")
@@ -1570,6 +1573,7 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         jobs_detail_title = window.findChild(QLabel, "jobsDetailTitle")
         jobs_detail_source = window.findChild(QLabel, "jobsDetailSourceValue")
         jobs_detail_targets = window.findChild(QLabel, "jobsDetailTargetsValue")
+        jobs_detail_plan = window.findChild(QLabel, "jobsDetailPlanValue")
         jobs_start = window.findChild(QPushButton, "jobsStartBackupButton")
         activity_title = window.findChild(QLabel, "activityStatusTitle")
         activity_rows = window.findChildren(QLabel, "activityDimensionLabel")
@@ -1589,6 +1593,7 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         cataloged_files_summary = window.findChild(QLabel, "catalogedFilesSummary")
         cataloged_files_rows = window.findChildren(QLabel, "catalogedFilesRow")
         language = window.findChild(QToolButton, "languageSelectorButton")
+        dashboard_scroll = window.findChild(QScrollArea, "dashboardScrollArea")
 
         assert provider.calls == [
             "connect",
@@ -1642,6 +1647,16 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         assert job_detail_plan is not None
         assert job_detail_plan.text().startswith("2 operasjoner fra plan-a.")
         assert "2048 B" in job_detail_plan.text()
+        assert (
+            "Identiske filer: 1 forventet replika · 2 stier til samme fil · "
+            "0 B mulig besparelse"
+        ) in job_detail_plan.text()
+        assert jobs_detail_plan is not None
+        assert "Identiske filer:" in jobs_detail_plan.text()
+        assert job_detail_plan.wordWrap() is True
+        assert jobs_detail_plan.wordWrap() is True
+        assert dashboard_scroll is not None
+        assert dashboard_scroll.horizontalScrollBar().maximum() == 0
         assert job_detail_rows[0].text() == (
             "USB 1: E:/Backup · Skrivbar og registrert"
         )
@@ -1707,7 +1722,12 @@ def test_main_window_refreshes_backup_overview_when_provider_supports_it(qapp) -
         )
         assert job_detail_revision.text() == "Revision: job-rev-a - Filter: filter-a"
         assert job_detail_plan.text().startswith("2 operations from plan-a.")
-        assert job_detail_plan.text().endswith("Preview only")
+        assert "Preview only" in job_detail_plan.text()
+        assert (
+            "Identical files: 1 expected replica · 2 same-file paths · "
+            "0 B possible savings"
+        ) in job_detail_plan.text()
+        assert "Identical files:" in jobs_detail_plan.text()
         assert plan_preview_summary.text() == "2 operations from plan-a."
         assert plan_preview_rows[0].text() == ("Low: Create folder: Photos -> target-a")
         assert plan_preview_rows[1].text() == (
@@ -5456,6 +5476,16 @@ class _FakeDashboardEngineClient(_FakeEngineClient):
                             "planned_bytes": 2048,
                             "plan_runnable": False,
                             "next_action": "Review the plan.",
+                        },
+                        "duplicate_summary": {
+                            "analysis_id": "analysis-a",
+                            "read_model_available": True,
+                            "duplicate_group_count": 1,
+                            "expected_replica_group_count": 1,
+                            "expected_replica_count": 1,
+                            "same_file_alias_group_count": 1,
+                            "same_file_alias_path_count": 2,
+                            "potential_savings_bytes": 0,
                         },
                     },
                 }

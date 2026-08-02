@@ -29,6 +29,9 @@ from mediasync_home.application.hash_evidence import (
     CurrentReadHashRefreshReport,
     CurrentReadHashRefreshState,
 )
+from mediasync_home.application.duplicates import (
+    DuplicateRelationMaterializationReport,
+)
 from mediasync_home.application.snapshot_scanning import (
     JobSnapshotMaterializationResult,
     SnapshotMaterializationRefreshReport,
@@ -50,6 +53,7 @@ def test_execute_next_backup_analysis_forces_fresh_job_scans_and_plan() -> None:
     snapshots = _SnapshotRefresher()
     plans = _PlanRefresher()
     hashes = _HashRefresher()
+    duplicates = _DuplicateRelationMaterializer()
     clock = iter(
         (
             "2026-07-31T10:00:00Z",
@@ -57,6 +61,7 @@ def test_execute_next_backup_analysis_forces_fresh_job_scans_and_plan() -> None:
             "2026-07-31T10:00:02Z",
             "2026-07-31T10:00:03Z",
             "2026-07-31T10:00:04Z",
+            "2026-07-31T10:00:05Z",
         )
     )
 
@@ -66,6 +71,7 @@ def test_execute_next_backup_analysis_forces_fresh_job_scans_and_plan() -> None:
         refresh_endpoint_classifications=lambda: None,
         snapshots=snapshots,
         hash_evidence=hashes,
+        duplicate_relations=duplicates,
         plans=plans,
         utc_now=lambda: next(clock),
     )
@@ -76,6 +82,7 @@ def test_execute_next_backup_analysis_forces_fresh_job_scans_and_plan() -> None:
     assert completed.plan_id == "plan-new"
     assert snapshots.calls == [("job-a", True)]
     assert hashes.calls == ["analysis-new"]
+    assert duplicates.calls == ["analysis-new"]
     assert plans.calls == [("job-a", True)]
 
 
@@ -406,6 +413,28 @@ class _HashRefresher:
             reused_entry_count=0,
             identical_pair_count=1,
             changed_pair_count=0,
+        )
+
+
+class _DuplicateRelationMaterializer:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def materialize_known_duplicate_relations(
+        self,
+        *,
+        analysis_id: str,
+        observed_utc: str,
+    ) -> DuplicateRelationMaterializationReport:
+        assert observed_utc
+        self.calls.append(analysis_id)
+        return DuplicateRelationMaterializationReport(
+            analysis_id=analysis_id,
+            alias_group_count=0,
+            alias_path_count=0,
+            expected_replica_group_count=1,
+            expected_replica_count=1,
+            idempotent_replay=False,
         )
 
 

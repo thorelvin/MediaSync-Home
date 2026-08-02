@@ -173,6 +173,46 @@ def test_database_contract_rejects_unbound_automation_policy() -> None:
         validate_contracts.validate_database_contract(document)
 
 
+def test_database_contract_rejects_expected_replica_savings() -> None:
+    yaml = _yaml_loader()
+    document = validate_contracts.load_yaml(
+        validate_contracts.ROOT / "schema/database-contract.yaml",
+        yaml,
+    )
+    document = copy.deepcopy(document)
+    invariant = _database_invariant(
+        document,
+        "DUP-001_TRUTHFUL_DUPLICATE_RELATIONS",
+    )
+    invariant["expected_replica_potential_savings_bytes"] = 1
+
+    with pytest.raises(
+        validate_contracts.ContractValidationError,
+        match="duplicate relation contract drifted",
+    ):
+        validate_contracts.validate_database_contract(document)
+
+
+def test_database_contract_rejects_unindexed_expected_replica_paths() -> None:
+    yaml = _yaml_loader()
+    document = validate_contracts.load_yaml(
+        validate_contracts.ROOT / "schema/database-contract.yaml",
+        yaml,
+    )
+    document = copy.deepcopy(document)
+    invariant = _database_invariant(
+        document,
+        "DUP-001_TRUTHFUL_DUPLICATE_RELATIONS",
+    )
+    invariant["path_key_match_index"] = None
+
+    with pytest.raises(
+        validate_contracts.ContractValidationError,
+        match="duplicate relation contract drifted",
+    ):
+        validate_contracts.validate_database_contract(document)
+
+
 def test_database_contract_rejects_ctime_birthtime_fallback() -> None:
     yaml = _yaml_loader()
     document = validate_contracts.load_yaml(

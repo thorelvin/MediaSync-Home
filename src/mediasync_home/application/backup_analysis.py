@@ -8,6 +8,7 @@ from typing import Protocol
 from mediasync_home.application.hash_evidence import (
     CurrentReadHashEvidenceRefresher,
 )
+from mediasync_home.application.duplicates import DuplicateRelationMaterializer
 from mediasync_home.application.initial_backup_planning import (
     InitialBackupPlanRefresher,
 )
@@ -176,6 +177,7 @@ def execute_next_backup_analysis(
     plans: InitialBackupPlanRefresher,
     utc_now: Callable[[], str],
     hash_evidence: CurrentReadHashEvidenceRefresher | None = None,
+    duplicate_relations: DuplicateRelationMaterializer | None = None,
     plan_store: PlanStore | None = None,
     run_id_factory: RunIdFactory | None = None,
 ) -> BackupAnalysisRequest | None:
@@ -271,6 +273,19 @@ def execute_next_backup_analysis(
                     analysis_id=snapshot_result.analysis_id,
                     utc_now=utc_now,
                 )
+        if duplicate_relations is not None:
+            if snapshot_result.analysis_id is None:
+                return _complete_request(
+                    requests,
+                    request=request,
+                    state=BackupAnalysisRequestState.FAILED,
+                    reason_code="BACKUP_ANALYSIS_DUPLICATE_ANALYSIS_MISSING",
+                    utc_now=utc_now,
+                )
+            duplicate_relations.materialize_known_duplicate_relations(
+                analysis_id=snapshot_result.analysis_id,
+                observed_utc=utc_now(),
+            )
         plan_report = plans.refresh_initial_backup_plans(
             observed_utc=utc_now(),
             job_id=request.job_id,

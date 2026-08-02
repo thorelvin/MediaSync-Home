@@ -160,6 +160,10 @@ class BackupJobDetailViewState:
     analysis_request_state: str | None = None
     analysis_request_reason_code: str | None = None
     analysis_request_started_run_id: str | None = None
+    duplicate_summary_available: bool = False
+    expected_replica_count: int = 0
+    same_file_alias_path_count: int = 0
+    potential_savings_bytes: int = 0
     job_revision_id: str | None = None
     writable_target_registration_required: bool = False
     controlled_takeover_required: bool = False
@@ -755,6 +759,10 @@ def _job_detail_from_payload(
     automation_payload = (
         automation_schedule if isinstance(automation_schedule, dict) else {}
     )
+    duplicate_summary = payload.get("duplicate_summary")
+    duplicate_payload = (
+        duplicate_summary if isinstance(duplicate_summary, dict) else {}
+    )
     automation_local_time = _optional_text(
         automation_payload.get("daily_local_time")
     )
@@ -794,6 +802,21 @@ def _job_detail_from_payload(
         analysis_request_reason_code=_optional_text(request_payload.get("reason_code")),
         analysis_request_started_run_id=_optional_text(
             request_payload.get("started_run_id")
+        ),
+        duplicate_summary_available=(
+            duplicate_payload.get("read_model_available") is True
+        ),
+        expected_replica_count=(
+            _non_negative_int(duplicate_payload.get("expected_replica_count")) or 0
+        ),
+        same_file_alias_path_count=(
+            _non_negative_int(
+                duplicate_payload.get("same_file_alias_path_count")
+            )
+            or 0
+        ),
+        potential_savings_bytes=(
+            _non_negative_int(duplicate_payload.get("potential_savings_bytes")) or 0
         ),
         job_revision_id=job_revision_id,
         writable_target_registration_required=(

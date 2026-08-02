@@ -6999,7 +6999,7 @@ class MediaSyncWindow(QMainWindow):
             ),
             (
                 (self._job_detail_plan_value, self._jobs_detail_plan_value),
-                state.plan_summary_label,
+                self._job_plan_summary_text(state),
             ),
         ):
             for label in labels:
@@ -7151,6 +7151,46 @@ class MediaSyncWindow(QMainWindow):
         self._apply_automation_controls(state)
         self._apply_run_progress_state(self._run_progress_state)
         self._refresh_dashboard_geometry()
+
+    def _job_plan_summary_text(self, state: BackupJobDetailViewState) -> str:
+        plan_summary = self._display(state.plan_summary_label)
+        if not state.duplicate_summary_available:
+            return plan_summary
+        if self._selected_language_code is LanguageCode.ENGLISH:
+            replica_label = (
+                "expected replica"
+                if state.expected_replica_count == 1
+                else "expected replicas"
+            )
+            alias_label = (
+                "same-file path"
+                if state.same_file_alias_path_count == 1
+                else "same-file paths"
+            )
+            duplicate_summary = (
+                f"{state.expected_replica_count} {replica_label} · "
+                f"{state.same_file_alias_path_count} {alias_label} · "
+                f"{_format_bytes(state.potential_savings_bytes)} possible savings"
+            )
+        else:
+            replica_label = (
+                "forventet replika"
+                if state.expected_replica_count == 1
+                else "forventede replikaer"
+            )
+            alias_label = (
+                "sti til samme fil"
+                if state.same_file_alias_path_count == 1
+                else "stier til samme fil"
+            )
+            duplicate_summary = (
+                f"{state.expected_replica_count} {replica_label} · "
+                f"{state.same_file_alias_path_count} {alias_label} · "
+                f"{_format_bytes(state.potential_savings_bytes)} mulig besparelse"
+            )
+        return (
+            f"{plan_summary}\n{self._texts().identical_files}: {duplicate_summary}"
+        )
 
     def _apply_automation_controls(self, state: BackupJobDetailViewState) -> None:
         enabled_control = self._jobs_automation_enabled
@@ -8889,7 +8929,7 @@ class MediaSyncWindow(QMainWindow):
                 layout,
                 5,
                 texts.plan,
-                self._display(state.plan_summary_label),
+                self._job_plan_summary_text(state),
             )
         )
         self._jobs_detail_plan_value.setObjectName("jobsDetailPlanValue")
@@ -10060,7 +10100,7 @@ class MediaSyncWindow(QMainWindow):
                 layout,
                 5,
                 texts.plan,
-                self._display(state.plan_summary_label),
+                self._job_plan_summary_text(state),
             )
         )
         self._job_detail_plan_value.setObjectName("jobDetailPlanValue")

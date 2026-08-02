@@ -129,6 +129,48 @@ REQUIRED_DATABASE_PARENT_SCOPE_FKS = {
         ("id", "endpoint_id"),
     ),
     (
+        "file_object_alias_groups",
+        ("snapshot_id", "endpoint_id"),
+        "snapshots",
+        ("id", "endpoint_id"),
+    ),
+    (
+        "file_object_alias_members",
+        ("snapshot_id", "group_id"),
+        "file_object_alias_groups",
+        ("snapshot_id", "id"),
+    ),
+    (
+        "file_object_alias_members",
+        ("snapshot_id", "file_entry_id"),
+        "file_entries",
+        ("snapshot_id", "id"),
+    ),
+    (
+        "duplicate_relation_path_keys",
+        ("snapshot_id", "endpoint_id"),
+        "snapshots",
+        ("id", "endpoint_id"),
+    ),
+    (
+        "duplicate_relation_path_keys",
+        ("snapshot_id", "file_entry_id"),
+        "file_entries",
+        ("snapshot_id", "id"),
+    ),
+    (
+        "duplicate_members",
+        ("snapshot_id", "endpoint_id"),
+        "snapshots",
+        ("id", "endpoint_id"),
+    ),
+    (
+        "duplicate_members",
+        ("snapshot_id", "file_entry_id"),
+        "file_entries",
+        ("snapshot_id", "id"),
+    ),
+    (
         "case_collision_members",
         ("snapshot_id", "file_entry_id"),
         "file_entries",
@@ -764,6 +806,46 @@ def _validate_source_file_precondition_invariant(
         fail(f"SRC-001 source-file precondition contract drifted: {drifted}")
 
 
+def _validate_truthful_duplicate_relations_invariant(
+    invariant: dict[str, Any],
+) -> None:
+    expected = {
+        "requirement_id": "DUP-001",
+        "alias_group_table": "file_object_alias_groups",
+        "alias_member_table": "file_object_alias_members",
+        "path_key_table": "duplicate_relation_path_keys",
+        "path_key_match_index": "idx_duplicate_relation_path_keys_match",
+        "target_case_aware_path_keys": True,
+        "duplicate_group_table": "duplicate_groups",
+        "duplicate_member_table": "duplicate_members",
+        "strong_evidence_table": "current_read_hash_evidence",
+        "strong_evidence_kind": "CURRENT_READ_HASH",
+        "full_hash_algorithm": "BLAKE3-256",
+        "full_hash_size_bound": True,
+        "stable_file_id_capability_required": True,
+        "same_file_relationship": "SAME_FILE_MULTIPLE_PATHS",
+        "same_file_potential_savings_bytes": 0,
+        "expected_replica_relationship": "EXPECTED_REPLICA",
+        "expected_replica_potential_savings_bytes": 0,
+        "immutable_relation_identity": True,
+        "automatic_mutation_allowed": False,
+    }
+    drifted = sorted(
+        key for key, expected_value in expected.items()
+        if invariant.get(key) != expected_value
+    )
+    if drifted:
+        fail(f"DUP-001 duplicate relation contract drifted: {drifted}")
+    related = set(
+        _column_tuple(
+            invariant.get("related_requirement_ids"),
+            "DUP-001 related_requirement_ids",
+        )
+    )
+    if related != {"SYNC-003"}:
+        fail("DUP-001 duplicate relation requirements drifted")
+
+
 def _validate_automation_policy_invariant(invariant: dict[str, Any]) -> None:
     expected = {
         "requirement_id": "AUTO-002",
@@ -1267,6 +1349,7 @@ def validate_database_contract(document: dict[str, Any]) -> int:
         "DB-006_ENDPOINT_HEADS_ARE_SEPARATE",
         "DB-006_JOB_HEADS_ARE_SEPARATE",
         "DB-007_PARENT_SCOPE_COMPOSITE_KEYS",
+        "DUP-001_TRUTHFUL_DUPLICATE_RELATIONS",
         "DUR-001_FINAL_DURABILITY_EVIDENCE",
         "END-001_ENDPOINT_CAPABILITY_EVIDENCE",
         "FILTER-001_BOUNDED_EVALUATION",
@@ -1311,6 +1394,9 @@ def validate_database_contract(document: dict[str, Any]) -> int:
     )
     _validate_current_read_hash_evidence_invariant(
         invariant_by_id["HASH-001_CURRENT_READ_HASH_EVIDENCE"]
+    )
+    _validate_truthful_duplicate_relations_invariant(
+        invariant_by_id["DUP-001_TRUTHFUL_DUPLICATE_RELATIONS"]
     )
     _validate_source_file_precondition_invariant(
         invariant_by_id["SRC-001_SOURCE_FILE_PRECONDITION"]

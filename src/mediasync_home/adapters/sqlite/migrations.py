@@ -303,6 +303,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_deferred_automation_plan_operations",
                 statements=CATALOG_DEFERRED_AUTOMATION_PLAN_OPERATIONS,
             ),
+            SqliteMigration(
+                version=54,
+                name="catalog_duplicate_relation_materialization",
+                statements=CATALOG_DUPLICATE_RELATION_MATERIALIZATION,
+            ),
         ),
     )
 
@@ -3056,6 +3061,263 @@ CATALOG_DEFERRED_AUTOMATION_PLAN_OPERATIONS = (
                     'CREATE_DIRECTORY'
                 )
             )
+    """,
+)
+
+
+CATALOG_DUPLICATE_RELATION_MATERIALIZATION = (
+    """
+    CREATE TABLE file_object_alias_groups (
+        id TEXT PRIMARY KEY,
+        analysis_id TEXT NOT NULL,
+        snapshot_id TEXT NOT NULL,
+        endpoint_id TEXT NOT NULL,
+        volume_identity TEXT NOT NULL,
+        file_id TEXT NOT NULL CHECK (length(file_id) = 64),
+        file_id_reliability TEXT NOT NULL CHECK (file_id_reliability = 'STABLE'),
+        reported_link_count INTEGER CHECK (reported_link_count IS NULL OR reported_link_count >= 2),
+        member_count INTEGER NOT NULL CHECK (member_count >= 2),
+        classification_state TEXT NOT NULL CHECK (
+            classification_state = 'SAME_FILE_MULTIPLE_PATHS'
+        ),
+        created_utc TEXT NOT NULL,
+        UNIQUE (snapshot_id, volume_identity, file_id),
+        UNIQUE (snapshot_id, id),
+        FOREIGN KEY (analysis_id) REFERENCES analyses (id) ON DELETE RESTRICT,
+        FOREIGN KEY (snapshot_id, endpoint_id)
+            REFERENCES snapshots (id, endpoint_id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TABLE file_object_alias_members (
+        snapshot_id TEXT NOT NULL,
+        group_id TEXT NOT NULL,
+        file_entry_id TEXT NOT NULL,
+        PRIMARY KEY (group_id, file_entry_id),
+        FOREIGN KEY (snapshot_id, group_id)
+            REFERENCES file_object_alias_groups (snapshot_id, id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (snapshot_id, file_entry_id)
+            REFERENCES file_entries (snapshot_id, id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TABLE duplicate_relation_path_keys (
+        analysis_id TEXT NOT NULL,
+        target_endpoint_id TEXT NOT NULL,
+        snapshot_id TEXT NOT NULL,
+        endpoint_id TEXT NOT NULL,
+        file_entry_id TEXT NOT NULL,
+        endpoint_role TEXT NOT NULL CHECK (
+            endpoint_role IN ('SOURCE', 'TARGET')
+        ),
+        path_key TEXT NOT NULL,
+        PRIMARY KEY (
+            analysis_id,
+            target_endpoint_id,
+            snapshot_id,
+            file_entry_id
+        ),
+        FOREIGN KEY (analysis_id) REFERENCES analyses (id) ON DELETE RESTRICT,
+        FOREIGN KEY (target_endpoint_id) REFERENCES endpoints (id) ON DELETE RESTRICT,
+        FOREIGN KEY (snapshot_id, endpoint_id)
+            REFERENCES snapshots (id, endpoint_id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (snapshot_id, file_entry_id)
+            REFERENCES file_entries (snapshot_id, id)
+            ON DELETE RESTRICT,
+        CHECK (
+            endpoint_role <> 'TARGET'
+            OR endpoint_id = target_endpoint_id
+        )
+    )
+    """,
+    """
+    CREATE TABLE duplicate_groups (
+        id TEXT PRIMARY KEY,
+        analysis_id TEXT NOT NULL,
+        relation_key TEXT NOT NULL,
+        full_hash TEXT NOT NULL CHECK (
+            length(full_hash) = 64
+            AND full_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+        member_count INTEGER NOT NULL CHECK (member_count >= 2),
+        physical_object_count INTEGER NOT NULL CHECK (
+            physical_object_count BETWEEN 2 AND member_count
+        ),
+        expected_replica_count INTEGER NOT NULL CHECK (
+            expected_replica_count >= 0
+            AND expected_replica_count < physical_object_count
+        ),
+        relationship_class TEXT NOT NULL CHECK (
+            relationship_class IN (
+                'EXPECTED_REPLICA',
+                'INTRA_ENDPOINT_DUPLICATE',
+                'UNRELATED_CROSS_ENDPOINT_DUPLICATE'
+            )
+        ),
+        potential_savings_bytes INTEGER NOT NULL CHECK (
+            potential_savings_bytes >= 0
+        ),
+        review_state TEXT NOT NULL CHECK (
+            review_state IN ('UNREVIEWED', 'REVIEWED')
+        ),
+        created_utc TEXT NOT NULL,
+        UNIQUE (analysis_id, relationship_class, relation_key),
+        FOREIGN KEY (analysis_id) REFERENCES analyses (id) ON DELETE RESTRICT,
+        CHECK (
+            (
+                relationship_class = 'EXPECTED_REPLICA'
+                AND expected_replica_count >= 1
+                AND potential_savings_bytes = 0
+            )
+            OR (
+                relationship_class <> 'EXPECTED_REPLICA'
+                AND potential_savings_bytes =
+                    size_bytes * (
+                        physical_object_count - expected_replica_count - 1
+                    )
+            )
+        )
+    )
+    """,
+    """
+    CREATE TABLE duplicate_members (
+        group_id TEXT NOT NULL,
+        snapshot_id TEXT NOT NULL,
+        endpoint_id TEXT NOT NULL,
+        file_entry_id TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        member_role TEXT NOT NULL CHECK (
+            member_role IN ('SOURCE_ORIGIN', 'EXPECTED_REPLICA', 'DUPLICATE')
+        ),
+        physical_object_key TEXT NOT NULL,
+        PRIMARY KEY (group_id, snapshot_id, file_entry_id),
+        FOREIGN KEY (group_id) REFERENCES duplicate_groups (id) ON DELETE RESTRICT,
+        FOREIGN KEY (snapshot_id, endpoint_id)
+            REFERENCES snapshots (id, endpoint_id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY (snapshot_id, file_entry_id)
+            REFERENCES file_entries (snapshot_id, id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_file_object_alias_groups_analysis
+        ON file_object_alias_groups (analysis_id, snapshot_id, id)
+    """,
+    """
+    CREATE INDEX idx_file_object_alias_members_snapshot_entry
+        ON file_object_alias_members (snapshot_id, file_entry_id, group_id)
+    """,
+    """
+    CREATE INDEX idx_duplicate_relation_path_keys_match
+        ON duplicate_relation_path_keys (
+            analysis_id,
+            target_endpoint_id,
+            path_key,
+            endpoint_role,
+            snapshot_id,
+            file_entry_id
+        )
+    """,
+    """
+    CREATE INDEX idx_duplicate_groups_analysis_class
+        ON duplicate_groups (
+            analysis_id,
+            relationship_class,
+            potential_savings_bytes DESC,
+            id
+        )
+    """,
+    """
+    CREATE INDEX idx_duplicate_members_group_role
+        ON duplicate_members (group_id, member_role, endpoint_id, relative_path)
+    """,
+    """
+    CREATE TRIGGER trg_file_object_alias_groups_no_update
+    BEFORE UPDATE ON file_object_alias_groups
+    BEGIN
+        SELECT RAISE(ABORT, 'FILE_OBJECT_ALIAS_GROUP_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_file_object_alias_groups_no_delete
+    BEFORE DELETE ON file_object_alias_groups
+    BEGIN
+        SELECT RAISE(ABORT, 'FILE_OBJECT_ALIAS_GROUP_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_file_object_alias_members_no_update
+    BEFORE UPDATE ON file_object_alias_members
+    BEGIN
+        SELECT RAISE(ABORT, 'FILE_OBJECT_ALIAS_MEMBER_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_file_object_alias_members_no_delete
+    BEFORE DELETE ON file_object_alias_members
+    BEGIN
+        SELECT RAISE(ABORT, 'FILE_OBJECT_ALIAS_MEMBER_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_duplicate_relation_path_keys_no_update
+    BEFORE UPDATE ON duplicate_relation_path_keys
+    BEGIN
+        SELECT RAISE(ABORT, 'DUPLICATE_RELATION_PATH_KEY_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_duplicate_relation_path_keys_no_delete
+    BEFORE DELETE ON duplicate_relation_path_keys
+    BEGIN
+        SELECT RAISE(ABORT, 'DUPLICATE_RELATION_PATH_KEY_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_duplicate_groups_identity_immutable
+    BEFORE UPDATE ON duplicate_groups
+    WHEN
+        NEW.id IS NOT OLD.id
+        OR NEW.analysis_id IS NOT OLD.analysis_id
+        OR NEW.relation_key IS NOT OLD.relation_key
+        OR NEW.full_hash IS NOT OLD.full_hash
+        OR NEW.size_bytes IS NOT OLD.size_bytes
+        OR NEW.member_count IS NOT OLD.member_count
+        OR NEW.physical_object_count IS NOT OLD.physical_object_count
+        OR NEW.expected_replica_count IS NOT OLD.expected_replica_count
+        OR NEW.relationship_class IS NOT OLD.relationship_class
+        OR NEW.potential_savings_bytes IS NOT OLD.potential_savings_bytes
+        OR NEW.created_utc IS NOT OLD.created_utc
+    BEGIN
+        SELECT RAISE(ABORT, 'DUPLICATE_GROUP_IDENTITY_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_duplicate_groups_no_delete
+    BEFORE DELETE ON duplicate_groups
+    BEGIN
+        SELECT RAISE(ABORT, 'DUPLICATE_GROUP_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_duplicate_members_no_update
+    BEFORE UPDATE ON duplicate_members
+    BEGIN
+        SELECT RAISE(ABORT, 'DUPLICATE_MEMBER_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_duplicate_members_no_delete
+    BEFORE DELETE ON duplicate_members
+    BEGIN
+        SELECT RAISE(ABORT, 'DUPLICATE_MEMBER_IMMUTABLE');
+    END
     """,
 )
 

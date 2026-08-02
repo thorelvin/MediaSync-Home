@@ -20,6 +20,7 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     apply_sqlite_connection_policy,
     catalog_critical_writer_policy,
 )
+from mediasync_home.adapters.sqlite.duplicates import SqliteDuplicateRelationStore
 from mediasync_home.adapters.sqlite.endpoint_classifications import (
     SqliteEndpointClassificationRefresher,
 )
@@ -51,8 +52,10 @@ from mediasync_home.application.initial_backup_planning import (
 )
 from mediasync_home.application.endpoint_capabilities import (
     DurabilityLevel,
+    EndpointCapabilities,
     EndpointCapabilitiesProbe,
     EndpointCapabilityEvidence,
+    FileIdReliability,
 )
 from mediasync_home.application.plans import (
     PlanOperationType,
@@ -495,6 +498,196 @@ def test_current_read_hash_evidence_skips_identical_existing_file(
                 SET computed_utc = 'changed'
                 """
             )
+
+
+def test_duplicate_relations_exclude_expected_replicas_and_hardlink_aliases_from_savings(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    source_file = source / "Family.bin"
+    source_file.write_bytes(b"one physical source object")
+    os.link(source_file, source / "Family alias.bin")
+    (target / "Family.bin").write_bytes(source_file.read_bytes())
+
+    with sqlite3.connect(database) as connection:
+        _prepare_registered_snapshots(
+            connection,
+            database=database,
+            source=source,
+            target=target,
+        )
+        hash_report = SqliteCurrentReadHashEvidenceRefresher(
+            connection
+        ).refresh_current_read_hash_evidence(
+            analysis_id="analysis-a",
+            observed_utc="2026-07-31T16:02:45Z",
+        )
+        relations = SqliteDuplicateRelationStore(connection)
+
+        first = relations.materialize_known_duplicate_relations(
+            analysis_id="analysis-a",
+            observed_utc="2026-07-31T16:02:46Z",
+        )
+        replay = relations.materialize_known_duplicate_relations(
+            analysis_id="analysis-a",
+            observed_utc="2026-07-31T16:02:47Z",
+        )
+        summary = relations.load_duplicate_analysis_summary("analysis-a")
+
+        assert hash_report.identical_pair_count == 1
+        assert first.alias_group_count == 1
+        assert first.alias_path_count == 2
+        assert first.expected_replica_group_count == 1
+        assert first.expected_replica_count == 1
+        assert first.idempotent_replay is False
+        assert replay.idempotent_replay is True
+        assert summary is not None
+        assert summary.same_file_alias_group_count == 1
+        assert summary.same_file_alias_path_count == 2
+        assert summary.expected_replica_group_count == 1
+        assert summary.expected_replica_count == 1
+        assert summary.potential_savings_bytes == 0
+        assert connection.execute(
+            """
+            SELECT relationship_class, potential_savings_bytes
+            FROM duplicate_groups
+            """
+        ).fetchall() == [("EXPECTED_REPLICA", 0)]
+        assert connection.execute(
+            """
+            SELECT classification_state, member_count
+            FROM file_object_alias_groups
+            """
+        ).fetchall() == [("SAME_FILE_MULTIPLE_PATHS", 2)]
+        assert connection.execute(
+            """
+            SELECT endpoint_role, relative_path, path_key
+            FROM duplicate_relation_path_keys AS path_keys
+            INNER JOIN file_entries AS entries
+                ON entries.snapshot_id = path_keys.snapshot_id
+                AND entries.id = path_keys.file_entry_id
+            ORDER BY endpoint_role, relative_path
+            """
+        ).fetchall() == [
+            ("SOURCE", "Family.bin", "family.bin"),
+            ("TARGET", "Family.bin", "family.bin"),
+        ]
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="DUPLICATE_RELATION_PATH_KEY_IMMUTABLE",
+        ):
+            connection.execute(
+                "UPDATE duplicate_relation_path_keys SET path_key = 'changed'"
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="DUPLICATE_GROUP_IDENTITY_IMMUTABLE",
+        ):
+            connection.execute(
+                "UPDATE duplicate_groups SET potential_savings_bytes = 1"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+            connection.execute(
+                """
+                INSERT INTO duplicate_groups (
+                    id,
+                    analysis_id,
+                    relation_key,
+                    full_hash,
+                    size_bytes,
+                    member_count,
+                    physical_object_count,
+                    expected_replica_count,
+                    relationship_class,
+                    potential_savings_bytes,
+                    review_state,
+                    created_utc
+                )
+                VALUES (
+                    'invalid-savings',
+                    'analysis-a',
+                    'invalid-savings',
+                    ?,
+                    100,
+                    2,
+                    2,
+                    1,
+                    'EXPECTED_REPLICA',
+                    100,
+                    'UNREVIEWED',
+                    '2026-07-31T16:02:48Z'
+                )
+                """,
+                ("a" * 64,),
+            )
+
+
+def test_duplicate_relations_do_not_collapse_hint_only_file_ids(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    source_file = source / "Original.bin"
+    source_file.write_bytes(b"same object")
+    os.link(source_file, source / "Alias.bin")
+
+    with sqlite3.connect(database) as connection:
+        _prepare_registered_snapshots(
+            connection,
+            database=database,
+            source=source,
+            target=target,
+        )
+        row = connection.execute(
+            """
+            SELECT read_capabilities_json
+            FROM endpoint_classification_observations
+            WHERE endpoint_id = ?
+            """,
+            (SOURCE_ENDPOINT_ID,),
+        ).fetchone()
+        assert row is not None
+        hinted = EndpointCapabilityEvidence.from_profile(
+            replace(
+                EndpointCapabilities.from_json(str(row[0])),
+                file_id_reliability=FileIdReliability.HINT,
+            )
+        )
+        connection.execute(
+            """
+            UPDATE endpoint_classification_observations
+            SET
+                read_capabilities_json = ?,
+                read_capabilities_hash = ?
+            WHERE endpoint_id = ?
+            """,
+            (
+                hinted.profile_json,
+                hinted.capabilities_hash,
+                SOURCE_ENDPOINT_ID,
+            ),
+        )
+        connection.commit()
+
+        report = SqliteDuplicateRelationStore(
+            connection
+        ).materialize_known_duplicate_relations(
+            analysis_id="analysis-a",
+            observed_utc="2026-07-31T16:02:46Z",
+        )
+
+        assert report.alias_group_count == 0
+        assert report.alias_path_count == 0
+        assert connection.execute(
+            "SELECT count(*) FROM file_object_alias_groups"
+        ).fetchone() == (0,)
 
 
 def test_incomplete_coverage_evidence_blocks_persisted_replacement_plan(

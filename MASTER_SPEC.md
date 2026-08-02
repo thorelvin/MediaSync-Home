@@ -5387,30 +5387,58 @@ separat og merger bare en bounded kandidatmengde i den synkende totalrekkefølge
 
 Fil-ID er et hint. Cachegjenbruk krever identitetskombinasjonen og evidensreglene i §6/§13.8. `METADATA_REVALIDATED_CACHED_HASH` kan ikke oppgraderes til `CURRENT_READ_HASH` uten ny full lesing. Hurtigsignaturer med ulike `signature_schema_version` er ikke sammenlignbare. En transaksjon som aktiverer en ny post deaktiverer den gamle aktive posten for samme logiske cacheidentitet; konkurrerende beregninger løses deterministisk etter evidensstyrke og generation, ikke last-write-wins.
 
+#### `duplicate_relation_path_keys`
+
+- `analysis_id TEXT NOT NULL REFERENCES analyses(id) ON DELETE RESTRICT`
+- `target_endpoint_id TEXT NOT NULL REFERENCES endpoints(id) ON DELETE RESTRICT`
+- `snapshot_id TEXT NOT NULL`
+- `endpoint_id TEXT NOT NULL`
+- `file_entry_id TEXT NOT NULL`
+- `endpoint_role TEXT NOT NULL`
+- `path_key TEXT NOT NULL`
+- primærnøkkel `(analysis_id, target_endpoint_id, snapshot_id, file_entry_id)`
+- sammensatte FK-er binder nøkkelen til nøyaktig snapshot, endepunkt og filpost
+- indeks `idx_duplicate_relation_path_keys_match` over `(analysis_id, target_endpoint_id, path_key, endpoint_role, snapshot_id, file_entry_id)`
+
+Tabellen materialiserer hver hashkandidat med en immutable stinøkkel under det
+aktuelle målets casekontekst. Forventede replikaer finnes med en indeksert
+likhetsjoin mellom `SOURCE`- og `TARGET`-nøkler; katalogstørrelsen gir derfor
+ikke en kvadratisk source-target path-sammenligning.
+
 #### `duplicate_groups`
 
 - `id TEXT PRIMARY KEY`
 - `analysis_id TEXT NOT NULL REFERENCES analyses(id) ON DELETE RESTRICT`
+- `relation_key TEXT NOT NULL`
 - `full_hash TEXT NOT NULL`
 - `size_bytes INTEGER NOT NULL`
 - `member_count INTEGER NOT NULL`
+- `physical_object_count INTEGER NOT NULL`
+- `expected_replica_count INTEGER NOT NULL`
 - `relationship_class TEXT NOT NULL`
 - `potential_savings_bytes INTEGER NOT NULL`
 - `review_state TEXT NOT NULL`
+- `created_utc TEXT NOT NULL`
+- unik `(analysis_id, relationship_class, relation_key)`
 
 #### `duplicate_members`
 
 - `group_id TEXT NOT NULL REFERENCES duplicate_groups(id) ON DELETE RESTRICT`
-- `endpoint_id TEXT NOT NULL REFERENCES endpoints(id) ON DELETE RESTRICT`
+- `snapshot_id TEXT NOT NULL`
+- `endpoint_id TEXT NOT NULL`
+- `file_entry_id TEXT NOT NULL`
 - `relative_path TEXT NOT NULL`
 - `member_role TEXT NOT NULL`
-- primærnøkkel `(group_id, endpoint_id, relative_path)`
+- `physical_object_key TEXT NOT NULL`
+- primærnøkkel `(group_id, snapshot_id, file_entry_id)`
+- sammensatte FK-er binder medlemmet til nøyaktig snapshot, endepunkt og filpost
 
 #### `file_object_alias_groups`
 
 Klassifiserer flere snapshotstier som peker til samme underliggende filobjekt. Dette er ikke et innholdsduplikat og gir normalt ingen mulig lagringsbesparelse.
 
 - `id TEXT PRIMARY KEY`
+- `analysis_id TEXT NOT NULL REFERENCES analyses(id) ON DELETE RESTRICT`
 - `snapshot_id TEXT NOT NULL REFERENCES snapshots(id) ON DELETE RESTRICT`
 - `endpoint_id TEXT NOT NULL REFERENCES endpoints(id) ON DELETE RESTRICT`
 - `volume_identity TEXT NOT NULL`
@@ -5419,6 +5447,7 @@ Klassifiserer flere snapshotstier som peker til samme underliggende filobjekt. D
 - `reported_link_count INTEGER`
 - `member_count INTEGER NOT NULL`
 - `classification_state TEXT NOT NULL`
+- `created_utc TEXT NOT NULL`
 - unik `(snapshot_id, volume_identity, file_id)`
 - unik `(snapshot_id, id)`
 
@@ -5426,12 +5455,14 @@ Klassifiserer flere snapshotstier som peker til samme underliggende filobjekt. D
 
 - `snapshot_id TEXT NOT NULL`
 - `group_id TEXT NOT NULL`
-- `file_entry_id INTEGER NOT NULL`
+- `file_entry_id TEXT NOT NULL`
 - primærnøkkel `(group_id, file_entry_id)`
 - sammensatt FK `(snapshot_id, group_id) REFERENCES file_object_alias_groups(snapshot_id, id)`
 - sammensatt FK `(snapshot_id, file_entry_id) REFERENCES file_entries(snapshot_id, id)`
 
 Aliasgrupper er endpointlokale. De brukes aldri som identitetsbevis mellom to endepunkter, og MediaSync forsøker ikke å gjenskape hardlinktopologi på backupmålet som standard.
+
+0B-implementasjonsnote: Catalog migration 54 materialiserer aliasgrupper bare når det lagrede endpointprofilet beviser `supports_file_ids` med `file_id_reliability = stable`. Snapshotets path-uavhengige identitetsfingerprint, som binder volum-/filobjektidentitet og relevante stat-felt, lagres som den ugjennomsiktige `file_id`-nøkkelen; endpoint-ID avgrenser volumkonteksten og hindrer cross-endpoint-identitet. Forventede replikaer materialiseres bare for konfigurert kilde-/målsti under målets casekontekst når begge snapshotposter har lik størrelse og immutable `CURRENT_READ_HASH` med BLAKE3-256. De immutable, målkontekst-normaliserte stinøklene bruker `idx_duplicate_relation_path_keys_match` for en indeksert likhetsjoin. Databaseconstraints krever 0 byte mulig besparelse for `EXPECTED_REPLICA`, og aliasgrupper inngår ikke i spareberegningen. Relasjonsidentitet og medlemmer er immutable; bare review-state kan endres. Materialiseringen flytter, sletter eller hardlinker ingen brukerfiler.
 
 #### `managed_objects`
 

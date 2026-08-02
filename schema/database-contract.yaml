@@ -367,6 +367,31 @@ invariants:
     hash_schema_version: 1
     fingerprint_must_be_stable: true
     immutable: true
+  - id: DUP-001_TRUTHFUL_DUPLICATE_RELATIONS
+    requirement_id: DUP-001
+    related_requirement_ids: [SYNC-003]
+    assertion: >
+      Multiple paths to one file object are classified before content
+      duplicates, and intended source-to-target backup copies remain expected
+      replicas. Neither relation contributes possible storage savings.
+    alias_group_table: file_object_alias_groups
+    alias_member_table: file_object_alias_members
+    path_key_table: duplicate_relation_path_keys
+    path_key_match_index: idx_duplicate_relation_path_keys_match
+    target_case_aware_path_keys: true
+    duplicate_group_table: duplicate_groups
+    duplicate_member_table: duplicate_members
+    strong_evidence_table: current_read_hash_evidence
+    strong_evidence_kind: CURRENT_READ_HASH
+    full_hash_algorithm: BLAKE3-256
+    full_hash_size_bound: true
+    stable_file_id_capability_required: true
+    same_file_relationship: SAME_FILE_MULTIPLE_PATHS
+    same_file_potential_savings_bytes: 0
+    expected_replica_relationship: EXPECTED_REPLICA
+    expected_replica_potential_savings_bytes: 0
+    immutable_relation_identity: true
+    automatic_mutation_allowed: false
   - id: SRC-001_SOURCE_FILE_PRECONDITION
     requirement_id: SRC-001
     assertion: >
@@ -545,6 +570,34 @@ invariants:
         child_columns: [snapshot_id, endpoint_id]
         parent_table: snapshots
         parent_columns: [id, endpoint_id]
+      - child_table: file_object_alias_groups
+        child_columns: [snapshot_id, endpoint_id]
+        parent_table: snapshots
+        parent_columns: [id, endpoint_id]
+      - child_table: file_object_alias_members
+        child_columns: [snapshot_id, group_id]
+        parent_table: file_object_alias_groups
+        parent_columns: [snapshot_id, id]
+      - child_table: file_object_alias_members
+        child_columns: [snapshot_id, file_entry_id]
+        parent_table: file_entries
+        parent_columns: [snapshot_id, id]
+      - child_table: duplicate_relation_path_keys
+        child_columns: [snapshot_id, endpoint_id]
+        parent_table: snapshots
+        parent_columns: [id, endpoint_id]
+      - child_table: duplicate_relation_path_keys
+        child_columns: [snapshot_id, file_entry_id]
+        parent_table: file_entries
+        parent_columns: [snapshot_id, id]
+      - child_table: duplicate_members
+        child_columns: [snapshot_id, endpoint_id]
+        parent_table: snapshots
+        parent_columns: [id, endpoint_id]
+      - child_table: duplicate_members
+        child_columns: [snapshot_id, file_entry_id]
+        parent_table: file_entries
+        parent_columns: [snapshot_id, id]
       - child_table: case_collision_members
         child_columns: [snapshot_id, file_entry_id]
         parent_table: file_entries

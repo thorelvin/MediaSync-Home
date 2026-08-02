@@ -326,6 +326,16 @@ def test_backup_job_detail_view_model_renders_exact_job_revision() -> None:
                         "plan_id": None,
                         "row_version": 2,
                     },
+                    "duplicate_summary": {
+                        "analysis_id": "analysis-a",
+                        "read_model_available": True,
+                        "duplicate_group_count": 1,
+                        "expected_replica_group_count": 1,
+                        "expected_replica_count": 1,
+                        "same_file_alias_group_count": 1,
+                        "same_file_alias_path_count": 2,
+                        "potential_savings_bytes": 0,
+                    },
                     "automation_schedule": {
                         "schedule_id": "daily-job-a",
                         "trigger_type": "scheduled_time",
@@ -367,6 +377,10 @@ def test_backup_job_detail_view_model_renders_exact_job_revision() -> None:
     assert state.analysis_id == "analysis-a"
     assert state.analysis_request_id == "request-a"
     assert state.analysis_request_state == "RUNNING"
+    assert state.duplicate_summary_available is True
+    assert state.expected_replica_count == 1
+    assert state.same_file_alias_path_count == 2
+    assert state.potential_savings_bytes == 0
     assert state.automation_schedule_id == "daily-job-a"
     assert state.automation_enabled is True
     assert state.automation_daily_local_time == "21:30"

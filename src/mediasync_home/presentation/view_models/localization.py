@@ -98,6 +98,12 @@ class ShellText:
         return "Start backup"
 
     @property
+    def identical_files(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Identical files"
+        return "Identiske filer"
+
+    @property
     def start_backup_tooltip(self) -> str:
         if self.language_tooltip_prefix == "Language":
             return "Start the sealed backup plan"

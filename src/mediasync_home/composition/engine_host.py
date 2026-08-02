@@ -71,6 +71,7 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     classify_sqlite_exception,
     recovery_writer_policy,
 )
+from mediasync_home.adapters.sqlite.duplicates import SqliteDuplicateRelationStore
 from mediasync_home.adapters.sqlite.installation_state import (
     SqliteInstallationStateStore,
 )
@@ -510,6 +511,7 @@ class EngineHostRuntime:
     )
     backup_analysis_snapshot_refresher: SqliteJobSnapshotMaterializer | None = None
     backup_analysis_hash_refresher: SqliteCurrentReadHashEvidenceRefresher | None = None
+    backup_analysis_duplicate_relations: SqliteDuplicateRelationStore | None = None
     backup_analysis_plan_refresher: SqliteInitialBackupPlanMaterializer | None = None
     trigger_occurrence_store: TriggerOccurrenceStore | None = None
     catalog_connection: sqlite3.Connection | None = None
@@ -542,6 +544,7 @@ class EngineHostRuntime:
             or self.backup_analysis_endpoint_refresher is None
             or self.backup_analysis_snapshot_refresher is None
             or self.backup_analysis_hash_refresher is None
+            or self.backup_analysis_duplicate_relations is None
             or self.backup_analysis_plan_refresher is None
             or self.run_executor_plan_store is None
             or self.run_executor_queue_store is None
@@ -558,6 +561,7 @@ class EngineHostRuntime:
             ),
             snapshots=self.backup_analysis_snapshot_refresher,
             hash_evidence=self.backup_analysis_hash_refresher,
+            duplicate_relations=self.backup_analysis_duplicate_relations,
             plans=self.backup_analysis_plan_refresher,
             plan_store=self.run_executor_plan_store,
             run_id_factory=UuidRunIdFactory(),
@@ -1891,15 +1895,23 @@ def build_engine_host_runtime(
         current_read_hash_refresher = SqliteCurrentReadHashEvidenceRefresher(
             catalog_connection
         )
+        duplicate_relations = SqliteDuplicateRelationStore(catalog_connection)
         for snapshot_result in snapshot_materialization_refresh.results:
             if (
                 snapshot_result.state in {"SEALED", "REUSED"}
                 and snapshot_result.analysis_id is not None
             ):
-                current_read_hash_refresher.refresh_current_read_hash_evidence(
-                    analysis_id=snapshot_result.analysis_id,
-                    observed_utc=runtime_clock.utc_now(),
+                hash_report = (
+                    current_read_hash_refresher.refresh_current_read_hash_evidence(
+                        analysis_id=snapshot_result.analysis_id,
+                        observed_utc=runtime_clock.utc_now(),
+                    )
                 )
+                if hash_report.ready:
+                    duplicate_relations.materialize_known_duplicate_relations(
+                        analysis_id=snapshot_result.analysis_id,
+                        observed_utc=runtime_clock.utc_now(),
+                    )
         state_capacity_report = capacity_gate.latest_report()
         plans = SqlitePlanStore(catalog_connection)
         initial_backup_plan_materializer = SqliteInitialBackupPlanMaterializer(
@@ -1995,10 +2007,17 @@ def build_engine_host_runtime(
                     result.state in {"SEALED", "REUSED"}
                     and result.analysis_id is not None
                 ):
-                    current_read_hash_refresher.refresh_current_read_hash_evidence(
-                        analysis_id=result.analysis_id,
-                        observed_utc=runtime_clock.utc_now(),
+                    hash_report = (
+                        current_read_hash_refresher.refresh_current_read_hash_evidence(
+                            analysis_id=result.analysis_id,
+                            observed_utc=runtime_clock.utc_now(),
+                        )
                     )
+                    if hash_report.ready:
+                        duplicate_relations.materialize_known_duplicate_relations(
+                            analysis_id=result.analysis_id,
+                            observed_utc=runtime_clock.utc_now(),
+                        )
             return report
 
         service = EngineHostIpcService(
@@ -2054,6 +2073,7 @@ def build_engine_host_runtime(
             trigger_occurrence_store=trigger_occurrences,
             external_resource_state_store=external_resource_state,
             cataloged_file_read_store=catalog_handoffs,
+            duplicate_analysis_read_store=duplicate_relations,
             backup_analysis_request_store=backup_analysis_requests,
             job_lifecycle_store=job_lifecycle,
             job_schedule_invalidator=job_lifecycle,
@@ -2116,6 +2136,7 @@ def build_engine_host_runtime(
         backup_analysis_endpoint_refresher=endpoint_classification_refresher,
         backup_analysis_snapshot_refresher=job_snapshot_materializer,
         backup_analysis_hash_refresher=current_read_hash_refresher,
+        backup_analysis_duplicate_relations=duplicate_relations,
         backup_analysis_plan_refresher=initial_backup_plan_materializer,
         trigger_occurrence_store=trigger_occurrences,
         catalog_connection=catalog_connection,
