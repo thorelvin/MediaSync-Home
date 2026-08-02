@@ -1,5 +1,15 @@
 # Implementeringsstatus
 
+Update 2026-08-02: `UX-005` now has end-to-end policy and GUI evidence for the
+established-backup primary action. One click requests a fresh analysis with
+safe-start intent; an all-low-risk absent-target copy/create plan queues its run
+without a second confirmation, while a replacement or other changed-risk plan
+returns to a runnable sealed review state and requires a separate Start Backup
+action. The GUI tests exercise the visible Run Backup button, analysis polling,
+queued run identity and interrupted review state; application and Engine Host
+tests cover the same decision against freshly materialized plans. The initial
+reviewed-plan path remains checksum-bound and idempotent.
+
 Update 2026-08-02: `AUTO-001` daily backup automation is now user-configurable
 in the Jobs workspace for the accepted local same-user scope. The localized Qt
 controls expose an enabled checkbox, local `HH:MM` time, Save action and

@@ -3707,6 +3707,80 @@ def test_start_backup_button_submits_sealed_plan_once(qapp) -> None:
         window.deleteLater()
 
 
+def test_established_backup_one_click_runs_fresh_safe_analysis(qapp) -> None:
+    provider = _FakeEstablishedQuickRunDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+        user_preferences=UserPreferences(language=UserLanguage.ENGLISH),
+    )
+
+    try:
+        window.show()
+        window.refresh_engine_status()
+        qapp.processEvents()
+        button = window.findChild(QPushButton, "startBackupButton")
+        assert button is not None
+        assert button.isVisible()
+        assert button.isEnabled()
+        assert button.text() == "Run backup"
+
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+        assert provider.check_start_policies == [True]
+        assert provider.started_plan is None
+        assert button.text() == "Checking changes..."
+
+        window._poll_backup_analysis()
+        qapp.processEvents()
+
+        assert window._job_detail_state.plan_id == "plan-fresh"
+        assert window._job_detail_state.analysis_request_started_run_id == "run-fresh"
+        assert window._active_run_id == "run-fresh"
+        assert provider.started_plan is None
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_established_backup_one_click_stops_changed_risk_for_review(qapp) -> None:
+    provider = _FakeEstablishedQuickRunDashboardEngineClient(review_required=True)
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.LIGHT,
+        user_preferences=UserPreferences(language=UserLanguage.ENGLISH),
+    )
+
+    try:
+        window.show()
+        window.refresh_engine_status()
+        qapp.processEvents()
+        button = window.findChild(QPushButton, "startBackupButton")
+        assert button is not None
+        assert button.isVisible()
+        assert button.isEnabled()
+        assert button.text() == "Run backup"
+
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        window._poll_backup_analysis()
+        qapp.processEvents()
+
+        assert provider.check_start_policies == [True]
+        assert provider.started_plan is None
+        assert window._job_detail_state.plan_id == "plan-fresh"
+        assert window._job_detail_state.analysis_request_started_run_id is None
+        assert button.isVisible()
+        assert button.isEnabled()
+        assert button.text() == "Start backup"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_pending_target_registration_stays_responsive_and_bounded(qapp) -> None:
     provider = _FakePendingRegistrationDashboardEngineClient()
     worker_provider = _BlockingTargetRegistrationEngineClient(provider)
@@ -6829,6 +6903,175 @@ class _FakeTargetRetryDashboardEngineClient(_FakeTerminalRunDashboardEngineClien
         detail["job"] = job
         payload["backup_job_detail"] = detail
         return IpcResponse.accepted(payload)
+
+
+class _FakeEstablishedQuickRunDashboardEngineClient(
+    _FakeTerminalRunDashboardEngineClient
+):
+    def __init__(self, *, review_required: bool = False) -> None:
+        super().__init__()
+        self.review_required = review_required
+        self.analysis_requested = False
+        self.check_start_policies: list[bool] = []
+
+    def check_backup(
+        self,
+        *,
+        job_id: str,
+        request_id: str,
+        idempotency_key: str,
+        start_when_safe: bool = True,
+    ) -> IpcResponse:
+        assert job_id == "job-a"
+        assert request_id
+        assert idempotency_key
+        self.analysis_requested = True
+        self.check_start_policies.append(start_when_safe)
+        return IpcResponse.accepted(
+            {
+                "analysis_request": {
+                    "request_id": "analysis-quick-run",
+                    "state": "QUEUED",
+                }
+            }
+        )
+
+    def get_backup_job_detail(self, *, job_id: str) -> IpcResponse:
+        response = super().get_backup_job_detail(job_id=job_id)
+        if not self.analysis_requested:
+            return response
+        payload = dict(response.payload)
+        detail = dict(payload["backup_job_detail"])
+        job = dict(detail["job"])
+        initial_plan = dict(job["initial_plan"])
+        initial_plan.update(
+            {
+                "analysis_id": "analysis-fresh",
+                "plan_id": "plan-fresh",
+                "plan_checksum": "b" * 64,
+                "operation_count": 1,
+                "planned_bytes": 1024,
+                "plan_runnable": True,
+            }
+        )
+        job["initial_plan"] = initial_plan
+        job["latest_analysis_request"] = {
+            "request_id": "analysis-quick-run",
+            "job_id": "job-a",
+            "job_revision_id": "job-rev-a",
+            "state": "SUCCEEDED",
+            "requested_utc": "2026-08-02T12:00:00.000Z",
+            "started_utc": "2026-08-02T12:00:01.000Z",
+            "completed_utc": "2026-08-02T12:00:02.000Z",
+            "analysis_id": "analysis-fresh",
+            "plan_id": "plan-fresh",
+            "reason_code": (
+                "INITIAL_BACKUP_PLAN_READY_FOR_REVIEW"
+                if self.review_required
+                else "BACKUP_ANALYSIS_SAFE_RUN_QUEUED"
+            ),
+            "operation_count": 1,
+            "planned_bytes": 1024,
+            "start_when_safe": True,
+            "started_run_id": None if self.review_required else "run-fresh",
+            "row_version": 2,
+        }
+        detail["job"] = job
+        payload["backup_job_detail"] = detail
+        return IpcResponse.accepted(payload)
+
+    def get_activity_overview(
+        self,
+        *,
+        job_id: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> IpcResponse:
+        response = super().get_activity_overview(
+            job_id=job_id,
+            limit=limit,
+            offset=offset,
+        )
+        if not self.analysis_requested or self.review_required:
+            return response
+        payload = dict(response.payload)
+        overview = dict(payload["activity_overview"])
+        run = dict(overview["runs"][0])
+        run.update(
+            {
+                "run_id": "run-fresh",
+                "plan_id": "plan-fresh",
+                "state": "PREFLIGHT",
+                "started_utc": "2026-08-02T12:00:02.000Z",
+                "finished_utc": None,
+                "planned_operations": 1,
+                "planned_bytes": 1024,
+            }
+        )
+        targets = list(run["targets"])
+        target = dict(targets[0])
+        target.update(
+            {
+                "run_target_id": "run-fresh-target-0000",
+                "state": "REVALIDATING",
+                "planned_operations": 1,
+                "completed_operations": 0,
+                "planned_bytes": 1024,
+                "completed_bytes": 0,
+            }
+        )
+        run["targets"] = [target]
+        overview["runs"] = [run]
+        payload["activity_overview"] = overview
+        return IpcResponse.accepted(payload)
+
+    def get_run_progress(
+        self,
+        *,
+        run_id: str,
+        after_sequence_no: int | None = None,
+    ) -> IpcResponse:
+        if run_id != "run-fresh":
+            return super().get_run_progress(
+                run_id=run_id,
+                after_sequence_no=after_sequence_no,
+            )
+        return IpcResponse.accepted(
+            {
+                "run_progress": {
+                    "run_id": run_id,
+                    "read_model_available": True,
+                    "run_found": True,
+                    "changed": after_sequence_no != 1,
+                    "snapshot": (
+                        None
+                        if after_sequence_no == 1
+                        else {
+                            "run_id": run_id,
+                            "job_id": "job-a",
+                            "state": "PREFLIGHT",
+                            "terminal": False,
+                            "sequence_no": 1,
+                            "planned_operations": 1,
+                            "completed_operations": 0,
+                            "planned_bytes": 1024,
+                            "completed_bytes": 0,
+                            "transferred_operations": 0,
+                            "transferred_bytes": 0,
+                            "warning_count": 0,
+                            "error_count": 0,
+                            "active_relative_path": None,
+                            "active_phase": None,
+                            "active_planned_bytes": None,
+                            "bytes_per_second": None,
+                            "eta_seconds": None,
+                            "stop_requested": False,
+                            "targets": [],
+                        }
+                    ),
+                }
+            }
+        )
 
 
 class _BlockingCheckCommandEngineClient(_FakeTargetRetryDashboardEngineClient):
