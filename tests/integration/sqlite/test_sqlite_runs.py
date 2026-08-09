@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -14,13 +15,20 @@ from mediasync_home.adapters.sqlite.backup_analysis import (
     SqliteBackupAnalysisRequestStore,
 )
 from mediasync_home.adapters.sqlite.command_receipts import SqliteCommandReceiptStore
+from mediasync_home.adapters.sqlite.cross_store_handoffs import (
+    SqliteCrossStoreHandoffStore,
+    SqliteCrossStoreHandoffTable,
+    SqliteRecoveryRunStartPeerStore,
+)
 from mediasync_home.adapters.sqlite.connection_policy import (
     apply_sqlite_connection_policy,
     catalog_critical_writer_policy,
+    recovery_writer_policy,
 )
 from mediasync_home.adapters.sqlite.migrations import (
     apply_sqlite_migrations,
     catalog_migration_plan,
+    recovery_migration_plan,
 )
 from mediasync_home.adapters.sqlite.job_catalog import SqliteStandardBackupJobCatalog
 from mediasync_home.adapters.sqlite.outbox import SqliteOutboxStore
@@ -33,6 +41,14 @@ from mediasync_home.adapters.sqlite.trigger_occurrences import (
 )
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
 from mediasync_home.application.command_receipts import CommandReceipt
+from mediasync_home.application.cross_store_handoffs import (
+    CrossStoreHandoffError,
+    CrossStoreRunStartCoordinator,
+    canonical_handoff_payload,
+    hash_handoff_payload,
+    recovery_run_binding_from_handoff,
+    run_start_source_handoff,
+)
 from mediasync_home.application.endpoint_retry import (
     MonotonicEndpointRetryScheduler,
     endpoint_retry_backoff_ms,
@@ -84,6 +100,7 @@ from mediasync_home.application.trigger_occurrences import (
 )
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.domain.capabilities import MutationPermit, _issue_mutation_permit
+from mediasync_home.generated.contract_types import CrossStoreHandoffState
 from mediasync_home.ipc.client import InProcessIpcClient
 from mediasync_home.ipc.client_identity import (
     ClientAuthorizationPolicy,
@@ -91,6 +108,46 @@ from mediasync_home.ipc.client_identity import (
 )
 from mediasync_home.ipc.protocol import IpcStatus
 from mediasync_home.ipc.server import EngineHostIpcService
+
+
+class _CrashWindowRunStartCoordinator:
+    def __init__(
+        self,
+        delegate: CrossStoreRunStartCoordinator,
+        *,
+        crash_after: str,
+    ) -> None:
+        self._delegate = delegate
+        self._crash_after = crash_after
+
+    def prepare_run_start(
+        self,
+        run: StartedRun,
+        *,
+        transition_command_receipt: bool = True,
+    ):
+        return self._delegate.prepare_run_start(
+            run,
+            transition_command_receipt=transition_command_receipt,
+        )
+
+    def advance_run_start(self, run_id: str):
+        if self._crash_after == "CATALOG_PREPARED":
+            self._raise_crash()
+        self._delegate.commit_recovery_peer(run_id)
+        if self._crash_after == "RECOVERY_PEER_COMMITTED":
+            self._raise_crash()
+        self._delegate.confirm_catalog_source(run_id)
+        if self._crash_after == "CATALOG_SOURCE_CONFIRMED":
+            self._raise_crash()
+        return self._delegate.complete_run_start(run_id)
+
+    @staticmethod
+    def _raise_crash() -> None:
+        raise CrossStoreHandoffError(
+            "TEST_CRASH_WINDOW",
+            "Restart the host and reconcile the durable handoff.",
+        )
 
 
 class FixedRunIdFactory(RunIdFactory):
@@ -1581,6 +1638,217 @@ def test_sqlite_enabled_start_run_ipc_persists_run_and_success_receipt(
         assert _row_count(connection, "command_receipts") == 1
         assert _row_count(connection, "outbox_messages") == 1
         assert id_factory.calls == 1
+
+
+@pytest.mark.parametrize(
+    "crash_after",
+    (
+        "CATALOG_PREPARED",
+        "RECOVERY_PEER_COMMITTED",
+        "CATALOG_SOURCE_CONFIRMED",
+    ),
+)
+def test_sqlite_run_start_cross_store_handoff_reconciles_every_crash_window(
+    tmp_path: Path,
+    crash_after: str,
+) -> None:
+    catalog_path = tmp_path / "catalog.sqlite"
+    recovery_path = tmp_path / "recovery.sqlite"
+    with (
+        sqlite3.connect(catalog_path) as catalog_connection,
+        sqlite3.connect(recovery_path) as recovery_connection,
+    ):
+        _prepare_catalog(catalog_connection, catalog_path)
+        apply_sqlite_connection_policy(
+            recovery_connection,
+            recovery_writer_policy(recovery_path),
+        )
+        apply_sqlite_migrations(recovery_connection, recovery_migration_plan())
+        _insert_plan_parent_rows(catalog_connection)
+        plan = _sealed_plan()
+        plans = SqlitePlanStore(catalog_connection)
+        plans.save_sealed_plan(plan)
+        runs = SqliteRunStore(catalog_connection)
+        receipts = SqliteCommandReceiptStore(catalog_connection)
+        outbox = SqliteOutboxStore(catalog_connection)
+        catalog_transaction = SqliteImmediateTransactionRunner(catalog_connection)
+        catalog_handoffs = SqliteCrossStoreHandoffStore(
+            catalog_connection,
+            table=SqliteCrossStoreHandoffTable.CATALOG,
+        )
+        recovery_handoffs = SqliteCrossStoreHandoffStore(
+            recovery_connection,
+            table=SqliteCrossStoreHandoffTable.RECOVERY,
+        )
+        recovery_runs = SqliteRecoveryRunStartPeerStore(
+            recovery_connection,
+            handoffs=recovery_handoffs,
+        )
+        coordinator = CrossStoreRunStartCoordinator(
+            catalog_handoffs=catalog_handoffs,
+            recovery_handoffs=recovery_handoffs,
+            recovery_runs=recovery_runs,
+            catalog_runs=runs,
+            command_receipts=receipts,
+            catalog_transaction=catalog_transaction,
+            outbox=outbox,
+        )
+        service = EngineHostIpcService(
+            ClientAuthorizationPolicy(
+                expected_user_sid_hash="same-user",
+                expected_session_id=42,
+            ),
+            status=replace(
+                startup_status(ProcessRole.ENGINE_HOST),
+                mutations_enabled=True,
+                scope="0B_LOCAL_MUTATION_PREVIEW",
+            ),
+            plan_store=plans,
+            run_store=runs,
+            run_id_factory=FixedRunIdFactory(),
+            command_receipt_store=receipts,
+            command_effect_transaction=catalog_transaction,
+            outbox_store=outbox,
+            run_start_cross_store_coordinator=_CrashWindowRunStartCoordinator(
+                coordinator,
+                crash_after=crash_after,
+            ),
+        )
+        client = InProcessIpcClient(
+            service=service,
+            identity=VerifiedClientIdentity(
+                user_sid_hash="same-user",
+                session_id=42,
+                is_remote=False,
+                transport="sqlite-cross-store-run-start-test",
+            ),
+            role=ProcessRole.GUI,
+            client_instance_id="55555555-5555-4555-8555-555555555555",
+        )
+        client.connect()
+        command_payload = {
+            "plan_id": plan.plan_id,
+            "plan_checksum": plan.plan_checksum,
+        }
+
+        interrupted = client.submit_command(
+            RunCommandName.START_RUN.value,
+            request_id="44444444-4444-4444-8444-444444444444",
+            idempotency_key="66666666-6666-4666-8666-666666666666",
+            payload=command_payload,
+            payload_hash=canonical_command_payload_hash(command_payload),
+        )
+
+        assert interrupted.status is IpcStatus.REJECTED
+        prepared = catalog_handoffs.load_handoff("run-start:run-a")
+        assert prepared is not None
+        interrupted_run = runs.load_started_run("run-a")
+        assert interrupted_run is not None
+        if crash_after != "CATALOG_SOURCE_CONFIRMED":
+            assert interrupted_run.state is RunState.CREATED
+
+        report = coordinator.reconcile_pending()
+
+        source = catalog_handoffs.load_handoff("run-start:run-a")
+        peer = recovery_handoffs.load_handoff("run-start:run-a")
+        binding = recovery_runs.load_run_binding("run-a")
+        run = runs.load_started_run("run-a")
+        receipt = receipts.load_command_receipt(
+            "66666666-6666-4666-8666-666666666666"
+        )
+        assert report.scanned == 1
+        assert report.completed_handoff_ids == ("run-start:run-a",)
+        assert source is not None and source.state.value == "COMPLETED"
+        assert peer is not None and peer.state.value == "COMPLETED"
+        assert binding is not None and binding.plan_checksum == plan.plan_checksum
+        assert run is not None and run.state is RunState.QUEUED
+        assert receipt is not None and receipt.state.value == "SUCCEEDED"
+        assert (
+            outbox.load_outbox_message(
+                "command-effect:66666666-6666-4666-8666-666666666666"
+            )
+            is not None
+        )
+
+        service.run_start_cross_store_coordinator = coordinator
+        replay = client.submit_command(
+            RunCommandName.START_RUN.value,
+            request_id="77777777-7777-4777-8777-777777777777",
+            idempotency_key="66666666-6666-4666-8666-666666666666",
+            payload=command_payload,
+            payload_hash=canonical_command_payload_hash(command_payload),
+        )
+        assert replay.status is IpcStatus.ACCEPTED
+        assert replay.payload["idempotent_replay"] is True
+        assert replay.payload["run"]["state"] == RunState.QUEUED.value
+
+
+def test_sqlite_run_start_cross_store_handoff_marks_mismatched_peer_ambiguous(
+    tmp_path: Path,
+) -> None:
+    catalog_path = tmp_path / "catalog.sqlite"
+    recovery_path = tmp_path / "recovery.sqlite"
+    with (
+        sqlite3.connect(catalog_path) as catalog_connection,
+        sqlite3.connect(recovery_path) as recovery_connection,
+    ):
+        apply_sqlite_migrations(catalog_connection, catalog_migration_plan())
+        apply_sqlite_migrations(recovery_connection, recovery_migration_plan())
+        catalog_handoffs = SqliteCrossStoreHandoffStore(
+            catalog_connection,
+            table=SqliteCrossStoreHandoffTable.CATALOG,
+        )
+        recovery_handoffs = SqliteCrossStoreHandoffStore(
+            recovery_connection,
+            table=SqliteCrossStoreHandoffTable.RECOVERY,
+        )
+        recovery_runs = SqliteRecoveryRunStartPeerStore(
+            recovery_connection,
+            handoffs=recovery_handoffs,
+        )
+        run = replace(_started_run_without_plan(), state=RunState.CREATED)
+        source = catalog_handoffs.record_handoff(run_start_source_handoff(run))
+        altered_payload = canonical_handoff_payload(
+            {
+                **json.loads(source.payload_json),
+                "plan_checksum": "f" * 64,
+            }
+        )
+        peer = replace(
+            source,
+            payload_json=altered_payload,
+            payload_hash=hash_handoff_payload(altered_payload),
+            state=CrossStoreHandoffState.PEER_COMMITTED,
+            expected_peer_state=CrossStoreHandoffState.SOURCE_CONFIRMED,
+        )
+        recovery_runs.commit_run_start_peer(
+            binding=recovery_run_binding_from_handoff(source),
+            handoff=peer,
+        )
+        coordinator = CrossStoreRunStartCoordinator(
+            catalog_handoffs=catalog_handoffs,
+            recovery_handoffs=recovery_handoffs,
+            recovery_runs=recovery_runs,
+            catalog_runs=SqliteRunStore(catalog_connection),
+            command_receipts=SqliteCommandReceiptStore(catalog_connection),
+            catalog_transaction=SqliteImmediateTransactionRunner(catalog_connection),
+        )
+
+        with pytest.raises(
+            CrossStoreHandoffError,
+            match="CROSS_STORE_HANDOFF_PAYLOAD_JSON_MISMATCH",
+        ):
+            coordinator.confirm_catalog_source(run.run_id)
+
+        source_after = catalog_handoffs.load_handoff(source.handoff_id)
+        peer_after = recovery_handoffs.load_handoff(source.handoff_id)
+        assert source_after is not None
+        assert source_after.state is CrossStoreHandoffState.AMBIGUOUS
+        assert peer_after is not None
+        assert peer_after.state is CrossStoreHandoffState.AMBIGUOUS
+        report = coordinator.reconcile_pending()
+        assert report.ambiguous_handoff_ids == (source.handoff_id,)
+        assert report.should_block_mutating_readiness
 
 
 def test_sqlite_enabled_trigger_occurrence_ipc_queues_fresh_safe_analysis(

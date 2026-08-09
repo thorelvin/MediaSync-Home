@@ -4,7 +4,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
 
-from mediasync_home.application.catalog_handoff import FinalFileCatalogHandoffStore
+from mediasync_home.application.catalog_handoff import (
+    CatalogCrossStoreHandoffCoordinator,
+    FinalFileCatalogHandoffStore,
+)
 from mediasync_home.application.operation_audit import (
     OperationAuditCatalogStore,
     OperationAuditRecoveryStore,
@@ -190,6 +193,7 @@ def execute_bounded_run_executor_cycle(
     recovery_object_cleanup_port: RecoveryObjectCleanupPort | None = None,
     staging_transfer_port: RunTargetStagingPort | None = None,
     operation_audits: OperationAuditCatalogStore | None = None,
+    cross_store_catalog_handoffs: CatalogCrossStoreHandoffCoordinator | None = None,
 ) -> RunExecutorCyclePumpOutcome:
     if max_steps < 1:
         raise RunExecutorViolation("RUN_EXECUTOR_CYCLE_REQUIRES_POSITIVE_STEP_LIMIT")
@@ -216,6 +220,7 @@ def execute_bounded_run_executor_cycle(
             recovery_object_cleanup_port=recovery_object_cleanup_port,
             staging_transfer_port=staging_transfer_port,
             operation_audits=operation_audits,
+            cross_store_catalog_handoffs=cross_store_catalog_handoffs,
         )
         if last_step.idle:
             return RunExecutorCyclePumpOutcome(
@@ -261,6 +266,7 @@ def execute_one_run_executor_cycle(
     recovery_object_cleanup_port: RecoveryObjectCleanupPort | None = None,
     staging_transfer_port: RunTargetStagingPort | None = None,
     operation_audits: OperationAuditCatalogStore | None = None,
+    cross_store_catalog_handoffs: CatalogCrossStoreHandoffCoordinator | None = None,
 ) -> RunExecutorCycleOutcome:
     stopping = (
         prepare_next_requested_run_stop(
@@ -361,6 +367,7 @@ def execute_one_run_executor_cycle(
             recovery_object_cleanup_port=recovery_object_cleanup_port,
             staging_transfer_port=staging_transfer_port,
             operation_audits=operation_audits,
+            cross_store_catalog_handoffs=cross_store_catalog_handoffs,
             retained=retained,
         )
         if retained_outcome.action is RunExecutorCycleAction.STAGING_RETRY_WAITING:
@@ -500,6 +507,7 @@ def _advance_retained_target(
     recovery_object_cleanup_port: RecoveryObjectCleanupPort | None,
     staging_transfer_port: RunTargetStagingPort | None,
     operation_audits: OperationAuditCatalogStore | None,
+    cross_store_catalog_handoffs: CatalogCrossStoreHandoffCoordinator | None,
     retained: _RetainedTarget,
 ) -> RunExecutorCycleOutcome:
     permit = retained.permit
@@ -602,6 +610,7 @@ def _advance_retained_target(
             recovery_operations=recovery_operations,
             catalog_handoffs=catalog_handoffs,
             process_instance_id=process_instance_id,
+            cross_store_coordinator=cross_store_catalog_handoffs,
         )
         if catalog_outcome.recorded:
             return _advanced(

@@ -16,6 +16,10 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     catalog_critical_writer_policy,
     recovery_writer_policy,
 )
+from mediasync_home.adapters.sqlite.cross_store_handoffs import (
+    SqliteCrossStoreHandoffStore,
+    SqliteCrossStoreHandoffTable,
+)
 from mediasync_home.adapters.sqlite.lease_tokens import SqliteResourceLeaseStore
 from mediasync_home.adapters.sqlite.migrations import (
     apply_sqlite_migrations,
@@ -24,12 +28,16 @@ from mediasync_home.adapters.sqlite.migrations import (
 )
 from mediasync_home.adapters.sqlite.recovery_intents import SqliteRecoveryIntentSegmentStore
 from mediasync_home.adapters.sqlite.recovery_operations import SqliteRecoveryOperationStore
+from mediasync_home.adapters.sqlite.transactions import SqliteImmediateTransactionRunner
 from mediasync_home.application.catalog_handoff import (
     CatalogHandoffReconciliationStatus,
     FinalFileCatalogHandoff,
     RetainedVersionCatalogHandoff,
     reconcile_catalog_handoffs_after_startup,
     record_catalog_handoff_after_final_verification,
+)
+from mediasync_home.application.cross_store_handoffs import (
+    CrossStoreOperationCatalogCoordinator,
 )
 from mediasync_home.application.recovery_intents import durable_recovery_intent_segment
 from mediasync_home.application.recovery_operations import (
@@ -254,6 +262,85 @@ def test_sqlite_catalog_handoff_records_catalog_then_recovery_phase(
             "final-file:run-a:operation-a"
         )
         assert _row_count(recovery_connection, "recovery_events") == event_count
+    finally:
+        catalog_connection.close()
+        recovery_connection.close()
+
+
+@pytest.mark.parametrize(
+    "crash_after",
+    (
+        "RECOVERY_PREPARED",
+        "CATALOG_PEER_COMMITTED",
+        "RECOVERY_SOURCE_CONFIRMED",
+    ),
+)
+def test_sqlite_operation_catalog_cross_store_handoff_reconciles_crash_windows(
+    tmp_path: Path,
+    crash_after: str,
+) -> None:
+    catalog_connection = _prepared_catalog_connection(tmp_path)
+    recovery_connection = _prepared_recovery_connection(tmp_path)
+    try:
+        catalog_effects = SqliteFinalFileCatalogHandoffStore(catalog_connection)
+        catalog_cross_store = SqliteCrossStoreHandoffStore(
+            catalog_connection,
+            table=SqliteCrossStoreHandoffTable.CATALOG,
+        )
+        recovery_cross_store = SqliteCrossStoreHandoffStore(
+            recovery_connection,
+            table=SqliteCrossStoreHandoffTable.RECOVERY,
+        )
+        _register_resource_lease(recovery_connection)
+        SqliteRecoveryIntentSegmentStore(recovery_connection).publish_intent_segment(
+            _segment()
+        )
+        recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
+        operation = _record_final_verified_operation(recovery_operations)
+        coordinator = CrossStoreOperationCatalogCoordinator(
+            recovery_handoffs=recovery_cross_store,
+            catalog_handoffs=catalog_cross_store,
+            recovery_operations=recovery_operations,
+            catalog_effects=catalog_effects,
+            recovery_transaction=SqliteImmediateTransactionRunner(recovery_connection),
+            catalog_transaction=SqliteImmediateTransactionRunner(catalog_connection),
+        )
+
+        source = coordinator.prepare_operation_catalog(
+            operation=operation,
+            handoff=_handoff(),
+        )
+        if crash_after != "RECOVERY_PREPARED":
+            coordinator.commit_catalog_peer(source.handoff_id)
+        if crash_after == "RECOVERY_SOURCE_CONFIRMED":
+            coordinator.confirm_recovery_source(
+                handoff_id=source.handoff_id,
+                process_instance_id="host-a",
+            )
+
+        report = coordinator.reconcile_pending(process_instance_id="host-restarted")
+
+        recovered = recovery_operations.load_operation(
+            run_id="run-a",
+            operation_id="operation-a",
+        )
+        recovery_handoff = recovery_cross_store.load_handoff(source.handoff_id)
+        catalog_handoff = catalog_cross_store.load_handoff(source.handoff_id)
+        assert report.scanned == 1
+        assert report.completed_handoff_ids == (source.handoff_id,)
+        assert recovered is not None
+        assert recovered.phase is RecoveryOperationPhase.CATALOG_RECORDED
+        assert recovered.catalog_handoff_id == "final-file:run-a:operation-a"
+        assert catalog_effects.load_final_file_handoff(
+            "final-file:run-a:operation-a"
+        ) == _handoff()
+        assert recovery_handoff is not None
+        assert recovery_handoff.state.value == "COMPLETED"
+        assert catalog_handoff is not None
+        assert catalog_handoff.state.value == "COMPLETED"
+        assert _row_count(catalog_connection, "final_file_catalog_handoffs") == 1
+        assert _row_count(catalog_connection, "store_handoffs") == 1
+        assert _row_count(recovery_connection, "recovery_handoffs") == 1
     finally:
         catalog_connection.close()
         recovery_connection.close()

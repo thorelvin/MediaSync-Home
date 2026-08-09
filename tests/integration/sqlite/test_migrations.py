@@ -38,7 +38,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 55
+        assert current_schema_version(connection, plan.store) == 56
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -94,8 +94,9 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "operation_outcomes",
             "schema_migrations",
             "store_identity",
+            "store_handoffs",
         }
-        assert _row_count(connection, "schema_migrations") == 55
+        assert _row_count(connection, "schema_migrations") == 56
         assert {
             "idx_initial_backup_materializations_history",
             "idx_initial_backup_materializations_job_history",
@@ -1103,7 +1104,7 @@ def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(
 
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 11
+        assert current_schema_version(connection, plan.store) == 12
         assert _table_names(connection) >= {
             "lease_counters",
             "resource_leases",
@@ -1115,6 +1116,8 @@ def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(
             "recovery_intent_steps",
             "schema_migrations",
             "store_identity",
+            "recovery_runs",
+            "recovery_handoffs",
         }
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
@@ -1138,6 +1141,68 @@ def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(
             "staging_retry_backoff_ms",
             "staging_retry_not_before_utc",
         } <= _column_names(connection, "recovery_operations")
+
+
+@pytest.mark.parametrize("store_name", ("catalog", "recovery"))
+def test_cross_store_handoff_schema_rejects_evidence_mutation_and_state_skip(
+    tmp_path: Path,
+    store_name: str,
+) -> None:
+    database = tmp_path / f"{store_name}.sqlite"
+    table = "store_handoffs" if store_name == "catalog" else "recovery_handoffs"
+    plan = catalog_migration_plan() if store_name == "catalog" else recovery_migration_plan()
+    policy = (
+        catalog_critical_writer_policy(database)
+        if store_name == "catalog"
+        else recovery_writer_policy(database)
+    )
+    with sqlite3.connect(database) as connection:
+        apply_sqlite_connection_policy(connection, policy)
+        apply_sqlite_migrations(connection, plan)
+        connection.execute(
+            f"""
+            INSERT INTO {table} (
+                id,
+                handoff_type,
+                direction,
+                payload_schema_version,
+                entity_type,
+                entity_id,
+                payload_json,
+                payload_hash,
+                state,
+                expected_peer_state
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "handoff-a",
+                "TEST_HANDOFF",
+                "CATALOG_TO_RECOVERY",
+                1,
+                "TEST_ENTITY",
+                "entity-a",
+                "{}",
+                "a" * 64,
+                "PREPARED",
+                "PEER_COMMITTED",
+            ),
+        )
+
+        with pytest.raises(sqlite3.IntegrityError, match="IMMUTABLE_EVIDENCE"):
+            connection.execute(
+                f"UPDATE {table} SET payload_hash = ? WHERE id = ?",
+                ("b" * 64, "handoff-a"),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="STATE_NOT_MONOTONE"):
+            connection.execute(
+                f"""
+                UPDATE {table}
+                SET state = 'COMPLETED', expected_peer_state = 'COMPLETED',
+                    completed_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id = 'handoff-a'
+                """
+            )
 
 
 def test_migration_runner_rejects_wrong_store_identity(tmp_path: Path) -> None:
@@ -1210,7 +1275,7 @@ def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> N
                 name,
                 migration_checksum
             )
-                    VALUES ('catalog', 56, 'future_migration', ?)
+                        VALUES ('catalog', 57, 'future_migration', ?)
             """,
             ("f" * 64,),
         )
@@ -1323,8 +1388,8 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
         preflight = inspect_sqlite_migration_state(connection, plan)
 
         assert preflight.initialized
-        assert preflight.current_version == 55
-        assert preflight.target_version == 55
+        assert preflight.current_version == 56
+        assert preflight.target_version == 56
         assert preflight.checksum_backfill_required
         assert "migration_checksum" not in _column_names(
             connection,

@@ -7,7 +7,7 @@ import os
 import sqlite3
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
@@ -66,6 +66,11 @@ from mediasync_home.adapters.sqlite.backup_analysis import (
     SqliteBackupAnalysisRequestStore,
 )
 from mediasync_home.adapters.sqlite.command_receipts import SqliteCommandReceiptStore
+from mediasync_home.adapters.sqlite.cross_store_handoffs import (
+    SqliteCrossStoreHandoffStore,
+    SqliteCrossStoreHandoffTable,
+    SqliteRecoveryRunStartPeerStore,
+)
 from mediasync_home.adapters.sqlite.connection_policy import (
     SqliteFailureKind,
     SqliteStore,
@@ -166,6 +171,11 @@ from mediasync_home.application.run_executor import (
     RunTargetLeaseRegistry,
     execute_bounded_run_executor_preflight_pump,
     execute_one_run_target_execution_start_step,
+)
+from mediasync_home.application.cross_store_handoffs import (
+    CrossStoreOperationCatalogCoordinator,
+    CrossStoreRunStartCoordinator,
+    CrossStoreHandoffReconciliationReport,
 )
 from mediasync_home.application.backup_analysis import (
     BackupAnalysisRequest,
@@ -498,6 +508,12 @@ class EngineHostRuntime:
     state_compaction_recovery: SqliteStateCompactionEpochRecoveryReport | None = None
     state_migration: SqliteStateMigrationReport | None = None
     startup_reconciliation: EngineHostStartupReconciliationReport | None = None
+    run_start_handoff_reconciliation: (
+        CrossStoreHandoffReconciliationReport | None
+    ) = None
+    operation_catalog_handoff_reconciliation: (
+        CrossStoreHandoffReconciliationReport | None
+    ) = None
     target_intent_reconciliation: (
         TargetRecoveryIntentStartupReconciliationReport | None
     ) = None
@@ -520,6 +536,9 @@ class EngineHostRuntime:
         TargetRecoveryIntentSegmentCleanupPort | None
     ) = None
     run_executor_catalog_handoff_store: FinalFileCatalogHandoffStore | None = None
+    run_executor_cross_store_catalog_handoffs: (
+        CrossStoreOperationCatalogCoordinator | None
+    ) = None
     run_executor_operation_audit_store: OperationAuditCatalogStore | None = None
     run_executor_staging_transfer_port: RunTargetStagingPort | None = None
     run_executor_final_commit_port: FinalCommitPort | None = None
@@ -596,6 +615,10 @@ class EngineHostRuntime:
             plans=self.backup_analysis_plan_refresher,
             plan_store=self.run_executor_plan_store,
             run_id_factory=UuidRunIdFactory(),
+            run_start_cross_store_coordinator=(
+                self.service.run_start_cross_store_coordinator
+            ),
+            run_start_transaction=self.service.command_effect_transaction,
             utc_now=self.clock.utc_now,
         )
         if completed is not None:
@@ -934,6 +957,7 @@ class EngineHostRuntime:
             recovery_operations=self.run_executor_recovery_operation_store,
             catalog_handoffs=self.run_executor_catalog_handoff_store,
             process_instance_id=self.run_executor_process_instance_id,
+            cross_store_coordinator=self.run_executor_cross_store_catalog_handoffs,
         )
 
     def run_executor_complete_catalog_recorded_target(
@@ -1037,6 +1061,9 @@ class EngineHostRuntime:
                     staging_transfer_port or self.run_executor_staging_transfer_port
                 ),
                 operation_audits=self.run_executor_operation_audit_store,
+                cross_store_catalog_handoffs=(
+                    self.run_executor_cross_store_catalog_handoffs
+                ),
             )
             self._reconcile_terminal_trigger_runs()
             return outcome
@@ -2034,6 +2061,43 @@ def build_engine_host_runtime(
             catalog_connection,
             endpoint_retry_scheduler=runtime_endpoint_retry_scheduler,
         )
+        catalog_transaction = SqliteImmediateTransactionRunner(
+            catalog_connection,
+            failure_observer=lambda failure_kind: _observe_catalog_capacity_failure(
+                capacity_gate,
+                failure_kind,
+            ),
+        )
+        catalog_cross_store_handoffs = SqliteCrossStoreHandoffStore(
+            catalog_connection,
+            table=SqliteCrossStoreHandoffTable.CATALOG,
+        )
+        recovery_cross_store_handoffs = SqliteCrossStoreHandoffStore(
+            recovery_connection,
+            table=SqliteCrossStoreHandoffTable.RECOVERY,
+        )
+        recovery_run_start_peers = SqliteRecoveryRunStartPeerStore(
+            recovery_connection,
+            handoffs=recovery_cross_store_handoffs,
+        )
+        run_start_cross_store_coordinator = CrossStoreRunStartCoordinator(
+            catalog_handoffs=catalog_cross_store_handoffs,
+            recovery_handoffs=recovery_cross_store_handoffs,
+            recovery_runs=recovery_run_start_peers,
+            catalog_runs=runs,
+            command_receipts=command_receipts,
+            catalog_transaction=catalog_transaction,
+            outbox=outbox,
+        )
+        run_start_handoff_reconciliation = (
+            run_start_cross_store_coordinator.reconcile_pending()
+        )
+        if run_start_handoff_reconciliation.should_block_mutating_readiness:
+            service_status = replace(
+                service_status,
+                mutations_enabled=False,
+                scope="RECOVERY_STATE_AMBIGUOUS",
+            )
         backup_analysis_requests = SqliteBackupAnalysisRequestStore(catalog_connection)
         job_lifecycle = SqliteJobLifecycleStore(
             catalog_connection,
@@ -2053,6 +2117,28 @@ def build_engine_host_runtime(
             recovery_connection,
             staging_retry_scheduler=runtime_staging_retry_scheduler,
         )
+        recovery_transaction = SqliteImmediateTransactionRunner(recovery_connection)
+        operation_catalog_cross_store_coordinator = (
+            CrossStoreOperationCatalogCoordinator(
+                recovery_handoffs=recovery_cross_store_handoffs,
+                catalog_handoffs=catalog_cross_store_handoffs,
+                recovery_operations=recovery_operations,
+                catalog_effects=catalog_handoffs,
+                recovery_transaction=recovery_transaction,
+                catalog_transaction=catalog_transaction,
+            )
+        )
+        operation_catalog_handoff_reconciliation = (
+            operation_catalog_cross_store_coordinator.reconcile_pending(
+                process_instance_id=reconciler_instance_id,
+            )
+        )
+        if operation_catalog_handoff_reconciliation.should_block_mutating_readiness:
+            service_status = replace(
+                service_status,
+                mutations_enabled=False,
+                scope="RECOVERY_STATE_AMBIGUOUS",
+            )
         run_progress = SqliteRunProgressSnapshotStore(
             catalog_runs=runs,
             recovery_connection=recovery_connection,
@@ -2180,6 +2266,7 @@ def build_engine_host_runtime(
             run_store=runs,
             run_control_store=runs,
             run_id_factory=UuidRunIdFactory(),
+            run_start_cross_store_coordinator=run_start_cross_store_coordinator,
             history_timeline_read_store=history,
             retained_version_read_store=version_retention_store,
             version_restore_protection_store=version_retention_store,
@@ -2204,13 +2291,7 @@ def build_engine_host_runtime(
             job_lifecycle_utc_now=runtime_clock.utc_now,
             job_editing_utc_now=runtime_clock.utc_now,
             command_receipt_store=command_receipts,
-            command_effect_transaction=SqliteImmediateTransactionRunner(
-                catalog_connection,
-                failure_observer=lambda failure_kind: _observe_catalog_capacity_failure(
-                    capacity_gate,
-                    failure_kind,
-                ),
-            ),
+            command_effect_transaction=catalog_transaction,
             outbox_store=outbox,
             state_capacity_provider=lambda: capacity_gate.latest_report().to_dict(),
         )
@@ -2235,6 +2316,10 @@ def build_engine_host_runtime(
         state_compaction_recovery=state_compaction_recovery,
         state_migration=state_migration,
         startup_reconciliation=startup_reconciliation,
+        run_start_handoff_reconciliation=run_start_handoff_reconciliation,
+        operation_catalog_handoff_reconciliation=(
+            operation_catalog_handoff_reconciliation
+        ),
         target_intent_reconciliation=target_intent_reconciliation,
         reconciler_instance_id=reconciler_instance_id,
         run_executor_queue_store=runs,
@@ -2247,6 +2332,9 @@ def build_engine_host_runtime(
         run_executor_intent_segment_lifecycle=recovery_intent_segments,
         run_executor_target_intent_segment_cleanup=target_intent_segment_cleanup,
         run_executor_catalog_handoff_store=catalog_handoffs,
+        run_executor_cross_store_catalog_handoffs=(
+            operation_catalog_cross_store_coordinator
+        ),
         run_executor_operation_audit_store=operation_audits,
         run_executor_staging_transfer_port=run_executor_staging_transfer_port,
         run_executor_final_commit_port=run_executor_final_commit_port,

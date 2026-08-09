@@ -313,6 +313,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_evidence_typed_hash_cache",
                 statements=CATALOG_EVIDENCE_TYPED_HASH_CACHE,
             ),
+            SqliteMigration(
+                version=56,
+                name="catalog_cross_store_handoffs",
+                statements=CATALOG_CROSS_STORE_HANDOFFS,
+            ),
         ),
     )
 
@@ -375,6 +380,11 @@ def recovery_migration_plan() -> SqliteMigrationPlan:
                 version=11,
                 name="recovery_version_retention_metadata",
                 statements=RECOVERY_VERSION_RETENTION_METADATA,
+            ),
+            SqliteMigration(
+                version=12,
+                name="recovery_cross_store_handoffs",
+                statements=RECOVERY_CROSS_STORE_HANDOFFS,
             ),
         ),
     )
@@ -3693,6 +3703,105 @@ CATALOG_EVIDENCE_TYPED_HASH_CACHE = (
 )
 
 
+CATALOG_CROSS_STORE_HANDOFFS = (
+    """
+    CREATE TABLE store_handoffs (
+        id TEXT PRIMARY KEY,
+        handoff_type TEXT NOT NULL CHECK (length(trim(handoff_type)) > 0),
+        direction TEXT NOT NULL CHECK (
+            direction IN ('CATALOG_TO_RECOVERY', 'RECOVERY_TO_CATALOG')
+        ),
+        payload_schema_version INTEGER NOT NULL CHECK (payload_schema_version >= 1),
+        entity_type TEXT NOT NULL CHECK (length(trim(entity_type)) > 0),
+        entity_id TEXT NOT NULL CHECK (length(trim(entity_id)) > 0),
+        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+        payload_hash TEXT NOT NULL CHECK (
+            length(payload_hash) = 64
+            AND payload_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        state TEXT NOT NULL CHECK (
+            state IN (
+                'PREPARED',
+                'PEER_COMMITTED',
+                'SOURCE_CONFIRMED',
+                'COMPLETED',
+                'ABORTED',
+                'AMBIGUOUS'
+            )
+        ),
+        expected_peer_state TEXT NOT NULL CHECK (
+            expected_peer_state IN (
+                'PREPARED',
+                'PEER_COMMITTED',
+                'SOURCE_CONFIRMED',
+                'COMPLETED'
+            )
+        ),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        last_error_code TEXT,
+        created_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        completed_utc TEXT,
+        UNIQUE (handoff_type, entity_type, entity_id, payload_hash),
+        CHECK (
+            (state = 'PREPARED' AND expected_peer_state = 'PEER_COMMITTED')
+            OR (state = 'PEER_COMMITTED' AND expected_peer_state = 'SOURCE_CONFIRMED')
+            OR (state = 'SOURCE_CONFIRMED' AND expected_peer_state = 'COMPLETED')
+            OR (
+                state IN ('COMPLETED', 'ABORTED', 'AMBIGUOUS')
+                AND expected_peer_state = 'COMPLETED'
+            )
+        ),
+        CHECK (
+            (state = 'COMPLETED' AND completed_utc IS NOT NULL)
+            OR (state != 'COMPLETED' AND completed_utc IS NULL)
+        )
+    )
+    """,
+    """
+    CREATE INDEX idx_store_handoffs_reconciliation
+        ON store_handoffs (state, updated_utc, id)
+    """,
+    """
+    CREATE TRIGGER trg_store_handoffs_immutable_evidence
+    BEFORE UPDATE ON store_handoffs
+    WHEN
+        NEW.id IS NOT OLD.id
+        OR NEW.handoff_type IS NOT OLD.handoff_type
+        OR NEW.direction IS NOT OLD.direction
+        OR NEW.payload_schema_version IS NOT OLD.payload_schema_version
+        OR NEW.entity_type IS NOT OLD.entity_type
+        OR NEW.entity_id IS NOT OLD.entity_id
+        OR NEW.payload_json IS NOT OLD.payload_json
+        OR NEW.payload_hash IS NOT OLD.payload_hash
+        OR NEW.created_utc IS NOT OLD.created_utc
+    BEGIN
+        SELECT RAISE(ABORT, 'STORE_HANDOFF_IMMUTABLE_EVIDENCE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_store_handoffs_no_delete
+    BEFORE DELETE ON store_handoffs
+    BEGIN
+        SELECT RAISE(ABORT, 'STORE_HANDOFF_DELETE_FORBIDDEN');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_store_handoffs_monotone_state
+    BEFORE UPDATE OF state ON store_handoffs
+    WHEN NOT (
+        NEW.state = OLD.state
+        OR (OLD.state = 'PREPARED' AND NEW.state IN ('SOURCE_CONFIRMED', 'ABORTED', 'AMBIGUOUS'))
+        OR (OLD.state = 'PEER_COMMITTED' AND NEW.state IN ('COMPLETED', 'AMBIGUOUS'))
+        OR (OLD.state = 'SOURCE_CONFIRMED' AND NEW.state IN ('COMPLETED', 'AMBIGUOUS'))
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'STORE_HANDOFF_STATE_NOT_MONOTONE');
+    END
+    """,
+)
+
+
 CATALOG_JOB_LIFECYCLE = (
     """
     ALTER TABLE jobs
@@ -5712,5 +5821,140 @@ RECOVERY_VERSION_RETENTION_METADATA = (
     ALTER TABLE recovery_operations
         ADD COLUMN version_manifest_hash TEXT
             CHECK (version_manifest_hash IS NULL OR length(version_manifest_hash) = 64)
+    """,
+)
+
+
+RECOVERY_CROSS_STORE_HANDOFFS = (
+    """
+    CREATE TABLE recovery_runs (
+        run_id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL CHECK (length(trim(job_id)) > 0),
+        job_revision_id TEXT NOT NULL CHECK (length(trim(job_revision_id)) > 0),
+        plan_id TEXT NOT NULL CHECK (length(trim(plan_id)) > 0),
+        plan_checksum TEXT NOT NULL CHECK (
+            length(plan_checksum) = 64
+            AND plan_checksum NOT GLOB '*[^0-9a-f]*'
+        ),
+        start_handoff_id TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL CHECK (state = 'BOUND'),
+        process_instance_id TEXT,
+        started_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        last_event_sequence INTEGER NOT NULL DEFAULT 0 CHECK (last_event_sequence >= 0)
+    )
+    """,
+    """
+    CREATE TABLE recovery_handoffs (
+        id TEXT PRIMARY KEY,
+        handoff_type TEXT NOT NULL CHECK (length(trim(handoff_type)) > 0),
+        direction TEXT NOT NULL CHECK (
+            direction IN ('CATALOG_TO_RECOVERY', 'RECOVERY_TO_CATALOG')
+        ),
+        payload_schema_version INTEGER NOT NULL CHECK (payload_schema_version >= 1),
+        entity_type TEXT NOT NULL CHECK (length(trim(entity_type)) > 0),
+        entity_id TEXT NOT NULL CHECK (length(trim(entity_id)) > 0),
+        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+        payload_hash TEXT NOT NULL CHECK (
+            length(payload_hash) = 64
+            AND payload_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        state TEXT NOT NULL CHECK (
+            state IN (
+                'PREPARED',
+                'PEER_COMMITTED',
+                'SOURCE_CONFIRMED',
+                'COMPLETED',
+                'ABORTED',
+                'AMBIGUOUS'
+            )
+        ),
+        expected_peer_state TEXT NOT NULL CHECK (
+            expected_peer_state IN (
+                'PREPARED',
+                'PEER_COMMITTED',
+                'SOURCE_CONFIRMED',
+                'COMPLETED'
+            )
+        ),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        last_error_code TEXT,
+        created_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        completed_utc TEXT,
+        UNIQUE (handoff_type, entity_type, entity_id, payload_hash),
+        CHECK (
+            (state = 'PREPARED' AND expected_peer_state = 'PEER_COMMITTED')
+            OR (state = 'PEER_COMMITTED' AND expected_peer_state = 'SOURCE_CONFIRMED')
+            OR (state = 'SOURCE_CONFIRMED' AND expected_peer_state = 'COMPLETED')
+            OR (
+                state IN ('COMPLETED', 'ABORTED', 'AMBIGUOUS')
+                AND expected_peer_state = 'COMPLETED'
+            )
+        ),
+        CHECK (
+            handoff_type != 'RUN_START'
+            OR (entity_type = 'RUN' AND direction = 'CATALOG_TO_RECOVERY')
+        ),
+        CHECK (
+            (state = 'COMPLETED' AND completed_utc IS NOT NULL)
+            OR (state != 'COMPLETED' AND completed_utc IS NULL)
+        )
+    )
+    """,
+    """
+    CREATE INDEX idx_recovery_handoffs_reconciliation
+        ON recovery_handoffs (state, updated_utc, id)
+    """,
+    """
+    CREATE TRIGGER trg_recovery_runs_no_update
+    BEFORE UPDATE ON recovery_runs
+    BEGIN
+        SELECT RAISE(ABORT, 'RECOVERY_RUN_BINDING_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_recovery_runs_no_delete
+    BEFORE DELETE ON recovery_runs
+    BEGIN
+        SELECT RAISE(ABORT, 'RECOVERY_RUN_BINDING_DELETE_FORBIDDEN');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_recovery_handoffs_immutable_evidence
+    BEFORE UPDATE ON recovery_handoffs
+    WHEN
+        NEW.id IS NOT OLD.id
+        OR NEW.handoff_type IS NOT OLD.handoff_type
+        OR NEW.direction IS NOT OLD.direction
+        OR NEW.payload_schema_version IS NOT OLD.payload_schema_version
+        OR NEW.entity_type IS NOT OLD.entity_type
+        OR NEW.entity_id IS NOT OLD.entity_id
+        OR NEW.payload_json IS NOT OLD.payload_json
+        OR NEW.payload_hash IS NOT OLD.payload_hash
+        OR NEW.created_utc IS NOT OLD.created_utc
+    BEGIN
+        SELECT RAISE(ABORT, 'RECOVERY_HANDOFF_IMMUTABLE_EVIDENCE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_recovery_handoffs_no_delete
+    BEFORE DELETE ON recovery_handoffs
+    BEGIN
+        SELECT RAISE(ABORT, 'RECOVERY_HANDOFF_DELETE_FORBIDDEN');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_recovery_handoffs_monotone_state
+    BEFORE UPDATE OF state ON recovery_handoffs
+    WHEN NOT (
+        NEW.state = OLD.state
+        OR (OLD.state = 'PREPARED' AND NEW.state IN ('SOURCE_CONFIRMED', 'ABORTED', 'AMBIGUOUS'))
+        OR (OLD.state = 'PEER_COMMITTED' AND NEW.state IN ('COMPLETED', 'AMBIGUOUS'))
+        OR (OLD.state = 'SOURCE_CONFIRMED' AND NEW.state IN ('COMPLETED', 'AMBIGUOUS'))
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'RECOVERY_HANDOFF_STATE_NOT_MONOTONE');
+    END
     """,
 )

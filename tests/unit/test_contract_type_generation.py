@@ -53,6 +53,14 @@ def test_runtime_command_and_recovery_types_are_generated_contract_types() -> No
         "ROLLBACK_REQUIRED",
         "USER_DECISION_REQUIRED",
     )
+    assert tuple(state.value for state in contract_types.CrossStoreHandoffState) == (
+        "PREPARED",
+        "PEER_COMMITTED",
+        "SOURCE_CONFIRMED",
+        "COMPLETED",
+        "ABORTED",
+        "AMBIGUOUS",
+    )
 
 
 def test_generated_reason_code_inventory_has_typed_metadata() -> None:

@@ -8,6 +8,7 @@ from typing import Protocol
 from mediasync_home.application.catalog_handoff import (
     CatalogHandoffError,
     CatalogHandoffOutcome,
+    CatalogCrossStoreHandoffCoordinator,
     FinalFileCatalogHandoffStore,
     record_catalog_handoff_after_final_verification,
 )
@@ -52,6 +53,7 @@ def record_next_run_target_catalog_handoff(
     recovery_operations: RunTargetCatalogHandoffOperationStore,
     catalog_handoffs: FinalFileCatalogHandoffStore,
     process_instance_id: str,
+    cross_store_coordinator: CatalogCrossStoreHandoffCoordinator | None = None,
 ) -> RunTargetCatalogHandoffStepOutcome:
     if not process_instance_id.strip():
         return _failed(
@@ -102,8 +104,9 @@ def record_next_run_target_catalog_handoff(
             recovery_operations=recovery_operations,
             catalog_handoffs=catalog_handoffs,
             process_instance_id=process_instance_id,
+            cross_store_coordinator=cross_store_coordinator,
         )
-    except (CatalogHandoffError, ValueError) as exc:
+    except (CatalogHandoffError, RuntimeError, ValueError) as exc:
         return _failed(
             permit=permit,
             operation_id=operation.operation_id,

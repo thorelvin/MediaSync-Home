@@ -992,8 +992,8 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.recovery_connection is not None
         assert runtime.installation_state is not None
         assert runtime.installation_state.product_channel == "local-preview"
-        assert runtime.installation_state.catalog_schema_version == 55
-        assert runtime.installation_state.recovery_schema_version == 11
+        assert runtime.installation_state.catalog_schema_version == 56
+        assert runtime.installation_state.recovery_schema_version == 12
         assert runtime.installation_state.ipc_protocol_major == 1
         assert runtime.snapshot_materialization_refresh is not None
         assert runtime.snapshot_materialization_refresh.scanned_job_count == 0
@@ -1043,17 +1043,19 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         )
         assert (
             current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG)
-            == 55
+            == 56
         )
         assert (
             current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY)
-            == 11
+            == 12
         )
         retention = runtime.run_version_retention_cycle()
         assert retention.planning.plan is None
         assert retention.planning.scanned == 0
         assert retention.apply.idle is True
         assert runtime.startup_reconciliation is not None
+        assert runtime.run_start_handoff_reconciliation is not None
+        assert runtime.run_start_handoff_reconciliation.scanned == 0
         assert runtime.startup_reconciliation.reconciler_instance_id == "host-new"
         assert runtime.startup_reconciliation.recovery_operations is not None
         assert runtime.startup_reconciliation.recovery_operations.scanned == 0
@@ -1417,6 +1419,29 @@ def test_local_writable_runtime_creates_job_from_inline_gui_draft(
             (checked.started_run_id,),
         ).fetchall()
         assert intent_states == [("CLEANED",)]
+        catalog_cross_store = runtime.catalog_connection.execute(
+            """
+            SELECT handoff_type, state
+            FROM store_handoffs
+            WHERE entity_id = ? OR entity_id LIKE ?
+            ORDER BY handoff_type
+            """,
+            (checked.started_run_id, f"{checked.started_run_id}:%"),
+        ).fetchall()
+        recovery_cross_store = runtime.recovery_connection.execute(
+            """
+            SELECT handoff_type, state
+            FROM recovery_handoffs
+            WHERE entity_id = ? OR entity_id LIKE ?
+            ORDER BY handoff_type
+            """,
+            (checked.started_run_id, f"{checked.started_run_id}:%"),
+        ).fetchall()
+        assert catalog_cross_store == [
+            ("OPERATION_CATALOG_RECORD", "COMPLETED"),
+            ("RUN_START", "COMPLETED"),
+        ]
+        assert recovery_cross_store == catalog_cross_store
 
         second_check_payload = {
             "job_id": str(response.payload["job"]["job_id"]),

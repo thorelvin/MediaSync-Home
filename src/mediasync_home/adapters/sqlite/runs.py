@@ -207,6 +207,36 @@ class SqliteRunStore(RunStore, RunActivityReadModelStore, RunProgressSnapshotSto
             (idempotency_key,),
         )
 
+    def release_created_run(self, run_id: str) -> StartedRun | None:
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            cursor = self._connection.execute(
+                """
+                UPDATE runs
+                SET state = 'QUEUED', row_version = row_version + 1
+                WHERE id = ? AND state = 'CREATED'
+                """,
+                (run_id,),
+            )
+            run = self.load_started_run(run_id)
+            if run is None:
+                if not outer_transaction:
+                    self._connection.execute("ROLLBACK")
+                return None
+            if cursor.rowcount == 0 and run.state is RunState.CREATED:
+                raise SqliteRunStoreError("RUN_RELEASE_STATE_CONFLICT")
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return run
+        except (sqlite3.Error, SqliteRunStoreError) as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            if isinstance(exc, SqliteRunStoreError):
+                raise
+            raise SqliteRunStoreError("RUN_RELEASE_FAILED") from exc
+
     def load_active_run_for_job(self, job_id: str) -> StartedRun | None:
         return self._load_one(
             """

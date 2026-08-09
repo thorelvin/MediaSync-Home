@@ -1585,6 +1585,16 @@ Recoverydatabasens side av §4.5.4. Catalog og recovery bruker samme ID, retning
 
 Handoffpayload er liten, kanonisk og identisk checksummet på begge sider. Den inneholder bare stabile IDs, schema, forventede faser og high-water; bulkdata refereres gjennom immutable entity IDs. Reconciliation er type-spesifikk, men må følge den generiske monotone state machine og kan aldri hoppe fra `prepared` til `completed` uten bevist peer-commit.
 
+0B-implementasjonsnote: Catalog migration 56 og recovery migration 12
+realiserer `store_handoffs`, `recovery_handoffs` og `recovery_runs` for
+`RUN_START` og `OPERATION_CATALOG_RECORD`. Begge retninger bruker identisk
+canonical JSON og SHA-256, immutable evidence-triggere, databasehåndhevet
+monoton state og korte sekvensielle transaksjoner. En run forblir `CREATED`
+til recoverybindingen er `PEER_COMMITTED`; katalogutfall og peer-handoff
+committes atomisk før recovery kan registrere `CATALOG_RECORDED`. Bounded
+startup reconciliation ferdigstiller kjente crashvinduer og gjør uløselig
+payload-/sideavvik `AMBIGUOUS`, som blokkerer muterende readiness.
+
 #### `lease_counters`
 
 Monoton fencingsekvens per muterbar ressurs.

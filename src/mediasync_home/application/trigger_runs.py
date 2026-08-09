@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from mediasync_home.application.command_receipts import CommandEffectTransaction
+from mediasync_home.application.cross_store_handoffs import (
+    RunStartCrossStoreCoordinator,
+)
 from mediasync_home.application.backup_analysis import (
     BackupAnalysisRequest,
     BackupAnalysisRequestState,
@@ -151,6 +155,8 @@ def enqueue_trigger_occurrence_run(
     plans: PlanStore,
     runs: RunStore,
     id_factory: RunIdFactory,
+    run_start_cross_store_coordinator: RunStartCrossStoreCoordinator | None = None,
+    run_start_transaction: CommandEffectTransaction | None = None,
 ) -> TriggerRunEnqueueOutcome:
     resolution = resolve_schedule_for_trigger(
         schedules=schedules,
@@ -192,19 +198,46 @@ def enqueue_trigger_occurrence_run(
             occurrence=occurrence,
         )
 
-    run_start = start_run_from_sealed_plan(
-        command=StartRunCommand(
-            request_id=command.request_id,
-            idempotency_key=command.idempotency_key,
-            plan_id=schedule.plan_id,
-            plan_checksum=schedule.plan_checksum,
-            run_idempotency_key=occurrence.occurrence_id,
-            trigger_occurrence_id=occurrence.occurrence_id,
-        ),
-        plans=plans,
-        runs=runs,
-        id_factory=id_factory,
-    )
+    def prepare_run() -> RunStartOutcome:
+        run_start = start_run_from_sealed_plan(
+            command=StartRunCommand(
+                request_id=command.request_id,
+                idempotency_key=command.idempotency_key,
+                plan_id=schedule.plan_id,
+                plan_checksum=schedule.plan_checksum,
+                run_idempotency_key=occurrence.occurrence_id,
+                trigger_occurrence_id=occurrence.occurrence_id,
+            ),
+            plans=plans,
+            runs=runs,
+            id_factory=id_factory,
+            defer_until_recovery_bound=(
+                run_start_cross_store_coordinator is not None
+            ),
+        )
+        if run_start.run is not None and run_start_cross_store_coordinator is not None:
+            run_start_cross_store_coordinator.prepare_run_start(
+                run_start.run,
+                transition_command_receipt=False,
+            )
+        return run_start
+
+    if run_start_cross_store_coordinator is not None:
+        if run_start_transaction is None:
+            return TriggerRunEnqueueOutcome(
+                enqueued=False,
+                deduplicated=registration.deduplicated,
+                compacted=registration.compacted,
+                schedule_resolution_kind=resolution.kind,
+                validation_codes=("TRIGGER_RUN_HANDOFF_NOT_CONFIGURED",),
+                next_action="Configure the catalog transaction before starting trigger runs.",
+                occurrence=occurrence,
+            )
+        run_start = run_start_transaction.run(prepare_run)
+        if run_start.run is not None:
+            run_start_cross_store_coordinator.advance_run_start(run_start.run.run_id)
+    else:
+        run_start = prepare_run()
     if run_start.run is None:
         return TriggerRunEnqueueOutcome(
             enqueued=False,

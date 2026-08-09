@@ -39,6 +39,10 @@ from mediasync_home.application.command_receipts import (
     transition_command_receipt,
 )
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
+from mediasync_home.application.cross_store_handoffs import (
+    CrossStoreHandoffError,
+    RunStartCrossStoreCoordinator,
+)
 from mediasync_home.application.duplicates import (
     DuplicateAnalysisReadStore,
     DuplicateRelationError,
@@ -411,6 +415,7 @@ class EngineHostIpcService:
     run_store: RunStore | None = None
     run_control_store: RunControlStore | None = None
     run_id_factory: RunIdFactory | None = None
+    run_start_cross_store_coordinator: RunStartCrossStoreCoordinator | None = None
     schedule_store: ScheduleStore | None = None
     task_scheduler_executable_path: str | None = None
     task_scheduler_time_zone_id: str | None = None
@@ -3555,9 +3560,45 @@ class EngineHostIpcService:
         identity: VerifiedClientIdentity,
         command: StartRunCommand,
     ) -> IpcResponse:
-        return self._run_command_effect_transaction(
+        prepared = self._run_command_effect_transaction(
             lambda: self._dispatch_start_run_in_transaction(envelope, identity, command)
         )
+        coordinator = self.run_start_cross_store_coordinator
+        if coordinator is None or prepared.status is IpcStatus.REJECTED:
+            return prepared
+        if self.run_store is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+        run = self.run_store.load_started_run_by_idempotency_key(
+            envelope.idempotency_key
+        )
+        if run is None:
+            return prepared
+        try:
+            coordinator.advance_run_start(run.run_id)
+        except CrossStoreHandoffError as exc:
+            payload = dict(prepared.payload)
+            payload["error_code"] = exc.validation_code
+            payload["next_action"] = exc.next_action
+            payload["retryable"] = True
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(IpcReason.COMMAND_PRECONDITION_FAILED, payload)
+        released = self.run_store.load_started_run(run.run_id)
+        payload = _start_run_response_payload(
+            envelope=envelope,
+            plan_id=command.plan_id,
+            mutations_enabled=True,
+            recognized=True,
+            outcome=None,
+            run=released,
+        )
+        payload["created"] = bool(prepared.payload.get("created", False))
+        payload["idempotent_replay"] = bool(
+            prepared.payload.get("idempotent_replay", False)
+        )
+        if "readiness" in prepared.payload:
+            payload["readiness"] = prepared.payload["readiness"]
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.accepted(payload)
 
     def _dispatch_start_run_in_transaction(
         self,
@@ -3592,6 +3633,9 @@ class EngineHostIpcService:
             id_factory=self.run_id_factory,
             operation_audit_store=self.operation_audit_read_store,
             job_lifecycle=self.job_lifecycle_store,
+            defer_until_recovery_bound=(
+                self.run_start_cross_store_coordinator is not None
+            ),
         )
         if outcome.run is None:
             receipt = transition_command_receipt(
@@ -3617,6 +3661,17 @@ class EngineHostIpcService:
             result_entity_id=outcome.run.run_id,
         )
         self.command_receipt_store.update_command_receipt(receipt)
+        if self.run_start_cross_store_coordinator is not None:
+            self.run_start_cross_store_coordinator.prepare_run_start(outcome.run)
+            payload = _start_run_response_payload(
+                envelope=envelope,
+                plan_id=command.plan_id,
+                mutations_enabled=True,
+                recognized=True,
+                outcome=outcome,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.accepted(payload)
         receipt = transition_command_receipt(receipt, CommandReceiptState.ACCEPTED)
         self.command_receipt_store.update_command_receipt(receipt)
         receipt = transition_command_receipt(receipt, CommandReceiptState.SUCCEEDED)

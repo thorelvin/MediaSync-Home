@@ -14,6 +14,29 @@ stores:
     writable_owner: engine_host
     sql_contract: recovery.sql
 invariants:
+  - id: ARC-009_CROSS_STORE_HANDOFF_PROTOCOL
+    requirement_id: ARC-009
+    catalog_table: store_handoffs
+    recovery_table: recovery_handoffs
+    recovery_run_table: recovery_runs
+    directions: [CATALOG_TO_RECOVERY, RECOVERY_TO_CATALOG]
+    success_path: [PREPARED, PEER_COMMITTED, SOURCE_CONFIRMED, COMPLETED]
+    terminal_divergence_states: [ABORTED, AMBIGUOUS]
+    immutable_evidence_fields:
+      - id
+      - handoff_type
+      - direction
+      - payload_schema_version
+      - entity_type
+      - entity_id
+      - payload_json
+      - payload_hash
+      - created_utc
+    payload_hash_algorithm: SHA-256
+    simultaneous_write_transactions_forbidden: true
+    run_start_requires_recovery_binding_before_queue: true
+    operation_catalog_requires_peer_commit_before_recovery_ack: true
+    startup_reconciliation_bounded: true
   - id: DB-001_FILE_ENTRIES_COMPARISON_KEY_IS_NON_UNIQUE
     requirement_id: DB-001
     table: file_entries

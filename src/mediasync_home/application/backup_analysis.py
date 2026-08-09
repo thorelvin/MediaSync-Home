@@ -5,6 +5,10 @@ from enum import Enum
 from collections.abc import Callable
 from typing import Protocol
 
+from mediasync_home.application.command_receipts import CommandEffectTransaction
+from mediasync_home.application.cross_store_handoffs import (
+    RunStartCrossStoreCoordinator,
+)
 from mediasync_home.application.hash_evidence import (
     CurrentReadHashEvidenceRefresher,
 )
@@ -24,6 +28,7 @@ from mediasync_home.application.plans import (
 )
 from mediasync_home.application.runs import (
     RunIdFactory,
+    RunStartOutcome,
     RunStore,
     StartRunCommand,
     StartedRun,
@@ -180,6 +185,8 @@ def execute_next_backup_analysis(
     duplicate_relations: DuplicateRelationMaterializer | None = None,
     plan_store: PlanStore | None = None,
     run_id_factory: RunIdFactory | None = None,
+    run_start_cross_store_coordinator: RunStartCrossStoreCoordinator | None = None,
+    run_start_transaction: CommandEffectTransaction | None = None,
 ) -> BackupAnalysisRequest | None:
     request = requests.claim_next_backup_analysis(started_utc=utc_now())
     if request is None:
@@ -330,6 +337,10 @@ def execute_next_backup_analysis(
                 plans=plan_store,
                 runs=runs,
                 run_id_factory=run_id_factory,
+                run_start_cross_store_coordinator=(
+                    run_start_cross_store_coordinator
+                ),
+                run_start_transaction=run_start_transaction,
                 utc_now=utc_now,
             )
         return _complete_request(
@@ -392,6 +403,8 @@ def _complete_after_safe_start(
     plans: PlanStore | None,
     runs: RunStore,
     run_id_factory: RunIdFactory | None,
+    run_start_cross_store_coordinator: RunStartCrossStoreCoordinator | None,
+    run_start_transaction: CommandEffectTransaction | None,
     utc_now: Callable[[], str],
 ) -> BackupAnalysisRequest:
     if (
@@ -436,23 +449,52 @@ def _complete_after_safe_start(
             planned_bytes=planned_bytes,
             utc_now=utc_now,
         )
-    outcome = start_run_from_sealed_plan(
-        command=StartRunCommand(
-            request_id=request.request_id,
-            idempotency_key=request.command_idempotency_key,
-            run_idempotency_key=f"backup-analysis-run:{request.request_id}",
-            plan_id=plan_id,
-            plan_checksum=plan_checksum,
-            trigger_occurrence_id=(
-                request.request_id
-                if request.request_id.startswith("trigger:")
-                else None
+    def prepare_run() -> RunStartOutcome:
+        outcome = start_run_from_sealed_plan(
+            command=StartRunCommand(
+                request_id=request.request_id,
+                idempotency_key=request.command_idempotency_key,
+                run_idempotency_key=f"backup-analysis-run:{request.request_id}",
+                plan_id=plan_id,
+                plan_checksum=plan_checksum,
+                trigger_occurrence_id=(
+                    request.request_id
+                    if request.request_id.startswith("trigger:")
+                    else None
+                ),
             ),
-        ),
-        plans=plans,
-        runs=runs,
-        id_factory=run_id_factory,
-    )
+            plans=plans,
+            runs=runs,
+            id_factory=run_id_factory,
+            defer_until_recovery_bound=(
+                run_start_cross_store_coordinator is not None
+            ),
+        )
+        if outcome.run is not None and run_start_cross_store_coordinator is not None:
+            run_start_cross_store_coordinator.prepare_run_start(
+                outcome.run,
+                transition_command_receipt=False,
+            )
+        return outcome
+
+    if run_start_cross_store_coordinator is not None:
+        if run_start_transaction is None:
+            return _complete_request(
+                requests,
+                request=request,
+                state=BackupAnalysisRequestState.FAILED,
+                reason_code="BACKUP_ANALYSIS_RUN_HANDOFF_NOT_CONFIGURED",
+                analysis_id=analysis_id,
+                plan_id=plan_id,
+                operation_count=operation_count,
+                planned_bytes=planned_bytes,
+                utc_now=utc_now,
+            )
+        outcome = run_start_transaction.run(prepare_run)
+        if outcome.run is not None:
+            run_start_cross_store_coordinator.advance_run_start(outcome.run.run_id)
+    else:
+        outcome = prepare_run()
     if (
         outcome.run is None
         or not outcome.readiness.plan_runnable

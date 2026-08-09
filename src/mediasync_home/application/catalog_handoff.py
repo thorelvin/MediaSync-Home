@@ -105,6 +105,16 @@ class FinalFileCatalogHandoffStore(Protocol):
     def load_final_file_handoff(self, handoff_id: str) -> FinalFileCatalogHandoff | None: ...
 
 
+class CatalogCrossStoreHandoffCoordinator(Protocol):
+    def record_operation_catalog_handoff(
+        self,
+        *,
+        operation: RecoveryOperation,
+        handoff: FinalFileCatalogHandoff,
+        process_instance_id: str,
+    ) -> CatalogHandoffOutcome: ...
+
+
 class CatalogHandoffRecoveryOperationStore(RecoveryOperationStore, Protocol):
     def list_operations_in_phase(
         self,
@@ -122,6 +132,7 @@ def record_catalog_handoff_after_final_verification(
     recovery_operations: RecoveryOperationStore,
     catalog_handoffs: FinalFileCatalogHandoffStore,
     process_instance_id: str,
+    cross_store_coordinator: CatalogCrossStoreHandoffCoordinator | None = None,
 ) -> CatalogHandoffOutcome:
     _validate_process_instance_id(process_instance_id)
     operation = recovery_operations.load_operation(run_id=run_id, operation_id=operation_id)
@@ -133,6 +144,12 @@ def record_catalog_handoff_after_final_verification(
 
     if operation.phase is RecoveryOperationPhase.CATALOG_RECORDED:
         handoff = _handoff_from_recorded_operation(operation=operation, content_hash=content_hash)
+        if cross_store_coordinator is not None:
+            return cross_store_coordinator.record_operation_catalog_handoff(
+                operation=operation,
+                handoff=handoff,
+                process_instance_id=process_instance_id,
+            )
         recorded = catalog_handoffs.record_final_file_handoff(handoff)
         return CatalogHandoffOutcome(
             handoff=recorded,
@@ -146,6 +163,12 @@ def record_catalog_handoff_after_final_verification(
         )
 
     handoff = _handoff_from_operation(operation=operation, content_hash=content_hash)
+    if cross_store_coordinator is not None:
+        return cross_store_coordinator.record_operation_catalog_handoff(
+            operation=operation,
+            handoff=handoff,
+            process_instance_id=process_instance_id,
+        )
     recorded = catalog_handoffs.record_final_file_handoff(handoff)
     updated = recovery_operations.record_operation_phase_transition(
         run_id=operation.run_id,
@@ -365,6 +388,12 @@ def _handoff_payload(handoff: FinalFileCatalogHandoff) -> Mapping[str, object]:
             else handoff.retained_version.version_object_id
         ),
     }
+
+
+def catalog_handoff_transition_payload(
+    handoff: FinalFileCatalogHandoff,
+) -> Mapping[str, object]:
+    return _handoff_payload(handoff)
 
 
 def _retained_version_from_operation(

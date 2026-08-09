@@ -689,6 +689,39 @@ def _validate_immutable_revision_invariant(invariant: dict[str, Any]) -> None:
         fail("ARC-005 endpoint generation runtime capability drifted")
 
 
+def _validate_cross_store_handoff_invariant(invariant: dict[str, Any]) -> None:
+    expected_fields = {
+        "id",
+        "handoff_type",
+        "direction",
+        "payload_schema_version",
+        "entity_type",
+        "entity_id",
+        "payload_json",
+        "payload_hash",
+        "created_utc",
+    }
+    if (
+        invariant.get("catalog_table") != "store_handoffs"
+        or invariant.get("recovery_table") != "recovery_handoffs"
+        or invariant.get("recovery_run_table") != "recovery_runs"
+        or invariant.get("directions")
+        != ["CATALOG_TO_RECOVERY", "RECOVERY_TO_CATALOG"]
+        or invariant.get("success_path")
+        != ["PREPARED", "PEER_COMMITTED", "SOURCE_CONFIRMED", "COMPLETED"]
+        or set(invariant.get("terminal_divergence_states", ()))
+        != {"ABORTED", "AMBIGUOUS"}
+        or set(invariant.get("immutable_evidence_fields", ())) != expected_fields
+        or invariant.get("payload_hash_algorithm") != "SHA-256"
+        or invariant.get("simultaneous_write_transactions_forbidden") is not True
+        or invariant.get("run_start_requires_recovery_binding_before_queue") is not True
+        or invariant.get("operation_catalog_requires_peer_commit_before_recovery_ack")
+        is not True
+        or invariant.get("startup_reconciliation_bounded") is not True
+    ):
+        fail("cross-store handoff contract drifted")
+
+
 def _validate_writable_endpoint_registration_invariant(
     invariant: dict[str, Any],
 ) -> None:
@@ -1342,6 +1375,7 @@ def validate_database_contract(document: dict[str, Any]) -> int:
     invariant_by_id = _indexed_mappings(invariants, "database-contract.yaml invariants")
     required_ids = {
         "ARC-005_IMMUTABLE_REVISION_GUARDS",
+        "ARC-009_CROSS_STORE_HANDOFF_PROTOCOL",
         "AUTO-002_IMMUTABLE_AUTOMATION_POLICY",
         "CTRL-001_WRITABLE_ENDPOINT_REGISTRATION",
         "DB-001_FILE_ENTRIES_COMPARISON_KEY_IS_NON_UNIQUE",
@@ -1385,6 +1419,9 @@ def validate_database_contract(document: dict[str, Any]) -> int:
     )
     _validate_immutable_revision_invariant(
         invariant_by_id["ARC-005_IMMUTABLE_REVISION_GUARDS"]
+    )
+    _validate_cross_store_handoff_invariant(
+        invariant_by_id["ARC-009_CROSS_STORE_HANDOFF_PROTOCOL"]
     )
     _validate_writable_endpoint_registration_invariant(
         invariant_by_id["CTRL-001_WRITABLE_ENDPOINT_REGISTRATION"]

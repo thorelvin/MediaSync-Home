@@ -654,6 +654,7 @@ def start_run_from_sealed_plan(
     id_factory: RunIdFactory,
     operation_audit_store: OperationAuditReadModelStore | None = None,
     job_lifecycle: JobLifecycleStore | None = None,
+    defer_until_recovery_bound: bool = False,
 ) -> RunStartOutcome:
     existing = runs.load_started_run_by_idempotency_key(
         _effective_run_idempotency_key(command)
@@ -762,6 +763,9 @@ def start_run_from_sealed_plan(
         plan=plan,
         ids=id_factory.new_run_ids(),
         retry_source=retry_source,
+        initial_state=(
+            RunState.CREATED if defer_until_recovery_bound else RunState.QUEUED
+        ),
     )
     runs.save_started_run(run)
     return RunStartOutcome(
@@ -1674,6 +1678,7 @@ def _started_run_from_plan(
     plan: SealedPlan,
     ids: RunIds,
     retry_source: StartedRun | None = None,
+    initial_state: RunState = RunState.QUEUED,
 ) -> StartedRun:
     target_endpoints = _selected_target_endpoints(
         plan,
@@ -1711,7 +1716,7 @@ def _started_run_from_plan(
             else ids.logical_run_group_id
         ),
         trigger_type=RunTriggerType.MANUAL_LOCAL_PREVIEW,
-        state=RunState.QUEUED,
+        state=initial_state,
         app_version=APP_VERSION,
         plan_checksum=plan.plan_checksum,
         planned_operations=(

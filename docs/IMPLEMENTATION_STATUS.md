@@ -1,5 +1,24 @@
 # Implementeringsstatus
 
+Update 2026-08-09: Milestone 8 now persists the canonical two-database
+handoff protocol in production. Catalog migration 56 adds `store_handoffs`;
+recovery migration 12 adds matching `recovery_handoffs` and immutable
+`recovery_runs`. Run start is committed as non-runnable `CREATED` plus
+`EFFECT_PREPARED` and source evidence, bound separately in recovery, then
+released to `QUEUED` only with catalog `SOURCE_CONFIRMED`; automated safe-start
+runs use the same protocol without claiming ownership of an already-terminal
+analysis receipt. The final-file path runs in the opposite direction:
+`FINAL_VERIFIED` prepares recovery evidence, the catalog outcome and peer row
+commit together, and `CATALOG_RECORDED` plus recovery source confirmation commit
+together. Both directions complete monotonically and bounded startup
+reconciliation resumes every intervening crash window. Immutable payload IDs,
+canonical JSON and SHA-256 must agree; independent disagreement persists as
+`AMBIGUOUS` and disables mutation readiness. Database checks/triggers reject
+backward state moves and evidence mutation. Real SQLite crash suites cover all
+six phase boundaries, replay and mismatch, while the real local copy test now
+proves completed rows on both stores alongside exact target bytes, catalog
+outcome and cleaned target intent.
+
 Update 2026-08-09: Milestone 8 target-side recovery intent evidence is now
 implemented for the local executor. Each bounded commit batch serializes one
 canonical JSONL header plus canonical operation rows, checksum-bound to the

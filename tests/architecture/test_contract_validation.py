@@ -95,6 +95,26 @@ def test_database_contract_rejects_unique_file_entry_comparison_key() -> None:
         validate_contracts.validate_database_contract(document)
 
 
+def test_database_contract_rejects_cross_store_dual_write_claim() -> None:
+    yaml = _yaml_loader()
+    document = validate_contracts.load_yaml(
+        validate_contracts.ROOT / "schema/database-contract.yaml",
+        yaml,
+    )
+    document = copy.deepcopy(document)
+    invariant = _database_invariant(
+        document,
+        "ARC-009_CROSS_STORE_HANDOFF_PROTOCOL",
+    )
+    invariant["simultaneous_write_transactions_forbidden"] = False
+
+    with pytest.raises(
+        validate_contracts.ContractValidationError,
+        match="cross-store handoff contract drifted",
+    ):
+        validate_contracts.validate_database_contract(document)
+
+
 def test_database_contract_rejects_missing_parent_scope_foreign_key() -> None:
     yaml = _yaml_loader()
     document = validate_contracts.load_yaml(

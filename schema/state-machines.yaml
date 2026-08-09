@@ -58,11 +58,22 @@ machines:
     - OLD_TARGET_PRESERVED
   cross_store_handoff:
     initial: PREPARED
+    states:
+    - PREPARED
+    - PEER_COMMITTED
+    - SOURCE_CONFIRMED
+    - COMPLETED
+    - ABORTED
+    - AMBIGUOUS
     linear_success_path:
     - PREPARED
     - PEER_COMMITTED
     - SOURCE_CONFIRMED
     - COMPLETED
+    terminal:
+    - COMPLETED
+    - ABORTED
+    - AMBIGUOUS
   endpoint_ownership:
     states:
     - UNREGISTERED

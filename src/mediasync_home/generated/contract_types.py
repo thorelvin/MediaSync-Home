@@ -9,7 +9,7 @@ from enum import Enum
 from typing import Final
 
 
-CONTRACT_SOURCE_SHA256: Final[str] = "d1e76cc44331b04ac3a8daa7af0c730f8a63ec8d6e9dfbe66b74f950b43ff132"
+CONTRACT_SOURCE_SHA256: Final[str] = "36e43ceb90147de8f0c0eed9e9ed440789acd9a3781539be29e14d03a9ba8e87"
 
 
 class RecoveryOperationPhase(str, Enum):
@@ -44,6 +44,8 @@ class CrossStoreHandoffState(str, Enum):
     PEER_COMMITTED = "PEER_COMMITTED"
     SOURCE_CONFIRMED = "SOURCE_CONFIRMED"
     COMPLETED = "COMPLETED"
+    ABORTED = "ABORTED"
+    AMBIGUOUS = "AMBIGUOUS"
 
 
 class EndpointOwnershipState(str, Enum):
