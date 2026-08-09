@@ -71,6 +71,15 @@ class StatusIpcClient(Protocol):
     ) -> IpcResponse:
         pass
 
+    def query_duplicate_report(
+        self,
+        *,
+        analysis_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        pass
+
     def query_activity_overview(
         self,
         *,
@@ -125,6 +134,7 @@ class StatusIpcClient(Protocol):
         after: dict[str, object] | None = None,
         target_endpoint_id: str | None = None,
         risk_levels: tuple[str, ...] = (),
+        duplicate_group_id: str | None = None,
     ) -> IpcResponse:
         pass
 
@@ -283,6 +293,21 @@ class EngineClient:
             )
         )
 
+    def get_duplicate_report(
+        self,
+        *,
+        analysis_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.query_duplicate_report(
+                analysis_id=analysis_id,
+                limit=limit,
+                after=after,
+            )
+        )
+
     def get_activity_overview(
         self,
         *,
@@ -368,6 +393,7 @@ class EngineClient:
         after: dict[str, object] | None = None,
         target_endpoint_id: str | None = None,
         risk_levels: tuple[str, ...] = (),
+        duplicate_group_id: str | None = None,
     ) -> IpcResponse:
         return self._request_with_handshake_retry(
             lambda: self._ipc_client.query_plan_operations(
@@ -376,6 +402,7 @@ class EngineClient:
                 after=after,
                 target_endpoint_id=target_endpoint_id,
                 risk_levels=risk_levels,
+                duplicate_group_id=duplicate_group_id,
             )
         )
 
@@ -789,6 +816,28 @@ class EngineClient:
             analysis_id=analysis_id,
             request_id=request_id,
             idempotency_key=idempotency_key,
+        )
+
+    def mark_duplicate_group_reviewed(
+        self,
+        *,
+        group_id: str,
+        expected_review_state: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        payload: dict[str, object] = {
+            "group_id": group_id,
+            "expected_review_state": expected_review_state,
+        }
+        return self._request_with_handshake_retry(
+            lambda: self._ipc_client.submit_command(
+                DuplicateScanCommandName.MARK_DUPLICATE_GROUP_REVIEWED.value,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                payload_hash=canonical_command_payload_hash(payload),
+            )
         )
 
     def _submit_duplicate_scan_command(

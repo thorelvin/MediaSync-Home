@@ -392,7 +392,9 @@ invariants:
     assertion: >
       Multiple paths to one file object are classified before content
       duplicates, and intended source-to-target backup copies remain expected
-      replicas. Neither relation contributes possible storage savings.
+      replicas. Neither relation contributes possible storage savings. Equal
+      current-read content on unrelated endpoints is reported separately using
+      one physical representative per endpoint.
     alias_group_table: file_object_alias_groups
     alias_member_table: file_object_alias_members
     path_key_table: duplicate_relation_path_keys
@@ -411,9 +413,27 @@ invariants:
     expected_replica_potential_savings_bytes: 0
     internal_duplicate_relationship: INTRA_ENDPOINT_DUPLICATE
     internal_duplicate_requires_separate_physical_objects: true
+    unrelated_cross_endpoint_relationship: UNRELATED_CROSS_ENDPOINT_DUPLICATE
+    unrelated_cross_endpoint_representative_per_endpoint: true
+    unrelated_cross_endpoint_excludes_expected_replica_members: true
+    cross_endpoint_savings_do_not_duplicate_internal_savings: true
     duplicate_scan_candidate_limit: 1000000
     duplicate_group_page_limit: 200
     duplicate_member_page_limit: 200
+    duplicate_report_page_limit: 500
+    duplicate_report_row_limit: 1000000
+    duplicate_report_includes_relationship_and_evidence: true
+    duplicate_member_absolute_local_path_max_length: 32767
+    duplicate_group_review_states: [UNREVIEWED, REVIEWED]
+    duplicate_group_review_transition: UNREVIEWED_TO_REVIEWED
+    duplicate_group_review_command_receipted: true
+    first_version_actions:
+      - OPEN_LOCATION
+      - COPY_PATH
+      - FILTER_PLAN_OPERATIONS_TO_GROUP
+      - EXPORT_CLASSIFIED_REPORT
+      - MARK_GROUP_REVIEWED
+      - OPEN_SELECTED_FILE
     pauses_while_backup_is_active: true
     immutable_relation_identity: true
     automatic_mutation_allowed: false

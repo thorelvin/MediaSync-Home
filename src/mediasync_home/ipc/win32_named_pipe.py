@@ -853,6 +853,13 @@ class Win32NamedPipeServer:
                 limit=_optional_query_int(request.get("limit")),
                 after=_optional_query_object(request.get("after")),
             )
+        if message_type == "QUERY_DUPLICATE_REPORT":
+            return self.service.query_duplicate_report(
+                str(request["client_instance_id"]),
+                analysis_id=str(request["analysis_id"]),
+                limit=_optional_query_int(request.get("limit")),
+                after=_optional_query_object(request.get("after")),
+            )
         if message_type == "QUERY_ACTIVITY_OVERVIEW":
             return self.service.query_activity_overview(
                 str(request["client_instance_id"]),
@@ -899,6 +906,9 @@ class Win32NamedPipeServer:
                     request.get("target_endpoint_id")
                 ),
                 risk_levels=_optional_query_str_tuple(request.get("risk_levels")),
+                duplicate_group_id=_optional_query_str(
+                    request.get("duplicate_group_id")
+                ),
             )
         if message_type == "QUERY_PLAN_ENDPOINTS":
             return self.service.query_plan_endpoints(
@@ -1087,6 +1097,24 @@ class Win32NamedPipeClient:
             request["after"] = after
         return self._roundtrip(request)
 
+    def query_duplicate_report(
+        self,
+        *,
+        analysis_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        request: dict[str, Any] = {
+            "message_type": "QUERY_DUPLICATE_REPORT",
+            "client_instance_id": self.client_instance_id,
+            "analysis_id": analysis_id,
+        }
+        if limit is not None:
+            request["limit"] = limit
+        if after is not None:
+            request["after"] = after
+        return self._roundtrip(request)
+
     def query_activity_overview(
         self,
         *,
@@ -1189,6 +1217,7 @@ class Win32NamedPipeClient:
         after: dict[str, object] | None = None,
         target_endpoint_id: str | None = None,
         risk_levels: tuple[str, ...] = (),
+        duplicate_group_id: str | None = None,
     ) -> IpcResponse:
         request: dict[str, Any] = {
             "message_type": "QUERY_PLAN_OPERATIONS",
@@ -1203,6 +1232,8 @@ class Win32NamedPipeClient:
             request["target_endpoint_id"] = target_endpoint_id
         if risk_levels:
             request["risk_levels"] = list(risk_levels)
+        if duplicate_group_id is not None:
+            request["duplicate_group_id"] = duplicate_group_id
         return self._roundtrip(request)
 
     def query_plan_endpoints(

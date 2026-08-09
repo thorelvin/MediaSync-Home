@@ -4,6 +4,7 @@ from mediasync_home.ipc.protocol import IpcResponse
 from mediasync_home.presentation.view_models.duplicate_scanning import (
     duplicate_group_page_from_response,
     duplicate_member_page_from_response,
+    duplicate_report_page_from_response,
     duplicate_scan_from_response,
 )
 
@@ -107,9 +108,13 @@ def test_duplicate_group_and_member_pages_require_valid_keyset_cursors() -> None
                             "snapshot_id": "snapshot-a",
                             "endpoint_id": "source-a",
                             "file_entry_id": "file-a",
-                            "relative_path": "Photos/A.jpg",
-                            "member_role": "ORIGINAL",
-                            "physical_object_key": "physical-a",
+                                "relative_path": "Photos/A.jpg",
+                                "member_role": "SOURCE_ORIGIN",
+                                "physical_object_key": "physical-a",
+                                "endpoint_role": "SOURCE",
+                                "absolute_path": "C:\\Source\\Photos\\A.jpg",
+                                "size_bytes": 4096,
+                                "evidence_kind": "CURRENT_READ_HASH",
                         }
                     ],
                     "has_more": True,
@@ -147,3 +152,91 @@ def test_duplicate_page_rejects_more_than_bounded_rows() -> None:
 
     assert page.read_model_available is False
     assert page.groups == ()
+
+
+def test_duplicate_report_page_parses_relationship_and_evidence_cursor() -> None:
+    full_hash = "a" * 64
+    response = IpcResponse.accepted(
+        {
+            "duplicate_report": {
+                "analysis_id": "analysis-a",
+                "rows": [
+                    {
+                        "group_id": "group-a",
+                        "relationship_class": "INTRA_ENDPOINT_DUPLICATE",
+                        "full_hash": full_hash,
+                        "size_bytes": 4096,
+                        "member_count": 2,
+                        "physical_object_count": 2,
+                        "expected_replica_count": 0,
+                        "potential_savings_bytes": 4096,
+                        "review_state": "UNREVIEWED",
+                        "created_utc": "2026-08-02T10:00:00Z",
+                        "snapshot_id": "snapshot-a",
+                        "endpoint_id": "source-a",
+                        "file_entry_id": "file-a",
+                        "relative_path": "Photos/A.jpg",
+                        "member_role": "SOURCE_ORIGIN",
+                        "physical_object_key": "physical-a",
+                        "endpoint_role": "SOURCE",
+                        "absolute_path": "C:\\Source\\Photos\\A.jpg",
+                        "evidence_kind": "CURRENT_READ_HASH",
+                    }
+                ],
+                "has_more": True,
+                "next_cursor": {
+                    "relationship_class": "INTRA_ENDPOINT_DUPLICATE",
+                    "full_hash": full_hash,
+                    "group_id": "group-a",
+                    "relative_path": "Photos/A.jpg",
+                    "snapshot_id": "snapshot-a",
+                    "file_entry_id": "file-a",
+                },
+            }
+        }
+    )
+
+    page = duplicate_report_page_from_response(response)
+
+    assert page.read_model_available is True
+    assert page.has_more is True
+    assert page.rows[0].member.evidence_kind == "CURRENT_READ_HASH"
+    assert page.rows[0].group.relationship_class == "INTRA_ENDPOINT_DUPLICATE"
+
+
+def test_duplicate_report_page_rejects_unknown_review_state_or_relative_path() -> None:
+    row = {
+        "group_id": "group-a",
+        "relationship_class": "INTRA_ENDPOINT_DUPLICATE",
+        "full_hash": "a" * 64,
+        "size_bytes": 4096,
+        "member_count": 2,
+        "physical_object_count": 2,
+        "expected_replica_count": 0,
+        "potential_savings_bytes": 4096,
+        "review_state": "UNKNOWN",
+        "snapshot_id": "snapshot-a",
+        "endpoint_id": "source-a",
+        "file_entry_id": "file-a",
+        "relative_path": "Photos/A.jpg",
+        "member_role": "SOURCE_ORIGIN",
+        "physical_object_key": "physical-a",
+        "endpoint_role": "SOURCE",
+        "absolute_path": "Photos/A.jpg",
+        "evidence_kind": "CURRENT_READ_HASH",
+    }
+    page = duplicate_report_page_from_response(
+        IpcResponse.accepted(
+            {
+                "duplicate_report": {
+                    "analysis_id": "analysis-a",
+                    "rows": [row],
+                    "has_more": False,
+                    "next_cursor": None,
+                }
+            }
+        )
+    )
+
+    assert page.read_model_available is False
+    assert page.rows == ()

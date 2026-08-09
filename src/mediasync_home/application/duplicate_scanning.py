@@ -16,6 +16,9 @@ DUPLICATE_GROUP_DEFAULT_PAGE_SIZE = 50
 DUPLICATE_GROUP_MAX_PAGE_SIZE = 200
 DUPLICATE_MEMBER_DEFAULT_PAGE_SIZE = 100
 DUPLICATE_MEMBER_MAX_PAGE_SIZE = 200
+DUPLICATE_REPORT_DEFAULT_PAGE_SIZE = 200
+DUPLICATE_REPORT_MAX_PAGE_SIZE = 500
+DUPLICATE_REPORT_MAX_ROWS = 1_000_000
 
 _HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -24,6 +27,7 @@ class DuplicateScanCommandName(str, Enum):
     START_DUPLICATE_SCAN = "START_DUPLICATE_SCAN"
     PAUSE_DUPLICATE_SCAN = "PAUSE_DUPLICATE_SCAN"
     RESUME_DUPLICATE_SCAN = "RESUME_DUPLICATE_SCAN"
+    MARK_DUPLICATE_GROUP_REVIEWED = "MARK_DUPLICATE_GROUP_REVIEWED"
 
 
 class DuplicateScanState(str, Enum):
@@ -63,6 +67,14 @@ class DuplicateScanCommand:
     request_id: str
     idempotency_key: str
     analysis_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateGroupReviewCommand:
+    request_id: str
+    idempotency_key: str
+    group_id: str
+    expected_review_state: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,6 +264,30 @@ class DuplicateMemberReadModel:
     relative_path: str
     member_role: str
     physical_object_key: str
+    endpoint_role: str
+    absolute_path: str
+    size_bytes: int
+    evidence_kind: str
+
+    def __post_init__(self) -> None:
+        if not all(
+            value.strip()
+            for value in (
+                self.group_id,
+                self.snapshot_id,
+                self.endpoint_id,
+                self.file_entry_id,
+                self.relative_path,
+                self.member_role,
+                self.physical_object_key,
+                self.endpoint_role,
+                self.absolute_path,
+                self.evidence_kind,
+            )
+        ):
+            raise DuplicateScanError("DUPLICATE_MEMBER_IDENTITY_INVALID")
+        if self.size_bytes < 0:
+            raise DuplicateScanError("DUPLICATE_MEMBER_SIZE_INVALID")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -262,6 +298,10 @@ class DuplicateMemberReadModel:
             "relative_path": self.relative_path,
             "member_role": self.member_role,
             "physical_object_key": self.physical_object_key,
+            "endpoint_role": self.endpoint_role,
+            "absolute_path": self.absolute_path,
+            "size_bytes": self.size_bytes,
+            "evidence_kind": self.evidence_kind,
         }
 
 
@@ -280,6 +320,55 @@ class DuplicateMemberPage:
                 None
                 if self.next_cursor is None
                 else {
+                    "relative_path": self.next_cursor.relative_path,
+                    "snapshot_id": self.next_cursor.snapshot_id,
+                    "file_entry_id": self.next_cursor.file_entry_id,
+                }
+            ),
+            "has_more": self.has_more,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateReportCursor:
+    relationship_class: str
+    full_hash: str
+    group_id: str
+    relative_path: str
+    snapshot_id: str
+    file_entry_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateReportRow:
+    group: DuplicateGroupReadModel
+    member: DuplicateMemberReadModel
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            **self.group.to_dict(),
+            **self.member.to_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateReportPage:
+    analysis_id: str
+    rows: tuple[DuplicateReportRow, ...]
+    next_cursor: DuplicateReportCursor | None
+    has_more: bool
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "analysis_id": self.analysis_id,
+            "rows": [row.to_dict() for row in self.rows],
+            "next_cursor": (
+                None
+                if self.next_cursor is None
+                else {
+                    "relationship_class": self.next_cursor.relationship_class,
+                    "full_hash": self.next_cursor.full_hash,
+                    "group_id": self.next_cursor.group_id,
                     "relative_path": self.next_cursor.relative_path,
                     "snapshot_id": self.next_cursor.snapshot_id,
                     "file_entry_id": self.next_cursor.file_entry_id,
@@ -309,6 +398,14 @@ class DuplicateScanReadStore(Protocol):
         after: DuplicateMemberCursor | None = None,
     ) -> DuplicateMemberPage: ...
 
+    def page_duplicate_report(
+        self,
+        *,
+        analysis_id: str,
+        limit: int,
+        after: DuplicateReportCursor | None = None,
+    ) -> DuplicateReportPage: ...
+
 
 class DuplicateScanStore(DuplicateScanReadStore, Protocol):
     def prepare_scan(self, *, analysis_id: str, observed_utc: str) -> None: ...
@@ -334,6 +431,15 @@ class DuplicateScanStore(DuplicateScanReadStore, Protocol):
         observed_utc: str,
     ) -> DuplicateScanStatus | None: ...
 
+    def load_duplicate_group(self, group_id: str) -> DuplicateGroupReadModel | None: ...
+
+    def mark_duplicate_group_reviewed(
+        self,
+        *,
+        group_id: str,
+        expected_review_state: str,
+    ) -> DuplicateGroupReadModel | None: ...
+
 
 def parse_duplicate_scan_command(
     *,
@@ -350,6 +456,28 @@ def parse_duplicate_scan_command(
         request_id=request_id,
         idempotency_key=idempotency_key,
         analysis_id=analysis_id.strip(),
+    )
+
+
+def parse_duplicate_group_review_command(
+    *,
+    request_id: str,
+    idempotency_key: str,
+    payload: dict[str, object],
+) -> DuplicateGroupReviewCommand:
+    if set(payload) != {"group_id", "expected_review_state"}:
+        raise DuplicateScanError("DUPLICATE_GROUP_REVIEW_PAYLOAD_INVALID")
+    group_id = payload.get("group_id")
+    expected_review_state = payload.get("expected_review_state")
+    if not isinstance(group_id, str) or not group_id.strip():
+        raise DuplicateScanError("DUPLICATE_GROUP_ID_REQUIRED")
+    if expected_review_state != "UNREVIEWED":
+        raise DuplicateScanError("DUPLICATE_GROUP_REVIEW_STATE_INVALID")
+    return DuplicateGroupReviewCommand(
+        request_id=request_id,
+        idempotency_key=idempotency_key,
+        group_id=group_id.strip(),
+        expected_review_state=expected_review_state,
     )
 
 

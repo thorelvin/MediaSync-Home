@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpacerItem,
     QStackedWidget,
+    QStyle,
     QToolButton,
     QTimeEdit,
     QVBoxLayout,
@@ -64,6 +65,11 @@ from mediasync_home.presentation.background_queries import (
     BoundedPagePrefetchCache,
     CommandSubmissionController,
     UiUpdateCoalescer,
+)
+from mediasync_home.presentation.duplicate_report_export import (
+    DuplicateReportExportResult,
+    DuplicateReportProvider,
+    export_duplicate_report_csv,
 )
 from mediasync_home.presentation.theme.icon_registry import IconRegistry
 from mediasync_home.presentation.virtual_tables import (
@@ -121,7 +127,9 @@ from mediasync_home.presentation.view_models.localization import (
 )
 from mediasync_home.presentation.view_models.duplicate_scanning import (
     DuplicateGroupPageViewState,
+    DuplicateGroupViewState,
     DuplicateMemberPageViewState,
+    DuplicateMemberViewState,
     DuplicateScanViewState,
     duplicate_group_page_from_response,
     duplicate_member_page_from_response,
@@ -231,6 +239,7 @@ class _ChangesPageContext:
     cursor: dict[str, object]
     target_endpoint_id: str | None
     risk_levels: tuple[str, ...]
+    duplicate_group_id: str | None
 
 
 @dataclass(frozen=True)
@@ -409,6 +418,14 @@ class DuplicateScanProvider(Protocol):
         after: dict[str, object] | None = None,
     ) -> IpcResponse: ...
 
+    def get_duplicate_report(
+        self,
+        *,
+        analysis_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse: ...
+
 
 class DuplicateScanCommandProvider(Protocol):
     def start_duplicate_scan(
@@ -435,6 +452,15 @@ class DuplicateScanCommandProvider(Protocol):
         idempotency_key: str,
     ) -> IpcResponse: ...
 
+    def mark_duplicate_group_reviewed(
+        self,
+        *,
+        group_id: str,
+        expected_review_state: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse: ...
+
 
 class PlanOperationsProvider(Protocol):
     def get_plan_operations(
@@ -445,6 +471,7 @@ class PlanOperationsProvider(Protocol):
         after: dict[str, object] | None = None,
         target_endpoint_id: str | None = None,
         risk_levels: tuple[str, ...] = (),
+        duplicate_group_id: str | None = None,
     ) -> IpcResponse: ...
 
 
@@ -641,6 +668,7 @@ class MediaSyncWindow(QMainWindow):
         ) = None,
         data_root: Path | None = None,
         open_data_folder: Callable[[Path], bool] | None = None,
+        open_local_path: Callable[[Path], bool] | None = None,
         show_component_gallery: bool | None = None,
     ) -> None:
         super().__init__()
@@ -682,6 +710,7 @@ class MediaSyncWindow(QMainWindow):
         self._apply_appearance = apply_appearance
         self._data_root = data_root
         self._open_data_folder = open_data_folder
+        self._open_local_path = open_local_path or _open_path_with_system
         self._icons = IconRegistry()
         self._connected = False
         self._status_query_pending = False
@@ -818,9 +847,16 @@ class MediaSyncWindow(QMainWindow):
         self._duplicate_group_page_index = 0
         self._duplicate_group_page_cursors: list[dict[str, object] | None] = [None]
         self._selected_duplicate_group_id: str | None = None
+        self._selected_duplicate_member_id: str | None = None
+        self._selected_duplicate_member: DuplicateMemberViewState | None = None
         self._duplicate_member_page_limit = 100
         self._duplicate_member_page_index = 0
         self._duplicate_member_page_cursors: list[dict[str, object] | None] = [None]
+        self._duplicate_review_command_pending = False
+        self._duplicate_review_command_group_id: str | None = None
+        self._duplicate_review_request_id: str | None = None
+        self._duplicate_review_idempotency_key: str | None = None
+        self._duplicate_report_export_pending = False
         self._activity_query_job_id: str | None = None
         self._catalog_query_pending = False
         self._requested_plan_preview_id: str | None = None
@@ -994,6 +1030,15 @@ class MediaSyncWindow(QMainWindow):
         self._duplicate_member_page_label: QLabel | None = None
         self._duplicate_member_previous_button: QToolButton | None = None
         self._duplicate_member_next_button: QToolButton | None = None
+        self._duplicate_member_open_location_button: QToolButton | None = None
+        self._duplicate_member_copy_path_button: QToolButton | None = None
+        self._duplicate_member_open_file_button: QToolButton | None = None
+        self._duplicate_group_filter_operations_button: QPushButton | None = None
+        self._duplicate_group_review_button: QPushButton | None = None
+        self._duplicate_report_export_button: QPushButton | None = None
+        self._duplicate_preview_title: QLabel | None = None
+        self._duplicate_preview_labels: dict[str, QLabel] = {}
+        self._duplicate_preview_values: dict[str, QLabel] = {}
         self._changes_plan_id: str | None = None
         self._changes_page_state = empty_plan_operation_preview_state()
         self._changes_page_limit = 200
@@ -1007,6 +1052,8 @@ class MediaSyncWindow(QMainWindow):
         ]()
         self._changes_target_filter: str | None = None
         self._changes_risk_filter = "ALL"
+        self._changes_duplicate_group_filter: str | None = None
+        self._changes_duplicate_filter_button: QPushButton | None = None
         self._selected_changes_operation_id: str | None = None
         self._changes_title_label: QLabel | None = None
         self._changes_attention_banner: QLabel | None = None
@@ -1713,6 +1760,8 @@ class MediaSyncWindow(QMainWindow):
         self._duplicate_group_page_index = 0
         self._duplicate_group_page_cursors = [None]
         self._selected_duplicate_group_id = None
+        self._selected_duplicate_member_id = None
+        self._selected_duplicate_member = None
         self._duplicate_member_page_index = 0
         self._duplicate_member_page_cursors = [None]
         self._duplicate_scan_state = empty_duplicate_scan_state(analysis_id)
@@ -1730,11 +1779,13 @@ class MediaSyncWindow(QMainWindow):
                 "duplicate-scan",
                 "duplicate-groups",
                 "duplicate-members",
+                "duplicate-report-export",
             ):
                 self._background_queries.cancel(key)
         self._duplicate_scan_query_pending = False
         self._duplicate_group_query_pending = False
         self._duplicate_member_query_pending = False
+        self._duplicate_report_export_pending = False
 
     def _refresh_duplicate_scan(
         self,
@@ -5180,6 +5231,7 @@ class MediaSyncWindow(QMainWindow):
                 self._changes_plan_id = plan_id
                 self._changes_target_filter = None
                 self._changes_risk_filter = "ALL"
+                self._changes_duplicate_group_filter = None
                 self._reset_changes_paging()
             self._refresh_changes_page()
 
@@ -5344,6 +5396,7 @@ class MediaSyncWindow(QMainWindow):
             self._changes_plan_id = plan_id
             self._changes_target_filter = None
             self._changes_risk_filter = "ALL"
+            self._changes_duplicate_group_filter = None
             self._reset_changes_paging()
         self._refresh_changes_page(background=False)
         self.apply_plan_operation_preview(
@@ -5370,16 +5423,26 @@ class MediaSyncWindow(QMainWindow):
         cursor = None if raw_cursor is None else dict(raw_cursor)
         target_endpoint_id = self._changes_target_filter
         risk_levels = self._changes_risk_levels()
+        duplicate_group_id = self._changes_duplicate_group_filter
         if background and self._background_queries is not None:
 
             def query(client: object) -> object:
                 provider = cast(PlanOperationsProvider, client)
+                if duplicate_group_id is None:
+                    return provider.get_plan_operations(
+                        plan_id=plan_id,
+                        limit=page_limit,
+                        after=cursor,
+                        target_endpoint_id=target_endpoint_id,
+                        risk_levels=risk_levels,
+                    )
                 return provider.get_plan_operations(
                     plan_id=plan_id,
                     limit=page_limit,
                     after=cursor,
                     target_endpoint_id=target_endpoint_id,
                     risk_levels=risk_levels,
+                    duplicate_group_id=duplicate_group_id,
                 )
 
             def accept(response: object) -> None:
@@ -5391,6 +5454,7 @@ class MediaSyncWindow(QMainWindow):
                         cursor=cursor,
                         target_endpoint_id=target_endpoint_id,
                         risk_levels=risk_levels,
+                        duplicate_group_id=duplicate_group_id,
                     )
 
                 if not self._ui_update_coalescer.submit(
@@ -5408,6 +5472,7 @@ class MediaSyncWindow(QMainWindow):
                     cursor=cursor,
                     target_endpoint_id=target_endpoint_id,
                     risk_levels=risk_levels,
+                    duplicate_group_id=duplicate_group_id,
                 )
 
             submitted = self._background_queries.submit(
@@ -5423,14 +5488,25 @@ class MediaSyncWindow(QMainWindow):
             return
 
         provider = cast(PlanOperationsProvider, self._engine_client)
-        self._apply_changes_response(
-            provider.get_plan_operations(
+        if duplicate_group_id is None:
+            response = provider.get_plan_operations(
                 plan_id=plan_id,
                 limit=page_limit,
                 after=cursor,
                 target_endpoint_id=target_endpoint_id,
                 risk_levels=risk_levels,
             )
+        else:
+            response = provider.get_plan_operations(
+                plan_id=plan_id,
+                limit=page_limit,
+                after=cursor,
+                target_endpoint_id=target_endpoint_id,
+                risk_levels=risk_levels,
+                duplicate_group_id=duplicate_group_id,
+            )
+        self._apply_changes_response(
+            response
         )
 
     def _accept_background_changes_response(
@@ -5442,6 +5518,7 @@ class MediaSyncWindow(QMainWindow):
         cursor: dict[str, object] | None,
         target_endpoint_id: str | None,
         risk_levels: tuple[str, ...],
+        duplicate_group_id: str | None,
     ) -> None:
         if not self._changes_query_context_matches(
             plan_id=plan_id,
@@ -5449,6 +5526,7 @@ class MediaSyncWindow(QMainWindow):
             cursor=cursor,
             target_endpoint_id=target_endpoint_id,
             risk_levels=risk_levels,
+            duplicate_group_id=duplicate_group_id,
         ):
             return
         self._set_changes_query_pending(False)
@@ -5463,6 +5541,7 @@ class MediaSyncWindow(QMainWindow):
         cursor: dict[str, object] | None,
         target_endpoint_id: str | None,
         risk_levels: tuple[str, ...],
+        duplicate_group_id: str | None,
     ) -> None:
         del error
         if not self._changes_query_context_matches(
@@ -5471,6 +5550,7 @@ class MediaSyncWindow(QMainWindow):
             cursor=cursor,
             target_endpoint_id=target_endpoint_id,
             risk_levels=risk_levels,
+            duplicate_group_id=duplicate_group_id,
         ):
             return
         self._set_changes_query_pending(False)
@@ -5490,6 +5570,7 @@ class MediaSyncWindow(QMainWindow):
         cursor: dict[str, object] | None,
         target_endpoint_id: str | None,
         risk_levels: tuple[str, ...],
+        duplicate_group_id: str | None,
     ) -> bool:
         if page_index >= len(self._changes_page_cursors):
             return False
@@ -5500,6 +5581,7 @@ class MediaSyncWindow(QMainWindow):
             and current_cursor == cursor
             and self._changes_target_filter == target_endpoint_id
             and self._changes_risk_levels() == risk_levels
+            and self._changes_duplicate_group_filter == duplicate_group_id
         )
 
     def _apply_changes_response(
@@ -5545,6 +5627,7 @@ class MediaSyncWindow(QMainWindow):
             cursor=dict(cursor),
             target_endpoint_id=self._changes_target_filter,
             risk_levels=self._changes_risk_levels(),
+            duplicate_group_id=self._changes_duplicate_group_filter,
         )
 
     def _schedule_changes_page_prefetch(self) -> None:
@@ -5561,12 +5644,21 @@ class MediaSyncWindow(QMainWindow):
 
         def query(client: object) -> object:
             provider = cast(PlanOperationsProvider, client)
+            if context.duplicate_group_id is None:
+                return provider.get_plan_operations(
+                    plan_id=context.plan_id,
+                    limit=page_limit,
+                    after=context.cursor,
+                    target_endpoint_id=context.target_endpoint_id,
+                    risk_levels=context.risk_levels,
+                )
             return provider.get_plan_operations(
                 plan_id=context.plan_id,
                 limit=page_limit,
                 after=context.cursor,
                 target_endpoint_id=context.target_endpoint_id,
                 risk_levels=context.risk_levels,
+                duplicate_group_id=context.duplicate_group_id,
             )
 
         def accept(response: object) -> None:
@@ -5611,6 +5703,7 @@ class MediaSyncWindow(QMainWindow):
         self._changes_plan_id = None
         self._changes_target_filter = None
         self._changes_risk_filter = "ALL"
+        self._changes_duplicate_group_filter = None
         self._reset_changes_paging()
         self._changes_page_state = empty_plan_operation_preview_state()
         self._apply_changes_page_state(self._changes_page_state)
@@ -5650,6 +5743,13 @@ class MediaSyncWindow(QMainWindow):
         if risk_filter == self._changes_risk_filter:
             return
         self._changes_risk_filter = risk_filter
+        self._reset_changes_paging()
+        self._refresh_changes_page()
+
+    def _clear_duplicate_operation_filter(self) -> None:
+        if self._changes_duplicate_group_filter is None:
+            return
+        self._changes_duplicate_group_filter = None
         self._reset_changes_paging()
         self._refresh_changes_page()
 
@@ -5695,6 +5795,23 @@ class MediaSyncWindow(QMainWindow):
 
     def _apply_changes_page_state(self, state: PlanOperationPreviewState) -> None:
         self._apply_changes_target_options(state)
+        if self._changes_duplicate_filter_button is not None:
+            filtered = self._changes_duplicate_group_filter is not None
+            self._changes_duplicate_filter_button.setText(
+                (
+                    "Identical-file group - clear"
+                    if self._selected_language_code is LanguageCode.ENGLISH
+                    else "Gruppe med identiske filer - fjern"
+                )
+            )
+            self._changes_duplicate_filter_button.setToolTip(
+                (
+                    "Show all planned changes"
+                    if self._selected_language_code is LanguageCode.ENGLISH
+                    else "Vis alle planlagte endringer"
+                )
+            )
+            self._changes_duplicate_filter_button.setVisible(filtered)
         if self._changes_risk_combo is not None:
             self._changes_risk_combo.blockSignals(True)
             risk_index = self._changes_risk_combo.findData(self._changes_risk_filter)
@@ -7542,11 +7659,17 @@ class MediaSyncWindow(QMainWindow):
                 if state.internal_duplicate_group_count > 0
                 else ""
             )
+            cross_summary = (
+                f" · {state.cross_endpoint_duplicate_group_count} across-location "
+                f"group(s) ({state.cross_endpoint_duplicate_file_count} files)"
+                if state.cross_endpoint_duplicate_group_count > 0
+                else ""
+            )
             duplicate_summary = (
                 f"{state.expected_replica_count} {replica_label} · "
                 f"{state.same_file_alias_path_count} {alias_label} · "
                 f"{_format_bytes(state.potential_savings_bytes)} possible savings"
-                f"{internal_summary}"
+                f"{internal_summary}{cross_summary}"
             )
         else:
             replica_label = (
@@ -7573,11 +7696,18 @@ class MediaSyncWindow(QMainWindow):
                 if state.internal_duplicate_group_count > 0
                 else ""
             )
+            cross_summary = (
+                f" · {state.cross_endpoint_duplicate_group_count} gruppe(r) på "
+                f"tvers av plasseringer "
+                f"({state.cross_endpoint_duplicate_file_count} filer)"
+                if state.cross_endpoint_duplicate_group_count > 0
+                else ""
+            )
             duplicate_summary = (
                 f"{state.expected_replica_count} {replica_label} · "
                 f"{state.same_file_alias_path_count} {alias_label} · "
                 f"{_format_bytes(state.potential_savings_bytes)} mulig besparelse"
-                f"{internal_summary}"
+                f"{internal_summary}{cross_summary}"
             )
         return f"{plan_summary}\n{self._texts().identical_files}: {duplicate_summary}"
 
@@ -7756,6 +7886,7 @@ class MediaSyncWindow(QMainWindow):
             != self._selected_duplicate_group_id
         ):
             self._select_duplicate_group(self._selected_duplicate_group_id)
+        self._apply_duplicate_action_state()
         self._refresh_dashboard_geometry()
 
     def _apply_duplicate_member_page_state(
@@ -7785,7 +7916,7 @@ class MediaSyncWindow(QMainWindow):
         )
         rows = tuple(
             VirtualTableRow(
-                row_id=f"{member.snapshot_id}:{member.file_entry_id}",
+                row_id=member.row_id,
                 cells=(
                     member.relative_path,
                     member.endpoint_id,
@@ -7795,8 +7926,18 @@ class MediaSyncWindow(QMainWindow):
             )
             for member in state.members
         )
-        table.replace_rows(rows, selected_row_id=None)
-        table.clearSelection()
+        self._selected_duplicate_member_id = table.replace_rows(
+            rows,
+            selected_row_id=self._selected_duplicate_member_id,
+        )
+        self._selected_duplicate_member = next(
+            (
+                member
+                for member in state.members
+                if member.row_id == self._selected_duplicate_member_id
+            ),
+            None,
+        )
         table.setVisible(bool(rows))
         if self._duplicate_member_empty is not None:
             if self._duplicate_member_query_pending:
@@ -7815,6 +7956,7 @@ class MediaSyncWindow(QMainWindow):
                 )
             self._duplicate_member_empty.setText(empty_text)
             self._duplicate_member_empty.setVisible(not rows)
+        self._apply_duplicate_action_state()
         self._refresh_dashboard_geometry()
 
     def _duplicate_group_page_text(self) -> str:
@@ -7857,11 +7999,381 @@ class MediaSyncWindow(QMainWindow):
     def _duplicate_member_role_label(self, member_role: str) -> str:
         english = self._selected_language_code is LanguageCode.ENGLISH
         return {
-            "ORIGINAL": "Original" if english else "Original",
+            "SOURCE_ORIGIN": "Original" if english else "Original",
             "EXPECTED_REPLICA": ("Backup copy" if english else "Backupkopi"),
             "DUPLICATE": "Duplicate" if english else "Duplikat",
             "ALIAS_PATH": "Same file" if english else "Samme fil",
         }.get(member_role, member_role)
+
+    def _selected_duplicate_group(self) -> DuplicateGroupViewState | None:
+        return next(
+            (
+                group
+                for group in self._duplicate_group_page_state.groups
+                if group.group_id == self._selected_duplicate_group_id
+            ),
+            None,
+        )
+
+    def _select_duplicate_member(self, row_id: str) -> None:
+        self._selected_duplicate_member_id = row_id or None
+        self._selected_duplicate_member = next(
+            (
+                member
+                for member in self._duplicate_member_page_state.members
+                if member.row_id == self._selected_duplicate_member_id
+            ),
+            None,
+        )
+        self._apply_duplicate_action_state()
+
+    def _apply_duplicate_action_state(self) -> None:
+        english = self._selected_language_code is LanguageCode.ENGLISH
+        member = self._selected_duplicate_member
+        group = self._selected_duplicate_group()
+        member_actions = (
+            (
+                self._duplicate_member_open_location_button,
+                "Open location" if english else "Åpne plassering",
+            ),
+            (
+                self._duplicate_member_copy_path_button,
+                "Copy path" if english else "Kopier sti",
+            ),
+            (
+                self._duplicate_member_open_file_button,
+                "Open file" if english else "Åpne fil",
+            ),
+        )
+        for button, tooltip in member_actions:
+            if button is not None:
+                button.setToolTip(tooltip)
+                button.setAccessibleName(tooltip)
+                button.setEnabled(member is not None)
+        filter_button = self._duplicate_group_filter_operations_button
+        if filter_button is not None:
+            filter_button.setText("Show changes" if english else "Vis endringer")
+            filter_button.setToolTip(
+                (
+                    "Filter planned operations to this group"
+                    if english
+                    else "Filtrer planlagte operasjoner til denne gruppen"
+                )
+            )
+            filter_button.setEnabled(
+                group is not None and self._job_detail_state.plan_id is not None
+            )
+        review_button = self._duplicate_group_review_button
+        if review_button is not None:
+            reviewed = group is not None and group.review_state == "REVIEWED"
+            review_button.setText(
+                "Reviewed"
+                if english and reviewed
+                else "Gjennomgått"
+                if reviewed
+                else "Mark reviewed"
+                if english
+                else "Marker gjennomgått"
+            )
+            review_button.setToolTip(
+                (
+                    "Record that this identical-file group has been reviewed"
+                    if english
+                    else "Registrer at denne gruppen er gjennomgått"
+                )
+            )
+            review_button.setEnabled(
+                group is not None
+                and not reviewed
+                and not self._duplicate_review_command_pending
+                and self._engine_client is not None
+                and hasattr(self._engine_client, "mark_duplicate_group_reviewed")
+            )
+        export_button = self._duplicate_report_export_button
+        if export_button is not None:
+            export_button.setText(
+                "Export report"
+                if english and not self._duplicate_report_export_pending
+                else "Eksporter rapport"
+                if not self._duplicate_report_export_pending
+                else "Exporting..."
+                if english
+                else "Eksporterer..."
+            )
+            export_button.setToolTip(
+                (
+                    "Export relationship and evidence classifications as CSV"
+                    if english
+                    else "Eksporter relasjons- og evidensklassifisering som CSV"
+                )
+            )
+            export_button.setEnabled(
+                self._job_detail_state.analysis_id is not None
+                and not self._duplicate_report_export_pending
+                and self._engine_client is not None
+                and hasattr(self._engine_client, "get_duplicate_report")
+            )
+        if self._duplicate_preview_title is not None:
+            self._duplicate_preview_title.setText(
+                member.relative_path
+                if member is not None
+                else "Select a file"
+                if english
+                else "Velg en fil"
+            )
+        preview_labels = {
+            "path": "Path" if english else "Sti",
+            "endpoint": "Endpoint" if english else "Endepunkt",
+            "size": "Size" if english else "Størrelse",
+            "evidence": "Evidence" if english else "Evidens",
+        }
+        for key, text_value in preview_labels.items():
+            label = self._duplicate_preview_labels.get(key)
+            if label is not None:
+                label.setText(text_value)
+        values = {
+            "path": "-" if member is None else member.absolute_path,
+            "endpoint": (
+                "-"
+                if member is None
+                else f"{member.endpoint_role} · {member.endpoint_id}"
+            ),
+            "size": "-" if member is None else _format_bytes(member.size_bytes),
+            "evidence": (
+                "-"
+                if member is None
+                else "Current full BLAKE3 read"
+                if english
+                else "Nåværende full BLAKE3-lesing"
+            ),
+        }
+        for key, text_value in values.items():
+            value = self._duplicate_preview_values.get(key)
+            if value is not None:
+                value.setText(text_value)
+
+    def _open_duplicate_member_location(self) -> None:
+        member = self._selected_duplicate_member
+        if member is None:
+            return
+        self._open_duplicate_path(Path(member.absolute_path).parent)
+
+    def _open_duplicate_member_file(self) -> None:
+        member = self._selected_duplicate_member
+        if member is None:
+            return
+        self._open_duplicate_path(Path(member.absolute_path))
+
+    def _open_duplicate_path(self, path: Path) -> None:
+        if self._open_local_path(path):
+            return
+        self.apply_engine_status(
+            replace(
+                self._engine_status_state,
+                detail=(
+                    "The selected path is no longer available."
+                    if self._selected_language_code is LanguageCode.ENGLISH
+                    else "Den valgte stien er ikke lenger tilgjengelig."
+                ),
+                status_kind="warning",
+            )
+        )
+
+    def _copy_duplicate_member_path(self) -> None:
+        member = self._selected_duplicate_member
+        if member is None:
+            return
+        QApplication.clipboard().setText(member.absolute_path)
+
+    def _filter_operations_to_duplicate_group(self) -> None:
+        group_id = self._selected_duplicate_group_id
+        plan_id = self._job_detail_state.plan_id
+        if group_id is None or plan_id is None:
+            return
+        self._cancel_background_changes_query()
+        self._changes_plan_id = plan_id
+        self._changes_target_filter = None
+        self._changes_risk_filter = "ALL"
+        self._changes_duplicate_group_filter = group_id
+        self._reset_changes_paging()
+        if self._navigation is not None:
+            self._navigation.setCurrentRow(0)
+        self._refresh_changes_page()
+
+    def _mark_duplicate_group_reviewed(self) -> None:
+        group = self._selected_duplicate_group()
+        if (
+            group is None
+            or group.review_state != "UNREVIEWED"
+            or self._engine_client is None
+            or not hasattr(self._engine_client, "mark_duplicate_group_reviewed")
+            or self._duplicate_review_command_pending
+        ):
+            return
+        if self._duplicate_review_command_group_id != group.group_id:
+            self._duplicate_review_command_group_id = group.group_id
+            self._duplicate_review_request_id = str(uuid4())
+            self._duplicate_review_idempotency_key = str(uuid4())
+        request_id = self._duplicate_review_request_id
+        idempotency_key = self._duplicate_review_idempotency_key
+        if request_id is None or idempotency_key is None:
+            return
+        group_id = group.group_id
+        self._duplicate_review_command_pending = True
+        self._apply_duplicate_action_state()
+
+        def operation(client: object) -> object:
+            return cast(DuplicateScanCommandProvider, client).mark_duplicate_group_reviewed(
+                group_id=group_id,
+                expected_review_state="UNREVIEWED",
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+            )
+
+        submitted = self._submit_engine_command(
+            name="duplicate-group-review",
+            operation=operation,
+            on_result=lambda response: self._accept_duplicate_group_review(
+                cast(IpcResponse, response),
+                group_id=group_id,
+            ),
+            on_error=lambda error: self._reject_duplicate_group_review(
+                group_id=group_id,
+                detail=str(error),
+            ),
+        )
+        if not submitted:
+            self._duplicate_review_command_pending = False
+            self._apply_duplicate_action_state()
+
+    def _accept_duplicate_group_review(
+        self,
+        response: IpcResponse,
+        *,
+        group_id: str,
+    ) -> None:
+        if self._duplicate_review_command_group_id != group_id:
+            return
+        self._duplicate_review_command_pending = False
+        if response.status is IpcStatus.ACCEPTED:
+            self._duplicate_review_command_group_id = None
+            self._duplicate_review_request_id = None
+            self._duplicate_review_idempotency_key = None
+            analysis_id = self._job_detail_state.analysis_id
+            if analysis_id is not None:
+                self._refresh_duplicate_groups(analysis_id=analysis_id)
+        else:
+            self._apply_command_transport_failure(
+                "Duplicate group review was rejected."
+            )
+        self._apply_duplicate_action_state()
+
+    def _reject_duplicate_group_review(self, *, group_id: str, detail: str) -> None:
+        if self._duplicate_review_command_group_id != group_id:
+            return
+        self._duplicate_review_command_pending = False
+        self._apply_command_transport_failure(detail)
+        self._apply_duplicate_action_state()
+
+    def _export_duplicate_report(self) -> None:
+        analysis_id = self._job_detail_state.analysis_id
+        if (
+            analysis_id is None
+            or self._engine_client is None
+            or not hasattr(self._engine_client, "get_duplicate_report")
+            or self._duplicate_report_export_pending
+        ):
+            return
+        suggested = f"mediasync-identical-files-{analysis_id[:12]}.csv"
+        title = (
+            "Export identical-file report"
+            if self._selected_language_code is LanguageCode.ENGLISH
+            else "Eksporter rapport om identiske filer"
+        )
+        selected, _filter = QFileDialog.getSaveFileName(
+            self,
+            title,
+            suggested,
+            "CSV (*.csv)",
+        )
+        if not selected:
+            return
+        destination = Path(selected)
+        if destination.suffix.casefold() != ".csv":
+            destination = destination.with_suffix(".csv")
+        self._duplicate_report_export_pending = True
+        self._apply_duplicate_action_state()
+
+        def export(client: object) -> object:
+            return export_duplicate_report_csv(
+                provider=cast(DuplicateReportProvider, client),
+                analysis_id=analysis_id,
+                destination=destination,
+            )
+
+        if self._background_queries is not None:
+            submitted = self._background_queries.submit(
+                key="duplicate-report-export",
+                operation=export,
+                on_result=lambda result: self._accept_duplicate_report_export(
+                    cast(DuplicateReportExportResult, result),
+                    analysis_id=analysis_id,
+                ),
+                on_error=lambda error: self._reject_duplicate_report_export(
+                    analysis_id=analysis_id,
+                    detail=str(error),
+                ),
+            )
+            if submitted:
+                return
+        try:
+            result = export_duplicate_report_csv(
+                provider=cast(DuplicateReportProvider, self._engine_client),
+                analysis_id=analysis_id,
+                destination=destination,
+            )
+        except Exception as exc:
+            self._reject_duplicate_report_export(
+                analysis_id=analysis_id,
+                detail=str(exc),
+            )
+            return
+        self._accept_duplicate_report_export(result, analysis_id=analysis_id)
+
+    def _accept_duplicate_report_export(
+        self,
+        result: DuplicateReportExportResult,
+        *,
+        analysis_id: str,
+    ) -> None:
+        if self._job_detail_state.analysis_id != analysis_id:
+            return
+        self._duplicate_report_export_pending = False
+        english = self._selected_language_code is LanguageCode.ENGLISH
+        self.apply_engine_status(
+            replace(
+                self._engine_status_state,
+                detail=(
+                    f"Exported {result.row_count} report rows."
+                    if english
+                    else f"Eksporterte {result.row_count} rapportrader."
+                ),
+                status_kind="ready",
+            )
+        )
+        self._apply_duplicate_action_state()
+
+    def _reject_duplicate_report_export(
+        self,
+        *,
+        analysis_id: str,
+        detail: str,
+    ) -> None:
+        if self._job_detail_state.analysis_id != analysis_id:
+            return
+        self._duplicate_report_export_pending = False
+        self._apply_command_transport_failure(detail)
+        self._apply_duplicate_action_state()
 
     def _select_duplicate_group(self, group_id: str) -> None:
         if not group_id:
@@ -7874,6 +8386,8 @@ class MediaSyncWindow(QMainWindow):
             self._duplicate_member_query_pending = False
             self._duplicate_member_page_index = 0
             self._duplicate_member_page_cursors = [None]
+            self._selected_duplicate_member_id = None
+            self._selected_duplicate_member = None
             self._duplicate_member_page_state = empty_duplicate_member_page_state(
                 group_id
             )
@@ -7920,6 +8434,8 @@ class MediaSyncWindow(QMainWindow):
         ):
             return
         self._duplicate_member_page_index -= 1
+        self._selected_duplicate_member_id = None
+        self._selected_duplicate_member = None
         self._refresh_duplicate_members(group_id=group_id)
 
     def _show_next_duplicate_member_page(self) -> None:
@@ -7938,6 +8454,8 @@ class MediaSyncWindow(QMainWindow):
         else:
             self._duplicate_member_page_cursors[next_index] = dict(cursor)
         self._duplicate_member_page_index = next_index
+        self._selected_duplicate_member_id = None
+        self._selected_duplicate_member = None
         self._refresh_duplicate_members(group_id=group_id)
 
     def _start_duplicate_scan(self) -> None:
@@ -10157,6 +10675,7 @@ class MediaSyncWindow(QMainWindow):
         members.setAccessibleName(texts.duplicate_locations)
         members.setMinimumHeight(132)
         members.setMaximumHeight(220)
+        members.rowSelected.connect(self._select_duplicate_member)
         self._duplicate_member_list = members
         layout.addWidget(members, 7, 0, 1, 3)
 
@@ -10165,6 +10684,85 @@ class MediaSyncWindow(QMainWindow):
         _configure_responsive_label(member_empty)
         self._duplicate_member_empty = member_empty
         layout.addWidget(member_empty, 8, 0, 1, 3)
+
+        actions = QWidget()
+        actions.setObjectName("duplicateActions")
+        actions_layout = QHBoxLayout(actions)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setSpacing(8)
+        open_location = QToolButton()
+        open_location.setObjectName("duplicateOpenLocationButton")
+        open_location.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
+        )
+        open_location.clicked.connect(self._open_duplicate_member_location)
+        self._duplicate_member_open_location_button = open_location
+        copy_path = QToolButton()
+        copy_path.setObjectName("duplicateCopyPathButton")
+        copy_path.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_FileLinkIcon)
+        )
+        copy_path.clicked.connect(self._copy_duplicate_member_path)
+        self._duplicate_member_copy_path_button = copy_path
+        open_file = QToolButton()
+        open_file.setObjectName("duplicateOpenFileButton")
+        open_file.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+        )
+        open_file.clicked.connect(self._open_duplicate_member_file)
+        self._duplicate_member_open_file_button = open_file
+        filter_operations = QPushButton()
+        filter_operations.setObjectName("duplicateFilterOperationsButton")
+        filter_operations.setIcon(self._icons.icon("activity"))
+        filter_operations.clicked.connect(
+            self._filter_operations_to_duplicate_group
+        )
+        self._duplicate_group_filter_operations_button = filter_operations
+        review = QPushButton()
+        review.setObjectName("duplicateMarkReviewedButton")
+        review.setIcon(self._icons.icon("status-ready"))
+        review.clicked.connect(self._mark_duplicate_group_reviewed)
+        self._duplicate_group_review_button = review
+        export_report = QPushButton()
+        export_report.setObjectName("duplicateExportReportButton")
+        export_report.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton)
+        )
+        export_report.clicked.connect(self._export_duplicate_report)
+        self._duplicate_report_export_button = export_report
+        actions_layout.addWidget(open_location)
+        actions_layout.addWidget(copy_path)
+        actions_layout.addWidget(open_file)
+        actions_layout.addStretch(1)
+        actions_layout.addWidget(filter_operations)
+        actions_layout.addWidget(review)
+        actions_layout.addWidget(export_report)
+        layout.addWidget(actions, 9, 0, 1, 3)
+
+        preview_title = QLabel()
+        preview_title.setObjectName("duplicatePreviewTitle")
+        _configure_responsive_label(preview_title, selectable=True)
+        self._duplicate_preview_title = preview_title
+        layout.addWidget(preview_title, 10, 0, 1, 3)
+        for row_index, (key, label_text) in enumerate(
+            (
+                ("path", texts.path),
+                ("endpoint", texts.target),
+                ("size", texts.size),
+                ("evidence", texts.decision),
+            ),
+            start=11,
+        ):
+            label, value = _add_labeled_text_value(
+                layout,
+                row_index,
+                label_text,
+                "-",
+            )
+            label.setObjectName("duplicatePreviewLabel")
+            value.setObjectName(f"duplicatePreview{key.title()}Value")
+            self._duplicate_preview_labels[key] = label
+            self._duplicate_preview_values[key] = value
 
         layout.setColumnStretch(0, 1)
         layout.setColumnStretch(1, 1)
@@ -10239,6 +10837,14 @@ class MediaSyncWindow(QMainWindow):
         layout.addWidget(target_filter, 2, 0)
         layout.addWidget(risk_filter, 2, 1)
 
+        duplicate_filter = QPushButton()
+        duplicate_filter.setObjectName("changesDuplicateGroupFilterButton")
+        duplicate_filter.setIcon(self._icons.icon("status-ready"))
+        duplicate_filter.clicked.connect(self._clear_duplicate_operation_filter)
+        duplicate_filter.setVisible(False)
+        self._changes_duplicate_filter_button = duplicate_filter
+        layout.addWidget(duplicate_filter, 3, 0, 1, 2)
+
         changes_list = BoundedVirtualTableView(
             headers=(
                 texts.decision,
@@ -10257,19 +10863,19 @@ class MediaSyncWindow(QMainWindow):
         changes_list.setMaximumHeight(260)
         changes_list.rowSelected.connect(self._select_changes_operation)
         self._changes_list = changes_list
-        layout.addWidget(changes_list, 3, 0, 1, 2)
+        layout.addWidget(changes_list, 4, 0, 1, 2)
 
         empty = QLabel(texts.no_plan_changes)
         empty.setObjectName("changesEmptyLabel")
         _configure_responsive_label(empty)
         self._changes_empty_label = empty
-        layout.addWidget(empty, 4, 0, 1, 2)
+        layout.addWidget(empty, 5, 0, 1, 2)
 
         detail_title = QLabel(texts.no_plan_changes)
         detail_title.setObjectName("changesDetailTitle")
         _configure_responsive_label(detail_title, selectable=True)
         self._changes_detail_title = detail_title
-        layout.addWidget(detail_title, 5, 0, 1, 2)
+        layout.addWidget(detail_title, 6, 0, 1, 2)
         for row_index, (key, label_text) in enumerate(
             (
                 ("decision", texts.decision),
@@ -10280,7 +10886,7 @@ class MediaSyncWindow(QMainWindow):
                 ("precondition", texts.precondition),
                 ("size", texts.planned_size),
             ),
-            start=6,
+            start=7,
         ):
             label, value = _add_labeled_text_value(
                 layout,
@@ -12222,6 +12828,17 @@ def _display_name_for_path(path: str) -> str:
 
 def _path_identity(path: str) -> str:
     return os.path.normcase(os.path.normpath(path)).casefold()
+
+
+def _open_path_with_system(path: Path) -> bool:
+    opener = getattr(os, "startfile", None)
+    if not path.exists() or not callable(opener):
+        return False
+    try:
+        opener(str(path))
+    except OSError:
+        return False
+    return True
 
 
 def _flag_icon(language_code: str) -> QIcon:

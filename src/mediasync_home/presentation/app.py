@@ -48,6 +48,7 @@ def build_main_window(
     user_preferences_store: UserPreferencesStore | None = None,
     data_root: Path | None = None,
     open_data_folder: Callable[[Path], bool] | None = None,
+    open_local_path: Callable[[Path], bool] | None = None,
     show_component_gallery: bool | None = None,
 ) -> MediaSyncWindow:
     app = ensure_qapplication([])
@@ -72,6 +73,7 @@ def build_main_window(
         ),
         data_root=data_root,
         open_data_folder=open_data_folder or _open_local_folder,
+        open_local_path=open_local_path,
         show_component_gallery=show_component_gallery,
     )
 

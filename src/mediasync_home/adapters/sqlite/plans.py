@@ -492,6 +492,40 @@ def _plan_operation_page_sql(query: PlanOperationPageQuery) -> str:
     if query.risk_levels:
         placeholders = ", ".join("?" for _ in query.risk_levels)
         filter_clauses.append(f"details.risk_level IN ({placeholders})")
+    if query.duplicate_group_id is not None:
+        filter_clauses.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM plan_seal_details AS duplicate_plan
+                INNER JOIN duplicate_groups AS duplicate_group
+                    ON duplicate_group.analysis_id = duplicate_plan.analysis_id
+                    AND duplicate_group.id = ?
+                INNER JOIN duplicate_members AS duplicate_member
+                    ON duplicate_member.group_id = duplicate_group.id
+                WHERE duplicate_plan.plan_id = details.plan_id
+                    AND (
+                        (
+                            details.target_endpoint_id = duplicate_member.endpoint_id
+                            AND details.target_relative_path =
+                                duplicate_member.relative_path
+                        )
+                        OR (
+                            details.source_relative_path =
+                                duplicate_member.relative_path
+                            AND EXISTS (
+                                SELECT 1
+                                FROM plan_endpoints AS source_endpoint
+                                WHERE source_endpoint.plan_id = details.plan_id
+                                    AND source_endpoint.role = 'SOURCE'
+                                    AND source_endpoint.endpoint_id =
+                                        duplicate_member.endpoint_id
+                            )
+                        )
+                    )
+            )
+            """
+        )
     filter_clause = "".join(f"\n            AND {clause}" for clause in filter_clauses)
     cursor_clause = ""
     if query.after is not None:
@@ -543,6 +577,8 @@ def _plan_operation_page_parameters(query: PlanOperationPageQuery) -> tuple[obje
     if query.target_endpoint_id is not None:
         parameters.append(query.target_endpoint_id)
     parameters.extend(risk.value for risk in query.risk_levels)
+    if query.duplicate_group_id is not None:
+        parameters.append(query.duplicate_group_id)
     if query.after is not None:
         parameters.extend(
             (

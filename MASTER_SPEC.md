@@ -5468,6 +5468,19 @@ ikke en kvadratisk source-target path-sammenligning.
 - primærnøkkel `(group_id, snapshot_id, file_entry_id)`
 - sammensatte FK-er binder medlemmet til nøyaktig snapshot, endepunkt og filpost
 
+0B-implementasjonsnote: `INTRA_ENDPOINT_DUPLICATE` teller ekstra fysiske
+objekter innen ett endepunkt. `UNRELATED_CROSS_ENDPOINT_DUPLICATE` velger deretter
+én ikke-replika-representant per endepunkt for samme størrelse/fullhash, slik at
+den samme interne kopien ikke telles på nytt som cross-endpoint-besparelse.
+Forventede replikaer og aliasstier bidrar fortsatt med 0 byte. Bounded keyset-
+rapportering returnerer høyst 500 rader per side og høyst 1 000 000 rader per
+eksport, med relasjonsklasse, `CURRENT_READ_HASH`-evidens, endepunktrolle og
+validert lokal absoluttsti. `review_state` går bare fra `UNREVIEWED` til
+`REVIEWED` gjennom en receipted Engine Host-kommando; gruppeidentiteten forblir
+immutable. Førsteversjonshandlingene er bare åpne plassering/fil, kopiere sti,
+filtrere planrader, eksportere rapport og markere gjennomgått. Ingen av dem
+sletter, flytter, hardlinker eller dedupliserer brukerfiler.
+
 #### `file_object_alias_groups`
 
 Klassifiserer flere snapshotstier som peker til samme underliggende filobjekt. Dette er ikke et innholdsduplikat og gir normalt ingen mulig lagringsbesparelse.

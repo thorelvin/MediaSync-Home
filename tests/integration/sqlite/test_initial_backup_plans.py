@@ -55,6 +55,7 @@ from mediasync_home.adapters.writable_endpoint_registration import (
 from mediasync_home.application.initial_backup_planning import (
     InitialBackupPlanIdFactory,
 )
+from mediasync_home.application.hash_evidence import CurrentReadHashEvidence
 from mediasync_home.application.endpoint_capabilities import (
     DurabilityLevel,
     EndpointCapabilities,
@@ -63,6 +64,7 @@ from mediasync_home.application.endpoint_capabilities import (
     FileIdReliability,
 )
 from mediasync_home.application.plans import (
+    PlanOperationPageQuery,
     PlanOperationType,
     TargetPreconditionKind,
 )
@@ -102,6 +104,16 @@ class _FixedPlanIds(InitialBackupPlanIdFactory):
     def new_initial_backup_plan_id(self) -> str:
         self.calls += 1
         return f"plan-{self.calls}"
+
+
+class _CountingCurrentReadHasher(LocalCurrentReadHasher):
+    def __init__(self) -> None:
+        super().__init__()
+        self.requests: list[CurrentReadHashRequest] = []
+
+    def hash_file(self, request: CurrentReadHashRequest) -> CurrentReadHashEvidence:
+        self.requests.append(request)
+        return super().hash_file(request)
 
 
 class _FixedRegistrationIds:
@@ -505,6 +517,64 @@ def test_current_read_hash_evidence_skips_identical_existing_file(
             )
 
 
+def test_current_read_hash_shares_one_source_read_across_two_targets(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target_a = tmp_path / "target-a"
+    target_b = tmp_path / "target-b"
+    payload = b"one source read, two target comparisons"
+    for root in (source, target_a, target_b):
+        root.mkdir()
+        (root / "Same.bin").write_bytes(payload)
+
+    with sqlite3.connect(database) as connection:
+        _prepare_registered_snapshots(
+            connection,
+            database=database,
+            source=source,
+            target=target_a,
+            additional_target=target_b,
+        )
+        hasher = _CountingCurrentReadHasher()
+        hash_report = SqliteCurrentReadHashEvidenceRefresher(
+            connection,
+            hasher=hasher,
+        ).refresh_current_read_hash_evidence(
+            analysis_id="analysis-a",
+            observed_utc="2026-08-09T10:00:00Z",
+        )
+        plan_report = SqliteInitialBackupPlanMaterializer(
+            connection,
+            plans=SqlitePlanStore(connection),
+            id_factory=_FixedPlanIds(),
+        ).refresh_initial_backup_plans(
+            observed_utc="2026-08-09T10:00:01Z",
+        )
+
+        assert hash_report.ready is True
+        assert hash_report.candidate_pair_count == 2
+        assert hash_report.hashed_entry_count == 3
+        assert hash_report.identical_pair_count == 2
+        assert len(hasher.requests) == 3
+        assert [
+            request.endpoint_id
+            for request in hasher.requests
+            if request.endpoint_id == SOURCE_ENDPOINT_ID
+        ] == [SOURCE_ENDPOINT_ID]
+        assert {request.endpoint_id for request in hasher.requests} == {
+            SOURCE_ENDPOINT_ID,
+            TARGET_ENDPOINT_ID,
+            TARGET_B_ENDPOINT_ID,
+        }
+        assert plan_report.no_changes_count == 1
+        assert plan_report.results[0].state == "NO_CHANGES"
+        assert connection.execute(
+            "SELECT count(*) FROM current_read_hash_evidence"
+        ).fetchone() == (3,)
+
+
 def test_duplicate_relations_exclude_expected_replicas_and_hardlink_aliases_from_savings(
     tmp_path: Path,
 ) -> None:
@@ -730,6 +800,156 @@ def test_duplicate_relations_classify_distinct_same_content_files_with_real_hash
             ("DUPLICATE", "Second.bin"),
         ]
         assert len({str(row[2]) for row in members}) == 2
+
+
+def test_duplicate_relations_classify_unrelated_cross_endpoint_files_and_report_them(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    content = b"same bytes at unrelated paths on separate endpoints"
+    source_path = source / "Original.bin"
+    target_path = target / "Elsewhere.bin"
+    source_path.write_bytes(content)
+    target_path.write_bytes(content)
+    before = {
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in (source_path, target_path)
+    }
+
+    with sqlite3.connect(database) as connection:
+        _prepare_registered_snapshots(
+            connection,
+            database=database,
+            source=source,
+            target=target,
+        )
+        rows = connection.execute(
+            """
+            SELECT entries.id, entries.snapshot_id, entries.endpoint_id,
+                   entries.relative_path, entries.size_bytes
+            FROM file_entries AS entries
+            WHERE entries.object_type = 'file'
+            ORDER BY entries.endpoint_id, entries.relative_path
+            """
+        ).fetchall()
+        roots = {SOURCE_ENDPOINT_ID: source, TARGET_ENDPOINT_ID: target}
+        evidence = tuple(
+            LocalCurrentReadHasher().hash_file(
+                CurrentReadHashRequest(
+                    snapshot_id=str(row[1]),
+                    entry_id=str(row[0]),
+                    endpoint_id=str(row[2]),
+                    root=roots[str(row[2])],
+                    relative_path=str(row[3]),
+                    expected_size_bytes=int(row[4]),
+                    computed_utc="2026-08-02T11:00:00Z",
+                )
+            )
+            for row in rows
+        )
+        SqliteCurrentReadHashEvidenceRefresher(
+            connection
+        ).persist_current_read_hash_evidence(
+            analysis_id="analysis-a",
+            evidence=evidence,
+        )
+        plan_report = SqliteInitialBackupPlanMaterializer(
+            connection,
+            plans=SqlitePlanStore(connection),
+            id_factory=_FixedPlanIds(),
+        ).refresh_initial_backup_plans(
+            observed_utc="2026-08-02T11:00:00.500Z",
+        )
+        plan_id = plan_report.results[0].plan_id
+        assert plan_id is not None
+        relations = SqliteDuplicateRelationStore(connection)
+        report = relations.materialize_known_duplicate_relations(
+            analysis_id="analysis-a",
+            observed_utc="2026-08-02T11:00:01Z",
+        )
+        summary = relations.load_duplicate_analysis_summary("analysis-a")
+        scanner = SqliteDuplicateScanner(connection)
+
+        assert report.expected_replica_group_count == 0
+        assert report.internal_duplicate_group_count == 0
+        assert report.cross_endpoint_duplicate_group_count == 1
+        assert report.cross_endpoint_duplicate_file_count == 2
+        assert summary is not None
+        assert summary.cross_endpoint_duplicate_group_count == 1
+        assert summary.cross_endpoint_duplicate_file_count == 2
+        assert summary.potential_savings_bytes == len(content)
+
+        groups = scanner.page_duplicate_groups(
+            analysis_id="analysis-a",
+            limit=10,
+            relationship_classes=("UNRELATED_CROSS_ENDPOINT_DUPLICATE",),
+        )
+        assert len(groups.groups) == 1
+        group = groups.groups[0]
+        assert group.physical_object_count == 2
+        assert group.potential_savings_bytes == len(content)
+        filtered_operations = SqlitePlanStore(connection).page_plan_operations(
+            PlanOperationPageQuery(
+                plan_id=plan_id,
+                limit=100,
+                duplicate_group_id=group.group_id,
+            )
+        )
+        assert filtered_operations.operations
+        assert {
+            operation.target_relative_path
+            for operation in filtered_operations.operations
+        } <= {"Original.bin", "Elsewhere.bin"}
+        members = scanner.page_duplicate_members(group_id=group.group_id, limit=10)
+        assert {member.endpoint_role for member in members.members} == {
+            "SOURCE",
+            "TARGET",
+        }
+        assert {Path(member.absolute_path) for member in members.members} == {
+            source_path,
+            target_path,
+        }
+        assert {member.evidence_kind for member in members.members} == {
+            "CURRENT_READ_HASH"
+        }
+
+        first_page = scanner.page_duplicate_report(
+            analysis_id="analysis-a",
+            limit=1,
+        )
+        assert first_page.has_more is True
+        assert first_page.next_cursor is not None
+        second_page = scanner.page_duplicate_report(
+            analysis_id="analysis-a",
+            limit=1,
+            after=first_page.next_cursor,
+        )
+        assert second_page.has_more is False
+        assert len(first_page.rows) + len(second_page.rows) == 2
+        assert {
+            item.group.relationship_class
+            for item in (*first_page.rows, *second_page.rows)
+        } == {"UNRELATED_CROSS_ENDPOINT_DUPLICATE"}
+
+        reviewed = scanner.mark_duplicate_group_reviewed(
+            group_id=group.group_id,
+            expected_review_state="UNREVIEWED",
+        )
+        assert reviewed is not None and reviewed.review_state == "REVIEWED"
+        assert (
+            scanner.mark_duplicate_group_reviewed(
+                group_id=group.group_id,
+                expected_review_state="UNREVIEWED",
+            )
+            is None
+        )
+
+    for path, expected in before.items():
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == expected
 
 
 def test_duplicate_scan_resumes_bounded_real_file_hashing_and_pages_results(

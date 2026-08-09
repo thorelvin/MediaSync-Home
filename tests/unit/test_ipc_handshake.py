@@ -38,6 +38,9 @@ from mediasync_home.application.duplicate_scanning import (
     DuplicateMemberCursor,
     DuplicateMemberPage,
     DuplicateMemberReadModel,
+    DuplicateReportCursor,
+    DuplicateReportPage,
+    DuplicateReportRow,
     DuplicateScanCommandName,
     DuplicateScanStage,
     DuplicateScanState,
@@ -574,6 +577,8 @@ class _DuplicateScanStore:
     def __init__(self) -> None:
         self.status: DuplicateScanStatus | None = None
         self.start_calls = 0
+        self.review_state = "UNREVIEWED"
+        self.review_calls = 0
 
     def prepare_scan(self, *, analysis_id: str, observed_utc: str) -> None:
         del analysis_id, observed_utc
@@ -642,21 +647,55 @@ class _DuplicateScanStore:
         return DuplicateGroupPage(
             analysis_id=analysis_id,
             groups=(
-                DuplicateGroupReadModel(
-                    group_id="group-a",
-                    relationship_class="INTRA_ENDPOINT_DUPLICATE",
-                    full_hash="a" * 64,
-                    size_bytes=128,
-                    member_count=2,
-                    physical_object_count=2,
-                    expected_replica_count=0,
-                    potential_savings_bytes=128,
-                    review_state="UNREVIEWED",
-                    created_utc="2026-08-02T10:00:00Z",
-                ),
+                self._group(),
             ),
             next_cursor=None,
             has_more=False,
+        )
+
+    def page_duplicate_report(
+        self,
+        *,
+        analysis_id: str,
+        limit: int,
+        after: DuplicateReportCursor | None = None,
+    ) -> DuplicateReportPage:
+        del limit, after
+        member = self.page_duplicate_members(group_id="group-a", limit=1).members[0]
+        return DuplicateReportPage(
+            analysis_id=analysis_id,
+            rows=(DuplicateReportRow(group=self._group(), member=member),),
+            next_cursor=None,
+            has_more=False,
+        )
+
+    def load_duplicate_group(self, group_id: str) -> DuplicateGroupReadModel | None:
+        return self._group() if group_id == "group-a" else None
+
+    def mark_duplicate_group_reviewed(
+        self,
+        *,
+        group_id: str,
+        expected_review_state: str,
+    ) -> DuplicateGroupReadModel | None:
+        if group_id != "group-a" or self.review_state != expected_review_state:
+            return None
+        self.review_calls += 1
+        self.review_state = "REVIEWED"
+        return self._group()
+
+    def _group(self) -> DuplicateGroupReadModel:
+        return DuplicateGroupReadModel(
+            group_id="group-a",
+            relationship_class="INTRA_ENDPOINT_DUPLICATE",
+            full_hash="a" * 64,
+            size_bytes=128,
+            member_count=2,
+            physical_object_count=2,
+            expected_replica_count=0,
+            potential_savings_bytes=128,
+            review_state=self.review_state,
+            created_utc="2026-08-02T10:00:00Z",
         )
 
     def page_duplicate_members(
@@ -678,6 +717,10 @@ class _DuplicateScanStore:
                     relative_path="A.bin",
                     member_role="DUPLICATE",
                     physical_object_key="object-a",
+                    endpoint_role="SOURCE",
+                    absolute_path="C:\\Source\\A.bin",
+                    size_bytes=1024,
+                    evidence_kind="CURRENT_READ_HASH",
                 ),
             ),
             next_cursor=None,
@@ -1695,6 +1738,50 @@ def test_duplicate_scan_command_is_receipted_and_replayed_once() -> None:
     assert receipt is not None
     assert receipt.state is CommandReceiptState.SUCCEEDED
     assert receipt.result_entity_type == "duplicate_scan"
+
+
+def test_duplicate_report_query_and_review_command_are_bounded_and_receipted() -> None:
+    store = _DuplicateScanStore()
+    receipts = _InMemoryCommandReceiptStore()
+    service = _service(mutations_enabled=True)
+    service.duplicate_scan_store = store
+    service.command_receipt_store = receipts
+    ipc_client = _client(service=service)
+    ipc_client.connect()
+
+    report = ipc_client.query_duplicate_report(analysis_id="analysis-a", limit=1)
+    payload: dict[str, object] = {
+        "group_id": "group-a",
+        "expected_review_state": "UNREVIEWED",
+    }
+    first = ipc_client.submit_command(
+        DuplicateScanCommandName.MARK_DUPLICATE_GROUP_REVIEWED.value,
+        request_id=REQUEST_ID_A,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=payload,
+        payload_hash=canonical_command_payload_hash(payload),
+    )
+    replay = ipc_client.submit_command(
+        DuplicateScanCommandName.MARK_DUPLICATE_GROUP_REVIEWED.value,
+        request_id=REQUEST_ID_B,
+        idempotency_key=IDEMPOTENCY_KEY_A,
+        payload=payload,
+        payload_hash=canonical_command_payload_hash(payload),
+    )
+
+    assert report.status is IpcStatus.ACCEPTED
+    row = report.payload["duplicate_report"]["rows"][0]
+    assert row["evidence_kind"] == "CURRENT_READ_HASH"
+    assert row["absolute_path"] == "C:\\Source\\A.bin"
+    assert first.status is IpcStatus.ACCEPTED
+    assert first.payload["duplicate_group"]["review_state"] == "REVIEWED"
+    assert replay.status is IpcStatus.ACCEPTED
+    assert replay.payload["idempotent_replay"] is True
+    assert store.review_calls == 1
+    receipt = receipts.load_command_receipt(IDEMPOTENCY_KEY_A)
+    assert receipt is not None
+    assert receipt.state is CommandReceiptState.SUCCEEDED
+    assert receipt.result_entity_type == "duplicate_group"
 
 
 def test_activity_overview_query_requires_prior_handshake() -> None:

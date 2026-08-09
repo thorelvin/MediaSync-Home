@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from mediasync_home.ipc.protocol import IpcResponse, IpcStatus
 
@@ -16,8 +17,11 @@ _RELATIONSHIP_CLASSES = {
     "SAME_FILE_MULTIPLE_PATHS",
     "POTENTIAL_DUPLICATE",
 }
+_REVIEW_STATES = {"UNREVIEWED", "REVIEWED"}
 _MAX_GROUP_ROWS = 200
 _MAX_MEMBER_ROWS = 200
+_MAX_REPORT_ROWS = 500
+_MAX_LOCAL_PATH_LENGTH = 32_767
 
 
 @dataclass(frozen=True)
@@ -81,6 +85,14 @@ class DuplicateMemberViewState:
     file_entry_id: str
     relative_path: str
     member_role: str
+    endpoint_role: str
+    absolute_path: str
+    size_bytes: int
+    evidence_kind: str
+
+    @property
+    def row_id(self) -> str:
+        return f"{self.snapshot_id}:{self.file_entry_id}"
 
 
 @dataclass(frozen=True)
@@ -88,6 +100,21 @@ class DuplicateMemberPageViewState:
     group_id: str | None
     read_model_available: bool
     members: tuple[DuplicateMemberViewState, ...] = ()
+    has_more: bool = False
+    next_cursor: dict[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class DuplicateReportRowViewState:
+    group: DuplicateGroupViewState
+    member: DuplicateMemberViewState
+
+
+@dataclass(frozen=True)
+class DuplicateReportPageViewState:
+    analysis_id: str | None
+    read_model_available: bool
+    rows: tuple[DuplicateReportRowViewState, ...] = ()
     has_more: bool = False
     next_cursor: dict[str, object] | None = None
 
@@ -112,6 +139,15 @@ def empty_duplicate_member_page_state(
 ) -> DuplicateMemberPageViewState:
     return DuplicateMemberPageViewState(
         group_id=group_id,
+        read_model_available=False,
+    )
+
+
+def empty_duplicate_report_page_state(
+    analysis_id: str | None = None,
+) -> DuplicateReportPageViewState:
+    return DuplicateReportPageViewState(
+        analysis_id=analysis_id,
         read_model_available=False,
     )
 
@@ -196,6 +232,47 @@ def duplicate_member_page_from_response(
     )
 
 
+def duplicate_report_page_from_response(
+    response: IpcResponse | None,
+) -> DuplicateReportPageViewState:
+    if response is None or response.status is IpcStatus.REJECTED:
+        return empty_duplicate_report_page_state()
+    payload = response.payload.get("duplicate_report")
+    if not isinstance(payload, dict):
+        return empty_duplicate_report_page_state()
+    analysis_id = _required_text(payload.get("analysis_id"))
+    values = payload.get("rows")
+    if (
+        analysis_id is None
+        or not isinstance(values, list)
+        or len(values) > _MAX_REPORT_ROWS
+    ):
+        return empty_duplicate_report_page_state(analysis_id)
+    rows: list[DuplicateReportRowViewState] = []
+    for item in values:
+        if not isinstance(item, dict):
+            return empty_duplicate_report_page_state(analysis_id)
+        group = _group_from_payload(item)
+        group_id = _required_text(item.get("group_id"))
+        member = (
+            None
+            if group_id is None
+            else _member_from_payload(item, group_id=group_id)
+        )
+        if group is None or member is None:
+            return empty_duplicate_report_page_state(analysis_id)
+        rows.append(DuplicateReportRowViewState(group=group, member=member))
+    cursor = _report_cursor(payload.get("next_cursor"))
+    has_more = payload.get("has_more") is True and cursor is not None
+    return DuplicateReportPageViewState(
+        analysis_id=analysis_id,
+        read_model_available=True,
+        rows=tuple(rows),
+        has_more=has_more,
+        next_cursor=cursor,
+    )
+
+
 def _scan_from_payload(
     payload: dict[object, object],
     *,
@@ -274,7 +351,7 @@ def _group_from_payload(
         or relationship_class not in _RELATIONSHIP_CLASSES
         or full_hash is None
         or _HASH_PATTERN.fullmatch(full_hash) is None
-        or review_state is None
+        or review_state not in _REVIEW_STATES
         or any(value is None for value in counts)
     ):
         return None
@@ -308,6 +385,10 @@ def _member_from_payload(
     file_entry_id = _required_text(payload.get("file_entry_id"))
     relative_path = _required_text(payload.get("relative_path"))
     member_role = _required_text(payload.get("member_role"))
+    endpoint_role = _required_text(payload.get("endpoint_role"))
+    absolute_path = _required_text(payload.get("absolute_path"))
+    size_bytes = _non_negative_int(payload.get("size_bytes"))
+    evidence_kind = _required_text(payload.get("evidence_kind"))
     if (
         payload_group_id != group_id
         or snapshot_id is None
@@ -315,6 +396,12 @@ def _member_from_payload(
         or file_entry_id is None
         or relative_path is None
         or member_role is None
+        or endpoint_role not in {"SOURCE", "TARGET"}
+        or absolute_path is None
+        or len(absolute_path) > _MAX_LOCAL_PATH_LENGTH
+        or not Path(absolute_path).is_absolute()
+        or size_bytes is None
+        or evidence_kind != "CURRENT_READ_HASH"
     ):
         return None
     return DuplicateMemberViewState(
@@ -324,6 +411,10 @@ def _member_from_payload(
         file_entry_id=file_entry_id,
         relative_path=relative_path,
         member_role=member_role,
+        endpoint_role=endpoint_role,
+        absolute_path=absolute_path,
+        size_bytes=size_bytes,
+        evidence_kind=evidence_kind,
     )
 
 
@@ -364,6 +455,43 @@ def _member_cursor(value: object) -> dict[str, object] | None:
     if relative_path is None or snapshot_id is None or file_entry_id is None:
         return None
     return {
+        "relative_path": relative_path,
+        "snapshot_id": snapshot_id,
+        "file_entry_id": file_entry_id,
+    }
+
+
+def _report_cursor(value: object) -> dict[str, object] | None:
+    keys = {
+        "relationship_class",
+        "full_hash",
+        "group_id",
+        "relative_path",
+        "snapshot_id",
+        "file_entry_id",
+    }
+    if not isinstance(value, dict) or set(value) != keys:
+        return None
+    relationship_class = _required_text(value.get("relationship_class"))
+    full_hash = _required_text(value.get("full_hash"))
+    group_id = _required_text(value.get("group_id"))
+    relative_path = _required_text(value.get("relative_path"))
+    snapshot_id = _required_text(value.get("snapshot_id"))
+    file_entry_id = _required_text(value.get("file_entry_id"))
+    if (
+        relationship_class not in _RELATIONSHIP_CLASSES
+        or full_hash is None
+        or _HASH_PATTERN.fullmatch(full_hash) is None
+        or group_id is None
+        or relative_path is None
+        or snapshot_id is None
+        or file_entry_id is None
+    ):
+        return None
+    return {
+        "relationship_class": relationship_class,
+        "full_hash": full_hash,
+        "group_id": group_id,
         "relative_path": relative_path,
         "snapshot_id": snapshot_id,
         "file_entry_id": file_entry_id,

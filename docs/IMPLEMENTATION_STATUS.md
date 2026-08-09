@@ -1,22 +1,25 @@
 # Implementeringsstatus
 
-Update 2026-08-02: Milestone 7 now has a persistent, bounded identical-file
+Update 2026-08-09: Milestone 7 now has a persistent, bounded identical-file
 scanner and evidence-typed hash cache. Catalog migration 55 adds immutable
 cache evidence, one deterministic duplicate scan per analysis and one durable
 request per physical candidate. Quick signatures use canonical first/last
 1 MiB segments plus a versioned middle segment for large files; full streaming
 BLAKE3 is limited to surviving groups. Exact snapshot fingerprints govern
 cache reuse, aliases collapse before savings arithmetic, expected backup
-replicas remain excluded, retries are capped at three, interrupted requests
-recover to pending, and scanning pauses while a backup is active. The
-authenticated pipe exposes bounded status/group/member pages and receipted
-start/pause/resume commands. Jobs renders bilingual progress and virtualized
-group/location tables with no horizontal overflow at 900x560. Real-file tests
-prove restart recovery, a quick-signature collision that full hashing rejects,
-source/target non-mutation, and actual backup copies through local and Robocopy
-staging. Ordinary backup comparison does not yet consume the general cache;
-unrelated cross-location relations, report/review/open/copy actions and selected
-file preview remain Milestone 7 work.
+replicas remain excluded, and unrelated cross-endpoint matches use one physical
+representative per endpoint so internal and cross-endpoint savings do not double
+count. Retries are capped at three, interrupted requests recover to pending, and
+background scanning pauses while a backup is active. The authenticated pipe
+exposes bounded status/group/member/report pages plus receipted scan and review
+commands. Jobs renders bilingual virtual tables, selected-file evidence preview,
+open-location/open-file/copy-path actions, group-filtered plan operations and an
+atomic classified CSV export without horizontal overflow at 900x560. Real-file
+tests prove restart recovery, rejection of quick-signature collisions,
+source/target non-mutation, unrelated cross-endpoint classification, and one
+shared source full read for two target comparisons. Ordinary comparison still
+uses analysis-scoped current-read evidence rather than promoting metadata-only
+general-cache hits; USN continuity remains future work.
 
 Update 2026-08-02: `AUTO-002` automation policy is now part of every standard
 backup revision and immutable sealed-plan checksum. The supported policy values

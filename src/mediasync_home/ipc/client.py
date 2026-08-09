@@ -129,6 +129,22 @@ class InProcessIpcClient:
             )
         )
 
+    def query_duplicate_report(
+        self,
+        *,
+        analysis_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        return self._correlated_response(
+            self.service.query_duplicate_report(
+                self.client_instance_id,
+                analysis_id=analysis_id,
+                limit=limit,
+                after=after,
+            )
+        )
+
     def query_activity_overview(
         self,
         *,
@@ -219,6 +235,7 @@ class InProcessIpcClient:
         after: dict[str, object] | None = None,
         target_endpoint_id: str | None = None,
         risk_levels: tuple[str, ...] = (),
+        duplicate_group_id: str | None = None,
     ) -> IpcResponse:
         return self._correlated_response(
             self.service.query_plan_operations(
@@ -228,6 +245,7 @@ class InProcessIpcClient:
                 after=after,
                 target_endpoint_id=target_endpoint_id,
                 risk_levels=risk_levels,
+                duplicate_group_id=duplicate_group_id,
             )
         )
 

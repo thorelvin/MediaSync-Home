@@ -5186,12 +5186,18 @@ def _ready_state() -> EngineStatusViewState:
     )
 
 
-def test_duplicate_scan_panel_is_responsive_bilingual_and_interactive(qapp) -> None:
+def test_duplicate_scan_panel_is_responsive_bilingual_and_interactive(
+    qapp,
+    monkeypatch,
+    tmp_path,
+) -> None:
     provider = _FakeDuplicateScanDashboardEngineClient()
+    opened_paths: list[str] = []
     window = build_main_window(
         initial_state=EngineStatusViewState.disconnected(),
         engine_client=provider,
         theme_mode=ThemeMode.LIGHT,
+        open_local_path=lambda path: opened_paths.append(str(path)) or True,
     )
 
     try:
@@ -5207,6 +5213,15 @@ def test_duplicate_scan_panel_is_responsive_bilingual_and_interactive(qapp) -> N
         resume = window.findChild(QPushButton, "duplicateScanResumeButton")
         groups = window.findChild(BoundedVirtualTableView, "duplicateGroupList")
         members = window.findChild(BoundedVirtualTableView, "duplicateMemberList")
+        preview_title = window.findChild(QLabel, "duplicatePreviewTitle")
+        preview_path = window.findChild(QLabel, "duplicatePreviewPathValue")
+        preview_evidence = window.findChild(QLabel, "duplicatePreviewEvidenceValue")
+        open_location = window.findChild(QToolButton, "duplicateOpenLocationButton")
+        copy_path = window.findChild(QToolButton, "duplicateCopyPathButton")
+        open_file = window.findChild(QToolButton, "duplicateOpenFileButton")
+        show_changes = window.findChild(QPushButton, "duplicateFilterOperationsButton")
+        mark_reviewed = window.findChild(QPushButton, "duplicateMarkReviewedButton")
+        export_report = window.findChild(QPushButton, "duplicateExportReportButton")
         jobs_scroll = window.findChild(QScrollArea, "jobsScrollArea")
         language = window.findChild(QToolButton, "languageSelectorButton")
 
@@ -5232,6 +5247,50 @@ def test_duplicate_scan_panel_is_responsive_bilingual_and_interactive(qapp) -> N
         assert groups.isColumnHidden(3) is True
         assert members is not None
         assert _virtual_row_count(members) == 2
+        _click_virtual_row(members, 1)
+        qapp.processEvents()
+        assert preview_title is not None
+        assert preview_title.text() == "Photos/Copy of A.jpg"
+        assert preview_path is not None
+        assert preview_path.text() == "C:\\Source\\Photos\\Copy of A.jpg"
+        assert preview_evidence is not None
+        assert "BLAKE3" in preview_evidence.text()
+        assert open_location is not None and open_location.isEnabled()
+        assert copy_path is not None and copy_path.isEnabled()
+        assert open_file is not None and open_file.isEnabled()
+        QTest.mouseClick(open_location, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(copy_path, Qt.MouseButton.LeftButton)
+        QTest.mouseClick(open_file, Qt.MouseButton.LeftButton)
+        assert opened_paths == [
+            "C:\\Source\\Photos",
+            "C:\\Source\\Photos\\Copy of A.jpg",
+        ]
+        assert qapp.clipboard().text() == "C:\\Source\\Photos\\Copy of A.jpg"
+        assert mark_reviewed is not None and mark_reviewed.isEnabled()
+        QTest.mouseClick(mark_reviewed, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert provider.review_state == "REVIEWED"
+        assert provider.calls.count("mark_duplicate_group_reviewed") == 1
+        assert mark_reviewed.isEnabled() is False
+        report_path = tmp_path / "identical-files.csv"
+        monkeypatch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            lambda *args, **kwargs: (str(report_path), "CSV (*.csv)"),
+        )
+        assert export_report is not None and export_report.isEnabled()
+        QTest.mouseClick(export_report, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        report_text = report_path.read_text(encoding="utf-8-sig")
+        assert "INTRA_ENDPOINT_DUPLICATE" in report_text
+        assert "CURRENT_READ_HASH" in report_text
+        assert show_changes is not None and show_changes.isEnabled()
+        QTest.mouseClick(show_changes, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert navigation.currentRow() == 0
+        assert provider.operation_duplicate_group_ids[-1] == "group-a"
+        navigation.setCurrentRow(1)
+        qapp.processEvents()
         assert groups.horizontalScrollBar().maximum() == 0
         assert members.horizontalScrollBar().maximum() == 0
         assert jobs_scroll is not None
@@ -5872,6 +5931,8 @@ class _FakeDuplicateScanDashboardEngineClient(_FakeDashboardEngineClient):
     def __init__(self) -> None:
         super().__init__()
         self.scan_state: str | None = None
+        self.review_state = "UNREVIEWED"
+        self.operation_duplicate_group_ids: list[str | None] = []
 
     def get_duplicate_scan(self, *, analysis_id: str) -> IpcResponse:
         self.calls.append("get_duplicate_scan")
@@ -5913,7 +5974,7 @@ class _FakeDuplicateScanDashboardEngineClient(_FakeDashboardEngineClient):
                             "physical_object_count": 2,
                             "expected_replica_count": 0,
                             "potential_savings_bytes": 4096,
-                            "review_state": "UNREVIEWED",
+                            "review_state": self.review_state,
                             "created_utc": "2026-08-02T10:00:00Z",
                         }
                     ],
@@ -5921,6 +5982,89 @@ class _FakeDuplicateScanDashboardEngineClient(_FakeDashboardEngineClient):
                     "has_more": False,
                 }
             }
+        )
+
+    def get_duplicate_report(
+        self,
+        *,
+        analysis_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        del limit, after
+        self.calls.append("get_duplicate_report")
+        return IpcResponse.accepted(
+            {
+                "duplicate_report": {
+                    "analysis_id": analysis_id,
+                    "rows": [
+                        {
+                            "group_id": "group-a",
+                            "relationship_class": "INTRA_ENDPOINT_DUPLICATE",
+                            "full_hash": "a" * 64,
+                            "size_bytes": 4096,
+                            "member_count": 2,
+                            "physical_object_count": 2,
+                            "expected_replica_count": 0,
+                            "potential_savings_bytes": 4096,
+                            "review_state": self.review_state,
+                            "created_utc": "2026-08-02T10:00:00Z",
+                            "snapshot_id": "snapshot-source",
+                            "endpoint_id": "source-a",
+                            "file_entry_id": "file-a",
+                            "relative_path": "Photos/A.jpg",
+                            "member_role": "SOURCE_ORIGIN",
+                            "physical_object_key": "physical-a",
+                            "endpoint_role": "SOURCE",
+                            "absolute_path": "C:\\Source\\Photos\\A.jpg",
+                            "evidence_kind": "CURRENT_READ_HASH",
+                        }
+                    ],
+                    "next_cursor": None,
+                    "has_more": False,
+                }
+            }
+        )
+
+    def mark_duplicate_group_reviewed(
+        self,
+        *,
+        group_id: str,
+        expected_review_state: str,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        assert group_id == "group-a"
+        assert expected_review_state == "UNREVIEWED"
+        assert request_id and idempotency_key
+        self.calls.append("mark_duplicate_group_reviewed")
+        self.review_state = "REVIEWED"
+        return IpcResponse.accepted(
+            {
+                "duplicate_group": {
+                    "group_id": group_id,
+                    "review_state": self.review_state,
+                }
+            }
+        )
+
+    def get_plan_operations(
+        self,
+        *,
+        plan_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+        target_endpoint_id: str | None = None,
+        risk_levels: tuple[str, ...] = (),
+        duplicate_group_id: str | None = None,
+    ) -> IpcResponse:
+        self.operation_duplicate_group_ids.append(duplicate_group_id)
+        return super().get_plan_operations(
+            plan_id=plan_id,
+            limit=limit,
+            after=after,
+            target_endpoint_id=target_endpoint_id,
+            risk_levels=risk_levels,
         )
 
     def get_duplicate_members(
@@ -5943,8 +6087,12 @@ class _FakeDuplicateScanDashboardEngineClient(_FakeDashboardEngineClient):
                             "endpoint_id": "source-a",
                             "file_entry_id": "file-a",
                             "relative_path": "Photos/A.jpg",
-                            "member_role": "ORIGINAL",
+                            "member_role": "SOURCE_ORIGIN",
                             "physical_object_key": "physical-a",
+                            "endpoint_role": "SOURCE",
+                            "absolute_path": "C:\\Source\\Photos\\A.jpg",
+                            "size_bytes": 4096,
+                            "evidence_kind": "CURRENT_READ_HASH",
                         },
                         {
                             "group_id": group_id,
@@ -5954,6 +6102,12 @@ class _FakeDuplicateScanDashboardEngineClient(_FakeDashboardEngineClient):
                             "relative_path": "Photos/Copy of A.jpg",
                             "member_role": "DUPLICATE",
                             "physical_object_key": "physical-b",
+                            "endpoint_role": "SOURCE",
+                            "absolute_path": (
+                                "C:\\Source\\Photos\\Copy of A.jpg"
+                            ),
+                            "size_bytes": 4096,
+                            "evidence_kind": "CURRENT_READ_HASH",
                         },
                     ],
                     "next_cursor": None,

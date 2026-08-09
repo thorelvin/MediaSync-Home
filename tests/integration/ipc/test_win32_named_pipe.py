@@ -21,6 +21,9 @@ from mediasync_home.application.duplicate_scanning import (
     DuplicateMemberCursor,
     DuplicateMemberPage,
     DuplicateMemberReadModel,
+    DuplicateReportCursor,
+    DuplicateReportPage,
+    DuplicateReportRow,
     DuplicateScanStage,
     DuplicateScanState,
     DuplicateScanStatus,
@@ -222,6 +225,10 @@ def test_named_pipe_duplicate_scan_queries_roundtrip_after_handshake() -> None:
         server,
         lambda: client.query_duplicate_members(group_id="group-a", limit=1),
     )
+    report = _roundtrip(
+        server,
+        lambda: client.query_duplicate_report(analysis_id="analysis-a", limit=1),
+    )
 
     assert handshake.status is IpcStatus.ACCEPTED
     assert status.status is IpcStatus.ACCEPTED
@@ -232,6 +239,12 @@ def test_named_pipe_duplicate_scan_queries_roundtrip_after_handshake() -> None:
     assert (
         members.payload["duplicate_members"]["members"][0]["relative_path"]
         == "Photos/A.jpg"
+    )
+    assert report.status is IpcStatus.ACCEPTED
+    assert report.payload["duplicate_report"]["rows"][0]["group_id"] == "group-a"
+    assert (
+        report.payload["duplicate_report"]["rows"][0]["evidence_kind"]
+        == "CURRENT_READ_HASH"
     )
 
 
@@ -331,10 +344,37 @@ class _DuplicateScanReadStore:
                     endpoint_id="source-a",
                     file_entry_id="file-a",
                     relative_path="Photos/A.jpg",
-                    member_role="ORIGINAL",
+                    member_role="SOURCE_ORIGIN",
                     physical_object_key="physical-a",
+                    endpoint_role="SOURCE",
+                    absolute_path="C:\\Source\\Photos\\A.jpg",
+                    size_bytes=1024,
+                    evidence_kind="CURRENT_READ_HASH",
                 ),
             ),
+            next_cursor=None,
+            has_more=False,
+        )
+
+    def page_duplicate_report(
+        self,
+        *,
+        analysis_id: str,
+        limit: int,
+        after: DuplicateReportCursor | None = None,
+    ) -> DuplicateReportPage:
+        del limit, after
+        group = self.page_duplicate_groups(
+            analysis_id=analysis_id,
+            limit=1,
+        ).groups[0]
+        member = self.page_duplicate_members(
+            group_id=group.group_id,
+            limit=1,
+        ).members[0]
+        return DuplicateReportPage(
+            analysis_id=analysis_id,
+            rows=(DuplicateReportRow(group=group, member=member),),
             next_cursor=None,
             has_more=False,
         )

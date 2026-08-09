@@ -27,6 +27,7 @@ from mediasync_home.adapters.sqlite.hash_evidence import (
 from mediasync_home.application.duplicate_scanning import (
     DUPLICATE_GROUP_MAX_PAGE_SIZE,
     DUPLICATE_MEMBER_MAX_PAGE_SIZE,
+    DUPLICATE_REPORT_MAX_PAGE_SIZE,
     DUPLICATE_SCAN_MAX_ACTIVE_JOBS,
     DUPLICATE_SCAN_MAX_ATTEMPTS_PER_FILE,
     DUPLICATE_SCAN_MAX_CANDIDATE_FILES,
@@ -38,6 +39,9 @@ from mediasync_home.application.duplicate_scanning import (
     DuplicateMemberCursor,
     DuplicateMemberPage,
     DuplicateMemberReadModel,
+    DuplicateReportCursor,
+    DuplicateReportPage,
+    DuplicateReportRow,
     DuplicateScanCycleReport,
     DuplicateScanError,
     DuplicateScanStage,
@@ -63,6 +67,7 @@ from mediasync_home.application.hash_evidence import (
     CurrentReadHashEvidence,
     HashEvidenceKind,
 )
+from mediasync_home.application.safe_paths import parse_endpoint_relative_path
 
 
 HASH_REQUEST_MAX_PERSISTED_ROWS = 1_000_000
@@ -440,6 +445,47 @@ class SqliteDuplicateScanner:
         ).fetchone()
         return None if row is None else _scan_from_row(tuple(row))
 
+    def load_duplicate_group(self, group_id: str) -> DuplicateGroupReadModel | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                id,
+                relationship_class,
+                full_hash,
+                size_bytes,
+                member_count,
+                physical_object_count,
+                expected_replica_count,
+                potential_savings_bytes,
+                review_state,
+                created_utc
+            FROM duplicate_groups
+            WHERE id = ?
+            """,
+            (group_id,),
+        ).fetchone()
+        return None if row is None else _group_from_row(tuple(row))
+
+    def mark_duplicate_group_reviewed(
+        self,
+        *,
+        group_id: str,
+        expected_review_state: str,
+    ) -> DuplicateGroupReadModel | None:
+        if not group_id.strip() or expected_review_state != "UNREVIEWED":
+            raise DuplicateScanError("DUPLICATE_GROUP_REVIEW_PRECONDITION_INVALID")
+        cursor = self._connection.execute(
+            """
+            UPDATE duplicate_groups
+            SET review_state = 'REVIEWED'
+            WHERE id = ? AND review_state = ?
+            """,
+            (group_id, expected_review_state),
+        )
+        if cursor.rowcount != 1:
+            return None
+        return self.load_duplicate_group(group_id)
+
     def page_duplicate_groups(
         self,
         *,
@@ -535,12 +581,12 @@ class SqliteDuplicateScanner:
         if after is not None:
             cursor_predicate = """
                 AND (
-                    relative_path > ?
-                    OR (relative_path = ? AND snapshot_id > ?)
+                    members.relative_path > ?
+                    OR (members.relative_path = ? AND members.snapshot_id > ?)
                     OR (
-                        relative_path = ?
-                        AND snapshot_id = ?
-                        AND file_entry_id > ?
+                        members.relative_path = ?
+                        AND members.snapshot_id = ?
+                        AND members.file_entry_id > ?
                     )
                 )
             """
@@ -558,17 +604,40 @@ class SqliteDuplicateScanner:
         rows = self._connection.execute(
             f"""
             SELECT
-                group_id,
-                snapshot_id,
-                endpoint_id,
-                file_entry_id,
-                relative_path,
-                member_role,
-                physical_object_key
-            FROM duplicate_members
-            WHERE group_id = ?
+                members.group_id,
+                members.snapshot_id,
+                members.endpoint_id,
+                members.file_entry_id,
+                members.relative_path,
+                members.member_role,
+                members.physical_object_key,
+                bindings.role,
+                revisions.root_uri,
+                hashes.size_bytes,
+                hashes.evidence_kind
+            FROM duplicate_members AS members
+            INNER JOIN duplicate_groups AS groups
+                ON groups.id = members.group_id
+            INNER JOIN analyses
+                ON analyses.id = groups.analysis_id
+            INNER JOIN standard_backup_job_endpoint_bindings AS bindings
+                ON bindings.job_id = analyses.job_id
+                AND bindings.job_revision_id = analyses.job_revision_id
+                AND bindings.endpoint_id = members.endpoint_id
+            INNER JOIN snapshots
+                ON snapshots.id = members.snapshot_id
+                AND snapshots.endpoint_id = members.endpoint_id
+            INNER JOIN endpoint_revisions AS revisions
+                ON revisions.endpoint_id = snapshots.endpoint_id
+                AND revisions.id = snapshots.endpoint_revision_id
+            INNER JOIN current_read_hash_evidence AS hashes
+                ON hashes.snapshot_id = members.snapshot_id
+                AND hashes.entry_id = members.file_entry_id
+                AND hashes.endpoint_id = members.endpoint_id
+                AND hashes.evidence_kind = 'CURRENT_READ_HASH'
+            WHERE members.group_id = ?
                 {cursor_predicate}
-            ORDER BY relative_path, snapshot_id, file_entry_id
+            ORDER BY members.relative_path, members.snapshot_id, members.file_entry_id
             LIMIT ?
             """,
             tuple(parameters),
@@ -586,6 +655,166 @@ class SqliteDuplicateScanner:
                     relative_path=last.relative_path,
                     snapshot_id=last.snapshot_id,
                     file_entry_id=last.file_entry_id,
+                )
+            ),
+            has_more=has_more,
+        )
+
+    def page_duplicate_report(
+        self,
+        *,
+        analysis_id: str,
+        limit: int,
+        after: DuplicateReportCursor | None = None,
+    ) -> DuplicateReportPage:
+        if not analysis_id.strip():
+            raise DuplicateScanError("DUPLICATE_REPORT_ANALYSIS_ID_INVALID")
+        if not 1 <= limit <= DUPLICATE_REPORT_MAX_PAGE_SIZE:
+            raise DuplicateScanError("DUPLICATE_REPORT_PAGE_LIMIT_INVALID")
+        parameters: list[object] = [analysis_id]
+        cursor_predicate = ""
+        if after is not None:
+            cursor_predicate = """
+                AND (
+                    groups.relationship_class > ?
+                    OR (
+                        groups.relationship_class = ?
+                        AND groups.full_hash > ?
+                    )
+                    OR (
+                        groups.relationship_class = ?
+                        AND groups.full_hash = ?
+                        AND groups.id > ?
+                    )
+                    OR (
+                        groups.relationship_class = ?
+                        AND groups.full_hash = ?
+                        AND groups.id = ?
+                        AND members.relative_path > ?
+                    )
+                    OR (
+                        groups.relationship_class = ?
+                        AND groups.full_hash = ?
+                        AND groups.id = ?
+                        AND members.relative_path = ?
+                        AND members.snapshot_id > ?
+                    )
+                    OR (
+                        groups.relationship_class = ?
+                        AND groups.full_hash = ?
+                        AND groups.id = ?
+                        AND members.relative_path = ?
+                        AND members.snapshot_id = ?
+                        AND members.file_entry_id > ?
+                    )
+                )
+            """
+            parameters.extend(
+                (
+                    after.relationship_class,
+                    after.relationship_class,
+                    after.full_hash,
+                    after.relationship_class,
+                    after.full_hash,
+                    after.group_id,
+                    after.relationship_class,
+                    after.full_hash,
+                    after.group_id,
+                    after.relative_path,
+                    after.relationship_class,
+                    after.full_hash,
+                    after.group_id,
+                    after.relative_path,
+                    after.snapshot_id,
+                    after.relationship_class,
+                    after.full_hash,
+                    after.group_id,
+                    after.relative_path,
+                    after.snapshot_id,
+                    after.file_entry_id,
+                )
+            )
+        parameters.append(limit + 1)
+        rows = self._connection.execute(
+            f"""
+            SELECT
+                groups.id,
+                groups.relationship_class,
+                groups.full_hash,
+                groups.size_bytes,
+                groups.member_count,
+                groups.physical_object_count,
+                groups.expected_replica_count,
+                groups.potential_savings_bytes,
+                groups.review_state,
+                groups.created_utc,
+                members.group_id,
+                members.snapshot_id,
+                members.endpoint_id,
+                members.file_entry_id,
+                members.relative_path,
+                members.member_role,
+                members.physical_object_key,
+                bindings.role,
+                revisions.root_uri,
+                hashes.size_bytes,
+                hashes.evidence_kind
+            FROM duplicate_groups AS groups
+            INNER JOIN duplicate_members AS members
+                ON members.group_id = groups.id
+            INNER JOIN analyses
+                ON analyses.id = groups.analysis_id
+            INNER JOIN standard_backup_job_endpoint_bindings AS bindings
+                ON bindings.job_id = analyses.job_id
+                AND bindings.job_revision_id = analyses.job_revision_id
+                AND bindings.endpoint_id = members.endpoint_id
+            INNER JOIN snapshots
+                ON snapshots.id = members.snapshot_id
+                AND snapshots.endpoint_id = members.endpoint_id
+            INNER JOIN endpoint_revisions AS revisions
+                ON revisions.endpoint_id = snapshots.endpoint_id
+                AND revisions.id = snapshots.endpoint_revision_id
+            INNER JOIN current_read_hash_evidence AS hashes
+                ON hashes.snapshot_id = members.snapshot_id
+                AND hashes.entry_id = members.file_entry_id
+                AND hashes.endpoint_id = members.endpoint_id
+                AND hashes.evidence_kind = 'CURRENT_READ_HASH'
+            WHERE groups.analysis_id = ?
+                {cursor_predicate}
+            ORDER BY
+                groups.relationship_class,
+                groups.full_hash,
+                groups.id,
+                members.relative_path,
+                members.snapshot_id,
+                members.file_entry_id
+            LIMIT ?
+            """,
+            tuple(parameters),
+        ).fetchall()
+        has_more = len(rows) > limit
+        page_rows = rows[:limit]
+        items = tuple(
+            DuplicateReportRow(
+                group=_group_from_row(tuple(row[:10])),
+                member=_member_from_row(tuple(row[10:])),
+            )
+            for row in page_rows
+        )
+        last = items[-1] if items else None
+        return DuplicateReportPage(
+            analysis_id=analysis_id,
+            rows=items,
+            next_cursor=(
+                None
+                if not has_more or last is None
+                else DuplicateReportCursor(
+                    relationship_class=last.group.relationship_class,
+                    full_hash=last.group.full_hash,
+                    group_id=last.group.group_id,
+                    relative_path=last.member.relative_path,
+                    snapshot_id=last.member.snapshot_id,
+                    file_entry_id=last.member.file_entry_id,
                 )
             ),
             has_more=has_more,
@@ -1639,14 +1868,21 @@ def _group_from_row(row: tuple[object, ...]) -> DuplicateGroupReadModel:
 
 
 def _member_from_row(row: tuple[object, ...]) -> DuplicateMemberReadModel:
+    relative_path = str(row[4])
+    safe_path = parse_endpoint_relative_path(relative_path)
+    root = local_path_from_file_uri(str(row[8]))
     return DuplicateMemberReadModel(
         group_id=str(row[0]),
         snapshot_id=str(row[1]),
         endpoint_id=str(row[2]),
         file_entry_id=str(row[3]),
-        relative_path=str(row[4]),
+        relative_path=relative_path,
         member_role=str(row[5]),
         physical_object_key=str(row[6]),
+        endpoint_role=str(row[7]),
+        absolute_path=str(root.joinpath(*safe_path.parts)),
+        size_bytes=_required_int(row[9]),
+        evidence_kind=str(row[10]),
     )
 
 

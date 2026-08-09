@@ -131,6 +131,7 @@ def query_plan_operations(
     after: PlanOperationCursor | Mapping[str, object] | None = None,
     target_endpoint_id: str | None = None,
     risk_levels: tuple[str, ...] = (),
+    duplicate_group_id: str | None = None,
 ) -> PlanOperationsReadPage:
     query = normalize_plan_operation_page_query(
         plan_id=plan_id,
@@ -138,6 +139,7 @@ def query_plan_operations(
         after=after,
         target_endpoint_id=target_endpoint_id,
         risk_levels=risk_levels,
+        duplicate_group_id=duplicate_group_id,
     )
     if plan_read_store is None:
         return PlanOperationsReadPage.unavailable(query=query)
@@ -184,6 +186,7 @@ def normalize_plan_operation_page_query(
     after: PlanOperationCursor | Mapping[str, object] | None,
     target_endpoint_id: str | None = None,
     risk_levels: tuple[str, ...] = (),
+    duplicate_group_id: str | None = None,
 ) -> PlanOperationPageQuery:
     try:
         query = PlanOperationPageQuery(
@@ -192,6 +195,7 @@ def normalize_plan_operation_page_query(
             after=_normalize_cursor(after),
             target_endpoint_id=_optional_text(target_endpoint_id),
             risk_levels=tuple(PlanRiskLevel(value) for value in risk_levels),
+            duplicate_group_id=_optional_text(duplicate_group_id),
         )
         validate_plan_operation_page_query(query)
     except (KeyError, TypeError, ValueError, PlanSealViolation) as exc:

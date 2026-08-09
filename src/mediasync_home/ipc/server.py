@@ -49,13 +49,19 @@ from mediasync_home.application.duplicate_scanning import (
     DUPLICATE_GROUP_MAX_PAGE_SIZE,
     DUPLICATE_MEMBER_DEFAULT_PAGE_SIZE,
     DUPLICATE_MEMBER_MAX_PAGE_SIZE,
+    DUPLICATE_REPORT_DEFAULT_PAGE_SIZE,
+    DUPLICATE_REPORT_MAX_PAGE_SIZE,
     DuplicateGroupCursor,
+    DuplicateGroupReadModel,
+    DuplicateGroupReviewCommand,
     DuplicateMemberCursor,
+    DuplicateReportCursor,
     DuplicateScanCommand,
     DuplicateScanCommandName,
     DuplicateScanError,
     DuplicateScanStatus,
     DuplicateScanStore,
+    parse_duplicate_group_review_command,
     parse_duplicate_scan_command,
 )
 from mediasync_home.application.external_resources import (
@@ -641,6 +647,34 @@ class EngineHostIpcService:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
         return IpcResponse.accepted({"duplicate_members": page.to_dict()})
 
+    def query_duplicate_report(
+        self,
+        client_instance_id: str,
+        *,
+        analysis_id: str,
+        limit: int | None = None,
+        after: dict[str, object] | None = None,
+    ) -> IpcResponse:
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
+        if self.duplicate_scan_store is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+        try:
+            page_limit = _bounded_query_limit(
+                limit,
+                default=DUPLICATE_REPORT_DEFAULT_PAGE_SIZE,
+                maximum=DUPLICATE_REPORT_MAX_PAGE_SIZE,
+            )
+            page = self.duplicate_scan_store.page_duplicate_report(
+                analysis_id=analysis_id.strip(),
+                limit=page_limit,
+                after=_duplicate_report_cursor(after),
+            )
+        except (DuplicateScanError, TypeError, ValueError):
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        return IpcResponse.accepted({"duplicate_report": page.to_dict()})
+
     def query_activity_overview(
         self,
         client_instance_id: str,
@@ -767,6 +801,7 @@ class EngineHostIpcService:
         after: dict[str, object] | None = None,
         target_endpoint_id: str | None = None,
         risk_levels: tuple[str, ...] = (),
+        duplicate_group_id: str | None = None,
     ) -> IpcResponse:
         rejection = self._authorize_client_request(client_instance_id)
         if rejection is not None:
@@ -779,6 +814,7 @@ class EngineHostIpcService:
                 after=after,
                 target_endpoint_id=target_endpoint_id,
                 risk_levels=risk_levels,
+                duplicate_group_id=duplicate_group_id,
             )
         except PlanOperationsQueryError:
             return IpcResponse.rejected(IpcReason.INVALID_FRAME)
@@ -995,6 +1031,11 @@ class EngineHostIpcService:
             DuplicateScanCommandName.RESUME_DUPLICATE_SCAN.value,
         }:
             return self._handle_duplicate_scan_command(command, identity)
+        if (
+            command.command_name
+            == DuplicateScanCommandName.MARK_DUPLICATE_GROUP_REVIEWED.value
+        ):
+            return self._handle_duplicate_group_review(command, identity)
         if (
             command.command_name
             == JobSchedulingCommandName.CONFIGURE_DAILY_BACKUP_SCHEDULE.value
@@ -2613,6 +2654,120 @@ class EngineHostIpcService:
             IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED,
             payload,
         )
+
+    def _handle_duplicate_group_review(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+    ) -> IpcResponse:
+        try:
+            command = parse_duplicate_group_review_command(
+                request_id=envelope.request_id,
+                idempotency_key=envelope.idempotency_key,
+                payload=envelope.payload,
+            )
+        except DuplicateScanError:
+            return IpcResponse.rejected(IpcReason.INVALID_FRAME)
+        if not self.status.mutations_enabled:
+            receipt_response = self._record_terminal_rejected_receipt(
+                envelope,
+                identity,
+                rejection_reason=IpcReason.MUTATING_COMMANDS_DISABLED.value,
+            )
+            if receipt_response is not None:
+                return receipt_response
+            payload = _duplicate_group_review_response_payload(
+                envelope=envelope,
+                group_id=command.group_id,
+                mutations_enabled=False,
+                group=None,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(IpcReason.MUTATING_COMMANDS_DISABLED, payload)
+        return self._run_command_effect_transaction(
+            lambda: self._dispatch_duplicate_group_review_in_transaction(
+                envelope,
+                identity,
+                command,
+            )
+        )
+
+    def _dispatch_duplicate_group_review_in_transaction(
+        self,
+        envelope: IpcCommandEnvelope,
+        identity: VerifiedClientIdentity,
+        command: DuplicateGroupReviewCommand,
+    ) -> IpcResponse:
+        if self.command_receipt_store is None or self.duplicate_scan_store is None:
+            receipt_response = self._record_terminal_rejected_receipt(
+                envelope,
+                identity,
+                rejection_reason=IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED.value,
+            )
+            if receipt_response is not None:
+                return receipt_response
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+        receipt, conflict_response = self._record_received_receipt(envelope, identity)
+        if conflict_response is not None:
+            return conflict_response
+        if receipt is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+        if receipt.state is not CommandReceiptState.RECEIVED:
+            group = self.duplicate_scan_store.load_duplicate_group(command.group_id)
+            payload = _duplicate_group_review_response_payload(
+                envelope=envelope,
+                group_id=command.group_id,
+                mutations_enabled=True,
+                group=group,
+            )
+            payload["idempotent_replay"] = True
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            if receipt.state is CommandReceiptState.REJECTED:
+                return IpcResponse.rejected(_receipt_rejection_reason(receipt), payload)
+            return IpcResponse.accepted(payload)
+
+        receipt = transition_command_receipt(receipt, CommandReceiptState.VALIDATED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        group = self.duplicate_scan_store.mark_duplicate_group_reviewed(
+            group_id=command.group_id,
+            expected_review_state=command.expected_review_state,
+        )
+        if group is None:
+            receipt = transition_command_receipt(
+                receipt,
+                CommandReceiptState.REJECTED,
+                rejection_reason=IpcReason.COMMAND_PRECONDITION_FAILED.value,
+            )
+            self.command_receipt_store.update_command_receipt(receipt)
+            payload = _duplicate_group_review_response_payload(
+                envelope=envelope,
+                group_id=command.group_id,
+                mutations_enabled=True,
+                group=None,
+            )
+            self._add_receipt_payload(payload, envelope.idempotency_key)
+            return IpcResponse.rejected(IpcReason.COMMAND_PRECONDITION_FAILED, payload)
+
+        receipt = transition_command_receipt(
+            receipt,
+            CommandReceiptState.EFFECT_PREPARED,
+            result_entity_type="duplicate_group",
+            result_entity_id=group.group_id,
+        )
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.ACCEPTED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        receipt = transition_command_receipt(receipt, CommandReceiptState.SUCCEEDED)
+        self.command_receipt_store.update_command_receipt(receipt)
+        self._enqueue_command_effect_outbox(receipt)
+        payload = _duplicate_group_review_response_payload(
+            envelope=envelope,
+            group_id=command.group_id,
+            mutations_enabled=True,
+            group=group,
+        )
+        self._add_receipt_payload(payload, envelope.idempotency_key)
+        return IpcResponse.accepted(payload)
 
     def _handle_job_lifecycle(
         self,
@@ -4590,6 +4745,22 @@ def _duplicate_scan_response_payload(
     }
 
 
+def _duplicate_group_review_response_payload(
+    *,
+    envelope: IpcCommandEnvelope,
+    group_id: str,
+    mutations_enabled: bool,
+    group: DuplicateGroupReadModel | None,
+) -> dict[str, Any]:
+    return {
+        "command_name": envelope.command_name,
+        "group_id": group_id,
+        "recognized": True,
+        "mutations_enabled": mutations_enabled,
+        "duplicate_group": None if group is None else group.to_dict(),
+    }
+
+
 def _job_lifecycle_response_payload(
     *,
     envelope: IpcCommandEnvelope,
@@ -4890,6 +5061,34 @@ def _duplicate_member_cursor(
         relative_path=str(values[0]),
         snapshot_id=str(values[1]),
         file_entry_id=str(values[2]),
+    )
+
+
+def _duplicate_report_cursor(
+    payload: dict[str, object] | None,
+) -> DuplicateReportCursor | None:
+    if payload is None:
+        return None
+    keys = (
+        "relationship_class",
+        "full_hash",
+        "group_id",
+        "relative_path",
+        "snapshot_id",
+        "file_entry_id",
+    )
+    if set(payload) != set(keys):
+        raise ValueError("duplicate report cursor is invalid")
+    values = tuple(payload.get(key) for key in keys)
+    if any(not isinstance(value, str) or not value.strip() for value in values):
+        raise ValueError("duplicate report cursor is invalid")
+    return DuplicateReportCursor(
+        relationship_class=str(values[0]),
+        full_hash=str(values[1]),
+        group_id=str(values[2]),
+        relative_path=str(values[3]),
+        snapshot_id=str(values[4]),
+        file_entry_id=str(values[5]),
     )
 
 

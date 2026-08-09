@@ -165,6 +165,8 @@ class BackupJobDetailViewState:
     same_file_alias_path_count: int = 0
     internal_duplicate_group_count: int = 0
     internal_duplicate_file_count: int = 0
+    cross_endpoint_duplicate_group_count: int = 0
+    cross_endpoint_duplicate_file_count: int = 0
     potential_savings_bytes: int = 0
     job_revision_id: str | None = None
     writable_target_registration_required: bool = False
@@ -815,6 +817,18 @@ def _job_detail_from_payload(
         ),
         internal_duplicate_file_count=(
             _non_negative_int(duplicate_payload.get("internal_duplicate_file_count"))
+            or 0
+        ),
+        cross_endpoint_duplicate_group_count=(
+            _non_negative_int(
+                duplicate_payload.get("cross_endpoint_duplicate_group_count")
+            )
+            or 0
+        ),
+        cross_endpoint_duplicate_file_count=(
+            _non_negative_int(
+                duplicate_payload.get("cross_endpoint_duplicate_file_count")
+            )
             or 0
         ),
         potential_savings_bytes=(

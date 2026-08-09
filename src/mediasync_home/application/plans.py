@@ -154,6 +154,7 @@ class PlanOperationPageQuery:
     after: PlanOperationCursor | None = None
     target_endpoint_id: str | None = None
     risk_levels: tuple[PlanRiskLevel, ...] = ()
+    duplicate_group_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -347,6 +348,10 @@ def validate_plan_operation_page_query(query: PlanOperationPageQuery) -> None:
         raise PlanSealViolation("PLAN_OPERATION_READ_LIMIT_TOO_LARGE")
     if query.target_endpoint_id is not None and not query.target_endpoint_id.strip():
         raise PlanSealViolation("PLAN_OPERATION_READ_TARGET_MUST_NOT_BE_BLANK")
+    if query.duplicate_group_id is not None and (
+        not query.duplicate_group_id.strip() or len(query.duplicate_group_id) > 512
+    ):
+        raise PlanSealViolation("PLAN_OPERATION_READ_DUPLICATE_GROUP_INVALID")
     if len(query.risk_levels) > len(PlanRiskLevel):
         raise PlanSealViolation("PLAN_OPERATION_READ_RISK_FILTER_TOO_LARGE")
     if len(set(query.risk_levels)) != len(query.risk_levels):
