@@ -31,6 +31,7 @@ class CommitReceipt:
     durability_state: str = "FINAL_DURABILITY_UNCONFIRMED"
     file_flush_succeeded: bool | None = None
     write_through_move_used: bool | None = None
+    filesystem_apply_method: str = "UNCONFIRMED"
 
     def __post_init__(self) -> None:
         expected_flags = {
@@ -52,6 +53,14 @@ class CommitReceipt:
         actual = (self.file_flush_succeeded, self.write_through_move_used)
         if actual != expected:
             raise ValueError("FINAL_COMMIT_RECEIPT_DURABILITY_EVIDENCE_INCONSISTENT")
+        if self.filesystem_apply_method not in {
+            "UNCONFIRMED",
+            "MOVEFILEEX_NO_OVERWRITE",
+            "MOVEFILEEX_REPLACE_EXISTING",
+            "REPLACEFILEW_WITH_BACKUP",
+            "REVERIFIED_EXISTING",
+        }:
+            raise ValueError("FINAL_COMMIT_RECEIPT_APPLY_METHOD_UNSUPPORTED")
 
 
 @dataclass(frozen=True)

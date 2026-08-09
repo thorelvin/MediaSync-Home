@@ -1,5 +1,20 @@
 # Implementeringsstatus
 
+Update 2026-08-09: local versioned replacement now uses the documented native
+Windows fast path. Controlled writable registration proves `ReplaceFileW`
+against a real old/new/backup triplet before advertising atomic replacement.
+After the journal durably records the retained old-target version, final commit
+copies and flushes a same-directory replacement, calls `ReplaceFileW` with a
+same-volume backup, verifies both the new final and the native old-file backup,
+then reopens and flushes the final. Receipts and recovery events distinguish
+`REPLACEFILEW_WITH_BACKUP` from `MOVEFILEEX_REPLACE_EXISTING`; the former claims
+file flush only, not write-through move. A native error with an unchanged old
+final and intact replacement uses the existing journaled write-through fallback.
+Any changed or incomplete postcondition blocks as explicit ambiguity and keeps
+the retained version plus native backup evidence instead of guessing. Live
+Windows tests prove the API backup bytes, production replacement path, fallback
+and ambiguous postcondition behavior.
+
 Update 2026-08-09: Milestone 8 now persists the canonical two-database
 handoff protocol in production. Catalog migration 56 adds `store_handoffs`;
 recovery migration 12 adds matching `recovery_handoffs` and immutable

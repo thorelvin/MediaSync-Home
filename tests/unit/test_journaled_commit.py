@@ -72,6 +72,7 @@ def test_journaled_final_commit_records_before_and_after_filesystem_apply() -> N
         "durability_state": "LOCAL_FILE_FLUSH_CONFIRMED",
         "file_flush_succeeded": True,
         "write_through_move_used": False,
+        "filesystem_apply_method": "UNCONFIRMED",
     }
 
 
@@ -84,6 +85,18 @@ def test_commit_receipt_rejects_synthetic_adapter_completion_claim() -> None:
             operation_id="operation-a",
             final_relative_path=RelativePath("Photos/image.jpg"),
             durability_state="FINAL_COMMIT_ADAPTER_COMPLETED",
+        )
+
+
+def test_commit_receipt_rejects_unknown_filesystem_apply_method() -> None:
+    with pytest.raises(
+        ValueError,
+        match="FINAL_COMMIT_RECEIPT_APPLY_METHOD_UNSUPPORTED",
+    ):
+        CommitReceipt(
+            operation_id="operation-a",
+            final_relative_path=RelativePath("Photos/image.jpg"),
+            filesystem_apply_method="ASSUMED_ATOMIC",
         )
 
 
@@ -121,6 +134,7 @@ def test_journaled_final_commit_wraps_lab_no_overwrite_adapter(tmp_path: Path) -
         durability_state="LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED",
         file_flush_succeeded=True,
         write_through_move_used=True,
+        filesystem_apply_method="MOVEFILEEX_NO_OVERWRITE",
     )
     assert (target_root / "Photos" / "image.jpg").read_bytes() == payload
     assert store.operation is not None
@@ -348,7 +362,18 @@ def test_journaled_final_commit_records_retryable_failure_when_adapter_fails() -
     }
 
 
-def test_journaled_final_commit_records_user_decision_for_ambiguous_preserved_drift() -> None:
+@pytest.mark.parametrize(
+    "validation_code",
+    [
+        "LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE",
+        "LOCAL_REPLACE_FINAL_COMMIT_REPLACEFILEW_POSTCONDITION_AMBIGUOUS",
+        "LOCAL_REPLACE_FINAL_COMMIT_REPLACEFILEW_FINAL_MISMATCH",
+        "LOCAL_REPLACE_FINAL_COMMIT_REPLACEFILEW_BACKUP_MISMATCH",
+    ],
+)
+def test_journaled_final_commit_records_user_decision_for_ambiguous_preserved_drift(
+    validation_code: str,
+) -> None:
     actions: list[str] = []
     operation = replace(
         _operation(),
@@ -359,7 +384,7 @@ def test_journaled_final_commit_records_user_decision_for_ambiguous_preserved_dr
     preservation = _FakeOldTargetPreservationPort(actions=actions)
     inner = _FakeFinalCommitPort(
         actions=actions,
-        failure=_CommitFailure("LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE"),
+        failure=_CommitFailure(validation_code),
     )
     runner = JournaledFinalCommitPort(
         recovery_operations=store,
@@ -380,11 +405,11 @@ def test_journaled_final_commit_records_user_decision_for_ambiguous_preserved_dr
     ]
     assert store.transitions[-1].next_phase is RecoveryOperationPhase.USER_DECISION_REQUIRED
     assert store.transitions[-1].payload == {
-        "error_code": "LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE",
+        "error_code": validation_code,
         "error_type": "_CommitFailure",
     }
     assert store.operation is not None
-    assert store.operation.last_error_code == "LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE"
+    assert store.operation.last_error_code == validation_code
 
 
 class _Transition:

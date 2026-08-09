@@ -161,9 +161,7 @@ def test_sqlite_run_final_commit_bridge_resumes_preserved_replacement(
         assert loaded is not None
         assert loaded.phase is RecoveryOperationPhase.FINAL_VERIFIED
         assert loaded.version_object_id == "op-a"
-        assert loaded.final_durability_state == (
-            "LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED"
-        )
+        assert loaded.final_durability_state == "LOCAL_FILE_FLUSH_CONFIRMED"
         assert (target_root / "Pictures" / "A.jpg").read_bytes() == new_payload
         assert (target_root / ".mediasync" / "objects" / "versions" / "op-a.payload").read_bytes() == old_payload
         assert _event_phases(connection)[-3:] == [

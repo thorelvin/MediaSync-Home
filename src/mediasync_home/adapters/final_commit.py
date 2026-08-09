@@ -15,7 +15,10 @@ from mediasync_home.adapters.file_object_fingerprints import (
 )
 from mediasync_home.adapters.reparse_guard import LocalReparseGuard, ReparseGuardError
 from mediasync_home.adapters.system_clock import SystemClock
-from mediasync_home.adapters.windows_durability import move_path_write_through
+from mediasync_home.adapters.windows_durability import (
+    move_path_write_through,
+    replace_file_with_backup,
+)
 from mediasync_home.application.clocks import ClockPort
 from mediasync_home.application.ports import (
     CommitReceipt,
@@ -116,6 +119,7 @@ class LabNoOverwriteFinalCommitAdapter(FinalCommitPort):
             artifact=artifact,
             final_path=final_path,
             write_through_move_used=True,
+            filesystem_apply_method="MOVEFILEEX_NO_OVERWRITE",
         )
 
 
@@ -517,16 +521,21 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
                     "LOCAL_REPLACE_FINAL_COMMIT_TARGET_CHANGED_AFTER_PRESERVE",
                     "Refresh analysis because the final target changed after old-target preservation.",
                 )
-            _replace_with_verified_payload(
+            filesystem_apply_method = _replace_with_verified_payload(
                 staging_payload=staging_payload,
                 final_path=final_path,
                 content_hash=artifact.content_hash,
                 expected_fingerprint=expected_fingerprint,
+                expected_old_fingerprint=expected_old,
+                version_payload=version_payload,
             )
             return _flushed_file_commit_receipt(
                 artifact=artifact,
                 final_path=final_path,
-                write_through_move_used=True,
+                write_through_move_used=(
+                    filesystem_apply_method == "MOVEFILEEX_REPLACE_EXISTING"
+                ),
+                filesystem_apply_method=filesystem_apply_method,
             )
         _insert_replacement_payload_without_overwrite(
             staging_payload=staging_payload,
@@ -538,6 +547,7 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
             artifact=artifact,
             final_path=final_path,
             write_through_move_used=True,
+            filesystem_apply_method="MOVEFILEEX_NO_OVERWRITE",
         )
 
     def cleanup_recovery_objects(
@@ -833,6 +843,7 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
             artifact=artifact,
             final_path=final_path,
             write_through_move_used=True,
+            filesystem_apply_method="MOVEFILEEX_NO_OVERWRITE",
         )
 
     def _commit_new_directory(
@@ -1619,8 +1630,14 @@ def _replace_with_verified_payload(
     final_path: Path,
     content_hash: str,
     expected_fingerprint: dict[str, object] | None,
-) -> None:
+    expected_old_fingerprint: dict[str, object],
+    version_payload: Path,
+) -> str:
     temp_path = final_path.parent / f".{final_path.name}.{uuid4().hex}.mediasync-replace.tmp"
+    replace_backup = version_payload.with_name(
+        f".{version_payload.name}.{uuid4().hex}.replacefilew-backup"
+    )
+    remove_replace_backup = True
     try:
         _copy_file_durable(
             source=staging_payload,
@@ -1632,6 +1649,51 @@ def _replace_with_verified_payload(
                 "LOCAL_REPLACE_FINAL_COMMIT_TEMP_HASH_MISMATCH",
                 "Restage and verify the artifact before attempting replacement.",
             )
+        if os.name == "nt":
+            try:
+                replace_file_with_backup(temp_path, final_path, replace_backup)
+            except OSError as replace_exc:
+                if _regular_file_matches_artifact(
+                    final_path,
+                    content_hash=content_hash,
+                    fingerprint=expected_fingerprint,
+                ) and _regular_file_matches(replace_backup, expected_old_fingerprint):
+                    return "REPLACEFILEW_WITH_BACKUP"
+                if (
+                    not _regular_file_matches(final_path, expected_old_fingerprint)
+                    or not temp_path.is_file()
+                    or (
+                        replace_backup.exists()
+                        and not _regular_file_matches(
+                            replace_backup,
+                            expected_old_fingerprint,
+                        )
+                    )
+                ):
+                    remove_replace_backup = False
+                    raise FinalCommitAdapterError(
+                        "LOCAL_REPLACE_FINAL_COMMIT_REPLACEFILEW_POSTCONDITION_AMBIGUOUS",
+                        "Keep recovery state and inspect final, staging and version backup evidence.",
+                    ) from replace_exc
+                replace_backup.unlink(missing_ok=True)
+            else:
+                if not _regular_file_matches_artifact(
+                    final_path,
+                    content_hash=content_hash,
+                    fingerprint=expected_fingerprint,
+                ):
+                    remove_replace_backup = False
+                    raise FinalCommitAdapterError(
+                        "LOCAL_REPLACE_FINAL_COMMIT_REPLACEFILEW_FINAL_MISMATCH",
+                        "Keep recovery state because ReplaceFileW did not produce the expected final file.",
+                    )
+                if not _regular_file_matches(replace_backup, expected_old_fingerprint):
+                    remove_replace_backup = False
+                    raise FinalCommitAdapterError(
+                        "LOCAL_REPLACE_FINAL_COMMIT_REPLACEFILEW_BACKUP_MISMATCH",
+                        "Keep the retained version and inspect the ReplaceFileW backup before cleanup.",
+                    )
+                return "REPLACEFILEW_WITH_BACKUP"
         try:
             move_path_write_through(
                 temp_path,
@@ -1643,8 +1705,36 @@ def _replace_with_verified_payload(
                 "LOCAL_REPLACE_FINAL_COMMIT_WRITE_THROUGH_MOVE_FAILED",
                 "Keep recovery state and inspect final, staging and version-object postconditions.",
             ) from exc
+        return "MOVEFILEEX_REPLACE_EXISTING"
     finally:
         temp_path.unlink(missing_ok=True)
+        if remove_replace_backup:
+            replace_backup.unlink(missing_ok=True)
+
+
+def _regular_file_matches(path: Path, fingerprint: dict[str, object] | None) -> bool:
+    if fingerprint is None or path.is_symlink() or not path.is_file():
+        return False
+    try:
+        return _fingerprint_file(path, expected=fingerprint) == fingerprint
+    except (FinalCommitAdapterError, OSError):
+        return False
+
+
+def _regular_file_matches_artifact(
+    path: Path,
+    *,
+    content_hash: str,
+    fingerprint: dict[str, object] | None,
+) -> bool:
+    if path.is_symlink() or not path.is_file():
+        return False
+    if fingerprint is not None:
+        return _regular_file_matches(path, fingerprint)
+    try:
+        return _hash_file(path) == content_hash
+    except OSError:
+        return False
 
 
 def _validate_replace_operation_binding(
@@ -2244,6 +2334,7 @@ def _flushed_file_commit_receipt(
     artifact: VerifiedStagingArtifact,
     final_path: Path,
     write_through_move_used: bool,
+    filesystem_apply_method: str = "UNCONFIRMED",
 ) -> CommitReceipt:
     _flush_committed_file(final_path)
     expected_fingerprint = _artifact_fingerprint(artifact)
@@ -2271,6 +2362,7 @@ def _flushed_file_commit_receipt(
         ),
         file_flush_succeeded=True,
         write_through_move_used=write_through_move_used,
+        filesystem_apply_method=filesystem_apply_method,
     )
 
 

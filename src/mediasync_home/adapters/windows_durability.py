@@ -50,6 +50,45 @@ def move_path_write_through(
     )
 
 
+def replace_file_with_backup(
+    replacement: Path,
+    replaced: Path,
+    backup: Path,
+) -> None:
+    """Atomically replace a Windows file while retaining the replaced file."""
+    if os.name != "nt":
+        raise OSError("REPLACE_FILE_WITH_BACKUP_REQUIRES_WINDOWS")
+    kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True)
+    replace_file = kernel32.ReplaceFileW
+    replace_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+    ]
+    replace_file.restype = wintypes.BOOL
+    if replace_file(
+        _extended_windows_path(replaced),
+        _extended_windows_path(replacement),
+        _extended_windows_path(backup),
+        0,
+        None,
+        None,
+    ):
+        return
+    error_code = ctypes.get_last_error()
+    message = f"{ctypes.FormatError(error_code)} (backup: {backup})"
+    raise OSError(
+        error_code,
+        message,
+        str(replaced),
+        None,
+        str(replacement),
+    )
+
+
 def _extended_windows_path(path: Path) -> str:
     absolute = os.path.abspath(os.fspath(path))
     if absolute.startswith("\\\\?\\"):

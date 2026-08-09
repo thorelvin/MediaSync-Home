@@ -48,6 +48,7 @@ def test_lab_final_commit_inserts_verified_staging_payload_without_overwrite(tmp
 
     assert receipt.operation_id == "object-a"
     assert receipt.final_relative_path == artifact.relative_path
+    assert receipt.filesystem_apply_method == "MOVEFILEEX_NO_OVERWRITE"
     assert receipt.durability_state == (
         "LOCAL_FILE_FLUSH_AND_WRITE_THROUGH_MOVE_CONFIRMED"
     )
@@ -308,6 +309,8 @@ def test_local_versioned_replace_preserves_old_target_then_replaces_with_verifie
     assert preservation.version_object_id == "operation-a"
     assert preservation.final_relative_path == RelativePath("Photos/image.jpg")
     assert receipt.final_relative_path == artifact.relative_path
+    assert receipt.filesystem_apply_method == "REPLACEFILEW_WITH_BACKUP"
+    assert receipt.write_through_move_used is False
     assert final.read_bytes() == b"new-image"
     assert version_payload.read_bytes() == b"old-image"
     manifest = json.loads(version_manifest.read_text(encoding="utf-8"))
@@ -323,6 +326,84 @@ def test_local_versioned_replace_preserves_old_target_then_replaces_with_verifie
         "byte_count": len(b"old-image"),
         "content_hash": _sha256(b"old-image"),
     }
+
+
+def test_local_versioned_replace_falls_back_when_replacefilew_leaves_old_final(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    final = fixture.target_root / "Photos" / "image.jpg"
+    final.write_bytes(b"old-image")
+    artifact = fixture.stage(
+        object_id="operation-a",
+        relative_path="Photos/image.jpg",
+        payload=b"new-image",
+    )
+    operation = _replace_operation(fixture, expected_target_payload=b"old-image")
+    adapter = LocalVersionedReplaceFinalCommitAdapter(
+        target_root=fixture.target_root,
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    adapter.preserve_old_target(permit, operation)
+    monkeypatch.setattr(
+        final_commit_module,
+        "replace_file_with_backup",
+        lambda *_args: (_ for _ in ()).throw(OSError("replace unavailable")),
+    )
+
+    receipt = adapter.commit_verified_artifact(permit, artifact)
+
+    assert receipt.filesystem_apply_method == "MOVEFILEEX_REPLACE_EXISTING"
+    assert receipt.write_through_move_used is True
+    assert final.read_bytes() == b"new-image"
+
+
+def test_local_versioned_replace_blocks_ambiguous_replacefilew_postcondition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _commit_fixture(tmp_path)
+    final = fixture.target_root / "Photos" / "image.jpg"
+    final.write_bytes(b"old-image")
+    artifact = fixture.stage(
+        object_id="operation-a",
+        relative_path="Photos/image.jpg",
+        payload=b"new-image",
+    )
+    operation = _replace_operation(fixture, expected_target_payload=b"old-image")
+    adapter = LocalVersionedReplaceFinalCommitAdapter(
+        target_root=fixture.target_root,
+        staging_root=fixture.staging_root,
+        permit_validator=fixture.lease,
+    )
+    permit = fixture.lease.issue_mutation_permit()
+    adapter.preserve_old_target(permit, operation)
+
+    def ambiguous_replace(_replacement: Path, replaced: Path, backup: Path) -> None:
+        backup.write_bytes(replaced.read_bytes())
+        replaced.write_bytes(b"unexpected")
+        raise OSError("indeterminate native result")
+
+    monkeypatch.setattr(
+        final_commit_module,
+        "replace_file_with_backup",
+        ambiguous_replace,
+    )
+
+    with pytest.raises(FinalCommitAdapterError) as exc_info:
+        adapter.commit_verified_artifact(permit, artifact)
+
+    assert exc_info.value.validation_code == (
+        "LOCAL_REPLACE_FINAL_COMMIT_REPLACEFILEW_POSTCONDITION_AMBIGUOUS"
+    )
+    version_root = fixture.target_root / ".mediasync" / "objects" / "versions"
+    assert (version_root / "operation-a.payload").read_bytes() == b"old-image"
+    assert [path.read_bytes() for path in version_root.glob("*.replacefilew-backup")] == [
+        b"old-image"
+    ]
 
 
 def test_local_versioned_replace_rejects_target_drift_after_old_target_preserved(
@@ -705,6 +786,7 @@ def test_local_resolving_final_commit_preserves_then_replaces(tmp_path: Path) ->
 
     assert preservation.version_object_id == "operation-a"
     assert receipt.final_relative_path == artifact.relative_path
+    assert receipt.filesystem_apply_method == "REPLACEFILEW_WITH_BACKUP"
     assert final.read_bytes() == b"new-image"
     assert (
         fixture.target_root / ".mediasync" / "objects" / "versions" / "operation-a.payload"

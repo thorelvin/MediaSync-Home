@@ -221,6 +221,7 @@ def _commit_preserved_target_replacement(
             "receipt_final_relative_path": receipt.final_relative_path.value,
             "receipt_operation_id": receipt.operation_id,
             "resume_from_phase": RecoveryOperationPhase.OLD_TARGET_PRESERVED.value,
+            "filesystem_apply_method": receipt.filesystem_apply_method,
         },
     )
     try:
@@ -243,6 +244,7 @@ def _commit_preserved_target_replacement(
             "durability_state": receipt.durability_state,
             "file_flush_succeeded": receipt.file_flush_succeeded,
             "write_through_move_used": receipt.write_through_move_used,
+            "filesystem_apply_method": receipt.filesystem_apply_method,
         },
         operation_metadata=RecoveryOperationMetadata(
             final_durability_state=receipt.durability_state,

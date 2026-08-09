@@ -5,7 +5,10 @@ from pathlib import Path
 import pytest
 
 import mediasync_home.adapters.windows_durability as windows_durability_module
-from mediasync_home.adapters.windows_durability import move_path_write_through
+from mediasync_home.adapters.windows_durability import (
+    move_path_write_through,
+    replace_file_with_backup,
+)
 
 
 def test_write_through_move_publishes_file_without_overwrite(tmp_path: Path) -> None:
@@ -54,6 +57,20 @@ def test_write_through_move_publishes_directory(tmp_path: Path) -> None:
 
     assert not source.exists()
     assert (destination / "marker").read_bytes() == b"marker"
+
+
+def test_replace_file_with_backup_atomically_retains_old_file(tmp_path: Path) -> None:
+    replacement = tmp_path / "replacement.tmp"
+    replaced = tmp_path / "final.txt"
+    backup = tmp_path / "backup.txt"
+    replacement.write_bytes(b"new")
+    replaced.write_bytes(b"old")
+
+    replace_file_with_backup(replacement, replaced, backup)
+
+    assert not replacement.exists()
+    assert replaced.read_bytes() == b"new"
+    assert backup.read_bytes() == b"old"
 
 
 @pytest.mark.parametrize(

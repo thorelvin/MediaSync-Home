@@ -19,7 +19,10 @@ from mediasync_home.application.endpoint_capabilities import (
     LockScope,
     SourceReadGuardLevel,
 )
-from mediasync_home.adapters.windows_durability import move_path_write_through
+from mediasync_home.adapters.windows_durability import (
+    move_path_write_through,
+    replace_file_with_backup,
+)
 
 
 _FILE_CASE_SENSITIVE_SEARCH = 0x00000001
@@ -72,12 +75,11 @@ class LocalWindowsEndpointCapabilitiesProbe:
 
             self._write_new(paths[4], b"replace-old\n")
             self._write_new(paths[5], b"replace-new\n")
-            move_path_write_through(
-                paths[5],
-                paths[4],
-                replace_existing=True,
+            replace_file_with_backup(paths[5], paths[4], paths[7])
+            atomic_replace = (
+                paths[4].read_bytes() == b"replace-new\n"
+                and paths[7].read_bytes() == b"replace-old\n"
             )
-            atomic_replace = paths[4].read_bytes() == b"replace-new\n"
 
             self._write_new(paths[6], b"stream-base\n")
             if profile.supports_named_streams:
