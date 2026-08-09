@@ -60,11 +60,7 @@ class SqliteWritableEndpointRegistrationStore:
         job_id: str,
         job_revision_id: str,
     ) -> tuple[WritableEndpointRegistrationCandidate, ...]:
-        active = self._connection.execute(
-            "SELECT active_revision_id FROM job_heads WHERE job_id = ?",
-            (job_id,),
-        ).fetchone()
-        if active is None or str(active[0]) != job_revision_id:
+        if self._load_active_job_revision(job_id) != job_revision_id:
             raise _registration_error(
                 "WRITABLE_ENDPOINT_JOB_REVISION_STALE",
                 "Refresh the active backup job before registering its targets.",
@@ -142,9 +138,10 @@ class SqliteWritableEndpointRegistrationStore:
     ) -> tuple[str, ...]:
         active = self._connection.execute(
             """
-            SELECT heads.active_revision_id, jobs.lifecycle_state
+            SELECT heads.active_revision_id, jobs.lifecycle_state, deletions.job_id
             FROM jobs
             INNER JOIN job_heads AS heads ON heads.job_id = jobs.id
+            LEFT JOIN job_deletions AS deletions ON deletions.job_id = jobs.id
             WHERE jobs.id = ?
             """,
             (job_id,),
@@ -153,6 +150,7 @@ class SqliteWritableEndpointRegistrationStore:
             active is None
             or str(active[0]) != job_revision_id
             or str(active[1]) != "ACTIVE"
+            or active[2] is not None
         ):
             raise _registration_error(
                 "WRITABLE_ENDPOINT_JOB_REVISION_STALE",
@@ -190,6 +188,11 @@ class SqliteWritableEndpointRegistrationStore:
                 ON heads.job_id = bindings.job_id
                 AND heads.active_revision_id = bindings.job_revision_id
             WHERE jobs.lifecycle_state = 'ACTIVE'
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM job_deletions AS deletions
+                    WHERE deletions.job_id = jobs.id
+                )
                 AND NOT (
                     bindings.job_id = ?
                     AND bindings.job_revision_id = ?
@@ -329,6 +332,10 @@ class SqliteWritableEndpointRegistrationStore:
                 )
             self._require_idle()
             self._connection.execute("BEGIN IMMEDIATE")
+            self._require_active_job_revision(
+                intent.job_id,
+                intent.source_job_revision_id,
+            )
             for item in applied_capabilities:
                 self._connection.execute(
                     """
@@ -455,6 +462,10 @@ class SqliteWritableEndpointRegistrationStore:
         try:
             self._require_idle()
             self._connection.execute("BEGIN IMMEDIATE")
+            self._require_active_job_revision(
+                intent.job_id,
+                intent.source_job_revision_id,
+            )
             self._commit_endpoint_revisions(intent, committed_utc=committed_utc)
             self._commit_job_revision(intent)
             cursor = self._connection.execute(
@@ -517,6 +528,17 @@ class SqliteWritableEndpointRegistrationStore:
                 last_next_action
             FROM writable_endpoint_registration_intents
             WHERE state IN ('PREPARED', 'FILESYSTEM_APPLIED')
+                AND EXISTS (
+                    SELECT 1
+                    FROM jobs
+                    WHERE jobs.id = writable_endpoint_registration_intents.job_id
+                        AND jobs.lifecycle_state = 'ACTIVE'
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM job_deletions AS deletions
+                    WHERE deletions.job_id = writable_endpoint_registration_intents.job_id
+                )
             ORDER BY created_utc, intent_id
             LIMIT ?
             """,
@@ -576,16 +598,10 @@ class SqliteWritableEndpointRegistrationStore:
         self,
         intent: WritableEndpointRegistrationIntent,
     ) -> None:
-        active = self._connection.execute(
-            "SELECT active_revision_id FROM job_heads WHERE job_id = ?",
-            (intent.job_id,),
-        ).fetchone()
-        if active is None or str(active[0]) != intent.source_job_revision_id:
-            raise _registration_error(
-                "WRITABLE_ENDPOINT_JOB_REVISION_STALE",
-                "Refresh the active backup job before registering its targets.",
-                retryable=False,
-            )
+        self._require_active_job_revision(
+            intent.job_id,
+            intent.source_job_revision_id,
+        )
         expected = {
             (target.target_ordinal, target.endpoint_id, target.source_endpoint_revision_id)
             for target in intent.prepared_targets
@@ -954,6 +970,33 @@ class SqliteWritableEndpointRegistrationStore:
                 retryable=False,
             )
         return _intent_from_row(row)
+
+    def _load_active_job_revision(self, job_id: str) -> str | None:
+        row = self._connection.execute(
+            """
+            SELECT heads.active_revision_id
+            FROM jobs
+            INNER JOIN job_heads AS heads ON heads.job_id = jobs.id
+            LEFT JOIN job_deletions AS deletions ON deletions.job_id = jobs.id
+            WHERE jobs.id = ?
+                AND jobs.lifecycle_state = 'ACTIVE'
+                AND deletions.job_id IS NULL
+            """,
+            (job_id,),
+        ).fetchone()
+        return None if row is None else str(row[0])
+
+    def _require_active_job_revision(
+        self,
+        job_id: str,
+        expected_revision_id: str,
+    ) -> None:
+        if self._load_active_job_revision(job_id) != expected_revision_id:
+            raise _registration_error(
+                "WRITABLE_ENDPOINT_JOB_REVISION_STALE",
+                "Refresh the active backup job before registering its targets.",
+                retryable=False,
+            )
 
     def _require_idle(self) -> None:
         if self._connection.in_transaction:

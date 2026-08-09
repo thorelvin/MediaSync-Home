@@ -221,6 +221,43 @@ def test_local_staging_copies_only_plan_bound_source_identity(tmp_path: Path) ->
     assert verification.fingerprint_json == validation.fingerprint_json
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows synthesizes execute bits by path")
+def test_local_staging_accepts_same_windows_executable_from_open_handle(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_file = source_root / "Pictures" / "Updater.exe"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"executable-bytes")
+    target_root.mkdir()
+    precondition = SourceFilePrecondition(
+        snapshot_id="snapshot-a",
+        snapshot_entry_id="entry-a",
+        relative_path="Pictures/Updater.exe",
+        size_bytes=source_file.stat().st_size,
+        identity_fingerprint_hash=stable_file_identity_hash(source_file.stat()),
+    )
+    operation = replace(
+        _source_operation(source_file),
+        source_relative_path="Pictures/Updater.exe",
+        final_relative_path="Pictures/Updater.exe",
+        source_precondition_json=precondition.to_json(),
+    )
+    adapter = LocalFileStagingTransferAdapter(
+        root_resolver=_SourceAndTargetRootResolver(
+            source_root=source_root,
+            target_root=target_root,
+        )
+    )
+
+    validation = adapter.validate_source_file(operation)
+
+    assert json.loads(validation.fingerprint_json)["byte_count"] == len(
+        b"executable-bytes"
+    )
+
+
 def test_local_staging_rejects_conflicting_immutable_manifest(tmp_path: Path) -> None:
     source_root = tmp_path / "source"
     target_root = tmp_path / "target"

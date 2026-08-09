@@ -24,6 +24,7 @@ from mediasync_home.adapters.sqlite.migrations import (
     apply_sqlite_migrations,
     catalog_migration_plan,
 )
+from mediasync_home.adapters.sqlite.job_lifecycle import SqliteJobLifecycleStore
 from mediasync_home.adapters.sqlite.transactions import SqliteImmediateTransactionRunner
 from mediasync_home.adapters.sqlite.writable_endpoint_registrations import (
     SqliteWritableEndpointRegistrationStore,
@@ -54,6 +55,7 @@ from mediasync_home.application.endpoint_capabilities import (
     EndpointCapabilityProbeScope,
 )
 from mediasync_home.application.runtime_status import startup_status
+from mediasync_home.application.job_lifecycle import ChangeJobLifecycleCommand
 from mediasync_home.domain.process_roles import ProcessRole
 from mediasync_home.ipc.client import InProcessIpcClient
 from mediasync_home.ipc.client_identity import (
@@ -474,6 +476,64 @@ def test_startup_reconciliation_finishes_exact_published_intent(
             """,
             (INTENT_ID,),
         ).fetchone() == ("COMMITTED", "2026-07-31T12:02:00Z")
+
+
+def test_deleted_job_excludes_pending_registration_from_startup_recovery(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database, source=source, target=target)
+        _refresher(connection).refresh_endpoint_classifications(
+            observed_utc="2026-07-31T12:00:00Z"
+        )
+        store = SqliteWritableEndpointRegistrationStore(connection)
+        candidate = store.load_registration_candidates(
+            job_id=JOB_ID,
+            job_revision_id=JOB_REVISION_ID,
+        )[0]
+        prepared = LocalWritableEndpointControlAreaProvisioner().prepare_new_control_area(
+            candidate,
+            intent_id=INTENT_ID,
+            target_ids=WritableEndpointTargetIds(
+                target_ordinal=1,
+                endpoint_revision_id=NEW_TARGET_REVISION_ID,
+                control_area_id=CONTROL_AREA_ID,
+            ),
+            owner_installation_id=INSTALLATION_ID,
+            created_utc="2026-07-31T12:01:00Z",
+        )
+        store.save_prepared_registration_intent(
+            _intent(prepared, created_utc="2026-07-31T12:01:00Z")
+        )
+
+        deleted = SqliteJobLifecycleStore(
+            connection,
+            installation_id=INSTALLATION_ID,
+        ).delete_standard_backup_job(
+            command=ChangeJobLifecycleCommand(
+                request_id="aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+                idempotency_key="bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb",
+                job_id=JOB_ID,
+                expected_job_revision_id=JOB_REVISION_ID,
+                expected_lifecycle_row_version=1,
+                explicit_confirmation=True,
+            ),
+            occurred_utc="2026-07-31T12:02:00Z",
+        )
+
+        assert deleted.applied
+        assert store.list_recoverable_registration_intents(limit=10) == ()
+        with pytest.raises(WritableEndpointRegistrationError) as exc_info:
+            store.load_registration_candidates(
+                job_id=JOB_ID,
+                job_revision_id=JOB_REVISION_ID,
+            )
+        assert exc_info.value.validation_code == "WRITABLE_ENDPOINT_JOB_REVISION_STALE"
 
 
 def test_startup_reconciliation_blocks_newly_detected_root_alias(

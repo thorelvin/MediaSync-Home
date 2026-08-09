@@ -350,6 +350,9 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
             INNER JOIN jobs
                 ON jobs.id = details.job_id
                 AND jobs.lifecycle_state = 'ACTIVE'
+            WHERE NOT EXISTS (
+                SELECT 1 FROM job_deletions WHERE job_deletions.job_id = jobs.id
+            )
             ORDER BY details.job_id
             """,
             (),
@@ -413,6 +416,11 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                 AND heads.active_revision_id = details.job_revision_id
             INNER JOIN jobs ON jobs.id = details.job_id
             WHERE jobs.lifecycle_state = ?
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM job_deletions
+                    WHERE job_deletions.job_id = jobs.id
+                )
             ORDER BY details.job_id
             LIMIT ? OFFSET ?
             """,
@@ -458,6 +466,11 @@ class SqliteStandardBackupJobCatalog(StandardBackupJobCatalog):
                 AND heads.active_revision_id = details.job_revision_id
             INNER JOIN jobs ON jobs.id = details.job_id
             WHERE details.job_id = ?
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM job_deletions
+                    WHERE job_deletions.job_id = jobs.id
+                )
             """,
             (job_id,),
         ).fetchone()

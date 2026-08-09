@@ -52,11 +52,15 @@ class SqliteJobLifecycleStore(JobLifecycleStore):
             SELECT
                 jobs.id,
                 heads.active_revision_id,
-                jobs.lifecycle_state,
+                CASE
+                    WHEN deletions.job_id IS NOT NULL THEN 'DELETED'
+                    ELSE jobs.lifecycle_state
+                END,
                 jobs.lifecycle_row_version,
                 jobs.archived_utc
             FROM jobs
             INNER JOIN job_heads AS heads ON heads.job_id = jobs.id
+            LEFT JOIN job_deletions AS deletions ON deletions.job_id = jobs.id
             WHERE jobs.id = ?
             """,
             (job_id,),
@@ -106,7 +110,10 @@ class SqliteJobLifecycleStore(JobLifecycleStore):
                 record=current,
             )
         try:
-            disabled_count = self.disable_enabled_schedules(command.job_id)
+            disabled_count = self.disable_enabled_schedules(
+                command.job_id,
+                validation_code_prefix="JOB_ARCHIVE",
+            )
         except SqliteJobLifecycleError as exc:
             return JobLifecycleTransitionOutcome(
                 applied=False,
@@ -134,13 +141,14 @@ class SqliteJobLifecycleStore(JobLifecycleStore):
             UPDATE backup_analysis_requests
             SET
                 state = 'BLOCKED',
+                started_utc = COALESCE(started_utc, ?),
                 completed_utc = ?,
                 reason_code = 'BACKUP_ANALYSIS_JOB_ARCHIVED',
                 row_version = row_version + 1
             WHERE job_id = ?
                 AND state IN ('QUEUED', 'RUNNING')
             """,
-            (occurred_utc, command.job_id),
+            (occurred_utc, occurred_utc, command.job_id),
         )
         recorded = self.load_job_lifecycle(command.job_id)
         assert recorded is not None
@@ -211,6 +219,112 @@ class SqliteJobLifecycleStore(JobLifecycleStore):
             analysis_request_id=command.request_id,
         )
 
+    def delete_standard_backup_job(
+        self,
+        *,
+        command: ChangeJobLifecycleCommand,
+        occurred_utc: str,
+    ) -> JobLifecycleTransitionOutcome:
+        replay = self._load_deletion_outcome(command.idempotency_key)
+        if replay is not None:
+            return replace(replay, idempotent_replay=True)
+        current = self.load_job_lifecycle(command.job_id)
+        rejection = _validate_deletion(current=current, command=command)
+        if rejection is not None:
+            return rejection
+        assert current is not None
+        blocking_state = self._blocking_run_state(command.job_id)
+        if blocking_state is not None:
+            return JobLifecycleTransitionOutcome(
+                applied=False,
+                validation_code=(
+                    "JOB_DELETE_RECOVERY_REQUIRED"
+                    if blocking_state == "RECOVERY_REQUIRED"
+                    else "JOB_DELETE_ACTIVE_RUN"
+                ),
+                next_action=(
+                    "Resolve recovery before deleting this job."
+                    if blocking_state == "RECOVERY_REQUIRED"
+                    else "Wait for the active backup to finish or stop it safely."
+                ),
+                record=current,
+            )
+        if self._has_recovery_required_target(command.job_id):
+            return JobLifecycleTransitionOutcome(
+                applied=False,
+                validation_code="JOB_DELETE_RECOVERY_REQUIRED",
+                next_action="Resolve recovery before deleting this job.",
+                record=current,
+            )
+        try:
+            disabled_count = self.disable_enabled_schedules(
+                command.job_id,
+                validation_code_prefix="JOB_DELETE",
+            )
+        except SqliteJobLifecycleError as exc:
+            return JobLifecycleTransitionOutcome(
+                applied=False,
+                validation_code=str(exc),
+                next_action="Restore Task Scheduler reconciliation context and retry.",
+                record=current,
+            )
+        cursor = self._connection.execute(
+            """
+            UPDATE jobs
+            SET lifecycle_row_version = lifecycle_row_version + 1
+            WHERE id = ? AND lifecycle_row_version = ?
+            """,
+            (command.job_id, current.row_version),
+        )
+        if cursor.rowcount != 1:
+            raise SqliteJobLifecycleError("JOB_LIFECYCLE_TRANSITION_CONFLICT")
+        deleted_row_version = current.row_version + 1
+        self._connection.execute(
+            """
+            INSERT INTO job_deletions (
+                job_id,
+                job_revision_id,
+                command_request_id,
+                command_idempotency_key,
+                occurred_utc,
+                lifecycle_row_version,
+                disabled_schedule_count
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                command.job_id,
+                command.expected_job_revision_id,
+                command.request_id,
+                command.idempotency_key,
+                occurred_utc,
+                deleted_row_version,
+                disabled_count,
+            ),
+        )
+        self._connection.execute(
+            """
+            UPDATE backup_analysis_requests
+            SET
+                state = 'BLOCKED',
+                started_utc = COALESCE(started_utc, ?),
+                completed_utc = ?,
+                reason_code = 'BACKUP_ANALYSIS_JOB_DELETED',
+                row_version = row_version + 1
+            WHERE job_id = ? AND state IN ('QUEUED', 'RUNNING')
+            """,
+            (occurred_utc, occurred_utc, command.job_id),
+        )
+        recorded = self.load_job_lifecycle(command.job_id)
+        assert recorded is not None and recorded.state is JobLifecycleState.DELETED
+        return JobLifecycleTransitionOutcome(
+            applied=True,
+            validation_code="JOB_DELETED",
+            next_action="The job configuration was deleted; history and files are retained.",
+            record=recorded,
+            disabled_schedule_count=disabled_count,
+        )
+
     def _blocking_run_state(self, job_id: str) -> str | None:
         placeholders = ", ".join("?" for _ in _BLOCKING_RUN_STATES)
         row = self._connection.execute(
@@ -240,7 +354,12 @@ class SqliteJobLifecycleStore(JobLifecycleStore):
         ).fetchone()
         return row is not None
 
-    def disable_enabled_schedules(self, job_id: str) -> int:
+    def disable_enabled_schedules(
+        self,
+        job_id: str,
+        *,
+        validation_code_prefix: str = "JOB_LIFECYCLE",
+    ) -> int:
         rows = self._connection.execute(
             f"""
             SELECT {_SCHEDULE_COLUMNS}
@@ -254,7 +373,9 @@ class SqliteJobLifecycleStore(JobLifecycleStore):
             return 0
         executable_path = self._task_scheduler_executable_path
         if executable_path is None or not executable_path.strip():
-            raise SqliteJobLifecycleError("JOB_ARCHIVE_SCHEDULER_CONTEXT_UNAVAILABLE")
+            raise SqliteJobLifecycleError(
+                f"{validation_code_prefix}_SCHEDULER_CONTEXT_UNAVAILABLE"
+            )
         normalized_path = str(Path(executable_path))
         for row in rows:
             schedule = _schedule_from_row(row)
@@ -288,7 +409,9 @@ class SqliteJobLifecycleStore(JobLifecycleStore):
                 ),
             )
             if cursor.rowcount != 1:
-                raise SqliteJobLifecycleError("JOB_ARCHIVE_SCHEDULE_CONFLICT")
+                raise SqliteJobLifecycleError(
+                    f"{validation_code_prefix}_SCHEDULE_CONFLICT"
+                )
         return len(rows)
 
     def _record_event(
@@ -381,6 +504,37 @@ class SqliteJobLifecycleStore(JobLifecycleStore):
             analysis_request_id=None if row[6] is None else str(row[6]),
         )
 
+    def _load_deletion_outcome(
+        self,
+        idempotency_key: str,
+    ) -> JobLifecycleTransitionOutcome | None:
+        row = self._connection.execute(
+            """
+            SELECT
+                job_id,
+                job_revision_id,
+                lifecycle_row_version,
+                disabled_schedule_count
+            FROM job_deletions
+            WHERE command_idempotency_key = ?
+            """,
+            (idempotency_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return JobLifecycleTransitionOutcome(
+            applied=True,
+            validation_code="JOB_DELETED",
+            next_action="The job configuration was deleted; history and files are retained.",
+            record=JobLifecycleRecord(
+                job_id=str(row[0]),
+                job_revision_id=str(row[1]),
+                state=JobLifecycleState.DELETED,
+                row_version=_required_int(row[2]),
+            ),
+            disabled_schedule_count=_required_int(row[3]),
+        )
+
 
 def _validate_transition(
     *,
@@ -413,6 +567,41 @@ def _validate_transition(
             applied=False,
             validation_code="JOB_LIFECYCLE_STATE_CHANGED",
             next_action="Refresh the job before changing its lifecycle.",
+            record=current,
+        )
+    return None
+
+
+def _validate_deletion(
+    *,
+    current: JobLifecycleRecord | None,
+    command: ChangeJobLifecycleCommand,
+) -> JobLifecycleTransitionOutcome | None:
+    if current is None:
+        return JobLifecycleTransitionOutcome(
+            applied=False,
+            validation_code="JOB_LIFECYCLE_JOB_NOT_FOUND",
+            next_action="Refresh the Jobs view and choose an existing job.",
+        )
+    if current.job_revision_id != command.expected_job_revision_id:
+        return JobLifecycleTransitionOutcome(
+            applied=False,
+            validation_code="JOB_LIFECYCLE_REVISION_STALE",
+            next_action="Refresh the job before deleting it.",
+            record=current,
+        )
+    if current.row_version != command.expected_lifecycle_row_version:
+        return JobLifecycleTransitionOutcome(
+            applied=False,
+            validation_code="JOB_LIFECYCLE_VERSION_STALE",
+            next_action="Refresh the job before deleting it.",
+            record=current,
+        )
+    if current.state is JobLifecycleState.DELETED:
+        return JobLifecycleTransitionOutcome(
+            applied=False,
+            validation_code="JOB_ALREADY_DELETED",
+            next_action="Refresh the Jobs view.",
             record=current,
         )
     return None

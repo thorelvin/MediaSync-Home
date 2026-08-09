@@ -61,6 +61,7 @@ from mediasync_home.application.version_objects import (
     create_version_object_manifest,
 )
 from mediasync_home.domain.capabilities import MutationPermit, _issue_mutation_permit
+from tests.support.sqlite_catalog import insert_default_filter_set_version
 
 
 def test_sqlite_version_history_lists_run_versions_with_active_hold(
@@ -228,6 +229,60 @@ def test_sqlite_due_versions_exclude_archived_jobs_and_active_holds(
             """,
             ("2026-09-01T00:00:00.000Z",),
         )
+        assert store.list_due_retained_versions(
+            cutoff_utc="2026-09-01T00:00:00.000Z",
+            limit=10,
+        ) == ()
+    finally:
+        connection.close()
+
+
+def test_sqlite_due_versions_exclude_deleted_jobs(tmp_path: Path) -> None:
+    connection = _prepared_catalog_connection(tmp_path)
+    try:
+        _insert_job(connection)
+        connection.execute(
+            "INSERT INTO filter_sets (job_id, id) VALUES ('job-a', 'filter-a')"
+        )
+        insert_default_filter_set_version(
+            connection,
+            job_id="job-a",
+            filter_set_id="filter-a",
+        )
+        connection.execute(
+            """
+            INSERT INTO job_revisions (
+                job_id, id, filter_set_id, filter_set_version
+            )
+            VALUES ('job-a', 'job-rev-a', 'filter-a', 1)
+            """
+        )
+        SqliteFinalFileCatalogHandoffStore(connection).record_final_file_handoff(
+            _handoff()
+        )
+        store = SqliteVersionRetentionStore(connection)
+        assert len(
+            store.list_due_retained_versions(
+                cutoff_utc="2026-09-01T00:00:00.000Z",
+                limit=10,
+            )
+        ) == 1
+        connection.execute(
+            "UPDATE jobs SET lifecycle_row_version = 2 WHERE id = 'job-a'"
+        )
+        connection.execute(
+            """
+            INSERT INTO job_deletions (
+                job_id, job_revision_id, command_request_id,
+                command_idempotency_key, occurred_utc, lifecycle_row_version
+            )
+            VALUES (
+                'job-a', 'job-rev-a', 'delete-request-a',
+                'delete-key-a', '2026-09-01T00:00:00.000Z', 2
+            )
+            """
+        )
+
         assert store.list_due_retained_versions(
             cutoff_utc="2026-09-01T00:00:00.000Z",
             limit=10,

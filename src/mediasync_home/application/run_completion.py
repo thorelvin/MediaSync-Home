@@ -405,9 +405,7 @@ def _operation_matches_permit(
         and operation.target_endpoint_revision_id == permit.endpoint_revision_id
         and operation.owner_installation_id == permit.owner_installation_id
         and operation.ownership_epoch == permit.ownership_epoch
-        and operation.lease_id == permit.lease_id
         and operation.lease_resource_key == permit.resource_key
-        and operation.fencing_token == permit.fencing_token
     )
 
 

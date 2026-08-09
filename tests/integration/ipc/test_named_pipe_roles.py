@@ -288,6 +288,10 @@ def test_gui_can_disconnect_and_reconnect_without_stopping_engine_host() -> None
 def test_launcher_local_preview_host_publishes_persistent_engine_host(tmp_path: Path) -> None:
     installation_id = f"launcher-host-{uuid4().hex}"
     state_root = tmp_path / "state"
+    stdout_path = tmp_path / "host.stdout"
+    stderr_path = tmp_path / "host.stderr"
+    stdout_stream = stdout_path.open("w", encoding="utf-8")
+    stderr_stream = stderr_path.open("w", encoding="utf-8")
     host = subprocess.Popen(
         [
             sys.executable,
@@ -304,8 +308,8 @@ def test_launcher_local_preview_host_publishes_persistent_engine_host(tmp_path: 
             "1000",
         ],
         cwd=Path(__file__).resolve().parents[3],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=stdout_stream,
+        stderr=stderr_stream,
         text=True,
     )
     stdout = ""
@@ -318,11 +322,15 @@ def test_launcher_local_preview_host_publishes_persistent_engine_host(tmp_path: 
             state_root=state_root,
         )
         assert host.poll() is None
-        time.sleep(0.5)
+        time.sleep(1.25)
     finally:
         if host.poll() is None:
             host.kill()
-        stdout, stderr = host.communicate(timeout=5)
+        host.wait(timeout=5)
+        stdout_stream.close()
+        stderr_stream.close()
+        stdout = stdout_path.read_text(encoding="utf-8")
+        stderr = stderr_path.read_text(encoding="utf-8")
 
     assert gui is not None
     gui_response = json.loads(gui.stdout)
@@ -333,7 +341,7 @@ def test_launcher_local_preview_host_publishes_persistent_engine_host(tmp_path: 
     assert gui_response["payload"]["host_status"]["role"] == "engine-host"
     assert host_events[0]["event"] == "ENGINE_HOST_PIPE_STARTING"
     assert host_events[0]["serve_forever"] is True
-    assert host_events[0]["run_executor_cycle_after_request"] is True
+    assert host_events[0]["run_executor_cycle_after_request"] is False
     assert host_events[0]["run_executor_cycle_interval_ms"] == 1000
     assert host_events[0]["run_executor_staging_backend"] == "robocopy"
     assert host_events[0]["host_locator"]["installation_id"] == installation_id

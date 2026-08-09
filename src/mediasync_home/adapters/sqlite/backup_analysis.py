@@ -115,6 +115,11 @@ class SqliteBackupAnalysisRequestStore:
                 INNER JOIN jobs ON jobs.id = requests.job_id
                 WHERE requests.state = 'QUEUED'
                     AND jobs.lifecycle_state = 'ACTIVE'
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM job_deletions AS deletions
+                        WHERE deletions.job_id = jobs.id
+                    )
                 ORDER BY requested_utc, request_id
                 LIMIT 1
                 """

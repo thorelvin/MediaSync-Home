@@ -46,6 +46,9 @@ def test_live_robocopy_adapter_runs_contained_and_publishes_manifested_payload(
     payload = b"live robocopy payload\n"
     source_file.parent.mkdir(parents=True)
     source_file.write_bytes(payload)
+    sibling_directory = source_file.parent / "must-not-be-copied"
+    sibling_directory.mkdir()
+    (sibling_directory / "unselected.txt").write_text("excluded", encoding="utf-8")
     target_root.mkdir()
     adapter = RobocopyStagingTransferAdapter(
         root_resolver=_RootResolver(source_root=source_root, target_root=target_root),
@@ -64,6 +67,7 @@ def test_live_robocopy_adapter_runs_contained_and_publishes_manifested_payload(
     assert manifest["canonical_manifest_hash"]
     assert manifest["entries"][0]["payload_name"] == "object-live.payload"
     assert not (work_root / "inbox" / "object-live").exists()
+    assert not (work_root / "quarantine").exists()
     assert (work_root / "logs" / "object-live.robocopy.log").is_file()
 
 

@@ -7,12 +7,14 @@ from typing import Protocol
 
 class JobLifecycleCommandName(str, Enum):
     ARCHIVE_STANDARD_BACKUP_JOB = "ARCHIVE_STANDARD_BACKUP_JOB"
+    DELETE_STANDARD_BACKUP_JOB = "DELETE_STANDARD_BACKUP_JOB"
     REACTIVATE_STANDARD_BACKUP_JOB = "REACTIVATE_STANDARD_BACKUP_JOB"
 
 
 class JobLifecycleState(str, Enum):
     ACTIVE = "ACTIVE"
     ARCHIVED = "ARCHIVED"
+    DELETED = "DELETED"
 
 
 class JobLifecyclePayloadError(ValueError):
@@ -82,6 +84,13 @@ class JobLifecycleStore(Protocol):
     ) -> JobLifecycleTransitionOutcome: ...
 
     def reactivate_standard_backup_job(
+        self,
+        *,
+        command: ChangeJobLifecycleCommand,
+        occurred_utc: str,
+    ) -> JobLifecycleTransitionOutcome: ...
+
+    def delete_standard_backup_job(
         self,
         *,
         command: ChangeJobLifecycleCommand,

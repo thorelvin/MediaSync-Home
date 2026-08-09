@@ -64,7 +64,7 @@ def test_robocopy_single_file_command_plan_uses_contained_transfer_policy(
         log_path=log_path,
         working_directory=work_root,
         working_directory_root=work_root,
-        profile=RobocopyTransferProfile(switches=("/E", "/R:1", "/W:1")),
+        profile=RobocopyTransferProfile(switches=("/Z", "/R:1", "/W:1")),
     )
 
     assert plan.parsed_argv == plan.argv
@@ -117,6 +117,33 @@ def test_robocopy_profile_rejects_forbidden_typed_switch(tmp_path: Path) -> None
             working_directory=tmp_path / "work",
             working_directory_root=tmp_path / "work",
             profile=RobocopyTransferProfile(switches=("/E", "/MOVE")),
+        )
+
+
+@pytest.mark.parametrize("switch", ["/E", "/S", "/LEV:2"])
+def test_robocopy_profile_rejects_recursive_file_batch_switch(
+    tmp_path: Path,
+    switch: str,
+) -> None:
+    with pytest.raises(
+        RobocopyConfigurationError,
+        match="ROBOCOPY_FILE_BATCH_RECURSION_FORBIDDEN",
+    ):
+        build_robocopy_batch_manifest(
+            batch_id="batch-a",
+            source_parent=tmp_path / "source",
+            staging_inbox=tmp_path / "inbox",
+            log_path=tmp_path / "log.txt",
+            entries=(
+                _manifest_entry(
+                    operation_id="op-a",
+                    staging_object_id="object-a",
+                    source_file_name="A.jpg",
+                    payload_path=tmp_path / "staging" / "object-a.payload",
+                    payload=b"image",
+                ),
+            ),
+            profile=RobocopyTransferProfile(switches=(switch,)),
         )
 
 
@@ -225,7 +252,7 @@ def test_robocopy_batch_manifest_is_canonical_and_immutable(tmp_path: Path) -> N
         staging_inbox=inbox,
         log_path=log_path,
         entries=(entry,),
-        profile=RobocopyTransferProfile(switches=("/E", "/R:1", "/W:1")),
+        profile=RobocopyTransferProfile(switches=("/Z", "/R:1", "/W:1")),
     )
     write_robocopy_batch_manifest(manifest=manifest, manifest_path=manifest_path)
     write_robocopy_batch_manifest(manifest=manifest, manifest_path=manifest_path)
@@ -318,7 +345,7 @@ def test_robocopy_directory_manifest_command_plan_uses_exact_file_list(
                 payload=b"b",
             ),
         ),
-        profile=RobocopyTransferProfile(switches=("/E", "/R:1", "/W:1")),
+        profile=RobocopyTransferProfile(switches=("/Z", "/R:1", "/W:1")),
     )
 
     plan = build_robocopy_directory_manifest_command_plan(
@@ -327,7 +354,7 @@ def test_robocopy_directory_manifest_command_plan_uses_exact_file_list(
         manifest_path=manifest_path,
         working_directory=tmp_path / "work",
         working_directory_root=tmp_path / "work",
-        profile=RobocopyTransferProfile(switches=("/E", "/R:1", "/W:1")),
+        profile=RobocopyTransferProfile(switches=("/Z", "/R:1", "/W:1")),
     )
 
     assert plan.file_names == ("A file.jpg", "B.jpg")
@@ -898,7 +925,9 @@ def test_robocopy_staging_transfer_blocks_extra_inbox_content_despite_nonfatal_e
 
     assert exc_info.value.validation_code == "STAGING_MANIFEST_MISMATCH"
     assert not (tmp_path / "staging" / "object-a.payload").exists()
-    assert (tmp_path / "work" / "inbox" / "object-a" / "unexpected.tmp").read_bytes() == b"extra"
+    quarantined = tuple((tmp_path / "work" / "quarantine").glob("object-a.*"))
+    assert len(quarantined) == 1
+    assert (quarantined[0] / "unexpected.tmp").read_bytes() == b"extra"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
@@ -934,6 +963,38 @@ def test_robocopy_staging_transfer_clears_empty_inbox_after_manifest_mismatch(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
+def test_robocopy_staging_transfer_quarantines_conflicting_manifest_before_retry(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_file = source_root / "Pictures" / "A.jpg"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"image-bytes")
+    target_root.mkdir()
+    manifest_path = tmp_path / "work" / "manifests" / "object-a.manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text("stale manifest", encoding="utf-8")
+    adapter = RobocopyStagingTransferAdapter(
+        root_resolver=_RootResolver(source_root=source_root, target_root=target_root),
+        staging_root=tmp_path / "staging",
+        robocopy_work_root=tmp_path / "work",
+        process_supervisor=_FakeRobocopySupervisor(exit_code=1),
+        executable_resolver=_FakeExecutableResolver(_resolved_executable(tmp_path)),
+    )
+
+    evidence = adapter.transfer_to_staging(_operation(source_file))
+
+    assert evidence.transfer_state == "ROBOCOPY_EXIT_1_COPIED_TRANSFERRED_TO_STAGING"
+    quarantined = tuple(
+        (tmp_path / "work" / "quarantine").glob("object-a.manifest.json.*")
+    )
+    assert len(quarantined) == 1
+    assert quarantined[0].read_text(encoding="utf-8") == "stale manifest"
+    assert (tmp_path / "staging" / "object-a.payload").read_bytes() == b"image-bytes"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
 def test_robocopy_staging_transfer_preserves_type_mismatch_after_manifest_mismatch(
     tmp_path: Path,
 ) -> None:
@@ -958,7 +1019,9 @@ def test_robocopy_staging_transfer_preserves_type_mismatch_after_manifest_mismat
         adapter.transfer_to_staging(_operation(source_file))
 
     assert exc_info.value.validation_code == "STAGING_MANIFEST_MISMATCH"
-    assert (tmp_path / "work" / "inbox" / "object-a" / "A.jpg").is_dir()
+    quarantined = tuple((tmp_path / "work" / "quarantine").glob("object-a.*"))
+    assert len(quarantined) == 1
+    assert (quarantined[0] / "A.jpg").is_dir()
     assert not (tmp_path / "staging" / "object-a.payload").exists()
 
 

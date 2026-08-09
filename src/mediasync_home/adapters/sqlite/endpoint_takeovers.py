@@ -67,11 +67,7 @@ class SqliteEndpointTakeoverStore:
         expected_foreign_owner_installation_id: str,
         expected_ownership_epoch: int,
     ) -> EndpointTakeoverCandidate:
-        active = self._connection.execute(
-            "SELECT active_revision_id FROM job_heads WHERE job_id = ?",
-            (job_id,),
-        ).fetchone()
-        if active is None or str(active[0]) != job_revision_id:
+        if self._load_active_job_revision(job_id) != job_revision_id:
             raise _error(
                 "ENDPOINT_TAKEOVER_JOB_REVISION_STALE",
                 "Refresh the active backup job before confirming takeover.",
@@ -333,6 +329,10 @@ class SqliteEndpointTakeoverStore:
         try:
             self._require_idle()
             self._connection.execute("BEGIN IMMEDIATE")
+            self._require_active_job_revision(
+                intent.job_id,
+                intent.source_job_revision_id,
+            )
             self._commit_endpoint_revision(intent, committed_utc=committed_utc)
             self._commit_job_revision(intent)
             self._enqueue_full_analysis(intent, requested_utc=committed_utc)
@@ -380,6 +380,17 @@ class SqliteEndpointTakeoverStore:
             SELECT {_INTENT_COLUMNS}
             FROM controlled_endpoint_takeover_intents
             WHERE state IN ('PREPARED', 'FILESYSTEM_APPLIED')
+                AND EXISTS (
+                    SELECT 1
+                    FROM jobs
+                    WHERE jobs.id = controlled_endpoint_takeover_intents.job_id
+                        AND jobs.lifecycle_state = 'ACTIVE'
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM job_deletions AS deletions
+                    WHERE deletions.job_id = controlled_endpoint_takeover_intents.job_id
+                )
             ORDER BY created_utc, intent_id
             LIMIT ?
             """,
@@ -409,6 +420,10 @@ class SqliteEndpointTakeoverStore:
         try:
             self._require_idle()
             self._connection.execute("BEGIN IMMEDIATE")
+            self._require_active_job_revision(
+                intent.job_id,
+                intent.source_job_revision_id,
+            )
             cursor = self._connection.execute(
                 """
                 UPDATE controlled_endpoint_takeover_intents
@@ -435,15 +450,12 @@ class SqliteEndpointTakeoverStore:
 
     def _revalidate_prepared_intent(self, intent: EndpointTakeoverIntent) -> None:
         prepared = intent.prepared
-        active_job = self._connection.execute(
-            "SELECT active_revision_id FROM job_heads WHERE job_id = ?",
-            (intent.job_id,),
-        ).fetchone()
+        active_job_revision = self._load_active_job_revision(intent.job_id)
         active_endpoint = self._connection.execute(
             "SELECT active_revision_id FROM endpoint_heads WHERE endpoint_id = ?",
             (prepared.endpoint_id,),
         ).fetchone()
-        if active_job is None or str(active_job[0]) != intent.source_job_revision_id:
+        if active_job_revision != intent.source_job_revision_id:
             raise _error(
                 "ENDPOINT_TAKEOVER_JOB_REVISION_STALE",
                 "Refresh the active backup job before confirming takeover.",
@@ -795,6 +807,33 @@ class SqliteEndpointTakeoverStore:
                 retryable=False,
             )
         return _intent_from_row(row)
+
+    def _load_active_job_revision(self, job_id: str) -> str | None:
+        row = self._connection.execute(
+            """
+            SELECT heads.active_revision_id
+            FROM jobs
+            INNER JOIN job_heads AS heads ON heads.job_id = jobs.id
+            LEFT JOIN job_deletions AS deletions ON deletions.job_id = jobs.id
+            WHERE jobs.id = ?
+                AND jobs.lifecycle_state = 'ACTIVE'
+                AND deletions.job_id IS NULL
+            """,
+            (job_id,),
+        ).fetchone()
+        return None if row is None else str(row[0])
+
+    def _require_active_job_revision(
+        self,
+        job_id: str,
+        expected_revision_id: str,
+    ) -> None:
+        if self._load_active_job_revision(job_id) != expected_revision_id:
+            raise _error(
+                "ENDPOINT_TAKEOVER_JOB_REVISION_STALE",
+                "Refresh the active backup job before confirming takeover.",
+                retryable=False,
+            )
 
     def _require_idle(self) -> None:
         if self._connection.in_transaction:

@@ -313,6 +313,45 @@ def test_startup_reconciliation_blocks_database_segment_missing_on_target() -> N
     assert report.missing_target_segment_ids == (segment.segment_id,)
 
 
+def test_startup_reconciliation_finalizes_missing_terminal_segment() -> None:
+    operation = replace(_operation(), phase=RecoveryOperationPhase.CLEANED)
+    segment = _segment(operation)
+    store = _IntentStore(initial=(segment,))
+
+    report = reconcile_target_recovery_intents_after_startup(
+        reader=_Reader(),
+        intent_segments=store,
+        recovery_operations=_OperationStore(operation),
+        missing_segment_finalizer=store,
+    )
+
+    assert report.mutation_safe is True
+    assert report.finalized_missing_segment_ids == (segment.segment_id,)
+    assert report.missing_target_segment_ids == ()
+    assert store.load_intent_segment(segment.segment_id) == replace(
+        segment, state=RecoveryIntentSegmentState.CLEANED
+    )
+
+
+def test_startup_reconciliation_does_not_finalize_missing_segment_after_truncated_scan(
+) -> None:
+    operation = replace(_operation(), phase=RecoveryOperationPhase.CLEANED)
+    segment = _segment(operation)
+    store = _IntentStore(initial=(segment,))
+
+    report = reconcile_target_recovery_intents_after_startup(
+        reader=_Reader(truncated=True),
+        intent_segments=store,
+        recovery_operations=_OperationStore(operation),
+        missing_segment_finalizer=store,
+    )
+
+    assert report.mutation_safe is False
+    assert report.finalized_missing_segment_ids == ()
+    assert report.missing_target_segment_ids == (segment.segment_id,)
+    assert store.load_intent_segment(segment.segment_id) == segment
+
+
 def test_startup_reconciliation_accepts_advanced_database_lifecycle_state() -> None:
     operation = _operation()
     segment = _segment(operation)
@@ -441,8 +480,9 @@ class _PermitValidator:
 
 
 class _Reader:
-    def __init__(self, *documents: object) -> None:
+    def __init__(self, *documents: object, truncated: bool = False) -> None:
         self._documents = documents
+        self._truncated = truncated
 
     def scan_target_intent_segments(
         self, *, limit: int
@@ -458,7 +498,7 @@ class _Reader:
                 for index, document in enumerate(self._documents)
             ),
             issues=(),
-            truncated=False,
+            truncated=self._truncated,
         )
 
 
@@ -493,6 +533,15 @@ class _IntentStore:
                 RecoveryIntentSegmentState.RECONCILED,
             }
         )[:limit]
+
+    def finalize_missing_terminal_intent_segment(self, segment_id: str) -> bool:
+        segment = self._segments.get(segment_id)
+        if segment is None:
+            return False
+        self._segments[segment_id] = replace(
+            segment, state=RecoveryIntentSegmentState.CLEANED
+        )
+        return True
 
 
 class _OperationStore:

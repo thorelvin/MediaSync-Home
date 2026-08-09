@@ -1677,6 +1677,11 @@ def run_engine_host(
     if args.run_executor_cycle_interval_ms is not None and args.state_root is None:
         raise RuntimeError("RUN_EXECUTOR_MAINTENANCE_REQUIRES_STATE_ROOT")
     if (
+        args.run_executor_cycle_after_request
+        and args.run_executor_cycle_interval_ms is not None
+    ):
+        raise RuntimeError("RUN_EXECUTOR_PUMP_MODES_CONFLICT")
+    if (
         args.run_executor_cycle_interval_ms is not None
         and args.run_executor_cycle_max_interval_ms
         < args.run_executor_cycle_interval_ms
@@ -2229,6 +2234,7 @@ def build_engine_host_runtime(
             ),
             intent_segments=recovery_intent_segments,
             recovery_operations=recovery_operations,
+            missing_segment_finalizer=recovery_intent_segments,
         )
         version_retention_store = SqliteVersionRetentionStore(catalog_connection)
         run_executor_lease_authority = LocalResolvingEndpointLeaseAuthority(
@@ -2880,6 +2886,9 @@ def _target_intent_reconciliation_payload(
         return None
     return {
         "conflicting_segment_ids": list(report.conflicting_segment_ids),
+        "finalized_missing_segment_ids": list(
+            report.finalized_missing_segment_ids
+        ),
         "imported_segment_ids": list(report.imported_segment_ids),
         "matched_segment_ids": list(report.matched_segment_ids),
         "missing_target_segment_ids": list(report.missing_target_segment_ids),

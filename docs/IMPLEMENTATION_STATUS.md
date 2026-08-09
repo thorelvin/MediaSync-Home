@@ -1,5 +1,20 @@
 # Implementeringsstatus
 
+Update 2026-08-10: the local unsigned release-readiness review is complete for
+the accepted same-user Windows scope. Permanent job deletion now preserves
+history and user files while tombstones exclude deleted jobs from endpoint
+registration, endpoint takeover, backup analysis and version-retention
+candidate selection. Recovery never finalizes a target intent after a
+truncated or otherwise incomplete scan. Rejected lifecycle commands preserve
+the selected Jobs context, and the Jobs action area reflows without clipped
+labels at the 900x560 minimum. The current source passes Ruff, strict mypy over
+221 modules, all four import contracts and 1,969 tests with 5 environment
+skips plus 25 subtests. Live Robocopy and executor tests copy and verify real
+files, including two targets and versioned replacement. The current Nuitka
+standalone package passes protocol, schema 58/13 startup, same-user Task
+Scheduler, GUI status and cleanup checks; signed installer and independent
+clean-machine distribution proof remain outside the accepted local scope.
+
 Update 2026-08-09: `REC-004` now has four independent, monotone directory
 recovery protocols for create, metadata, quarantine and restore. Recovery
 migration 13 persists immutable lifecycle heads plus hash-chained events and

@@ -15,6 +15,7 @@ from mediasync_home.application.run_intent_cleanup import (
     RecoveryIntentSegmentLifecycleStore,
 )
 from mediasync_home.application.target_recovery_intents import (
+    MissingTerminalIntentSegmentFinalizer,
     RecoveryIntentSegmentReconciliationStore,
 )
 
@@ -27,6 +28,7 @@ class SqliteRecoveryIntentSegmentStore(
     RecoveryIntentSegmentStore,
     RecoveryIntentSegmentReconciliationStore,
     RecoveryIntentSegmentLifecycleStore,
+    MissingTerminalIntentSegmentFinalizer,
 ):
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
@@ -235,6 +237,50 @@ class SqliteRecoveryIntentSegmentStore(
             (limit,),
         ).fetchall()
         return tuple(_segment_from_row(row) for row in rows)
+
+    def finalize_missing_terminal_intent_segment(self, segment_id: str) -> bool:
+        terminal_phases = tuple(
+            sorted(phase.value for phase in RECOVERY_OPERATION_TERMINAL_PHASES)
+        )
+        placeholders = ", ".join("?" for _ in terminal_phases)
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            cursor = self._connection.execute(
+                f"""
+                UPDATE recovery_intent_segments AS candidate
+                SET
+                    state = 'CLEANED',
+                    updated_utc = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE candidate.id = ?
+                    AND candidate.state IN ('DURABLE', 'RECONCILED')
+                    AND EXISTS (
+                        SELECT 1
+                        FROM recovery_operations AS bound
+                        WHERE bound.run_id = candidate.run_id
+                            AND bound.run_target_id = candidate.run_target_id
+                            AND bound.intent_segment_id = candidate.id
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM recovery_operations AS unfinished
+                        WHERE unfinished.run_id = candidate.run_id
+                            AND unfinished.run_target_id = candidate.run_target_id
+                            AND unfinished.phase NOT IN ({placeholders})
+                    )
+                """,
+                (segment_id, *terminal_phases),
+            )
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return cursor.rowcount == 1
+        except sqlite3.Error as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise SqliteRecoveryIntentSegmentStoreError(
+                "RECOVERY_INTENT_SEGMENT_TERMINAL_RECONCILIATION_FAILED"
+            ) from exc
 
     def load_next_intent_segment_lifecycle_candidate(
         self,

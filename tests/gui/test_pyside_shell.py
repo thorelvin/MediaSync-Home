@@ -45,7 +45,7 @@ from mediasync_home.application.user_preferences import (  # noqa: E402
     UserPreferences,
 )
 from mediasync_home.domain.process_roles import ProcessRole  # noqa: E402
-from mediasync_home.ipc.protocol import IpcResponse  # noqa: E402
+from mediasync_home.ipc.protocol import IpcReason, IpcResponse  # noqa: E402
 from mediasync_home.presentation.app import build_main_window, ensure_qapplication  # noqa: E402
 from mediasync_home.presentation.background_queries import (  # noqa: E402
     BackgroundQueryController,
@@ -1956,6 +1956,9 @@ def test_jobs_workspace_filters_archived_jobs_and_reactivates_without_clipping(
         qapp.processEvents()
         lifecycle_filter = window.findChild(QComboBox, "jobsLifecycleFilter")
         lifecycle_button = window.findChild(QPushButton, "jobsLifecycleButton")
+        delete_button = window.findChild(QPushButton, "jobsDeleteButton")
+        edit_button = window.findChild(QPushButton, "jobsEditButton")
+        start_button = window.findChild(QPushButton, "jobsStartBackupButton")
         jobs_scroll = window.findChild(QScrollArea, "jobsScrollArea")
         detail_panel = window.findChild(QFrame, "jobsDetailPanel")
 
@@ -1967,6 +1970,21 @@ def test_jobs_workspace_filters_archived_jobs_and_reactivates_without_clipping(
         assert lifecycle_button is not None
         assert lifecycle_button.text() == "Arkiver jobb"
         assert lifecycle_button.isEnabled()
+        assert delete_button is not None
+        assert delete_button.text() == "Slett jobb"
+        assert delete_button.isEnabled()
+        assert edit_button is not None
+        assert start_button is not None
+        window.resize(window.minimumSize())
+        qapp.processEvents()
+        for button in (edit_button, lifecycle_button, delete_button, start_button):
+            icon_width = 0 if button.icon().isNull() else button.iconSize().width() + 8
+            assert (
+                button.fontMetrics().horizontalAdvance(button.text())
+                + icon_width
+                + 24
+                <= button.width()
+            )
 
         lifecycle_filter.setCurrentIndex(lifecycle_filter.findData("ARCHIVED"))
         qapp.processEvents()
@@ -1981,6 +1999,7 @@ def test_jobs_workspace_filters_archived_jobs_and_reactivates_without_clipping(
         assert lifecycle_filter.itemText(0) == "Active"
         assert lifecycle_filter.itemText(1) == "Archived"
         assert lifecycle_button.text() == "Reactivate"
+        assert delete_button.text() == "Delete job"
 
         assert window._change_selected_job_lifecycle()
         qapp.processEvents()
@@ -1991,6 +2010,58 @@ def test_jobs_workspace_filters_archived_jobs_and_reactivates_without_clipping(
         assert (
             lifecycle_button.geometry().right() <= detail_panel.contentsRect().right()
         )
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_jobs_workspace_permanently_deletes_selected_job(qapp) -> None:
+    provider = _FakeJobLifecycleDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.resize(760, 520)
+        window.show()
+        window.refresh_engine_status()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+
+        assert window._change_selected_job_lifecycle(delete=True)
+        qapp.processEvents()
+        assert provider.lifecycle_commands == ["DELETE"]
+        assert window.findChild(QScrollArea, "jobsScrollArea").horizontalScrollBar().maximum() == 0
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_rejected_job_lifecycle_command_keeps_selected_job_context(qapp) -> None:
+    provider = _RejectingJobLifecycleDashboardEngineClient()
+    window = build_main_window(
+        initial_state=EngineStatusViewState.disconnected(),
+        engine_client=provider,
+        theme_mode=ThemeMode.DARK,
+    )
+
+    try:
+        window.show()
+        window.refresh_engine_status()
+        window._select_navigation_row(1)
+        qapp.processEvents()
+
+        assert window._selected_job_id == "job-a"
+        assert window._job_detail_state.job_id == "job-a"
+        assert window._change_selected_job_lifecycle()
+        qapp.processEvents()
+
+        assert provider.lifecycle_commands == ["ARCHIVE"]
+        assert window._selected_job_id == "job-a"
+        assert window._job_detail_state.job_id == "job-a"
+        assert "JOB_ARCHIVE_ACTIVE_RUN" in window._engine_status_state.detail
     finally:
         window.close()
         window.deleteLater()
@@ -6425,6 +6496,21 @@ class _FakeJobLifecycleDashboardEngineClient(_FakeDashboardEngineClient):
     def reactivate_standard_backup_job(self, **_kwargs: object) -> IpcResponse:
         self.lifecycle_commands.append("REACTIVATE")
         return IpcResponse.accepted({"applied": True})
+
+    def delete_standard_backup_job(self, **_kwargs: object) -> IpcResponse:
+        self.lifecycle_commands.append("DELETE")
+        return IpcResponse.accepted({"applied": True})
+
+
+class _RejectingJobLifecycleDashboardEngineClient(
+    _FakeJobLifecycleDashboardEngineClient
+):
+    def archive_standard_backup_job(self, **_kwargs: object) -> IpcResponse:
+        self.lifecycle_commands.append("ARCHIVE")
+        return IpcResponse.rejected(
+            IpcReason.COMMAND_PRECONDITION_FAILED,
+            {"validation_code": "JOB_ARCHIVE_ACTIVE_RUN"},
+        )
 
 
 class _FakeAutomationDashboardEngineClient(_FakeDashboardEngineClient):

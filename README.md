@@ -2,11 +2,11 @@
 
 **Rask, trygg og oversiktlig backup av store bilde- og videosamlinger på Windows.**
 
-MediaSync Home er et planlagt Windows-program for å kopiere og synkronisere filer mellom lokale disker, USB-disker og SMB/NAS. Hovedflyten er enkel: velg én kilde, velg opptil tre backupmål, kontroller endringene og start backupen.
+MediaSync Home er et lokalt Windows-program under alpha-utvikling for å kopiere og synkronisere filer mellom lokale disker, USB-disker og SMB/NAS. Hovedflyten er enkel: velg én kilde, velg opptil tre backupmål, kontroller endringene og start backupen.
 
 [Prosjektstatus](docs/IMPLEMENTATION_STATUS.md) · [Roadmap](docs/RELEASE_SCOPE.md) · [Dokumentasjon](docs/README.md) · [GUI og UX](docs/GUI_AND_UX.md) · [Start med Codex](docs/CODEX_START_PROMPT.md)
 
-> **Prosjektstatus: spesifikasjon / pre-alpha.** Repositoryet inneholder foreløpig produktkrav, arkitektur, kontraktsutkast, testplan og avgrensede Codex-arbeidsordrer. Det finnes ingen installasjonsklar eller produksjonstestet app ennå. Ikke bruk prototyper på den eneste kopien av verdifulle filer.
+> **Prosjektstatus: lokal alpha-kandidat.** Repositoryet inneholder en kjørbar Windows-app og reproduserbart bevis for lokal usignert pakking, ekte filkopiering, recovery og samme-bruker-automatisering. Den er ikke en signert eller offentlig distribuert produksjonsutgivelse ennå. Test alltid med egne testdata før appen brukes på den eneste kopien av verdifulle filer.
 
 ![Konseptskisse av MediaSync Home med én kilde og tre backupmål](docs/assets/gui-concept-v1.png)
 
@@ -28,9 +28,9 @@ Kjør backup og se hva som faktisk ble verifisert
 
 Prosjektet er laget for store private samlinger med bilder, RAW-filer, video, sidecar-filer og andre filtyper. Det skal fungere uten internett og uten telemetri.
 
-## Planlagte hovedfunksjoner
+## Hovedfunksjoner og retning
 
-| Område | Planlagt opplevelse |
+| Område | Opplevelse |
 |---|---|
 | Backup til flere mål | Én kilde kan sikkerhetskopieres til opptil tre uavhengige disker eller NAS-mål. |
 | Synkroniseringsmoduser | Oppdater, speil med karantene og senere avansert toveissynkronisering. |
@@ -60,11 +60,11 @@ Se [arkitekturen](docs/ARCHITECTURE.md), [recoveryprotokollen](docs/RECOVERY_PRO
 | Felt | Nåværende status |
 |---|---|
 | Spesifikasjonspakke | `v2.9.2` |
-| Produktkode | Ikke startet |
-| Aktiv arbeidsordre | `0A.0 — miljø- og sikkerhetspreflight` |
-| Første leverbare produktmål | Alpha 0.1: én kilde, ett mål og bare nye filer |
+| Produktkode | Lokal Windows-runtime implementert |
+| Aktiv arbeidsordre | Lokal release-readiness og stabilisering |
+| Første leverbare produktmål | Lokal usignert alpha for samme Windows-bruker |
 | Støttet plattformmål | Windows 10 og Windows 11, x64 |
-| Nedlastbar app | Ikke tilgjengelig ennå |
+| Nedlastbar app | Ingen offentlig nedlasting; lokal Nuitka-pakke består runtime-smoke |
 | Lisens | Ikke valgt ennå |
 
 Den detaljerte statusen vedlikeholdes i [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md). En tom eller blokkert test skal aldri omtales som bestått.
@@ -94,7 +94,18 @@ Den detaljerte statusen vedlikeholdes i [IMPLEMENTATION_STATUS.md](docs/IMPLEMEN
 | arbeide med kontrakter | [schema/README.md](schema/README.md) og [kontraktsmanifestet](schema/contracts-manifest.yaml) |
 | forstå beslutningene | [ADR-katalogen](docs/adr/README.md) og [beslutningsregisteret](docs/DECISION_REGISTER.md) |
 
-## Kom i gang med spesifikasjonspakken
+## Kjør appen lokalt
+
+Fra repositoryroten i PowerShell:
+
+```powershell
+$env:PYTHONPATH = "src"
+.venv\Scripts\python.exe -m mediasync_home
+```
+
+Appen starter GUI og lokal Engine Host i samme brukersesjon. Språk velges med flagget øverst til høyre. Den lokale pakken er foreløpig usignert.
+
+## Valider repositoryet
 
 Kjør dette i et rent repository på Windows før første Codex-endring:
 
@@ -104,8 +115,6 @@ python tools/validate_handoff.py --verify-bundle
 git add .
 git commit -m "chore: add MediaSync Home specification v2.9.2"
 ```
-
-Gi deretter Codex bare innholdet i [`docs/CODEX_START_PROMPT.md`](docs/CODEX_START_PROMPT.md). Første økt skal utføre **kun 0A.0**, dokumentere miljø og blockers, og deretter stoppe.
 
 Etter at baselinefilene er endret, brukes vanlig validering uten hashkontroll:
 

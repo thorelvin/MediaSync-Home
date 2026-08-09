@@ -312,6 +312,16 @@ class ShellText:
         )
 
     @property
+    def delete_job(self) -> str:
+        return "Delete job" if self.language_tooltip_prefix == "Language" else "Slett jobb"
+
+    @property
+    def delete_job_tooltip(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return "Permanently remove this job configuration"
+        return "Fjern denne jobbkonfigurasjonen permanent"
+
+    @property
     def reactivate_job(self) -> str:
         return (
             "Reactivate"
@@ -325,6 +335,26 @@ class ShellText:
             "Archive backup job?"
             if self.language_tooltip_prefix == "Language"
             else "Arkivere backupjobb?"
+        )
+
+    @property
+    def delete_job_title(self) -> str:
+        return (
+            "Delete backup job permanently?"
+            if self.language_tooltip_prefix == "Language"
+            else "Slette backupjobben permanent?"
+        )
+
+    @property
+    def delete_job_confirmation(self) -> str:
+        if self.language_tooltip_prefix == "Language":
+            return (
+                "The job configuration will be permanently removed and cannot be "
+                "reactivated. Backup history and copied files will be kept."
+            )
+        return (
+            "Jobbkonfigurasjonen fjernes permanent og kan ikke aktiveres igjen. "
+            "Backuphistorikk og kopierte filer beholdes."
         )
 
     @property
@@ -359,6 +389,14 @@ class ShellText:
             "Job archived"
             if self.language_tooltip_prefix == "Language"
             else "Jobben er arkivert"
+        )
+
+    @property
+    def job_deleted(self) -> str:
+        return (
+            "Job deleted"
+            if self.language_tooltip_prefix == "Language"
+            else "Jobben er slettet"
         )
 
     @property

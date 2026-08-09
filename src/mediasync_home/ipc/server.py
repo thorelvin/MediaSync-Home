@@ -1048,6 +1048,7 @@ class EngineHostIpcService:
             return self._handle_configure_daily_backup_schedule(command, identity)
         if command.command_name in {
             JobLifecycleCommandName.ARCHIVE_STANDARD_BACKUP_JOB.value,
+            JobLifecycleCommandName.DELETE_STANDARD_BACKUP_JOB.value,
             JobLifecycleCommandName.REACTIVATE_STANDARD_BACKUP_JOB.value,
         }:
             return self._handle_job_lifecycle(command, identity)
@@ -1750,13 +1751,18 @@ class EngineHostIpcService:
             if self.job_lifecycle_store is None
             else self.job_lifecycle_store.load_job_lifecycle(command.job_id)
         )
-        if lifecycle is not None and lifecycle.state is JobLifecycleState.ARCHIVED:
+        if lifecycle is not None and lifecycle.state is not JobLifecycleState.ACTIVE:
+            deleted = lifecycle.state is JobLifecycleState.DELETED
             return self._run_command_effect_transaction(
                 lambda: self._reject_writable_target_registration(
                     envelope,
                     command,
-                    validation_code="JOB_ARCHIVED",
-                    next_action="Reactivate the backup job before registering its targets.",
+                    validation_code="JOB_DELETED" if deleted else "JOB_ARCHIVED",
+                    next_action=(
+                        "The deleted backup job cannot register writable targets."
+                        if deleted
+                        else "Reactivate the backup job before registering its targets."
+                    ),
                 )
             )
 
@@ -1984,13 +1990,18 @@ class EngineHostIpcService:
             if self.job_lifecycle_store is None
             else self.job_lifecycle_store.load_job_lifecycle(command.job_id)
         )
-        if lifecycle is not None and lifecycle.state is JobLifecycleState.ARCHIVED:
+        if lifecycle is not None and lifecycle.state is not JobLifecycleState.ACTIVE:
+            deleted = lifecycle.state is JobLifecycleState.DELETED
             return self._run_command_effect_transaction(
                 lambda: self._reject_controlled_endpoint_takeover(
                     envelope,
                     command,
-                    validation_code="JOB_ARCHIVED",
-                    next_action="Reactivate the backup job before taking over its endpoint.",
+                    validation_code="JOB_DELETED" if deleted else "JOB_ARCHIVED",
+                    next_action=(
+                        "The deleted backup job cannot take over an endpoint."
+                        if deleted
+                        else "Reactivate the backup job before taking over its endpoint."
+                    ),
                 )
             )
         try:
@@ -2861,6 +2872,14 @@ class EngineHostIpcService:
                 command=command,
                 occurred_utc=occurred_utc,
             )
+        elif (
+            envelope.command_name
+            == JobLifecycleCommandName.DELETE_STANDARD_BACKUP_JOB.value
+        ):
+            outcome = self.job_lifecycle_store.delete_standard_backup_job(
+                command=command,
+                occurred_utc=occurred_utc,
+            )
         else:
             outcome = self.job_lifecycle_store.reactivate_standard_backup_job(
                 command=command,
@@ -2900,7 +2919,12 @@ class EngineHostIpcService:
         receipt = transition_command_receipt(
             receipt,
             CommandReceiptState.EFFECT_PREPARED,
-            result_entity_type="job_lifecycle_event",
+            result_entity_type=(
+                "job_deletion"
+                if envelope.command_name
+                == JobLifecycleCommandName.DELETE_STANDARD_BACKUP_JOB.value
+                else "job_lifecycle_event"
+            ),
             result_entity_id=envelope.request_id,
         )
         self.command_receipt_store.update_command_receipt(receipt)
@@ -2933,6 +2957,14 @@ class EngineHostIpcService:
             == JobLifecycleCommandName.ARCHIVE_STANDARD_BACKUP_JOB.value
         ):
             return self.job_lifecycle_store.archive_standard_backup_job(
+                command=command,
+                occurred_utc=occurred_utc,
+            )
+        if (
+            envelope.command_name
+            == JobLifecycleCommandName.DELETE_STANDARD_BACKUP_JOB.value
+        ):
+            return self.job_lifecycle_store.delete_standard_backup_job(
                 command=command,
                 occurred_utc=occurred_utc,
             )

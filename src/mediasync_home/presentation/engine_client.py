@@ -667,6 +667,24 @@ class EngineClient:
             idempotency_key=idempotency_key,
         )
 
+    def delete_standard_backup_job(
+        self,
+        *,
+        job_id: str,
+        expected_job_revision_id: str,
+        expected_lifecycle_row_version: int,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse:
+        return self._change_standard_backup_job_lifecycle(
+            JobLifecycleCommandName.DELETE_STANDARD_BACKUP_JOB,
+            job_id=job_id,
+            expected_job_revision_id=expected_job_revision_id,
+            expected_lifecycle_row_version=expected_lifecycle_row_version,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
+
     def _change_standard_backup_job_lifecycle(
         self,
         command_name: JobLifecycleCommandName,

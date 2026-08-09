@@ -323,6 +323,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_directory_metadata_records",
                 statements=CATALOG_DIRECTORY_METADATA_RECORDS,
             ),
+            SqliteMigration(
+                version=58,
+                name="catalog_job_deletions",
+                statements=CATALOG_JOB_DELETIONS,
+            ),
         ),
     )
 
@@ -3857,6 +3862,43 @@ CATALOG_DIRECTORY_METADATA_RECORDS = (
     BEFORE DELETE ON directory_metadata_records
     BEGIN
         SELECT RAISE(ABORT, 'DIRECTORY_METADATA_RECORD_IMMUTABLE');
+    END
+    """,
+)
+
+
+CATALOG_JOB_DELETIONS = (
+    """
+    CREATE TABLE job_deletions (
+        job_id TEXT PRIMARY KEY,
+        job_revision_id TEXT NOT NULL,
+        command_request_id TEXT NOT NULL UNIQUE,
+        command_idempotency_key TEXT NOT NULL UNIQUE,
+        occurred_utc TEXT NOT NULL,
+        lifecycle_row_version INTEGER NOT NULL CHECK (lifecycle_row_version >= 2),
+        disabled_schedule_count INTEGER NOT NULL DEFAULT 0
+            CHECK (disabled_schedule_count >= 0),
+        FOREIGN KEY (job_id, job_revision_id)
+            REFERENCES job_revisions (job_id, id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX idx_job_deletions_occurred
+        ON job_deletions (occurred_utc, job_id)
+    """,
+    """
+    CREATE TRIGGER trg_job_deletions_no_update
+    BEFORE UPDATE ON job_deletions
+    BEGIN
+        SELECT RAISE(ABORT, 'JOB_DELETION_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_job_deletions_no_delete
+    BEFORE DELETE ON job_deletions
+    BEGIN
+        SELECT RAISE(ABORT, 'JOB_DELETION_IMMUTABLE');
     END
     """,
 )

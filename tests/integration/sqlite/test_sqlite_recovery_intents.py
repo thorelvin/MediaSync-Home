@@ -336,6 +336,47 @@ def test_sqlite_recovery_intent_lifecycle_allows_superseded_unbound_segment(
         connection.close()
 
 
+def test_sqlite_missing_intent_finalization_requires_bound_terminal_operations(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _register_resource_lease(connection)
+        intents = SqliteRecoveryIntentSegmentStore(connection)
+        operations = SqliteRecoveryOperationStore(connection)
+        segment = _segment(operation_count=1)
+        intents.publish_intent_segment(segment)
+        operations.record_planned_operation(_operation(), process_instance_id="engine-a")
+        connection.execute(
+            """
+            UPDATE recovery_operations
+            SET intent_segment_id = ?, intent_ordinal = 0
+            WHERE run_id = 'run-a' AND operation_id = 'op-a'
+            """,
+            (segment.segment_id,),
+        )
+        connection.commit()
+
+        assert not intents.finalize_missing_terminal_intent_segment(segment.segment_id)
+
+        connection.execute(
+            """
+            UPDATE recovery_operations
+            SET phase = 'CANCELLED'
+            WHERE run_id = 'run-a' AND operation_id = 'op-a'
+            """
+        )
+        connection.commit()
+
+        assert intents.finalize_missing_terminal_intent_segment(segment.segment_id)
+        finalized = intents.load_intent_segment(segment.segment_id)
+        assert finalized is not None
+        assert finalized.state is RecoveryIntentSegmentState.CLEANED
+        assert not intents.finalize_missing_terminal_intent_segment(segment.segment_id)
+    finally:
+        connection.close()
+
+
 def _prepared_recovery_connection(tmp_path: Path) -> sqlite3.Connection:
     database = tmp_path / "recovery.sqlite"
     connection = sqlite3.connect(database)

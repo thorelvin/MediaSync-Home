@@ -71,6 +71,7 @@ class TargetRecoveryIntentStartupReconciliationReport:
     scanned: int
     matched_segment_ids: tuple[str, ...]
     imported_segment_ids: tuple[str, ...]
+    finalized_missing_segment_ids: tuple[str, ...]
     missing_target_segment_ids: tuple[str, ...]
     conflicting_segment_ids: tuple[str, ...]
     unreconciled_segment_ids: tuple[str, ...]
@@ -120,11 +121,16 @@ class RecoveryIntentOperationLookup(Protocol):
     ) -> RecoveryOperation | None: ...
 
 
+class MissingTerminalIntentSegmentFinalizer(Protocol):
+    def finalize_missing_terminal_intent_segment(self, segment_id: str) -> bool: ...
+
+
 def reconcile_target_recovery_intents_after_startup(
     *,
     reader: TargetRecoveryIntentSegmentReader,
     intent_segments: RecoveryIntentSegmentReconciliationStore,
     recovery_operations: RecoveryIntentOperationLookup,
+    missing_segment_finalizer: MissingTerminalIntentSegmentFinalizer | None = None,
     limit: int = 10_000,
 ) -> TargetRecoveryIntentStartupReconciliationReport:
     if not 1 <= limit <= 10_000:
@@ -179,18 +185,35 @@ def reconcile_target_recovery_intents_after_startup(
     unresolved_database_segments = intent_segments.list_unresolved_intent_segments(
         limit=limit
     )
-    missing_target = tuple(
-        sorted(
-            segment.segment_id
-            for segment in unresolved_database_segments
-            if segment.segment_id not in target_by_id
-        )
+    missing_candidates = tuple(
+        segment.segment_id
+        for segment in unresolved_database_segments
+        if segment.segment_id not in target_by_id
     )
+    finalized_missing: list[str] = []
+    missing_target: list[str] = []
+    can_finalize_missing = not (
+        scan.truncated or scan.issues or conflicts or unreconciled
+    )
+    for segment_id in sorted(missing_candidates):
+        finalized = False
+        if missing_segment_finalizer is not None and can_finalize_missing:
+            try:
+                finalized = missing_segment_finalizer.finalize_missing_terminal_intent_segment(
+                    segment_id
+                )
+            except ValueError:
+                finalized = False
+        if finalized:
+            finalized_missing.append(segment_id)
+        else:
+            missing_target.append(segment_id)
     return TargetRecoveryIntentStartupReconciliationReport(
         scanned=scan.scanned,
         matched_segment_ids=tuple(matched),
         imported_segment_ids=tuple(imported),
-        missing_target_segment_ids=missing_target,
+        finalized_missing_segment_ids=tuple(finalized_missing),
+        missing_target_segment_ids=tuple(missing_target),
         conflicting_segment_ids=tuple(sorted(conflicts)),
         unreconciled_segment_ids=tuple(sorted(unreconciled)),
         scan_issues=scan.issues,

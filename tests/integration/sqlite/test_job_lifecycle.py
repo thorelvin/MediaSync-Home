@@ -113,6 +113,33 @@ def test_archive_disables_schedule_preserves_records_and_replays(tmp_path: Path)
         assert tuple(row.job_id for row in archived_rows) == ("job-a",)
 
 
+def test_delete_reports_delete_specific_scheduler_context_error(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database)
+        _insert_job_and_plan(connection)
+        enabled = bind_same_user_task_scheduler_definition_hash(
+            _schedule(),
+            installation_id=INSTALLATION_ID,
+            executable_path=EXECUTABLE_PATH,
+        )
+        SqliteScheduleStore(connection).save_schedule(enabled)
+        store = SqliteJobLifecycleStore(
+            connection,
+            installation_id=INSTALLATION_ID,
+            task_scheduler_executable_path=None,
+        )
+
+        outcome = store.delete_standard_backup_job(
+            command=_command(expected_row_version=1),
+            occurred_utc="2026-08-01T10:00:00Z",
+        )
+
+        assert not outcome.applied
+        assert outcome.validation_code == "JOB_DELETE_SCHEDULER_CONTEXT_UNAVAILABLE"
+        assert store.load_job_lifecycle("job-a") is not None
+
+
 @pytest.mark.parametrize(
     ("run_state", "validation_code"),
     (
@@ -143,12 +170,16 @@ def test_archive_blocks_active_and_recovery_required_runs(
         assert _row_count(connection, "job_lifecycle_events") == 0
 
 
-def test_archive_reactivate_ipc_queues_check_and_survives_restart(tmp_path: Path) -> None:
+def test_archive_reactivate_delete_ipc_preserves_history_and_survives_restart(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "catalog.sqlite"
     archive_request_id = str(uuid4())
     archive_key = str(uuid4())
     reactivate_request_id = str(uuid4())
     reactivate_key = str(uuid4())
+    delete_request_id = str(uuid4())
+    delete_key = str(uuid4())
     with sqlite3.connect(database) as connection:
         _prepare_catalog(connection, database)
         _insert_job_and_plan(connection)
@@ -201,32 +232,55 @@ def test_archive_reactivate_ipc_queues_check_and_survives_restart(tmp_path: Path
             request_id=reactivate_request_id,
             idempotency_key=reactivate_key,
         )
+        deleted = client.delete_standard_backup_job(
+            job_id="job-a",
+            expected_job_revision_id="job-rev-a",
+            expected_lifecycle_row_version=3,
+            request_id=delete_request_id,
+            idempotency_key=delete_key,
+        )
 
         assert archived.status is IpcStatus.ACCEPTED
         assert reactivated.status is IpcStatus.ACCEPTED
+        assert deleted.status is IpcStatus.ACCEPTED
+        assert deleted.payload["validation_code"] == "JOB_DELETED"
         request = SqliteBackupAnalysisRequestStore(
             connection
         ).load_backup_analysis_request(reactivate_request_id)
         assert request is not None
         assert request.job_id == "job-a"
-        assert request.state.value == "QUEUED"
+        assert request.state.value == "BLOCKED"
         assert not request.start_when_safe
         assert connection.execute(
             "SELECT state FROM command_receipts WHERE idempotency_key = ?",
             (reactivate_key,),
         ).fetchone() == ("SUCCEEDED",)
+        assert _row_count(connection, "job_deletions") == 1
+        catalog = SqliteStandardBackupJobCatalog(connection)
+        assert catalog.load_standard_backup_job_detail("job-a") is None
+        assert catalog.list_active_standard_backup_job_summaries(limit=10, offset=0) == ()
+        assert (
+            catalog.list_standard_backup_job_summaries(
+                lifecycle_state=JobLifecycleState.ARCHIVED,
+                limit=10,
+                offset=0,
+            )
+            == ()
+        )
+        assert _row_count(connection, "job_revisions") == 1
+        assert _row_count(connection, "plans") == 1
 
     with sqlite3.connect(database) as restarted_connection:
         _prepare_catalog(restarted_connection, database)
         restarted = _lifecycle_store(restarted_connection).load_job_lifecycle("job-a")
         assert restarted is not None
-        assert restarted.state is JobLifecycleState.ACTIVE
-        assert restarted.row_version == 3
+        assert restarted.state is JobLifecycleState.DELETED
+        assert restarted.row_version == 4
         queued = SqliteBackupAnalysisRequestStore(
             restarted_connection
         ).load_backup_analysis_request(reactivate_request_id)
         assert queued is not None
-        assert queued.state.value == "QUEUED"
+        assert queued.state.value == "BLOCKED"
 
 
 def _prepare_catalog(connection: sqlite3.Connection, database: Path) -> None:

@@ -14,10 +14,12 @@ from mediasync_home.adapters.sqlite.migrations import (
     apply_sqlite_migrations,
     catalog_migration_plan,
 )
+from mediasync_home.adapters.sqlite.job_lifecycle import SqliteJobLifecycleStore
 from mediasync_home.application.backup_analysis import (
     BackupAnalysisRequest,
     BackupAnalysisRequestState,
 )
+from mediasync_home.application.job_lifecycle import ChangeJobLifecycleCommand
 from tests.support.sqlite_catalog import insert_default_filter_set_version
 
 
@@ -77,6 +79,48 @@ def test_backup_analysis_request_lifecycle_and_interrupted_requeue(
             )
             is None
         )
+
+
+def test_deleted_job_analysis_request_is_not_claimed(tmp_path: Path) -> None:
+    database = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(database) as connection:
+        apply_sqlite_connection_policy(
+            connection,
+            catalog_critical_writer_policy(database),
+        )
+        apply_sqlite_migrations(connection, catalog_migration_plan())
+        _insert_job(connection)
+        analyses = SqliteBackupAnalysisRequestStore(connection)
+        deleted = SqliteJobLifecycleStore(
+            connection,
+            installation_id="installation-a",
+        ).delete_standard_backup_job(
+            command=ChangeJobLifecycleCommand(
+                request_id="aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+                idempotency_key="bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb",
+                job_id="job-a",
+                expected_job_revision_id="revision-a",
+                expected_lifecycle_row_version=1,
+                explicit_confirmation=True,
+            ),
+            occurred_utc="2026-07-31T10:00:01Z",
+        )
+
+        assert deleted.applied
+        connection.commit()
+        analyses.enqueue_backup_analysis(
+            BackupAnalysisRequest(
+                request_id="request-a",
+                command_idempotency_key="key-a",
+                job_id="job-a",
+                job_revision_id="revision-a",
+                state=BackupAnalysisRequestState.QUEUED,
+                requested_utc="2026-07-31T10:00:01Z",
+            )
+        )
+        assert analyses.claim_next_backup_analysis(
+            started_utc="2026-07-31T10:00:02Z"
+        ) is None
 
 
 def _insert_job(connection: sqlite3.Connection) -> None:

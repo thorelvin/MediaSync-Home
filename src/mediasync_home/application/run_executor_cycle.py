@@ -1069,7 +1069,10 @@ def _retained_executing_targets(
             (item for item in run.targets if item.run_target_id == run_target_id), None
         )
         if target is None or target.state is not RunTargetState.EXECUTING:
-            if target is not None and target.state is RunTargetState.SUCCEEDED:
+            if target is not None and target.state not in {
+                RunTargetState.REVALIDATING,
+                RunTargetState.EXECUTING,
+            }:
                 lease_registry.release_retained_run_target_lease(
                     run_id=run_id,
                     run_target_id=run_target_id,

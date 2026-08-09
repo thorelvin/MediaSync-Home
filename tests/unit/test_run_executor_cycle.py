@@ -46,6 +46,7 @@ from mediasync_home.application.run_executor_cycle import (
     RunExecutorCycleAction,
     RunExecutorCycleRecoveryOperationStore,
     RunExecutorCycleRunStore,
+    _retained_executing_targets,
     execute_bounded_run_executor_cycle,
     execute_one_run_executor_cycle,
 )
@@ -109,6 +110,30 @@ def test_executor_finalizes_pause_only_at_cycle_boundary_and_releases_lease() ->
     assert paused.state is RunState.PAUSED
     assert paused.targets[0].state is RunTargetState.PAUSED
     assert paused.targets[0].last_lease_id is None
+
+
+def test_executor_releases_retained_lease_after_target_moves_to_endpoint_wait() -> None:
+    plan = _sealed_plan()
+    runs = _InMemoryRunStore(
+        _run(
+            state=RunState.EXECUTING,
+            plan=plan,
+            target_state=RunTargetState.WAITING_FOR_ENDPOINT,
+        )
+    )
+    lease = _FakeLiveLease()
+    registry = HeldRunTargetLeaseRegistry()
+    registry.retain_run_target_lease(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+        lease=lease,
+    )
+
+    retained = _retained_executing_targets(runs=runs, lease_registry=registry)
+
+    assert retained == ()
+    assert lease.released is True
+    assert registry.retained_count == 0
 
 
 def test_bounded_executor_cycle_progresses_queued_target_through_staging() -> None:

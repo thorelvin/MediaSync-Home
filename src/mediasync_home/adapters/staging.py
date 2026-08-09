@@ -683,7 +683,11 @@ class LocalFileStagingTransferAdapter:
         precondition = _source_precondition(operation)
         try:
             with source_path.open("rb", buffering=0) as stream:
-                _require_source_identity(os.fstat(stream.fileno()), precondition)
+                _require_source_identity(
+                    os.fstat(stream.fileno()),
+                    precondition,
+                    path_stat=source_path.stat(follow_symlinks=False),
+                )
         except LocalFileStagingError:
             raise
         except OSError as exc:
@@ -1058,14 +1062,22 @@ def _fingerprint_source_file(
     byte_count = 0
     try:
         with path.open("rb", buffering=0) as handle:
-            _require_source_identity(os.fstat(handle.fileno()), precondition)
+            _require_source_identity(
+                os.fstat(handle.fileno()),
+                precondition,
+                path_stat=path.stat(follow_symlinks=False),
+            )
             while True:
                 chunk = handle.read(1024 * 1024)
                 if not chunk:
                     break
                 digest.update(chunk)
                 byte_count += len(chunk)
-            _require_source_identity(os.fstat(handle.fileno()), precondition)
+            _require_source_identity(
+                os.fstat(handle.fileno()),
+                precondition,
+                path_stat=path.stat(follow_symlinks=False),
+            )
     except LocalFileStagingError:
         raise
     except OSError as exc:
@@ -1097,6 +1109,8 @@ def _source_precondition(operation: RecoveryOperation) -> SourceFilePrecondition
 def _require_source_identity(
     value: os.stat_result,
     precondition: SourceFilePrecondition,
+    *,
+    path_stat: os.stat_result | None = None,
 ) -> None:
     if not stat.S_ISREG(value.st_mode):
         raise LocalFileStagingError(
@@ -1108,11 +1122,36 @@ def _require_source_identity(
             "LOCAL_STAGING_SOURCE_SIZE_CHANGED",
             "Refresh analysis because the source file size changed.",
         )
-    if stable_file_identity_hash(value) != precondition.identity_fingerprint_hash:
-        raise LocalFileStagingError(
-            "LOCAL_STAGING_SOURCE_IDENTITY_CHANGED",
-            "Refresh analysis because the source file changed after it was scanned.",
-        )
+    if stable_file_identity_hash(value) == precondition.identity_fingerprint_hash:
+        return
+    if (
+        path_stat is not None
+        and stable_file_identity_hash(path_stat)
+        == precondition.identity_fingerprint_hash
+        and _same_file_object_identity(value, path_stat)
+    ):
+        return
+    raise LocalFileStagingError(
+        "LOCAL_STAGING_SOURCE_IDENTITY_CHANGED",
+        "Refresh analysis because the source file changed after it was scanned.",
+    )
+
+
+def _same_file_object_identity(
+    opened: os.stat_result,
+    path_stat: os.stat_result,
+) -> bool:
+    return (
+        stat.S_IFMT(opened.st_mode) == stat.S_IFMT(path_stat.st_mode)
+        and int(opened.st_size) == int(path_stat.st_size)
+        and int(opened.st_mtime_ns) == int(path_stat.st_mtime_ns)
+        and int(opened.st_dev) == int(path_stat.st_dev)
+        and int(opened.st_ino) == int(path_stat.st_ino)
+        and int(getattr(opened, "st_birthtime_ns", 0))
+        == int(getattr(path_stat, "st_birthtime_ns", 0))
+        and int(getattr(opened, "st_file_attributes", 0))
+        == int(getattr(path_stat, "st_file_attributes", 0))
+    )
 
 
 def _canonical_json(payload: dict[str, object]) -> str:

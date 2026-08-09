@@ -380,8 +380,9 @@ def build_local_preview_host_run(
     if state_root is not None:
         engine_args.extend(("--state-root", str(state_root.resolve())))
         engine_args.append("--enable-local-mutations")
-        engine_args.append("--run-executor-cycle-after-request")
-        if run_executor_cycle_interval_ms is not None:
+        if run_executor_cycle_interval_ms is None:
+            engine_args.append("--run-executor-cycle-after-request")
+        else:
             engine_args.extend(
                 (
                     "--run-executor-cycle-interval-ms",

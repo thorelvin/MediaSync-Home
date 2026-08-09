@@ -487,13 +487,13 @@ def check_bundle_rules() -> None:
     if f"v{EXPECTED_VERSION}" not in readme:
         fail("README.md version mismatch")
     required_readme_fragments = {
-        "spesifikasjon / pre-alpha",
+        "lokal alpha-kandidat",
         "docs/assets/gui-concept-v1.png",
         "docs/IMPLEMENTATION_STATUS.md",
         "docs/RELEASE_SCOPE.md",
         "docs/README.md",
         "docs/CODEX_START_PROMPT.md",
-        "Det finnes ingen installasjonsklar",
+        "ikke en signert eller offentlig distribuert produksjonsutgivelse",
         "MediaSync Home er et uavhengig prosjekt",
     }
     for fragment in required_readme_fragments:

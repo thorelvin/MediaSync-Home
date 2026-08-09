@@ -96,7 +96,7 @@ def test_complete_run_target_after_catalog_handoffs_rejects_target_permit_mismat
     assert outcome.validation_codes == ("RUN_TARGET_COMPLETION_PERMIT_MISMATCH",)
 
 
-def test_complete_run_target_after_catalog_handoffs_rejects_operation_permit_mismatch() -> (
+def test_complete_run_target_after_catalog_handoffs_accepts_prior_lease_completion() -> (
     None
 ):
     outcome = complete_run_target_after_catalog_handoffs(
@@ -104,6 +104,21 @@ def test_complete_run_target_after_catalog_handoffs_rejects_operation_permit_mis
         runs=_InMemoryRunStore(_executing_run()),
         recovery_operations=_FakeRecoveryOperationStore(
             (_operation(lease_id="other-lease"),)
+        ),
+    )
+
+    assert outcome.completed is True
+    assert outcome.validation_codes == ()
+
+
+def test_complete_run_target_after_catalog_handoffs_rejects_operation_ownership_mismatch() -> (
+    None
+):
+    outcome = complete_run_target_after_catalog_handoffs(
+        permit=_permit(),
+        runs=_InMemoryRunStore(_executing_run()),
+        recovery_operations=_FakeRecoveryOperationStore(
+            (_operation(ownership_epoch=2),)
         ),
     )
 
@@ -516,6 +531,7 @@ def _target() -> StartedRunTarget:
 def _operation(
     *,
     lease_id: str = "lease-a",
+    ownership_epoch: int = 1,
     phase: RecoveryOperationPhase = RecoveryOperationPhase.CATALOG_RECORDED,
     last_error_code: str | None = None,
 ) -> RecoveryOperation:
@@ -528,7 +544,7 @@ def _operation(
             target_endpoint_revision_id="target-rev-a",
             endpoint_generation=1,
             owner_installation_id="owner-a",
-            ownership_epoch=1,
+            ownership_epoch=ownership_epoch,
             lease_id=lease_id,
             lease_resource_key="endpoint:target-a",
             fencing_token=42,

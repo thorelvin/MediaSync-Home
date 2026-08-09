@@ -370,16 +370,23 @@ class _RecordingWritableEndpointRegistration:
         )
 
 
-class _StaticArchivedJobLifecycleStore:
+class _StaticJobLifecycleStore:
+    def __init__(self, state: JobLifecycleState) -> None:
+        self._state = state
+
     def load_job_lifecycle(self, job_id: str) -> JobLifecycleRecord | None:
         if job_id != "job-a":
             return None
         return JobLifecycleRecord(
             job_id=job_id,
             job_revision_id="job-revision-a",
-            state=JobLifecycleState.ARCHIVED,
+            state=self._state,
             row_version=2,
-            archived_utc="2026-08-01T06:00:00Z",
+            archived_utc=(
+                "2026-08-01T06:00:00Z"
+                if self._state is JobLifecycleState.ARCHIVED
+                else None
+            ),
         )
 
     def archive_standard_backup_job(
@@ -2463,13 +2470,23 @@ def test_register_writable_targets_rejects_stale_reviewed_revision() -> None:
     assert receipt.rejection_reason == IpcReason.COMMAND_PRECONDITION_FAILED.value
 
 
-def test_register_writable_targets_rejects_archived_job_before_coordinator() -> None:
+@pytest.mark.parametrize(
+    ("state", "validation_code"),
+    (
+        (JobLifecycleState.ARCHIVED, "JOB_ARCHIVED"),
+        (JobLifecycleState.DELETED, "JOB_DELETED"),
+    ),
+)
+def test_register_writable_targets_rejects_inactive_job_before_coordinator(
+    state: JobLifecycleState,
+    validation_code: str,
+) -> None:
     receipts = _InMemoryCommandReceiptStore()
     registration = _RecordingWritableEndpointRegistration()
     service = _service(mutations_enabled=True)
     service.command_receipt_store = receipts
     service.writable_endpoint_registration = registration  # type: ignore[assignment]
-    service.job_lifecycle_store = _StaticArchivedJobLifecycleStore()
+    service.job_lifecycle_store = _StaticJobLifecycleStore(state)
     ipc_client = _client(service=service)
     ipc_client.connect()
     payload = {"job_id": "job-a", "job_revision_id": "job-revision-a"}
@@ -2486,20 +2503,30 @@ def test_register_writable_targets_rejects_archived_job_before_coordinator() -> 
     assert response.status is IpcStatus.REJECTED
     assert response.reason is IpcReason.COMMAND_PRECONDITION_FAILED
     assert response.payload["writable_endpoint_registration"]["validation_codes"] == [
-        "JOB_ARCHIVED"
+        validation_code
     ]
     assert registration.calls == []
     assert receipt is not None
     assert receipt.state is CommandReceiptState.REJECTED
 
 
-def test_controlled_endpoint_takeover_rejects_archived_job_before_coordinator() -> None:
+@pytest.mark.parametrize(
+    ("state", "validation_code"),
+    (
+        (JobLifecycleState.ARCHIVED, "JOB_ARCHIVED"),
+        (JobLifecycleState.DELETED, "JOB_DELETED"),
+    ),
+)
+def test_controlled_endpoint_takeover_rejects_inactive_job_before_coordinator(
+    state: JobLifecycleState,
+    validation_code: str,
+) -> None:
     receipts = _InMemoryCommandReceiptStore()
     takeover = _RecordingEndpointTakeover()
     service = _service(mutations_enabled=True)
     service.command_receipt_store = receipts
     service.endpoint_takeover = takeover  # type: ignore[assignment]
-    service.job_lifecycle_store = _StaticArchivedJobLifecycleStore()
+    service.job_lifecycle_store = _StaticJobLifecycleStore(state)
     ipc_client = _client(service=service)
     ipc_client.connect()
     payload: dict[str, object] = {
@@ -2526,7 +2553,7 @@ def test_controlled_endpoint_takeover_rejects_archived_job_before_coordinator() 
     assert response.status is IpcStatus.REJECTED
     assert response.reason is IpcReason.COMMAND_PRECONDITION_FAILED
     assert response.payload["endpoint_takeover"]["validation_codes"] == [
-        "JOB_ARCHIVED"
+        validation_code
     ]
     assert takeover.calls == 0
     assert receipt is not None

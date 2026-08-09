@@ -88,6 +88,11 @@ class SqliteVersionRetentionStore:
                 AND jobs.lifecycle_state = 'ACTIVE'
                 AND NOT EXISTS (
                     SELECT 1
+                    FROM job_deletions AS deletions
+                    WHERE deletions.job_id = jobs.id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
                     FROM version_retention_holds AS holds
                     WHERE holds.version_object_id = versions.version_object_id
                         AND holds.released_utc IS NULL
@@ -1699,6 +1704,11 @@ class SqliteVersionRetentionStore:
                             FROM jobs
                             WHERE jobs.id = retained_version_objects.job_id
                                 AND jobs.lifecycle_state = 'ACTIVE'
+                                AND NOT EXISTS (
+                                    SELECT 1
+                                    FROM job_deletions AS deletions
+                                    WHERE deletions.job_id = jobs.id
+                                )
                         )
                         AND NOT EXISTS (
                             SELECT 1
@@ -1872,6 +1882,11 @@ class SqliteVersionRetentionStore:
                             AND versions.row_version = version_retention_items.expected_object_row_version
                             AND versions.manifest_hash = version_retention_items.expected_manifest_hash
                             AND jobs.lifecycle_state = 'ACTIVE'
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM job_deletions AS deletions
+                                WHERE deletions.job_id = jobs.id
+                            )
                             AND NOT EXISTS (
                                 SELECT 1
                                 FROM version_retention_holds AS holds

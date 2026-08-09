@@ -9,6 +9,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
 from mediasync_home.adapters.endpoint_leases import EndpointRootResolver
 from mediasync_home.adapters.process_supervisor import Win32JobObjectTransferSupervisor
@@ -43,8 +44,8 @@ from mediasync_home.application.run_staging import (
 
 
 FORBIDDEN_ROBOCOPY_SWITCH_NAMES = frozenset(("MIR", "PURGE", "MOVE", "MOV"))
+RECURSIVE_ROBOCOPY_SWITCH_NAMES = frozenset(("E", "S", "LEV"))
 DEFAULT_ROBOCOPY_SWITCHES = (
-    "/E",
     "/Z",
     "/R:1",
     "/W:1",
@@ -258,16 +259,16 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
         self._validate_source_identity(operation, source_path)
         inbox = self._robocopy_inbox_path(operation)
         if inbox.exists():
-            raise LocalFileStagingError(
-                "ROBOCOPY_STAGING_INBOX_EXISTS",
-                "Inspect and remove the stale Robocopy staging inbox before retrying.",
-            )
+            if not quarantine_robocopy_batch_inbox(inbox=inbox):
+                raise LocalFileStagingError(
+                    "ROBOCOPY_STAGING_INBOX_EXISTS",
+                    "Inspect the stale Robocopy staging inbox before retrying.",
+                )
         log_path = self._robocopy_log_path(operation)
+        manifest_path = self._robocopy_manifest_path(operation)
         manifest: RobocopyBatchManifest | None = None
 
         try:
-            inbox.mkdir(parents=True)
-            log_path.parent.mkdir(parents=True, exist_ok=True)
             manifest = build_robocopy_batch_manifest(
                 batch_id=_safe_staging_name(operation),
                 source_parent=source_path.parent,
@@ -283,8 +284,12 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
                 ),
                 profile=self._profile,
             )
-            manifest_path = self._robocopy_manifest_path(operation)
-            write_robocopy_batch_manifest(manifest=manifest, manifest_path=manifest_path)
+            write_robocopy_batch_manifest_for_retry(
+                manifest=manifest,
+                manifest_path=manifest_path,
+            )
+            inbox.mkdir(parents=True)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
             command_plan = build_robocopy_directory_manifest_command_plan(
                 executable=self._executable_resolver.resolve("Robocopy.exe"),
                 manifest=manifest,
@@ -312,7 +317,9 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
             discard_robocopy_batch_inbox(inbox=inbox, manifest=manifest)
             raise
         except LocalFileStagingError as exc:
-            if exc.validation_code in _DISCARD_ROBOCOPY_INBOX_ERROR_CODES:
+            if exc.validation_code == "STAGING_MANIFEST_MISMATCH":
+                quarantine_robocopy_batch_inbox(inbox=inbox)
+            elif exc.validation_code in _DISCARD_ROBOCOPY_INBOX_ERROR_CODES:
                 discard_robocopy_batch_inbox(inbox=inbox, manifest=manifest)
             raise
         except (RobocopyConfigurationError, WindowsCommandLineError) as exc:
@@ -524,6 +531,21 @@ def write_robocopy_batch_manifest(
         raise RobocopyConfigurationError("ROBOCOPY_MANIFEST_CONFLICT") from exc
 
 
+def write_robocopy_batch_manifest_for_retry(
+    *,
+    manifest: RobocopyBatchManifest,
+    manifest_path: Path,
+) -> None:
+    try:
+        write_robocopy_batch_manifest(manifest=manifest, manifest_path=manifest_path)
+    except RobocopyConfigurationError as exc:
+        if str(exc) != "ROBOCOPY_MANIFEST_CONFLICT":
+            raise
+        if not _quarantine_robocopy_artifact(manifest_path):
+            raise
+        write_robocopy_batch_manifest(manifest=manifest, manifest_path=manifest_path)
+
+
 def build_robocopy_directory_manifest_command_plan(
     *,
     executable: ResolvedSystemExecutable,
@@ -662,6 +684,11 @@ def validate_robocopy_switches(arguments: tuple[str, ...]) -> None:
 
 def validate_robocopy_profile(profile: RobocopyTransferProfile) -> None:
     validate_robocopy_switches(profile.switches)
+    if any(
+        _robocopy_switch_name(switch) in RECURSIVE_ROBOCOPY_SWITCH_NAMES
+        for switch in profile.switches
+    ):
+        raise RobocopyConfigurationError("ROBOCOPY_FILE_BATCH_RECURSION_FORBIDDEN")
     if (
         profile.success_max_exit_code < 0
         or profile.success_max_exit_code > ROBOCOPY_SUCCESS_MAX_EXIT_CODE
@@ -970,6 +997,25 @@ def discard_robocopy_batch_inbox(
             return False
     try:
         inbox.rmdir()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def quarantine_robocopy_batch_inbox(*, inbox: Path) -> bool:
+    return _quarantine_robocopy_artifact(inbox)
+
+
+def _quarantine_robocopy_artifact(path: Path) -> bool:
+    if not path.exists():
+        return True
+    quarantine_root = path.parent.parent / "quarantine"
+    quarantine_path = quarantine_root / f"{path.name}.{uuid4().hex}"
+    try:
+        quarantine_root.mkdir(parents=True, exist_ok=True)
+        path.rename(quarantine_path)
     except FileNotFoundError:
         return True
     except OSError:

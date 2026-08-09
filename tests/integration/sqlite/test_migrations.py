@@ -38,7 +38,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 57
+        assert current_schema_version(connection, plan.store) == 58
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -96,8 +96,9 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "store_identity",
             "store_handoffs",
             "directory_metadata_records",
+            "job_deletions",
         }
-        assert _row_count(connection, "schema_migrations") == 57
+        assert _row_count(connection, "schema_migrations") == 58
         assert {
             "idx_initial_backup_materializations_history",
             "idx_initial_backup_materializations_job_history",
@@ -1282,7 +1283,7 @@ def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> N
                 name,
                 migration_checksum
             )
-                        VALUES ('catalog', 58, 'future_migration', ?)
+                        VALUES ('catalog', 59, 'future_migration', ?)
             """,
             ("f" * 64,),
         )
@@ -1395,8 +1396,8 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
         preflight = inspect_sqlite_migration_state(connection, plan)
 
         assert preflight.initialized
-        assert preflight.current_version == 57
-        assert preflight.target_version == 57
+        assert preflight.current_version == 58
+        assert preflight.target_version == 58
         assert preflight.checksum_backfill_required
         assert "migration_checksum" not in _column_names(
             connection,

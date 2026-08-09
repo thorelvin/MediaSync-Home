@@ -28,6 +28,7 @@ from mediasync_home.adapters.sqlite.migrations import (
     apply_sqlite_migrations,
     catalog_migration_plan,
 )
+from mediasync_home.adapters.sqlite.job_lifecycle import SqliteJobLifecycleStore
 from mediasync_home.adapters.sqlite.transactions import SqliteImmediateTransactionRunner
 from mediasync_home.adapters.writable_endpoint_registration import (
     LocalWritableEndpointControlAreaProvisioner,
@@ -37,6 +38,7 @@ from mediasync_home.application.command_receipts import CommandReceiptState
 from mediasync_home.application.endpoint_takeover import (
     EndpointTakeoverCommandName,
     EndpointTakeoverCoordinator,
+    EndpointTakeoverError,
     EndpointTakeoverIds,
     EndpointTakeoverIntent,
     EndpointTakeoverState,
@@ -44,6 +46,7 @@ from mediasync_home.application.endpoint_takeover import (
     StartControlledEndpointTakeoverCommand,
 )
 from mediasync_home.application.runtime_status import startup_status
+from mediasync_home.application.job_lifecycle import ChangeJobLifecycleCommand
 from mediasync_home.application.writable_endpoint_registration import (
     WritableEndpointRegistrationCandidate,
     WritableEndpointTargetIds,
@@ -298,6 +301,78 @@ def test_startup_reconciliation_finishes_published_takeover(tmp_path: Path) -> N
             "SELECT state FROM controlled_endpoint_takeover_intents WHERE intent_id = ?",
             (INTENT_ID,),
         ).fetchone() == ("COMMITTED",)
+
+
+def test_deleted_job_excludes_pending_takeover_from_startup_recovery(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "catalog.sqlite"
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    with sqlite3.connect(database) as connection:
+        _prepare_catalog(connection, database, source=source, target=target)
+        _create_foreign_marker(target)
+        _refresher(connection).refresh_endpoint_classifications(
+            observed_utc="2026-08-01T12:00:00Z"
+        )
+        store = SqliteEndpointTakeoverStore(connection)
+        candidate = store.load_takeover_candidate(
+            job_id=JOB_ID,
+            job_revision_id=JOB_REVISION_ID,
+            target_ordinal=1,
+            endpoint_id=TARGET_ENDPOINT_ID,
+            expected_foreign_owner_installation_id=FOREIGN_OWNER,
+            expected_ownership_epoch=1,
+        )
+        filesystem = LocalEndpointTakeoverFilesystem()
+        prepared = filesystem.prepare_controlled_takeover(
+            candidate,
+            intent_id=INTENT_ID,
+            resulting_endpoint_revision_id=NEW_ENDPOINT_REVISION_ID,
+            owner_installation_id=LOCAL_OWNER,
+            created_utc="2026-08-01T12:01:00Z",
+        )
+        command = StartControlledEndpointTakeoverCommand(
+            request_id="dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            idempotency_key="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            job_id=JOB_ID,
+            job_revision_id=JOB_REVISION_ID,
+            target_ordinal=1,
+            endpoint_id=TARGET_ENDPOINT_ID,
+            expected_foreign_owner_installation_id=FOREIGN_OWNER,
+            expected_ownership_epoch=1,
+        )
+        store.save_prepared_takeover_intent(_prepared_intent(command, prepared))
+
+        deleted = SqliteJobLifecycleStore(
+            connection,
+            installation_id=LOCAL_OWNER,
+        ).delete_standard_backup_job(
+            command=ChangeJobLifecycleCommand(
+                request_id="aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+                idempotency_key="bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb",
+                job_id=JOB_ID,
+                expected_job_revision_id=JOB_REVISION_ID,
+                expected_lifecycle_row_version=1,
+                explicit_confirmation=True,
+            ),
+            occurred_utc="2026-08-01T12:02:00Z",
+        )
+
+        assert deleted.applied
+        assert store.list_recoverable_takeover_intents(limit=10) == ()
+        with pytest.raises(EndpointTakeoverError) as exc_info:
+            store.load_takeover_candidate(
+                job_id=JOB_ID,
+                job_revision_id=JOB_REVISION_ID,
+                target_ordinal=1,
+                endpoint_id=TARGET_ENDPOINT_ID,
+                expected_foreign_owner_installation_id=FOREIGN_OWNER,
+                expected_ownership_epoch=1,
+            )
+        assert exc_info.value.validation_code == "ENDPOINT_TAKEOVER_JOB_REVISION_STALE"
 
 
 class _FixedTakeoverIds:

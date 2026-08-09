@@ -302,6 +302,16 @@ class JobLifecycleProvider(Protocol):
         idempotency_key: str,
     ) -> IpcResponse: ...
 
+    def delete_standard_backup_job(
+        self,
+        *,
+        job_id: str,
+        expected_job_revision_id: str,
+        expected_lifecycle_row_version: int,
+        request_id: str,
+        idempotency_key: str,
+    ) -> IpcResponse: ...
+
 
 class AutomationScheduleProvider(Protocol):
     def configure_daily_backup_schedule(
@@ -819,11 +829,12 @@ class MediaSyncWindow(QMainWindow):
         self._jobs_lifecycle_filter_combo: QComboBox | None = None
         self._jobs_lifecycle_filter = "ACTIVE"
         self._jobs_lifecycle_button: QPushButton | None = None
+        self._jobs_delete_button: QPushButton | None = None
         self._jobs_edit_button: QPushButton | None = None
         self._job_lifecycle_command_pending = False
         self._job_lifecycle_request_id: str | None = None
         self._job_lifecycle_idempotency_key: str | None = None
-        self._job_lifecycle_command_key: tuple[str, str, int] | None = None
+        self._job_lifecycle_command_key: tuple[str, str, str, int] | None = None
         self._automation_command_pending = False
         self._automation_request_id: str | None = None
         self._automation_idempotency_key: str | None = None
@@ -967,6 +978,7 @@ class MediaSyncWindow(QMainWindow):
         self._setup_discard_edit_button: QPushButton | None = None
         self._setup_consequence_label: QLabel | None = None
         self._setup_actions_layout: QGridLayout | None = None
+        self._jobs_detail_actions_layout: QGridLayout | None = None
         self._job_detail_title: QLabel | None = None
         self._job_detail_source_label: QLabel | None = None
         self._job_detail_targets_label: QLabel | None = None
@@ -1750,6 +1762,8 @@ class MediaSyncWindow(QMainWindow):
                 self._start_backup_button,
                 self._jobs_start_backup_button,
                 self._jobs_lifecycle_button,
+                self._jobs_delete_button,
+                self._jobs_edit_button,
             ):
                 if button is not None:
                     button.setEnabled(False)
@@ -7612,6 +7626,20 @@ class MediaSyncWindow(QMainWindow):
                 and not self._command_worker_active()
                 and not active_for_job
             )
+        if self._jobs_delete_button is not None:
+            button = self._jobs_delete_button
+            button.setText(self._texts().delete_job)
+            button.setToolTip(self._texts().delete_job_tooltip)
+            button.setVisible(state.found)
+            button.setEnabled(
+                state.found
+                and not self._job_detail_query_pending
+                and not self._job_lifecycle_command_pending
+                and not self._command_worker_active()
+                and not active_for_job
+                and self._engine_client is not None
+                and hasattr(self._engine_client, "delete_standard_backup_job")
+            )
         if self._jobs_edit_button is not None:
             button = self._jobs_edit_button
             button.setText(self._texts().edit_job)
@@ -8853,11 +8881,27 @@ class MediaSyncWindow(QMainWindow):
         if answer == QMessageBox.StandardButton.Yes:
             self._change_selected_job_lifecycle()
 
-    def _change_selected_job_lifecycle(self) -> bool:
+    def _confirm_selected_job_deletion(self) -> None:
+        state = self._job_detail_state
+        if not state.found or state.job_id is None or state.job_revision_id is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            self._texts().delete_job_title,
+            self._texts().delete_job_confirmation,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._change_selected_job_lifecycle(delete=True)
+
+    def _change_selected_job_lifecycle(self, *, delete: bool = False) -> bool:
         state = self._job_detail_state
         archived = state.lifecycle_state == "ARCHIVED"
         method_name = (
-            "reactivate_standard_backup_job"
+            "delete_standard_backup_job"
+            if delete
+            else "reactivate_standard_backup_job"
             if archived
             else "archive_standard_backup_job"
         )
@@ -8873,6 +8917,7 @@ class MediaSyncWindow(QMainWindow):
         ):
             return False
         command_key = (
+            method_name,
             state.job_id,
             state.lifecycle_state,
             state.lifecycle_row_version,
@@ -8908,6 +8953,7 @@ class MediaSyncWindow(QMainWindow):
             self._apply_job_lifecycle_response(
                 cast(IpcResponse, value),
                 archived=archived,
+                deleted=delete,
             )
 
         def reject(_error: Exception) -> None:
@@ -8918,7 +8964,13 @@ class MediaSyncWindow(QMainWindow):
             self._refresh_command_buttons()
 
         submitted = self._submit_engine_command(
-            name="reactivate-job" if archived else "archive-job",
+            name=(
+                "delete-job"
+                if delete
+                else "reactivate-job"
+                if archived
+                else "archive-job"
+            ),
             operation=command,
             on_result=accept,
             on_error=reject,
@@ -8933,6 +8985,7 @@ class MediaSyncWindow(QMainWindow):
         response: IpcResponse,
         *,
         archived: bool,
+        deleted: bool = False,
     ) -> None:
         if response.status is IpcStatus.REJECTED:
             reason_value = response.payload.get("validation_code")
@@ -8955,7 +9008,9 @@ class MediaSyncWindow(QMainWindow):
                 replace(
                     self._engine_status_state,
                     detail=(
-                        self._texts().job_reactivated
+                        self._texts().job_deleted
+                        if deleted
+                        else self._texts().job_reactivated
                         if archived
                         else self._texts().job_archived
                     ),
@@ -8965,9 +9020,10 @@ class MediaSyncWindow(QMainWindow):
         self._job_lifecycle_command_key = None
         self._job_lifecycle_request_id = None
         self._job_lifecycle_idempotency_key = None
-        self._selected_job_id = None
-        self.apply_backup_job_detail(empty_backup_job_detail_state())
-        self._clear_selected_plan_previews()
+        if response.status is not IpcStatus.REJECTED:
+            self._selected_job_id = None
+            self.apply_backup_job_detail(empty_backup_job_detail_state())
+            self._clear_selected_plan_previews()
         self._refresh_backup_overview()
         self._refresh_activity_overview()
         self._refresh_command_buttons()
@@ -10498,6 +10554,13 @@ class MediaSyncWindow(QMainWindow):
         lifecycle_button.clicked.connect(self._confirm_selected_job_lifecycle_change)
         self._jobs_lifecycle_button = lifecycle_button
 
+        delete_button = QPushButton(texts.delete_job)
+        delete_button.setObjectName("jobsDeleteButton")
+        delete_button.setIcon(self._icons.icon("remove-target"))
+        delete_button.setToolTip(texts.delete_job_tooltip)
+        delete_button.clicked.connect(self._confirm_selected_job_deletion)
+        self._jobs_delete_button = delete_button
+
         edit_button = QPushButton(texts.edit_job)
         edit_button.setObjectName("jobsEditButton")
         edit_button.setIcon(self._icons.icon("edit"))
@@ -10507,13 +10570,11 @@ class MediaSyncWindow(QMainWindow):
 
         actions = QWidget()
         actions.setObjectName("jobsDetailActions")
-        actions_layout = QHBoxLayout(actions)
+        actions_layout = QGridLayout(actions)
         actions_layout.setContentsMargins(0, 0, 0, 0)
         actions_layout.setSpacing(8)
-        actions_layout.addWidget(edit_button)
-        actions_layout.addWidget(lifecycle_button)
-        actions_layout.addStretch(1)
-        actions_layout.addWidget(start_backup)
+        self._jobs_detail_actions_layout = actions_layout
+        self._lay_out_jobs_detail_actions(compact=self.width() < 1040)
         layout.addWidget(actions, 21, 0, 1, 3)
         layout.setColumnStretch(1, 1)
         return panel
@@ -12247,6 +12308,7 @@ class MediaSyncWindow(QMainWindow):
         self._compact_dashboard_layout = compact_steps
         self._stacked_dashboard_details = stacked_details
         self._lay_out_setup_actions(compact=compact_steps)
+        self._lay_out_jobs_detail_actions(compact=compact_steps)
         if self._dashboard_detail_layout is not None:
             self._dashboard_detail_layout.setDirection(
                 QBoxLayout.Direction.TopToBottom
@@ -12307,6 +12369,36 @@ class MediaSyncWindow(QMainWindow):
         layout.addWidget(back, 0, 2)
         layout.addWidget(save_without_check, 0, 3)
         layout.addWidget(primary, 0, 4)
+
+    def _lay_out_jobs_detail_actions(self, *, compact: bool) -> None:
+        layout = self._jobs_detail_actions_layout
+        edit = self._jobs_edit_button
+        lifecycle = self._jobs_lifecycle_button
+        delete = self._jobs_delete_button
+        start = self._jobs_start_backup_button
+        if (
+            layout is None
+            or edit is None
+            or lifecycle is None
+            or delete is None
+            or start is None
+        ):
+            return
+        for button in (edit, lifecycle, delete, start):
+            layout.removeWidget(button)
+        for column in range(5):
+            layout.setColumnStretch(column, 0)
+        layout.addWidget(edit, 0, 0)
+        if compact:
+            layout.addWidget(lifecycle, 1, 0)
+            layout.addWidget(delete, 2, 0)
+            layout.addWidget(start, 3, 0)
+            layout.setColumnStretch(0, 1)
+            return
+        layout.addWidget(lifecycle, 0, 1)
+        layout.addWidget(delete, 0, 2)
+        layout.setColumnStretch(3, 1)
+        layout.addWidget(start, 0, 4)
 
     def _update_responsive_settings_layout(self) -> None:
         direction = (

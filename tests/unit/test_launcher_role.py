@@ -311,7 +311,6 @@ def test_local_preview_host_run_can_enable_task_scheduler_startup_pump(
         "--state-root",
         str(state_root.resolve()),
         "--enable-local-mutations",
-        "--run-executor-cycle-after-request",
         "--run-executor-cycle-interval-ms",
         "250",
         "--run-executor-staging-backend",
