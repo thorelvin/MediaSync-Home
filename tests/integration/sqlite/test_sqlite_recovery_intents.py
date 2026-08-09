@@ -15,9 +15,18 @@ from mediasync_home.adapters.sqlite.recovery_intents import (
     SqliteRecoveryIntentSegmentStore,
     SqliteRecoveryIntentSegmentStoreError,
 )
+from mediasync_home.adapters.sqlite.recovery_operations import (
+    SqliteRecoveryOperationStore,
+)
 from mediasync_home.application.recovery_intents import (
     RecoveryIntentSegment,
+    RecoveryIntentSegmentState,
     durable_recovery_intent_segment,
+)
+from mediasync_home.application.recovery_operations import (
+    RecoveryOperation,
+    RecoveryTargetPreconditionKind,
+    planned_recovery_operation,
 )
 
 
@@ -219,6 +228,114 @@ def test_recovery_intent_segment_migration_blocks_durable_field_mutation(
         connection.close()
 
 
+def test_sqlite_recovery_intent_lifecycle_waits_for_terminal_referenced_operations(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _register_resource_lease(connection)
+        intents = SqliteRecoveryIntentSegmentStore(connection)
+        operations = SqliteRecoveryOperationStore(connection)
+        segment = _segment(operation_count=1)
+        intents.publish_intent_segment(segment)
+        operations.record_planned_operation(
+            _operation(),
+            process_instance_id="engine-a",
+        )
+        connection.execute(
+            """
+            UPDATE recovery_operations
+            SET intent_segment_id = ?, intent_ordinal = ?
+            WHERE run_id = ? AND operation_id = ?
+            """,
+            (segment.segment_id, 0, "run-a", "op-a"),
+        )
+        connection.commit()
+
+        assert intents.intent_segment_reconciliation_ready(
+            segment_id=segment.segment_id
+        ) is False
+
+        connection.execute(
+            """
+            UPDATE recovery_operations
+            SET phase = 'CANCELLED'
+            WHERE run_id = ? AND operation_id = ?
+            """,
+            ("run-a", "op-a"),
+        )
+        connection.commit()
+        assert intents.intent_segment_reconciliation_ready(
+            segment_id=segment.segment_id
+        ) is True
+
+        reconciled = intents.transition_intent_segment_state(
+            segment_id=segment.segment_id,
+            expected_state=RecoveryIntentSegmentState.DURABLE,
+            next_state=RecoveryIntentSegmentState.RECONCILED,
+        )
+        assert reconciled is not None
+        assert reconciled.state is RecoveryIntentSegmentState.RECONCILED
+        assert intents.list_unresolved_intent_segments(limit=10) == (reconciled,)
+        assert intents.transition_intent_segment_state(
+            segment_id=segment.segment_id,
+            expected_state=RecoveryIntentSegmentState.DURABLE,
+            next_state=RecoveryIntentSegmentState.RECONCILED,
+        ) is None
+
+        cleanup_eligible = intents.transition_intent_segment_state(
+            segment_id=segment.segment_id,
+            expected_state=RecoveryIntentSegmentState.RECONCILED,
+            next_state=RecoveryIntentSegmentState.CLEANUP_ELIGIBLE,
+        )
+        assert cleanup_eligible is not None
+        assert intents.list_unresolved_intent_segments(limit=10) == ()
+        cleaned = intents.transition_intent_segment_state(
+            segment_id=segment.segment_id,
+            expected_state=RecoveryIntentSegmentState.CLEANUP_ELIGIBLE,
+            next_state=RecoveryIntentSegmentState.CLEANED,
+        )
+        assert cleaned is not None
+        assert cleaned.state is RecoveryIntentSegmentState.CLEANED
+        assert intents.load_next_intent_segment_lifecycle_candidate(
+            run_id="run-a",
+            run_target_id="run-a-target-0000",
+        ) is None
+    finally:
+        connection.close()
+
+
+def test_sqlite_recovery_intent_lifecycle_allows_superseded_unbound_segment(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _register_resource_lease(connection)
+        store = SqliteRecoveryIntentSegmentStore(connection)
+        first = _segment(operation_count=1)
+        second = _segment(
+            segment_id="segment-b",
+            segment_sequence=1,
+            relative_path=(
+                "installations/owner-a/recovery/run-a/segment-000001.intent.jsonl"
+            ),
+            operation_count=1,
+            segment_hash="b" * 64,
+            previous_segment_hash=first.segment_hash,
+        )
+        store.publish_intent_segment(first)
+        store.publish_intent_segment(second)
+
+        assert store.intent_segment_reconciliation_ready(
+            segment_id=first.segment_id
+        ) is True
+        assert store.intent_segment_reconciliation_ready(
+            segment_id=second.segment_id
+        ) is False
+    finally:
+        connection.close()
+
+
 def _prepared_recovery_connection(tmp_path: Path) -> sqlite3.Connection:
     database = tmp_path / "recovery.sqlite"
     connection = sqlite3.connect(database)
@@ -266,3 +383,22 @@ def _segment(**overrides: object) -> RecoveryIntentSegment:
     }
     values.update(overrides)
     return durable_recovery_intent_segment(**values)
+
+
+def _operation() -> RecoveryOperation:
+    return planned_recovery_operation(
+        run_id="run-a",
+        run_target_id="run-a-target-0000",
+        operation_id="op-a",
+        target_endpoint_id="target-a",
+        target_endpoint_revision_id="target-rev-a",
+        endpoint_generation=1,
+        owner_installation_id="owner-a",
+        ownership_epoch=1,
+        lease_id="lease-a",
+        lease_resource_key="endpoint:target-a",
+        fencing_token=1,
+        final_relative_path="Pictures/A.jpg",
+        target_precondition_kind=RecoveryTargetPreconditionKind.ABSENT,
+        planned_bytes=128,
+    )

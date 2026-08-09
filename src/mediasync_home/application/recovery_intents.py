@@ -146,6 +146,32 @@ def validate_recovery_intent_segment(segment: RecoveryIntentSegment) -> None:
         raise RecoveryIntentSegmentViolation("RECOVERY_INTENT_SEGMENT_REQUIRES_DURABLE_STORAGE")
 
 
+def recovery_intent_segment_evidence_matches(
+    first: RecoveryIntentSegment,
+    second: RecoveryIntentSegment,
+) -> bool:
+    return (
+        first.segment_id == second.segment_id
+        and first.run_id == second.run_id
+        and first.run_target_id == second.run_target_id
+        and first.target_endpoint_id == second.target_endpoint_id
+        and first.target_endpoint_revision_id == second.target_endpoint_revision_id
+        and first.endpoint_generation == second.endpoint_generation
+        and first.owner_installation_id == second.owner_installation_id
+        and first.ownership_epoch == second.ownership_epoch
+        and first.lease_id == second.lease_id
+        and first.fencing_token == second.fencing_token
+        and first.segment_sequence == second.segment_sequence
+        and first.relative_path == second.relative_path
+        and first.schema_version == second.schema_version
+        and first.operation_count == second.operation_count
+        and first.byte_count == second.byte_count
+        and first.segment_hash == second.segment_hash
+        and first.previous_segment_hash == second.previous_segment_hash
+        and first.durability_state == second.durability_state
+    )
+
+
 def _non_empty(*values: str) -> bool:
     return all(value.strip() for value in values)
 

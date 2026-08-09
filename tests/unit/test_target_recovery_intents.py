@@ -9,10 +9,14 @@ import pytest
 
 from mediasync_home.adapters.recovery_intents import (
     LocalTargetRecoveryIntentError,
+    LocalTargetRecoveryIntentSegmentCleanup,
     LocalTargetRecoveryIntentSegmentPublisher,
     SqliteCatalogTargetRecoveryIntentSegmentReader,
 )
-from mediasync_home.application.recovery_intents import RecoveryIntentSegment
+from mediasync_home.application.recovery_intents import (
+    RecoveryIntentSegment,
+    RecoveryIntentSegmentState,
+)
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
     RecoveryOperationPhase,
@@ -121,6 +125,67 @@ def test_local_target_recovery_intent_publisher_rejects_existing_conflict(
             operations=(operation,),
             plan_checksum=PLAN_CHECKSUM,
         )
+
+
+def test_local_target_recovery_intent_cleanup_deletes_then_verifies_absence(
+    tmp_path: Path,
+) -> None:
+    target_root = _target_root(tmp_path)
+    operation = _operation()
+    segment = _segment(operation)
+    LocalTargetRecoveryIntentSegmentPublisher(
+        root_resolver=_RootResolver(target_root),
+        clock=_Clock(),
+    ).publish_target_intent_segment(
+        segment=segment,
+        operations=(operation,),
+        plan_checksum=PLAN_CHECKSUM,
+    )
+    eligible = replace(
+        segment,
+        state=RecoveryIntentSegmentState.CLEANUP_ELIGIBLE,
+    )
+    validator = _PermitValidator()
+    cleanup = LocalTargetRecoveryIntentSegmentCleanup(
+        root_resolver=_RootResolver(target_root),
+        permit_validator=validator,
+    )
+    path = target_root / ".mediasync" / Path(segment.relative_path)
+
+    assert cleanup.ensure_target_intent_segment_absent(
+        permit=_permit(), segment=eligible
+    ) is False
+    assert path.exists() is False
+    assert cleanup.ensure_target_intent_segment_absent(
+        permit=_permit(), segment=eligible
+    ) is True
+    assert validator.calls == 2
+
+
+def test_local_target_recovery_intent_cleanup_rejects_changed_document(
+    tmp_path: Path,
+) -> None:
+    target_root = _target_root(tmp_path)
+    operation = _operation()
+    segment = _segment(operation)
+    path = target_root / ".mediasync" / Path(segment.relative_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("{}\n", encoding="utf-8")
+    cleanup = LocalTargetRecoveryIntentSegmentCleanup(
+        root_resolver=_RootResolver(target_root),
+        permit_validator=_PermitValidator(),
+    )
+
+    with pytest.raises(LocalTargetRecoveryIntentError, match="HEADER_INVALID"):
+        cleanup.ensure_target_intent_segment_absent(
+            permit=_permit(),
+            segment=replace(
+                segment,
+                state=RecoveryIntentSegmentState.CLEANUP_ELIGIBLE,
+            ),
+        )
+
+    assert path.exists()
 
 
 def test_sqlite_catalog_target_recovery_intent_reader_scans_owned_endpoint(
@@ -248,6 +313,90 @@ def test_startup_reconciliation_blocks_database_segment_missing_on_target() -> N
     assert report.missing_target_segment_ids == (segment.segment_id,)
 
 
+def test_startup_reconciliation_accepts_advanced_database_lifecycle_state() -> None:
+    operation = _operation()
+    segment = _segment(operation)
+    document = parse_target_recovery_intent_segment_document(
+        build_target_recovery_intent_segment_document(
+            segment=segment,
+            operations=(operation,),
+            plan_checksum=PLAN_CHECKSUM,
+            created_utc="2026-08-09T10:00:00.000Z",
+        )
+    )
+    store = _IntentStore(
+        initial=(replace(segment, state=RecoveryIntentSegmentState.RECONCILED),)
+    )
+
+    report = reconcile_target_recovery_intents_after_startup(
+        reader=_Reader(document),
+        intent_segments=store,
+        recovery_operations=_OperationStore(operation),
+    )
+
+    assert report.mutation_safe is True
+    assert report.matched_segment_ids == (segment.segment_id,)
+
+
+def test_startup_reconciliation_accepts_cleanup_eligible_segment_absent_on_target() -> None:
+    operation = _operation()
+    segment = replace(
+        _segment(operation),
+        state=RecoveryIntentSegmentState.CLEANUP_ELIGIBLE,
+    )
+
+    report = reconcile_target_recovery_intents_after_startup(
+        reader=_Reader(),
+        intent_segments=_IntentStore(initial=(segment,)),
+        recovery_operations=_OperationStore(operation),
+    )
+
+    assert report.mutation_safe is True
+    assert report.missing_target_segment_ids == ()
+
+
+def test_startup_reconciliation_blocks_reconciled_segment_absent_on_target() -> None:
+    operation = _operation()
+    segment = replace(
+        _segment(operation),
+        state=RecoveryIntentSegmentState.RECONCILED,
+    )
+
+    report = reconcile_target_recovery_intents_after_startup(
+        reader=_Reader(),
+        intent_segments=_IntentStore(initial=(segment,)),
+        recovery_operations=_OperationStore(operation),
+    )
+
+    assert report.mutation_safe is False
+    assert report.missing_target_segment_ids == (segment.segment_id,)
+
+
+def test_startup_reconciliation_blocks_cleaned_segment_present_on_target() -> None:
+    operation = _operation()
+    segment = _segment(operation)
+    document = parse_target_recovery_intent_segment_document(
+        build_target_recovery_intent_segment_document(
+            segment=segment,
+            operations=(operation,),
+            plan_checksum=PLAN_CHECKSUM,
+            created_utc="2026-08-09T10:00:00.000Z",
+        )
+    )
+    store = _IntentStore(
+        initial=(replace(segment, state=RecoveryIntentSegmentState.CLEANED),)
+    )
+
+    report = reconcile_target_recovery_intents_after_startup(
+        reader=_Reader(document),
+        intent_segments=store,
+        recovery_operations=_OperationStore(operation),
+    )
+
+    assert report.mutation_safe is False
+    assert report.conflicting_segment_ids == (segment.segment_id,)
+
+
 class _RootResolver:
     def __init__(self, root: Path) -> None:
         self._root = root
@@ -277,6 +426,18 @@ class _AdvancingClock:
     def utc_now(self) -> str:
         self._calls += 1
         return f"2026-08-09T10:00:0{self._calls}.000Z"
+
+
+class _PermitValidator:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def assert_mutation_permit_current(self, permit: MutationPermit) -> None:
+        assert permit.run_id == "run-a"
+        assert permit.run_target_id == "run-a-target-0000"
+        assert permit.endpoint_id == "target-a"
+        assert permit.endpoint_revision_id == "target-rev-a"
+        self.calls += 1
 
 
 class _Reader:
@@ -322,7 +483,16 @@ class _IntentStore:
         *,
         limit: int,
     ) -> tuple[RecoveryIntentSegment, ...]:
-        return tuple(self._segments.values())[:limit]
+        return tuple(
+            segment
+            for segment in self._segments.values()
+            if segment.state
+            in {
+                RecoveryIntentSegmentState.BUILDING,
+                RecoveryIntentSegmentState.DURABLE,
+                RecoveryIntentSegmentState.RECONCILED,
+            }
+        )[:limit]
 
 
 class _OperationStore:

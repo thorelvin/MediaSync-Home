@@ -48,6 +48,13 @@ from mediasync_home.application.run_intent_segments import (
     TargetRecoveryIntentSegmentPublisher,
     publish_run_target_recovery_intent_segment,
 )
+from mediasync_home.application.run_intent_cleanup import (
+    RecoveryIntentSegmentLifecycleStore,
+    RunIntentCleanupAction,
+    RunIntentCleanupOutcome,
+    TargetRecoveryIntentSegmentCleanupPort,
+    advance_next_run_target_intent_cleanup,
+)
 from mediasync_home.application.run_operation_lease_rebind import (
     rebind_next_run_target_recovery_operation_lease,
 )
@@ -89,6 +96,10 @@ class RunExecutorCycleAction(str, Enum):
     EXECUTION_STARTED = "EXECUTION_STARTED"
     OPERATIONS_PLANNED = "OPERATIONS_PLANNED"
     INTENT_PUBLISHED = "INTENT_PUBLISHED"
+    INTENT_RECONCILED = "INTENT_RECONCILED"
+    INTENT_CLEANUP_ELIGIBLE = "INTENT_CLEANUP_ELIGIBLE"
+    INTENT_TARGET_REMOVED = "INTENT_TARGET_REMOVED"
+    INTENT_CLEANED = "INTENT_CLEANED"
     FINAL_COMMITTED = "FINAL_COMMITTED"
     CATALOG_HANDOFF_RECORDED = "CATALOG_HANDOFF_RECORDED"
     RECOVERY_OBJECT_CLEANED = "RECOVERY_OBJECT_CLEANED"
@@ -169,6 +180,8 @@ def execute_bounded_run_executor_cycle(
     recovery_operations: RunExecutorCycleRecoveryOperationStore,
     intent_segments: RecoveryIntentSegmentStore,
     target_intent_segments: TargetRecoveryIntentSegmentPublisher | None = None,
+    intent_segment_lifecycle: RecoveryIntentSegmentLifecycleStore | None = None,
+    target_intent_segment_cleanup: TargetRecoveryIntentSegmentCleanupPort | None = None,
     catalog_handoffs: FinalFileCatalogHandoffStore,
     process_instance_id: str,
     max_steps: int,
@@ -194,6 +207,8 @@ def execute_bounded_run_executor_cycle(
             recovery_operations=recovery_operations,
             intent_segments=intent_segments,
             target_intent_segments=target_intent_segments,
+            intent_segment_lifecycle=intent_segment_lifecycle,
+            target_intent_segment_cleanup=target_intent_segment_cleanup,
             catalog_handoffs=catalog_handoffs,
             process_instance_id=process_instance_id,
             final_commit_port=final_commit_port,
@@ -237,6 +252,8 @@ def execute_one_run_executor_cycle(
     recovery_operations: RunExecutorCycleRecoveryOperationStore,
     intent_segments: RecoveryIntentSegmentStore,
     target_intent_segments: TargetRecoveryIntentSegmentPublisher | None = None,
+    intent_segment_lifecycle: RecoveryIntentSegmentLifecycleStore | None = None,
+    target_intent_segment_cleanup: TargetRecoveryIntentSegmentCleanupPort | None = None,
     catalog_handoffs: FinalFileCatalogHandoffStore,
     process_instance_id: str,
     final_commit_port: FinalCommitPort | None = None,
@@ -335,6 +352,8 @@ def execute_one_run_executor_cycle(
             recovery_operations=recovery_operations,
             intent_segments=intent_segments,
             target_intent_segments=target_intent_segments,
+            intent_segment_lifecycle=intent_segment_lifecycle,
+            target_intent_segment_cleanup=target_intent_segment_cleanup,
             catalog_handoffs=catalog_handoffs,
             process_instance_id=process_instance_id,
             final_commit_port=final_commit_port,
@@ -472,6 +491,8 @@ def _advance_retained_target(
     recovery_operations: RunExecutorCycleRecoveryOperationStore,
     intent_segments: RecoveryIntentSegmentStore,
     target_intent_segments: TargetRecoveryIntentSegmentPublisher | None,
+    intent_segment_lifecycle: RecoveryIntentSegmentLifecycleStore | None,
+    target_intent_segment_cleanup: TargetRecoveryIntentSegmentCleanupPort | None,
     catalog_handoffs: FinalFileCatalogHandoffStore,
     process_instance_id: str,
     final_commit_port: FinalCommitPort | None,
@@ -501,11 +522,45 @@ def _advance_retained_target(
                 next_action=audit_outcome.next_action,
             )
 
+    intent_cleanup_outcome: RunIntentCleanupOutcome | None = None
+    if (intent_segment_lifecycle is None) != (target_intent_segment_cleanup is None):
+        return _blocked(
+            run_id=permit.run_id,
+            run_target_id=permit.run_target_id,
+            validation_codes=("RUN_INTENT_CLEANUP_PORTS_INCOMPLETE",),
+            next_action="Configure both recovery intent lifecycle and target cleanup ports.",
+        )
+    if (
+        intent_segment_lifecycle is not None
+        and target_intent_segment_cleanup is not None
+    ):
+        intent_cleanup_outcome = advance_next_run_target_intent_cleanup(
+            permit=permit,
+            intent_segments=intent_segment_lifecycle,
+            target_cleanup=target_intent_segment_cleanup,
+        )
+        if intent_cleanup_outcome.advanced:
+            return _advanced(
+                action=_intent_cleanup_cycle_action(intent_cleanup_outcome.action),
+                run_id=permit.run_id,
+                run_target_id=permit.run_target_id,
+                next_action=intent_cleanup_outcome.next_action,
+            )
+        if intent_cleanup_outcome.validation_codes:
+            return _blocked(
+                run_id=permit.run_id,
+                run_target_id=permit.run_target_id,
+                validation_codes=intent_cleanup_outcome.validation_codes,
+                next_action=intent_cleanup_outcome.next_action,
+            )
+
     if _terminal_recovery_ready(
         recovery_operations=recovery_operations,
         permit=permit,
         target=target,
     ):
+        if _intent_cleanup_incomplete(intent_cleanup_outcome):
+            return _intent_cleanup_blocked(permit)
         if audit_outcome is not None and not audit_outcome.terminal_outcomes_complete:
             return _blocked(
                 run_id=permit.run_id,
@@ -815,6 +870,8 @@ def _advance_retained_target(
         permit=permit,
         target=target,
     ):
+        if _intent_cleanup_incomplete(intent_cleanup_outcome):
+            return _intent_cleanup_blocked(permit)
         if audit_outcome is not None and not audit_outcome.terminal_outcomes_complete:
             return _operation_audit_incomplete(permit)
         completion_outcome = complete_run_target_after_terminal_recovery(
@@ -848,6 +905,8 @@ def _advance_retained_target(
         )
         >= target.planned_operations
     ):
+        if _intent_cleanup_incomplete(intent_cleanup_outcome):
+            return _intent_cleanup_blocked(permit)
         if audit_outcome is not None and not audit_outcome.terminal_outcomes_complete:
             return _operation_audit_incomplete(permit)
         completion_outcome = complete_run_target_after_catalog_handoffs(
@@ -1109,6 +1168,35 @@ def _terminal_completion_action(
     if target is not None and target.state is RunTargetState.CANCELLED:
         return RunExecutorCycleAction.TARGET_CANCELLED
     return RunExecutorCycleAction.TARGET_COMPLETED
+
+
+def _intent_cleanup_cycle_action(
+    action: RunIntentCleanupAction,
+) -> RunExecutorCycleAction:
+    actions = {
+        RunIntentCleanupAction.RECONCILED: RunExecutorCycleAction.INTENT_RECONCILED,
+        RunIntentCleanupAction.CLEANUP_ELIGIBLE: (
+            RunExecutorCycleAction.INTENT_CLEANUP_ELIGIBLE
+        ),
+        RunIntentCleanupAction.TARGET_REMOVED: (
+            RunExecutorCycleAction.INTENT_TARGET_REMOVED
+        ),
+        RunIntentCleanupAction.CLEANED: RunExecutorCycleAction.INTENT_CLEANED,
+    }
+    return actions[action]
+
+
+def _intent_cleanup_incomplete(outcome: RunIntentCleanupOutcome | None) -> bool:
+    return outcome is not None and not outcome.all_cleaned
+
+
+def _intent_cleanup_blocked(permit: MutationPermit) -> RunExecutorCycleOutcome:
+    return _blocked(
+        run_id=permit.run_id,
+        run_target_id=permit.run_target_id,
+        validation_codes=("RUN_INTENT_CLEANUP_INCOMPLETE",),
+        next_action="Finish recovery intent reconciliation and cleanup before completing the target.",
+    )
 
 
 def _operation_audit_incomplete(permit: MutationPermit) -> RunExecutorCycleOutcome:

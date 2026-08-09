@@ -462,6 +462,15 @@ invariants:
     target_first_import_requires_historical_lease: true
     target_first_import_requires_staging_verified_operations: true
     missing_target_evidence_blocks_mutation: true
+    lifecycle_order: [DURABLE, RECONCILED, CLEANUP_ELIGIBLE, CLEANED]
+    reconciliation_requires_terminal_operations: true
+    unbound_segment_requires_later_hash_chained_segment: true
+    target_cleanup_requires_fresh_mutation_permit: true
+    target_cleanup_requires_exact_immutable_evidence: true
+    cleaned_requires_later_observed_absence: true
+    run_target_completion_requires_all_segments_cleaned: true
+    reconciled_missing_target_evidence_blocks_mutation: true
+    cleaned_target_evidence_reappearance_blocks_mutation: true
   - id: SRC-001_SOURCE_FILE_PRECONDITION
     requirement_id: SRC-001
     assertion: >

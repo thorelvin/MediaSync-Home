@@ -7,7 +7,9 @@ from typing import Mapping, Protocol
 from mediasync_home.application.recovery_intents import (
     MAX_INTENT_SEGMENT_BYTES,
     RecoveryIntentSegment,
+    RecoveryIntentSegmentState,
     durable_recovery_intent_segment,
+    recovery_intent_segment_evidence_matches,
 )
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
@@ -150,7 +152,9 @@ def reconcile_target_recovery_intents_after_startup(
         segment = scanned.document.segment
         existing_database = intent_segments.load_intent_segment(segment_id)
         if existing_database is not None:
-            if existing_database == segment:
+            if existing_database.state is RecoveryIntentSegmentState.CLEANED:
+                conflicts.add(segment_id)
+            elif recovery_intent_segment_evidence_matches(existing_database, segment):
                 matched.append(segment_id)
             else:
                 conflicts.add(segment_id)

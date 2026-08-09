@@ -14,11 +14,18 @@ control-record limit. Startup scans at most 10,000 owned target documents,
 rejects reparse/path/schema/hash/endpoint conflicts, imports a target-first
 crash orphan only when its historical lease and still-`STAGING_VERIFIED` local
 operations match exactly, and blocks all executor mutation when database-side
-evidence is missing on the target or reconciliation remains ambiguous. Real
-local copy coverage proves both final user bytes and the target-side segment;
-strict parser, no-overwrite, idempotency, import and state-restore scans are
-covered separately. Segment terminal reconciliation and retention cleanup are
-the next Milestone 8 recovery slice.
+evidence is missing on the target or reconciliation remains ambiguous. After
+all run-target operations become terminal, each segment advances monotonically
+through `RECONCILED` and `CLEANUP_ELIGIBLE`. Cleanup requires a fresh mutation
+permit plus exact immutable target-document evidence, removes the document in
+one cycle, and records `CLEANED` only after a later cycle observes it absent;
+target completion waits for every segment. Startup resumes both intervening
+crash windows without treating the target document's immutable `DURABLE` header
+as a conflict with the newer database lifecycle. Real local copy coverage now
+proves final user bytes, target publication, all four lifecycle actions,
+terminal marker removal and the `CLEANED` database row; strict parser,
+no-overwrite, idempotency, import, restart and state-restore scans are covered
+separately. This completes the local REC-003 target-intent lifecycle slice.
 
 Update 2026-08-09: Milestone 7 now has a persistent, bounded identical-file
 scanner and evidence-typed hash cache. Catalog migration 55 adds immutable

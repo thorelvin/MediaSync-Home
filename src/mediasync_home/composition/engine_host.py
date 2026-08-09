@@ -33,6 +33,7 @@ from mediasync_home.adapters.local_snapshot_scanner import (
 from mediasync_home.adapters.local_state_capacity import LocalStateCapacityProbe
 from mediasync_home.adapters.robocopy import RobocopyStagingTransferAdapter
 from mediasync_home.adapters.recovery_intents import (
+    LocalTargetRecoveryIntentSegmentCleanup,
     LocalTargetRecoveryIntentSegmentPublisher,
     SqliteCatalogTargetRecoveryIntentSegmentReader,
 )
@@ -217,6 +218,10 @@ from mediasync_home.application.run_intent_segments import (
     RunTargetIntentSegmentOutcome,
     TargetRecoveryIntentSegmentPublisher,
     publish_run_target_recovery_intent_segment,
+)
+from mediasync_home.application.run_intent_cleanup import (
+    RecoveryIntentSegmentLifecycleStore,
+    TargetRecoveryIntentSegmentCleanupPort,
 )
 from mediasync_home.application.target_recovery_intents import (
     TargetRecoveryIntentStartupReconciliationReport,
@@ -507,6 +512,12 @@ class EngineHostRuntime:
     run_executor_recovery_intent_segment_store: RecoveryIntentSegmentStore | None = None
     run_executor_target_intent_segment_publisher: (
         TargetRecoveryIntentSegmentPublisher | None
+    ) = None
+    run_executor_intent_segment_lifecycle: (
+        RecoveryIntentSegmentLifecycleStore | None
+    ) = None
+    run_executor_target_intent_segment_cleanup: (
+        TargetRecoveryIntentSegmentCleanupPort | None
     ) = None
     run_executor_catalog_handoff_store: FinalFileCatalogHandoffStore | None = None
     run_executor_operation_audit_store: OperationAuditCatalogStore | None = None
@@ -888,6 +899,8 @@ class EngineHostRuntime:
             or self.run_executor_plan_store is None
             or self.run_executor_recovery_operation_store is None
             or self.run_executor_recovery_intent_segment_store is None
+            or self.run_executor_intent_segment_lifecycle is None
+            or self.run_executor_target_intent_segment_cleanup is None
             or self.run_executor_process_instance_id is None
         ):
             raise RuntimeError("RUN_EXECUTOR_RUNTIME_NOT_CONFIGURED")
@@ -1002,6 +1015,10 @@ class EngineHostRuntime:
                 intent_segments=self.run_executor_recovery_intent_segment_store,
                 target_intent_segments=(
                     self.run_executor_target_intent_segment_publisher
+                ),
+                intent_segment_lifecycle=self.run_executor_intent_segment_lifecycle,
+                target_intent_segment_cleanup=(
+                    self.run_executor_target_intent_segment_cleanup
                 ),
                 catalog_handoffs=self.run_executor_catalog_handoff_store,
                 process_instance_id=self.run_executor_process_instance_id,
@@ -2067,6 +2084,10 @@ def build_engine_host_runtime(
         run_executor_permit_validator = RetainedRunTargetPermitValidator(
             run_executor_lease_registry
         )
+        target_intent_segment_cleanup = LocalTargetRecoveryIntentSegmentCleanup(
+            root_resolver=endpoint_root_resolver,
+            permit_validator=run_executor_permit_validator,
+        )
         run_executor_final_commit_port = LocalResolvingFinalCommitAdapter(
             root_resolver=endpoint_root_resolver,
             permit_validator=run_executor_permit_validator,
@@ -2223,6 +2244,8 @@ def build_engine_host_runtime(
         run_executor_recovery_operation_store=recovery_operations,
         run_executor_recovery_intent_segment_store=recovery_intent_segments,
         run_executor_target_intent_segment_publisher=target_intent_segment_publisher,
+        run_executor_intent_segment_lifecycle=recovery_intent_segments,
+        run_executor_target_intent_segment_cleanup=target_intent_segment_cleanup,
         run_executor_catalog_handoff_store=catalog_handoffs,
         run_executor_operation_audit_store=operation_audits,
         run_executor_staging_transfer_port=run_executor_staging_transfer_port,

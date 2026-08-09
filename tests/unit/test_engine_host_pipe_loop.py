@@ -1356,7 +1356,33 @@ def test_local_writable_runtime_creates_job_from_inline_gui_draft(
         assert refreshed_job["initial_plan"]["state"] == "SEALED"
         assert refreshed_job["initial_plan"]["operation_count"] == 1
         assert runtime.catalog_connection is not None
-        executor_outcome = runtime.run_executor_cycle(max_steps=100)
+        executor_actions: list[RunExecutorCycleAction] = []
+        target_intent = None
+        for _ in range(100):
+            executor_outcome = runtime.run_executor_cycle(max_steps=1)
+            if executor_outcome.last_step is not None:
+                executor_actions.append(executor_outcome.last_step.action)
+            if (
+                executor_outcome.last_step is not None
+                and executor_outcome.last_step.action
+                is RunExecutorCycleAction.INTENT_PUBLISHED
+            ):
+                published_paths = tuple(
+                    (target_root / ".mediasync" / "installations").glob(
+                        "*/recovery/*/segment-*.intent.jsonl"
+                    )
+                )
+                assert len(published_paths) == 1
+                target_intent = parse_target_recovery_intent_segment_document(
+                    published_paths[0].read_bytes()
+                )
+            current_run = runtime.run_executor_queue_store.load_started_run(
+                checked.started_run_id
+            )
+            if current_run is not None and current_run.state.value == "COMPLETED":
+                break
+        else:
+            pytest.fail("real-file executor did not complete within its bounded test cycles")
         completed_run = runtime.run_executor_queue_store.load_started_run(
             checked.started_run_id
         )
@@ -1364,20 +1390,33 @@ def test_local_writable_runtime_creates_job_from_inline_gui_draft(
         assert completed_run is not None
         assert completed_run.state.value == "COMPLETED", executor_outcome
         assert (target_root / "new.txt").read_text(encoding="utf-8") == "new"
-        target_intent_paths = tuple(
-            (target_root / ".mediasync" / "installations").glob(
-                "*/recovery/*/segment-*.intent.jsonl"
-            )
-        )
-        assert len(target_intent_paths) == 1
-        target_intent = parse_target_recovery_intent_segment_document(
-            target_intent_paths[0].read_bytes()
-        )
+        assert target_intent is not None
         assert target_intent.segment.operation_count == 1
         assert (
             target_intent.plan_checksum
             == refreshed_job["initial_plan"]["plan_checksum"]
         )
+        assert RunExecutorCycleAction.INTENT_RECONCILED in executor_actions
+        assert RunExecutorCycleAction.INTENT_CLEANUP_ELIGIBLE in executor_actions
+        assert RunExecutorCycleAction.INTENT_TARGET_REMOVED in executor_actions
+        assert RunExecutorCycleAction.INTENT_CLEANED in executor_actions
+        target_intent_paths = tuple(
+            (target_root / ".mediasync" / "installations").glob(
+                "*/recovery/*/segment-*.intent.jsonl"
+            )
+        )
+        assert target_intent_paths == ()
+        assert runtime.recovery_connection is not None
+        intent_states = runtime.recovery_connection.execute(
+            """
+            SELECT state
+            FROM recovery_intent_segments
+            WHERE run_id = ?
+            ORDER BY segment_sequence
+            """,
+            (checked.started_run_id,),
+        ).fetchall()
+        assert intent_states == [("CLEANED",)]
 
         second_check_payload = {
             "job_id": str(response.payload["job"]["job_id"]),

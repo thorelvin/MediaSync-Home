@@ -4,6 +4,7 @@ import os
 import sqlite3
 import stat
 from pathlib import Path
+from typing import Protocol
 from uuid import uuid4
 
 from mediasync_home.adapters.endpoint_leases import EndpointRootResolver
@@ -12,8 +13,15 @@ from mediasync_home.adapters.system_clock import SystemClock
 from mediasync_home.adapters.windows_durability import move_path_write_through
 from mediasync_home.adapters.sqlite.endpoint_roots import local_path_from_file_uri
 from mediasync_home.application.clocks import ClockPort
-from mediasync_home.application.recovery_intents import RecoveryIntentSegment
+from mediasync_home.application.recovery_intents import (
+    RecoveryIntentSegment,
+    RecoveryIntentSegmentState,
+    recovery_intent_segment_evidence_matches,
+)
 from mediasync_home.application.recovery_operations import RecoveryOperation
+from mediasync_home.application.run_intent_cleanup import (
+    TargetRecoveryIntentSegmentCleanupPort,
+)
 from mediasync_home.application.run_intent_segments import (
     TargetRecoveryIntentSegmentPublisher,
     recovery_intent_segment_relative_path,
@@ -27,6 +35,7 @@ from mediasync_home.application.target_recovery_intents import (
     build_target_recovery_intent_segment_document,
     parse_target_recovery_intent_segment_document,
 )
+from mediasync_home.domain.capabilities import MutationPermit
 
 
 class LocalTargetRecoveryIntentError(ValueError):
@@ -34,6 +43,10 @@ class LocalTargetRecoveryIntentError(ValueError):
         super().__init__(validation_code)
         self.validation_code = validation_code
         self.next_action = next_action
+
+
+class TargetRecoveryIntentMutationPermitValidator(Protocol):
+    def assert_mutation_permit_current(self, permit: MutationPermit) -> None: ...
 
 
 class LocalTargetRecoveryIntentSegmentPublisher(TargetRecoveryIntentSegmentPublisher):
@@ -208,6 +221,177 @@ class LocalTargetRecoveryIntentSegmentPublisher(TargetRecoveryIntentSegmentPubli
             raise _error(
                 "TARGET_RECOVERY_INTENT_IDEMPOTENCY_CONFLICT",
                 "Inspect the conflicting immutable target recovery intent document.",
+            )
+
+
+class LocalTargetRecoveryIntentSegmentCleanup(
+    TargetRecoveryIntentSegmentCleanupPort
+):
+    def __init__(
+        self,
+        *,
+        root_resolver: EndpointRootResolver,
+        permit_validator: TargetRecoveryIntentMutationPermitValidator,
+        reparse_guard: LocalReparseGuard | None = None,
+    ) -> None:
+        self._root_resolver = root_resolver
+        self._permit_validator = permit_validator
+        self._reparse_guard = reparse_guard or LocalReparseGuard()
+
+    def ensure_target_intent_segment_absent(
+        self,
+        *,
+        permit: MutationPermit,
+        segment: RecoveryIntentSegment,
+    ) -> bool:
+        self._permit_validator.assert_mutation_permit_current(permit)
+        self._require_cleanup_binding(permit=permit, segment=segment)
+        expected_relative_path = recovery_intent_segment_relative_path(
+            owner_installation_id=segment.owner_installation_id,
+            run_id=segment.run_id,
+            segment_sequence=segment.segment_sequence,
+        )
+        if segment.relative_path.replace("\\", "/") != expected_relative_path:
+            raise _error(
+                "TARGET_RECOVERY_INTENT_PATH_MISMATCH",
+                "Inspect the changed target recovery intent path.",
+            )
+        root = self._resolve_root(segment)
+        target_path = root / ".mediasync" / Path(expected_relative_path)
+        self._require_safe_parent(root=root, target_path=target_path)
+        if not target_path.exists() and not target_path.is_symlink():
+            return True
+        self._require_matching_document(path=target_path, segment=segment)
+        try:
+            target_path.unlink()
+            if os.name != "nt":
+                directory_fd = os.open(target_path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        except OSError as exc:
+            raise _error(
+                "TARGET_RECOVERY_INTENT_CLEANUP_FAILED",
+                "Restore target control-area write access before retrying cleanup.",
+            ) from exc
+        return False
+
+    def _require_cleanup_binding(
+        self,
+        *,
+        permit: MutationPermit,
+        segment: RecoveryIntentSegment,
+    ) -> None:
+        if (
+            segment.state is not RecoveryIntentSegmentState.CLEANUP_ELIGIBLE
+            or segment.run_id != permit.run_id
+            or segment.run_target_id != permit.run_target_id
+            or segment.target_endpoint_id != permit.endpoint_id
+            or segment.target_endpoint_revision_id != permit.endpoint_revision_id
+            or segment.owner_installation_id != permit.owner_installation_id
+            or segment.ownership_epoch != permit.ownership_epoch
+        ):
+            raise _error(
+                "TARGET_RECOVERY_INTENT_CLEANUP_BINDING_MISMATCH",
+                "Reconcile the endpoint lease and intent lifecycle before cleanup.",
+            )
+
+    def _resolve_root(self, segment: RecoveryIntentSegment) -> Path:
+        try:
+            root = self._root_resolver.resolve_endpoint_root(
+                resource_key=f"endpoint:{segment.target_endpoint_id}",
+                endpoint_id=segment.target_endpoint_id,
+                endpoint_revision_id=segment.target_endpoint_revision_id,
+            )
+        except ValueError as exc:
+            raise _error(
+                "TARGET_RECOVERY_INTENT_ENDPOINT_MISMATCH",
+                "Refresh the target endpoint binding before cleaning recovery evidence.",
+            ) from exc
+        if root is None:
+            raise _error(
+                "TARGET_RECOVERY_INTENT_ENDPOINT_NOT_FOUND",
+                "Reconnect the target before cleaning recovery evidence.",
+            )
+        try:
+            return self._reparse_guard.resolve_existing_root(
+                Path(root),
+                missing_code="TARGET_RECOVERY_INTENT_ROOT_MISSING",
+                missing_next_action="Reconnect the target before cleaning recovery evidence.",
+                reparse_code="TARGET_RECOVERY_INTENT_ROOT_REPARSE_BLOCKED",
+                reparse_next_action="Use an ordinary non-reparse target root.",
+            )
+        except ReparseGuardError as exc:
+            raise _error(exc.validation_code, exc.next_action) from exc
+
+    def _require_safe_parent(self, *, root: Path, target_path: Path) -> None:
+        try:
+            relative_parent = target_path.parent.relative_to(root)
+            self._reparse_guard.reject_reparse_chain(
+                root=root,
+                relative_parts=relative_parent.parts,
+                missing_code="TARGET_RECOVERY_INTENT_CONTROL_AREA_MISSING",
+                missing_next_action="Inspect the target recovery control area before cleanup.",
+                reparse_code="TARGET_RECOVERY_INTENT_CONTROL_REPARSE_BLOCKED",
+                reparse_next_action="Repair the target recovery control area before cleanup.",
+            )
+        except (OSError, ReparseGuardError, ValueError) as exc:
+            if isinstance(exc, ReparseGuardError):
+                raise _error(exc.validation_code, exc.next_action) from exc
+            raise _error(
+                "TARGET_RECOVERY_INTENT_CLEANUP_PATH_INVALID",
+                "Inspect the target recovery control area before cleanup.",
+            ) from exc
+
+    def _require_matching_document(
+        self,
+        *,
+        path: Path,
+        segment: RecoveryIntentSegment,
+    ) -> None:
+        try:
+            self._reparse_guard.reject_reparse_chain(
+                root=path.parent,
+                relative_parts=(path.name,),
+                missing_code="TARGET_RECOVERY_INTENT_DOCUMENT_MISSING",
+                missing_next_action="Retry target recovery intent cleanup.",
+                reparse_code="TARGET_RECOVERY_INTENT_DOCUMENT_REPARSE_BLOCKED",
+                reparse_next_action="Inspect the changed target recovery intent path.",
+            )
+            file_stat = path.stat(follow_symlinks=False)
+            if (
+                not stat.S_ISREG(file_stat.st_mode)
+                or file_stat.st_size > TARGET_RECOVERY_INTENT_DOCUMENT_BYTES
+            ):
+                raise _error(
+                    "TARGET_RECOVERY_INTENT_DOCUMENT_TYPE_OR_SIZE_INVALID",
+                    "Inspect the changed target recovery intent document.",
+                )
+            document = parse_target_recovery_intent_segment_document(path.read_bytes())
+        except LocalTargetRecoveryIntentError:
+            raise
+        except (OSError, ReparseGuardError, ValueError) as exc:
+            raise _error(
+                str(
+                    getattr(
+                        exc,
+                        "validation_code",
+                        "TARGET_RECOVERY_INTENT_DOCUMENT_INVALID",
+                    )
+                ),
+                str(
+                    getattr(
+                        exc,
+                        "next_action",
+                        "Inspect the changed target recovery intent document.",
+                    )
+                ),
+            ) from exc
+        if not recovery_intent_segment_evidence_matches(document.segment, segment):
+            raise _error(
+                "TARGET_RECOVERY_INTENT_CLEANUP_EVIDENCE_MISMATCH",
+                "Inspect the changed target recovery intent document.",
             )
 
 
