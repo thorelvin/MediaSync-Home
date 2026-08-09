@@ -73,6 +73,9 @@ from mediasync_home.application.task_scheduler import (
     bind_same_user_task_scheduler_definition_hash,
     build_same_user_task_scheduler_definition,
 )
+from mediasync_home.application.target_recovery_intents import (
+    parse_target_recovery_intent_segment_document,
+)
 from mediasync_home.application.trigger_occurrences import TriggerKind, payload_hash
 from mediasync_home.composition import engine_host as engine_host_module
 from mediasync_home.composition.engine_host import (
@@ -1103,7 +1106,9 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         )
 
         assert operation_audit.status is IpcStatus.ACCEPTED
-        assert operation_audit.payload["operation_audit"]["read_model_available"] is True
+        assert (
+            operation_audit.payload["operation_audit"]["read_model_available"] is True
+        )
         assert operation_audit.payload["operation_audit"]["found"] is False
 
         response = ipc_client.submit_command(
@@ -1359,6 +1364,20 @@ def test_local_writable_runtime_creates_job_from_inline_gui_draft(
         assert completed_run is not None
         assert completed_run.state.value == "COMPLETED", executor_outcome
         assert (target_root / "new.txt").read_text(encoding="utf-8") == "new"
+        target_intent_paths = tuple(
+            (target_root / ".mediasync" / "installations").glob(
+                "*/recovery/*/segment-*.intent.jsonl"
+            )
+        )
+        assert len(target_intent_paths) == 1
+        target_intent = parse_target_recovery_intent_segment_document(
+            target_intent_paths[0].read_bytes()
+        )
+        assert target_intent.segment.operation_count == 1
+        assert (
+            target_intent.plan_checksum
+            == refreshed_job["initial_plan"]["plan_checksum"]
+        )
 
         second_check_payload = {
             "job_id": str(response.payload["job"]["job_id"]),

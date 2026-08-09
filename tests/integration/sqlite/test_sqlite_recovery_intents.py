@@ -83,6 +83,40 @@ def test_sqlite_recovery_intent_segment_store_requires_active_matching_lease(
         connection.close()
 
 
+def test_sqlite_recovery_intent_segment_store_imports_target_first_evidence_after_lease_release(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_recovery_connection(tmp_path)
+    try:
+        lease_store = _register_resource_lease(connection)
+        lease_store.release_resource_lease(lease_id="lease-a")
+        store = SqliteRecoveryIntentSegmentStore(connection)
+
+        imported = store.import_intent_segment(_segment())
+
+        assert imported == _segment()
+        assert store.list_unresolved_intent_segments(limit=10) == (_segment(),)
+    finally:
+        connection.close()
+
+
+def test_sqlite_recovery_intent_segment_import_requires_historical_lease_binding(
+    tmp_path: Path,
+) -> None:
+    connection = _prepared_recovery_connection(tmp_path)
+    try:
+        _register_resource_lease(connection)
+        store = SqliteRecoveryIntentSegmentStore(connection)
+
+        with pytest.raises(
+            SqliteRecoveryIntentSegmentStoreError,
+            match="HISTORICAL_LEASE_MISMATCH",
+        ):
+            store.import_intent_segment(_segment(run_target_id="other-target"))
+    finally:
+        connection.close()
+
+
 def test_sqlite_recovery_intent_segment_store_chains_segments_by_previous_hash(
     tmp_path: Path,
 ) -> None:

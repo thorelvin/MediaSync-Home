@@ -32,6 +32,10 @@ from mediasync_home.adapters.local_snapshot_scanner import (
 )
 from mediasync_home.adapters.local_state_capacity import LocalStateCapacityProbe
 from mediasync_home.adapters.robocopy import RobocopyStagingTransferAdapter
+from mediasync_home.adapters.recovery_intents import (
+    LocalTargetRecoveryIntentSegmentPublisher,
+    SqliteCatalogTargetRecoveryIntentSegmentReader,
+)
 from mediasync_home.adapters.selected_directory_identity import (
     LocalSelectedDirectoryIdentityProbe,
 )
@@ -179,6 +183,8 @@ from mediasync_home.application.clocks import ClockPort
 from mediasync_home.application.endpoint_retry import MonotonicEndpointRetryScheduler
 from mediasync_home.application.staging_retry import MonotonicStagingRetryScheduler
 from mediasync_home.application.run_executor_cycle import (
+    RunExecutorCycleAction,
+    RunExecutorCycleOutcome,
     RunExecutorCyclePumpOutcome,
     RunExecutorCycleRecoveryOperationStore,
     RunExecutorCycleRunStore,
@@ -209,7 +215,12 @@ from mediasync_home.application.run_operation_planning import (
 from mediasync_home.application.run_staging import RunTargetStagingPort
 from mediasync_home.application.run_intent_segments import (
     RunTargetIntentSegmentOutcome,
+    TargetRecoveryIntentSegmentPublisher,
     publish_run_target_recovery_intent_segment,
+)
+from mediasync_home.application.target_recovery_intents import (
+    TargetRecoveryIntentStartupReconciliationReport,
+    reconcile_target_recovery_intents_after_startup,
 )
 from mediasync_home.application.run_catalog_handoffs import (
     RunTargetCatalogHandoffStepOutcome,
@@ -482,6 +493,9 @@ class EngineHostRuntime:
     state_compaction_recovery: SqliteStateCompactionEpochRecoveryReport | None = None
     state_migration: SqliteStateMigrationReport | None = None
     startup_reconciliation: EngineHostStartupReconciliationReport | None = None
+    target_intent_reconciliation: (
+        TargetRecoveryIntentStartupReconciliationReport | None
+    ) = None
     reconciler_instance_id: str | None = None
     run_executor_queue_store: RunExecutorCycleRunStore | None = None
     run_executor_lease_authority: EndpointLeaseAuthority | None = None
@@ -491,6 +505,9 @@ class EngineHostRuntime:
         RunExecutorCycleRecoveryOperationStore | None
     ) = None
     run_executor_recovery_intent_segment_store: RecoveryIntentSegmentStore | None = None
+    run_executor_target_intent_segment_publisher: (
+        TargetRecoveryIntentSegmentPublisher | None
+    ) = None
     run_executor_catalog_handoff_store: FinalFileCatalogHandoffStore | None = None
     run_executor_operation_audit_store: OperationAuditCatalogStore | None = None
     run_executor_staging_transfer_port: RunTargetStagingPort | None = None
@@ -867,11 +884,16 @@ class EngineHostRuntime:
         previous_segment_hash: str | None = None,
     ) -> RunTargetIntentSegmentOutcome:
         if (
-            self.run_executor_recovery_operation_store is None
+            self.run_executor_queue_store is None
+            or self.run_executor_plan_store is None
+            or self.run_executor_recovery_operation_store is None
             or self.run_executor_recovery_intent_segment_store is None
             or self.run_executor_process_instance_id is None
         ):
             raise RuntimeError("RUN_EXECUTOR_RUNTIME_NOT_CONFIGURED")
+        run = self.run_executor_queue_store.load_started_run(permit.run_id)
+        if run is None:
+            raise RuntimeError("RUN_EXECUTOR_RUN_NOT_FOUND")
         return publish_run_target_recovery_intent_segment(
             permit=permit,
             recovery_operations=self.run_executor_recovery_operation_store,
@@ -879,6 +901,8 @@ class EngineHostRuntime:
             process_instance_id=self.run_executor_process_instance_id,
             segment_sequence=segment_sequence,
             previous_segment_hash=previous_segment_hash,
+            target_intent_segments=self.run_executor_target_intent_segment_publisher,
+            plan_checksum=run.plan_checksum,
         )
 
     def run_executor_record_catalog_handoff(
@@ -942,6 +966,29 @@ class EngineHostRuntime:
         if max_steps > MAX_RUN_EXECUTOR_PUMP_STEPS:
             raise RunExecutorViolation("RUN_EXECUTOR_CYCLE_STEP_LIMIT_TOO_LARGE")
         self._reconcile_terminal_trigger_runs()
+        if (
+            self.target_intent_reconciliation is not None
+            and not self.target_intent_reconciliation.mutation_safe
+        ):
+            return RunExecutorCyclePumpOutcome(
+                steps_attempted=0,
+                stopped_reason=RunExecutorPumpStopReason.BLOCKED,
+                last_step=RunExecutorCycleOutcome(
+                    action=RunExecutorCycleAction.BLOCKED,
+                    advanced=False,
+                    idle=False,
+                    run_id=None,
+                    run_target_id=None,
+                    validation_codes=(
+                        "TARGET_RECOVERY_INTENT_RECONCILIATION_REQUIRED",
+                    ),
+                    next_action=(
+                        "Inspect target-side recovery evidence before allowing mutations."
+                    ),
+                ),
+                validation_codes=("TARGET_RECOVERY_INTENT_RECONCILIATION_REQUIRED",),
+                next_action="Inspect target-side recovery evidence before allowing mutations.",
+            )
         capacity_block = self._run_capacity_block()
         if capacity_block is not None:
             return capacity_block
@@ -953,6 +1000,9 @@ class EngineHostRuntime:
                 plans=self.run_executor_plan_store,
                 recovery_operations=self.run_executor_recovery_operation_store,
                 intent_segments=self.run_executor_recovery_intent_segment_store,
+                target_intent_segments=(
+                    self.run_executor_target_intent_segment_publisher
+                ),
                 catalog_handoffs=self.run_executor_catalog_handoff_store,
                 process_instance_id=self.run_executor_process_instance_id,
                 max_steps=max_steps,
@@ -1632,6 +1682,11 @@ def run_engine_host(
                     "startup_reconciliation": _startup_reconciliation_payload(
                         runtime.startup_reconciliation
                     ),
+                    "target_intent_reconciliation": (
+                        _target_intent_reconciliation_payload(
+                            getattr(runtime, "target_intent_reconciliation", None)
+                        )
+                    ),
                     "state_restore_recovery": _state_restore_recovery_payload(
                         runtime.state_restore_recovery
                     ),
@@ -1987,6 +2042,18 @@ def build_engine_host_runtime(
         )
         recovery_intent_segments = SqliteRecoveryIntentSegmentStore(recovery_connection)
         endpoint_root_resolver = SqliteEndpointRootResolver(catalog_connection)
+        target_intent_segment_publisher = LocalTargetRecoveryIntentSegmentPublisher(
+            root_resolver=endpoint_root_resolver,
+            clock=runtime_clock,
+        )
+        target_intent_reconciliation = reconcile_target_recovery_intents_after_startup(
+            reader=SqliteCatalogTargetRecoveryIntentSegmentReader(
+                catalog_connection=catalog_connection,
+                owner_installation_id=installation_state.installation_id,
+            ),
+            intent_segments=recovery_intent_segments,
+            recovery_operations=recovery_operations,
+        )
         version_retention_store = SqliteVersionRetentionStore(catalog_connection)
         run_executor_lease_authority = LocalResolvingEndpointLeaseAuthority(
             root_resolver=endpoint_root_resolver,
@@ -2147,6 +2214,7 @@ def build_engine_host_runtime(
         state_compaction_recovery=state_compaction_recovery,
         state_migration=state_migration,
         startup_reconciliation=startup_reconciliation,
+        target_intent_reconciliation=target_intent_reconciliation,
         reconciler_instance_id=reconciler_instance_id,
         run_executor_queue_store=runs,
         run_executor_lease_authority=run_executor_lease_authority,
@@ -2154,6 +2222,7 @@ def build_engine_host_runtime(
         run_executor_plan_store=plans,
         run_executor_recovery_operation_store=recovery_operations,
         run_executor_recovery_intent_segment_store=recovery_intent_segments,
+        run_executor_target_intent_segment_publisher=target_intent_segment_publisher,
         run_executor_catalog_handoff_store=catalog_handoffs,
         run_executor_operation_audit_store=operation_audits,
         run_executor_staging_transfer_port=run_executor_staging_transfer_port,
@@ -2612,6 +2681,30 @@ def _startup_reconciliation_payload(
         "skipped_external_resource_requeue_reason": (
             report.skipped_external_resource_requeue_reason
         ),
+    }
+
+
+def _target_intent_reconciliation_payload(
+    report: TargetRecoveryIntentStartupReconciliationReport | None,
+) -> dict[str, object] | None:
+    if report is None:
+        return None
+    return {
+        "conflicting_segment_ids": list(report.conflicting_segment_ids),
+        "imported_segment_ids": list(report.imported_segment_ids),
+        "matched_segment_ids": list(report.matched_segment_ids),
+        "missing_target_segment_ids": list(report.missing_target_segment_ids),
+        "mutation_safe": report.mutation_safe,
+        "scan_issues": [
+            {
+                "relative_path": issue.relative_path,
+                "validation_code": issue.validation_code,
+            }
+            for issue in report.scan_issues
+        ],
+        "scanned": report.scanned,
+        "truncated": report.truncated,
+        "unreconciled_segment_ids": list(report.unreconciled_segment_ids),
     }
 
 

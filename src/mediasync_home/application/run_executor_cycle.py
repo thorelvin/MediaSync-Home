@@ -45,6 +45,7 @@ from mediasync_home.application.run_final_commits import (
     commit_next_run_target_verified_artifact,
 )
 from mediasync_home.application.run_intent_segments import (
+    TargetRecoveryIntentSegmentPublisher,
     publish_run_target_recovery_intent_segment,
 )
 from mediasync_home.application.run_operation_lease_rebind import (
@@ -167,6 +168,7 @@ def execute_bounded_run_executor_cycle(
     plans: PlanStore,
     recovery_operations: RunExecutorCycleRecoveryOperationStore,
     intent_segments: RecoveryIntentSegmentStore,
+    target_intent_segments: TargetRecoveryIntentSegmentPublisher | None = None,
     catalog_handoffs: FinalFileCatalogHandoffStore,
     process_instance_id: str,
     max_steps: int,
@@ -191,6 +193,7 @@ def execute_bounded_run_executor_cycle(
             plans=plans,
             recovery_operations=recovery_operations,
             intent_segments=intent_segments,
+            target_intent_segments=target_intent_segments,
             catalog_handoffs=catalog_handoffs,
             process_instance_id=process_instance_id,
             final_commit_port=final_commit_port,
@@ -233,6 +236,7 @@ def execute_one_run_executor_cycle(
     plans: PlanStore,
     recovery_operations: RunExecutorCycleRecoveryOperationStore,
     intent_segments: RecoveryIntentSegmentStore,
+    target_intent_segments: TargetRecoveryIntentSegmentPublisher | None = None,
     catalog_handoffs: FinalFileCatalogHandoffStore,
     process_instance_id: str,
     final_commit_port: FinalCommitPort | None = None,
@@ -330,6 +334,7 @@ def execute_one_run_executor_cycle(
             plans=plans,
             recovery_operations=recovery_operations,
             intent_segments=intent_segments,
+            target_intent_segments=target_intent_segments,
             catalog_handoffs=catalog_handoffs,
             process_instance_id=process_instance_id,
             final_commit_port=final_commit_port,
@@ -466,6 +471,7 @@ def _advance_retained_target(
     plans: PlanStore,
     recovery_operations: RunExecutorCycleRecoveryOperationStore,
     intent_segments: RecoveryIntentSegmentStore,
+    target_intent_segments: TargetRecoveryIntentSegmentPublisher | None,
     catalog_handoffs: FinalFileCatalogHandoffStore,
     process_instance_id: str,
     final_commit_port: FinalCommitPort | None,
@@ -567,6 +573,8 @@ def _advance_retained_target(
                 permit=permit,
                 recovery_operations=recovery_operations,
                 intent_segments=intent_segments,
+                target_intent_segments=target_intent_segments,
+                plan_checksum=retained.run.plan_checksum,
                 process_instance_id=process_instance_id,
                 max_operations=target.planned_operations + 1,
             )
@@ -623,6 +631,8 @@ def _advance_retained_target(
             permit=permit,
             recovery_operations=recovery_operations,
             intent_segments=intent_segments,
+            target_intent_segments=target_intent_segments,
+            plan_checksum=retained.run.plan_checksum,
             process_instance_id=process_instance_id,
             max_operations=target.planned_operations + 1,
         )
@@ -710,6 +720,8 @@ def _advance_retained_target(
             previous_segment_hash=(
                 None if latest_segment is None else latest_segment.segment_hash
             ),
+            target_intent_segments=target_intent_segments,
+            plan_checksum=retained.run.plan_checksum,
         )
         if intent_outcome.published:
             return _advanced(

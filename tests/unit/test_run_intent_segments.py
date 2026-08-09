@@ -39,7 +39,7 @@ def test_publish_run_target_recovery_intent_segment_publishes_and_binds_operatio
     assert outcome.segment.segment_id == "run-a-target-0000-intent-000000"
     assert outcome.segment.relative_path == "installations/owner-a/recovery/run-a/segment-000000.intent.jsonl"
     assert outcome.segment.operation_count == 2
-    assert outcome.segment.byte_count == 256
+    assert 0 < outcome.segment.byte_count < 16 * 1024 * 1024
     assert len(outcome.segment.segment_hash) == 64
     assert outcome.operations_bound == 2
     assert intent_segments.published == (outcome.segment,)
@@ -95,6 +95,68 @@ def test_publish_run_target_recovery_intent_segment_reports_publish_failure() ->
     assert outcome.published is False
     assert outcome.validation_codes == ("RECOVERY_INTENT_SEGMENT_LEASE_MISMATCH",)
     assert outcome.operations_bound == 0
+
+
+def test_publish_run_target_recovery_intent_segment_publishes_target_first() -> None:
+    events: list[str] = []
+    target_intents = _FakeTargetIntentPublisher(events=events)
+    intent_segments = _FakeIntentSegmentStore(events=events)
+
+    outcome = publish_run_target_recovery_intent_segment(
+        permit=_permit(),
+        recovery_operations=_FakeRecoveryOperationStore((_operation(),)),
+        intent_segments=intent_segments,
+        target_intent_segments=target_intents,
+        plan_checksum="1" * 64,
+        process_instance_id="host-a",
+    )
+
+    assert outcome.published is True
+    assert events == ["target", "database"]
+    assert target_intents.published_operation_ids == ("op-a",)
+
+
+def test_publish_run_target_recovery_intent_segment_stops_before_database_when_target_fails() -> None:
+    events: list[str] = []
+    intent_segments = _FakeIntentSegmentStore(events=events)
+
+    outcome = publish_run_target_recovery_intent_segment(
+        permit=_permit(),
+        recovery_operations=_FakeRecoveryOperationStore((_operation(),)),
+        intent_segments=intent_segments,
+        target_intent_segments=_FakeTargetIntentPublisher(
+            events=events,
+            failure=ValueError("TARGET_RECOVERY_INTENT_PUBLICATION_FAILED"),
+        ),
+        plan_checksum="1" * 64,
+        process_instance_id="host-a",
+    )
+
+    assert outcome.published is False
+    assert outcome.validation_codes == ("TARGET_RECOVERY_INTENT_PUBLICATION_FAILED",)
+    assert events == ["target"]
+    assert intent_segments.published == ()
+
+
+def test_publish_run_target_recovery_intent_segment_bounds_document_not_user_file_size() -> None:
+    large_file = replace(
+        _operation(),
+        planned_bytes=8 * 1024 * 1024 * 1024,
+        expected_staging_fingerprint_json=(
+            '{"byte_count":8589934592,"content_hash":"' + "a" * 64 + '"}'
+        ),
+    )
+
+    outcome = publish_run_target_recovery_intent_segment(
+        permit=_permit(),
+        recovery_operations=_FakeRecoveryOperationStore((large_file,)),
+        intent_segments=_FakeIntentSegmentStore(),
+        process_instance_id="host-a",
+    )
+
+    assert outcome.published is True
+    assert outcome.segment is not None
+    assert outcome.segment.byte_count < 16 * 1024 * 1024
 
 
 def test_publish_run_target_recovery_intent_segment_reports_operation_phase_conflict() -> None:
@@ -188,11 +250,19 @@ class _FakeRecoveryOperationStore(RunTargetIntentOperationStore):
 
 
 class _FakeIntentSegmentStore(RecoveryIntentSegmentStore):
-    def __init__(self, *, failure: ValueError | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        failure: ValueError | None = None,
+        events: list[str] | None = None,
+    ) -> None:
         self.published: tuple[RecoveryIntentSegment, ...] = ()
         self._failure = failure
+        self._events = events
 
     def publish_intent_segment(self, segment: RecoveryIntentSegment) -> RecoveryIntentSegment:
+        if self._events is not None:
+            self._events.append("database")
         if self._failure is not None:
             raise self._failure
         self.published = (*self.published, segment)
@@ -200,6 +270,33 @@ class _FakeIntentSegmentStore(RecoveryIntentSegmentStore):
 
     def load_intent_segment(self, segment_id: str) -> RecoveryIntentSegment | None:
         return next((segment for segment in self.published if segment.segment_id == segment_id), None)
+
+
+class _FakeTargetIntentPublisher:
+    def __init__(
+        self,
+        *,
+        events: list[str],
+        failure: ValueError | None = None,
+    ) -> None:
+        self._events = events
+        self._failure = failure
+        self.published_operation_ids: tuple[str, ...] = ()
+
+    def publish_target_intent_segment(
+        self,
+        *,
+        segment: RecoveryIntentSegment,
+        operations: tuple[RecoveryOperation, ...],
+        plan_checksum: str,
+    ) -> None:
+        del segment, plan_checksum
+        self._events.append("target")
+        if self._failure is not None:
+            raise self._failure
+        self.published_operation_ids = tuple(
+            operation.operation_id for operation in operations
+        )
 
 
 def _operation(

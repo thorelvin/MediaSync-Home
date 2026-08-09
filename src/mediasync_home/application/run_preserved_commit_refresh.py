@@ -13,6 +13,7 @@ from mediasync_home.application.recovery_operations import (
     RecoveryOperationStore,
 )
 from mediasync_home.application.run_intent_segments import (
+    TargetRecoveryIntentSegmentPublisher,
     build_run_target_recovery_intent_segment,
 )
 from mediasync_home.domain.capabilities import MutationPermit
@@ -50,6 +51,8 @@ def refresh_next_run_target_preserved_commit_intent_for_fresh_lease(
     permit: MutationPermit,
     recovery_operations: RunTargetPreservedCommitRefreshOperationStore,
     intent_segments: RecoveryIntentSegmentStore,
+    target_intent_segments: TargetRecoveryIntentSegmentPublisher | None = None,
+    plan_checksum: str | None = None,
     process_instance_id: str,
     max_operations: int,
 ) -> RunTargetPreservedCommitRefreshOutcome:
@@ -142,8 +145,17 @@ def refresh_next_run_target_preserved_commit_intent_for_fresh_lease(
         operations=(operation,),
         segment_sequence=latest_segment.segment_sequence + 1,
         previous_segment_hash=latest_segment.segment_hash,
+        plan_checksum=plan_checksum,
     )
     try:
+        if target_intent_segments is not None:
+            if plan_checksum is None:
+                raise ValueError("RUN_TARGET_INTENT_REQUIRES_PLAN_CHECKSUM")
+            target_intent_segments.publish_target_intent_segment(
+                segment=segment,
+                operations=(operation,),
+                plan_checksum=plan_checksum,
+            )
         published = intent_segments.publish_intent_segment(segment)
         refreshed = recovery_operations.record_old_target_preserved_commit_intent_refreshed(
             run_id=operation.run_id,

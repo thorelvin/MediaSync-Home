@@ -4,9 +4,11 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Mapping, Protocol
+from uuid import UUID
 
 from mediasync_home.application.recovery_intents import (
+    MAX_INTENT_SEGMENT_BYTES,
     MAX_INTENT_SEGMENT_OPERATIONS,
     RecoveryIntentSegment,
     RecoveryIntentSegmentStore,
@@ -21,6 +23,8 @@ from mediasync_home.domain.capabilities import MutationPermit
 
 
 SAFE_PATH_COMPONENT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+TARGET_RECOVERY_INTENT_SCHEMA_VERSION = 1
 
 
 class RunTargetIntentOperationStore(RecoveryOperationStore, Protocol):
@@ -32,6 +36,16 @@ class RunTargetIntentOperationStore(RecoveryOperationStore, Protocol):
         phase: RecoveryOperationPhase,
         limit: int,
     ) -> tuple[RecoveryOperation, ...]: ...
+
+
+class TargetRecoveryIntentSegmentPublisher(Protocol):
+    def publish_target_intent_segment(
+        self,
+        *,
+        segment: RecoveryIntentSegment,
+        operations: tuple[RecoveryOperation, ...],
+        plan_checksum: str,
+    ) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -54,6 +68,8 @@ def publish_run_target_recovery_intent_segment(
     process_instance_id: str,
     segment_sequence: int = 0,
     previous_segment_hash: str | None = None,
+    target_intent_segments: TargetRecoveryIntentSegmentPublisher | None = None,
+    plan_checksum: str | None = None,
 ) -> RunTargetIntentSegmentOutcome:
     if not process_instance_id.strip():
         return _failed(
@@ -81,7 +97,9 @@ def publish_run_target_recovery_intent_segment(
             next_action="Stage and verify at least one operation before publishing commit intent.",
         )
 
-    ordered_operations = tuple(sorted(operations, key=lambda operation: operation.operation_id))
+    ordered_operations = tuple(
+        sorted(operations, key=lambda operation: operation.operation_id)
+    )
     mismatch = next(
         (
             operation
@@ -97,13 +115,36 @@ def publish_run_target_recovery_intent_segment(
             next_action="Reacquire the endpoint lease before publishing commit intent.",
         )
 
+    bounded_operations = _bounded_intent_operations(ordered_operations)
+    if not bounded_operations:
+        return _failed(
+            permit=permit,
+            validation_code="RUN_TARGET_INTENT_OPERATION_RECORD_TOO_LARGE",
+            next_action="Reduce recovery operation metadata before retrying intent publication.",
+        )
+    if target_intent_segments is not None and (
+        plan_checksum is None or HASH_PATTERN.fullmatch(plan_checksum) is None
+    ):
+        return _failed(
+            permit=permit,
+            validation_code="RUN_TARGET_INTENT_REQUIRES_PLAN_CHECKSUM",
+            next_action="Reload the sealed plan before publishing target recovery evidence.",
+        )
+
     segment = build_run_target_recovery_intent_segment(
         permit=permit,
-        operations=ordered_operations,
+        operations=bounded_operations,
         segment_sequence=segment_sequence,
         previous_segment_hash=previous_segment_hash,
+        plan_checksum=plan_checksum,
     )
     try:
+        if target_intent_segments is not None:
+            target_intent_segments.publish_target_intent_segment(
+                segment=segment,
+                operations=bounded_operations,
+                plan_checksum=plan_checksum or "",
+            )
         published = intent_segments.publish_intent_segment(segment)
     except ValueError as exc:
         return _failed(
@@ -115,7 +156,7 @@ def publish_run_target_recovery_intent_segment(
             ),
         )
 
-    for ordinal, operation in enumerate(ordered_operations):
+    for ordinal, operation in enumerate(bounded_operations):
         try:
             updated = recovery_operations.record_operation_phase_transition(
                 run_id=operation.run_id,
@@ -163,7 +204,7 @@ def publish_run_target_recovery_intent_segment(
         run_target_id=permit.run_target_id,
         segment_id=published.segment_id,
         segment=published,
-        operations_bound=len(ordered_operations),
+        operations_bound=len(bounded_operations),
         validation_codes=(),
         next_action="Durable commit intent is recorded for staged run-target operations.",
     )
@@ -175,7 +216,14 @@ def build_run_target_recovery_intent_segment(
     operations: tuple[RecoveryOperation, ...],
     segment_sequence: int,
     previous_segment_hash: str | None,
+    plan_checksum: str | None = None,
 ) -> RecoveryIntentSegment:
+    operation_payloads = tuple(
+        canonical_recovery_intent_operation_payload(
+            operation=operation, ordinal=ordinal
+        )
+        for ordinal, operation in enumerate(operations)
+    )
     return durable_recovery_intent_segment(
         segment_id=_segment_id(permit=permit, segment_sequence=segment_sequence),
         run_id=permit.run_id,
@@ -188,16 +236,26 @@ def build_run_target_recovery_intent_segment(
         lease_id=permit.lease_id,
         fencing_token=permit.fencing_token,
         segment_sequence=segment_sequence,
-        relative_path=_segment_relative_path(permit=permit, segment_sequence=segment_sequence),
-        schema_version=1,
+        relative_path=_segment_relative_path(
+            permit=permit, segment_sequence=segment_sequence
+        ),
+        schema_version=TARGET_RECOVERY_INTENT_SCHEMA_VERSION,
         operation_count=len(operations),
-        byte_count=sum(_operation_byte_count(operation) for operation in operations),
-        segment_hash=_segment_hash(permit=permit, operations=operations),
+        byte_count=sum(
+            _canonical_json_line_size(payload) for payload in operation_payloads
+        ),
+        segment_hash=recovery_intent_segment_hash(
+            permit=permit,
+            operation_payloads=operation_payloads,
+            plan_checksum=plan_checksum,
+        ),
         previous_segment_hash=previous_segment_hash,
     )
 
 
-def _operation_matches_permit(*, operation: RecoveryOperation, permit: MutationPermit) -> bool:
+def _operation_matches_permit(
+    *, operation: RecoveryOperation, permit: MutationPermit
+) -> bool:
     return (
         operation.phase is RecoveryOperationPhase.STAGING_VERIFIED
         and operation.run_id == permit.run_id
@@ -217,43 +275,144 @@ def _segment_id(*, permit: MutationPermit, segment_sequence: int) -> str:
 
 
 def _segment_relative_path(*, permit: MutationPermit, segment_sequence: int) -> str:
-    owner = _safe_path_component(permit.owner_installation_id)
-    run = _safe_path_component(permit.run_id)
+    return recovery_intent_segment_relative_path(
+        owner_installation_id=permit.owner_installation_id,
+        run_id=permit.run_id,
+        segment_sequence=segment_sequence,
+    )
+
+
+def recovery_intent_segment_relative_path(
+    *,
+    owner_installation_id: str,
+    run_id: str,
+    segment_sequence: int,
+) -> str:
+    owner = recovery_intent_installation_namespace(owner_installation_id)
+    run = _safe_path_component(run_id)
     return f"installations/{owner}/recovery/{run}/segment-{segment_sequence:06d}.intent.jsonl"
 
 
-def _segment_hash(*, permit: MutationPermit, operations: tuple[RecoveryOperation, ...]) -> str:
+def recovery_intent_installation_namespace(owner_installation_id: str) -> str:
+    try:
+        return UUID(owner_installation_id).hex[:12]
+    except ValueError:
+        return _safe_path_component(owner_installation_id)
+
+
+def canonical_recovery_intent_operation_payload(
+    *,
+    operation: RecoveryOperation,
+    ordinal: int,
+) -> dict[str, object]:
+    return {
+        "assurance_level": operation.assurance_level,
+        "expected_final_fingerprint_json": operation.expected_final_fingerprint_json,
+        "expected_source_fingerprint_json": operation.expected_source_fingerprint_json,
+        "expected_source_parent_identity_json": (
+            operation.expected_source_parent_identity_json
+        ),
+        "expected_staging_fingerprint_json": operation.expected_staging_fingerprint_json,
+        "expected_target_fingerprint_json": operation.expected_target_fingerprint_json,
+        "expected_target_parent_identity_json": (
+            operation.expected_target_parent_identity_json
+        ),
+        "expected_target_path_chain_hash": operation.expected_target_path_chain_hash,
+        "final_relative_path": operation.final_relative_path,
+        "operation_id": operation.operation_id,
+        "operation_kind": operation.operation_kind.value,
+        "ordinal": ordinal,
+        "plan_sequence_no": operation.plan_sequence_no,
+        "planned_bytes": operation.planned_bytes,
+        "record_type": "OPERATION",
+        "source_case_context_hash": operation.source_case_context_hash,
+        "source_endpoint_id": operation.source_endpoint_id,
+        "source_endpoint_revision_id": operation.source_endpoint_revision_id,
+        "source_guard_evidence_hash": operation.source_guard_evidence_hash,
+        "source_guard_kind": operation.source_guard_kind,
+        "source_hash_evidence_kind": operation.source_hash_evidence_kind,
+        "source_path_chain_hash": operation.source_path_chain_hash,
+        "source_precondition_json": operation.source_precondition_json,
+        "source_relative_path": operation.source_relative_path,
+        "staging_durability_state": operation.staging_durability_state,
+        "staging_object_id": operation.staging_object_id,
+        "target_precondition_kind": operation.target_precondition_kind.value,
+    }
+
+
+def recovery_intent_segment_hash(
+    *,
+    permit: MutationPermit,
+    operation_payloads: tuple[Mapping[str, object], ...],
+    plan_checksum: str | None,
+) -> str:
+    return recovery_intent_segment_hash_for_binding(
+        run_id=permit.run_id,
+        run_target_id=permit.run_target_id,
+        endpoint_id=permit.endpoint_id,
+        endpoint_revision_id=permit.endpoint_revision_id,
+        owner_installation_id=permit.owner_installation_id,
+        ownership_epoch=permit.ownership_epoch,
+        lease_id=permit.lease_id,
+        fencing_token=permit.fencing_token,
+        operation_payloads=operation_payloads,
+        plan_checksum=plan_checksum,
+    )
+
+
+def recovery_intent_segment_hash_for_binding(
+    *,
+    run_id: str,
+    run_target_id: str,
+    endpoint_id: str,
+    endpoint_revision_id: str,
+    owner_installation_id: str,
+    ownership_epoch: int,
+    lease_id: str,
+    fencing_token: int,
+    operation_payloads: tuple[Mapping[str, object], ...],
+    plan_checksum: str | None,
+) -> str:
     payload = {
-        "fencing_token": permit.fencing_token,
-        "lease_id": permit.lease_id,
-        "operations": [
-            {
-                "final_relative_path": operation.final_relative_path,
-                "operation_id": operation.operation_id,
-                "target_precondition_kind": operation.target_precondition_kind.value,
-            }
-            for operation in operations
-        ],
-        "run_id": permit.run_id,
-        "run_target_id": permit.run_target_id,
+        "endpoint_id": endpoint_id,
+        "endpoint_revision_id": endpoint_revision_id,
+        "fencing_token": fencing_token,
+        "lease_id": lease_id,
+        "operations": list(operation_payloads),
+        "owner_installation_id": owner_installation_id,
+        "ownership_epoch": ownership_epoch,
+        "plan_checksum": plan_checksum,
+        "run_id": run_id,
+        "run_target_id": run_target_id,
+        "schema_version": TARGET_RECOVERY_INTENT_SCHEMA_VERSION,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _operation_byte_count(operation: RecoveryOperation) -> int:
-    if operation.expected_staging_fingerprint_json is None:
-        return 0
-    try:
-        payload = json.loads(operation.expected_staging_fingerprint_json)
-    except json.JSONDecodeError:
-        return 0
-    if not isinstance(payload, dict):
-        return 0
-    byte_count = payload.get("byte_count")
-    if not isinstance(byte_count, int) or byte_count < 0:
-        return 0
-    return byte_count
+def _bounded_intent_operations(
+    operations: tuple[RecoveryOperation, ...],
+) -> tuple[RecoveryOperation, ...]:
+    bounded: list[RecoveryOperation] = []
+    byte_count = 0
+    for operation in operations:
+        payload = canonical_recovery_intent_operation_payload(
+            operation=operation,
+            ordinal=len(bounded),
+        )
+        operation_bytes = _canonical_json_line_size(payload)
+        if byte_count + operation_bytes > MAX_INTENT_SEGMENT_BYTES:
+            break
+        bounded.append(operation)
+        byte_count += operation_bytes
+    return tuple(bounded)
+
+
+def _canonical_json_line_size(payload: Mapping[str, object]) -> int:
+    return (
+        len(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        + 1
+    )
 
 
 def _safe_path_component(value: str) -> str:

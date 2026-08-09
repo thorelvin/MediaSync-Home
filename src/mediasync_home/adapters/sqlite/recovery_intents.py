@@ -10,17 +10,25 @@ from mediasync_home.application.recovery_intents import (
     RecoveryIntentSegmentStore,
     validate_recovery_intent_segment,
 )
+from mediasync_home.application.target_recovery_intents import (
+    RecoveryIntentSegmentReconciliationStore,
+)
 
 
 class SqliteRecoveryIntentSegmentStoreError(ValueError):
     pass
 
 
-class SqliteRecoveryIntentSegmentStore(RecoveryIntentSegmentStore):
+class SqliteRecoveryIntentSegmentStore(
+    RecoveryIntentSegmentStore,
+    RecoveryIntentSegmentReconciliationStore,
+):
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
-    def publish_intent_segment(self, segment: RecoveryIntentSegment) -> RecoveryIntentSegment:
+    def publish_intent_segment(
+        self, segment: RecoveryIntentSegment
+    ) -> RecoveryIntentSegment:
         validate_recovery_intent_segment(segment)
         outer_transaction = self._connection.in_transaction
         try:
@@ -42,7 +50,9 @@ class SqliteRecoveryIntentSegmentStore(RecoveryIntentSegmentStore):
             self._insert_segment(segment)
             published = self.load_intent_segment(segment.segment_id)
             if published is None:
-                raise SqliteRecoveryIntentSegmentStoreError("RECOVERY_INTENT_SEGMENT_LOAD_FAILED")
+                raise SqliteRecoveryIntentSegmentStoreError(
+                    "RECOVERY_INTENT_SEGMENT_LOAD_FAILED"
+                )
             if not outer_transaction:
                 self._connection.execute("COMMIT")
             return published
@@ -135,6 +145,92 @@ class SqliteRecoveryIntentSegmentStore(RecoveryIntentSegmentStore):
             return None
         return _segment_from_row(row)
 
+    def import_intent_segment(
+        self,
+        segment: RecoveryIntentSegment,
+    ) -> RecoveryIntentSegment:
+        validate_recovery_intent_segment(segment)
+        outer_transaction = self._connection.in_transaction
+        try:
+            if not outer_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            existing = self.load_intent_segment(segment.segment_id)
+            if existing is not None:
+                if existing != segment:
+                    raise SqliteRecoveryIntentSegmentStoreError(
+                        "RECOVERY_INTENT_SEGMENT_IDEMPOTENCY_CONFLICT"
+                    )
+                if not outer_transaction:
+                    self._connection.execute("COMMIT")
+                return existing
+            self._require_historical_matching_lease(segment)
+            self._require_segment_chain(segment)
+            self._insert_segment(segment)
+            imported = self.load_intent_segment(segment.segment_id)
+            if imported is None:
+                raise SqliteRecoveryIntentSegmentStoreError(
+                    "RECOVERY_INTENT_SEGMENT_LOAD_FAILED"
+                )
+            if not outer_transaction:
+                self._connection.execute("COMMIT")
+            return imported
+        except SqliteRecoveryIntentSegmentStoreError:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
+        except sqlite3.IntegrityError as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise SqliteRecoveryIntentSegmentStoreError(
+                "RECOVERY_INTENT_SEGMENT_IMPORT_CONFLICT"
+            ) from exc
+        except sqlite3.Error as exc:
+            if not outer_transaction and self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise SqliteRecoveryIntentSegmentStoreError(
+                "RECOVERY_INTENT_SEGMENT_IMPORT_FAILED"
+            ) from exc
+
+    def list_unresolved_intent_segments(
+        self,
+        *,
+        limit: int,
+    ) -> tuple[RecoveryIntentSegment, ...]:
+        if not 1 <= limit <= 10_000:
+            raise SqliteRecoveryIntentSegmentStoreError(
+                "RECOVERY_INTENT_SEGMENT_LIST_LIMIT_INVALID"
+            )
+        rows = self._connection.execute(
+            """
+            SELECT
+                id,
+                run_id,
+                run_target_id,
+                target_endpoint_id,
+                target_endpoint_revision_id,
+                endpoint_generation,
+                owner_installation_id,
+                ownership_epoch,
+                lease_id,
+                fencing_token,
+                segment_sequence,
+                relative_path,
+                schema_version,
+                operation_count,
+                byte_count,
+                segment_hash,
+                previous_segment_hash,
+                durability_state,
+                state
+            FROM recovery_intent_segments
+            WHERE state IN ('BUILDING', 'DURABLE')
+            ORDER BY run_target_id, segment_sequence, id
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return tuple(_segment_from_row(row) for row in rows)
+
     def _require_active_matching_lease(self, segment: RecoveryIntentSegment) -> None:
         row = self._connection.execute(
             """
@@ -150,7 +246,9 @@ class SqliteRecoveryIntentSegmentStore(RecoveryIntentSegmentStore):
             (segment.lease_id,),
         ).fetchone()
         if row is None:
-            raise SqliteRecoveryIntentSegmentStoreError("RECOVERY_INTENT_SEGMENT_LEASE_MISMATCH")
+            raise SqliteRecoveryIntentSegmentStoreError(
+                "RECOVERY_INTENT_SEGMENT_LEASE_MISMATCH"
+            )
         if (
             str(row[0]) != segment.owner_installation_id
             or int(row[1]) != segment.ownership_epoch
@@ -158,7 +256,38 @@ class SqliteRecoveryIntentSegmentStore(RecoveryIntentSegmentStore):
             or str(row[3]) != segment.target_endpoint_id
             or str(row[4]) != "ACQUIRED"
         ):
-            raise SqliteRecoveryIntentSegmentStoreError("RECOVERY_INTENT_SEGMENT_LEASE_MISMATCH")
+            raise SqliteRecoveryIntentSegmentStoreError(
+                "RECOVERY_INTENT_SEGMENT_LEASE_MISMATCH"
+            )
+
+    def _require_historical_matching_lease(
+        self, segment: RecoveryIntentSegment
+    ) -> None:
+        row = self._connection.execute(
+            """
+            SELECT
+                owner_instance_id,
+                ownership_epoch,
+                fencing_token,
+                run_id,
+                run_target_id,
+                endpoint_id
+            FROM resource_leases
+            WHERE lease_id = ?
+            """,
+            (segment.lease_id,),
+        ).fetchone()
+        if row is None or (
+            str(row[0]) != segment.owner_installation_id
+            or int(row[1]) != segment.ownership_epoch
+            or int(row[2]) != segment.fencing_token
+            or str(row[3]) != segment.run_id
+            or str(row[4]) != segment.run_target_id
+            or str(row[5]) != segment.target_endpoint_id
+        ):
+            raise SqliteRecoveryIntentSegmentStoreError(
+                "RECOVERY_INTENT_SEGMENT_HISTORICAL_LEASE_MISMATCH"
+            )
 
     def _require_segment_chain(self, segment: RecoveryIntentSegment) -> None:
         if segment.segment_sequence == 0:
@@ -178,7 +307,9 @@ class SqliteRecoveryIntentSegmentStore(RecoveryIntentSegmentStore):
             (segment.run_target_id, segment.segment_sequence - 1),
         ).fetchone()
         if row is None or segment.previous_segment_hash != str(row[0]):
-            raise SqliteRecoveryIntentSegmentStoreError("RECOVERY_INTENT_SEGMENT_CHAIN_MISMATCH")
+            raise SqliteRecoveryIntentSegmentStoreError(
+                "RECOVERY_INTENT_SEGMENT_CHAIN_MISMATCH"
+            )
 
     def _insert_segment(self, segment: RecoveryIntentSegment) -> None:
         self._connection.execute(

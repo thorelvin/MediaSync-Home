@@ -66,7 +66,7 @@ def test_sqlite_run_intent_segment_publisher_records_segment_and_binds_operation
         assert segment is not None
         assert segment == outcome.segment
         assert segment.operation_count == 2
-        assert segment.byte_count == 256
+        assert 0 < segment.byte_count < 16 * 1024 * 1024
         assert len(segment.segment_hash) == 64
         assert op_a is not None
         assert op_a.phase is RecoveryOperationPhase.COMMIT_INTENT_RECORDED

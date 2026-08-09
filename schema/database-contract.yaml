@@ -437,6 +437,31 @@ invariants:
     pauses_while_backup_is_active: true
     immutable_relation_identity: true
     automatic_mutation_allowed: false
+  - id: REC-003_TARGET_RECOVERY_INTENT_SEGMENTS
+    requirement_id: REC-003
+    assertion: >
+      Each irreversible target batch has one bounded immutable canonical JSONL
+      segment on the owned target before the matching durable recovery row and
+      operation phase; startup imports only exact target-first crash evidence
+      and blocks mutation on missing, conflicting or ambiguous evidence.
+    recovery_table: recovery_intent_segments
+    target_document_schema_version: 1
+    target_document_format: canonical-jsonl
+    maximum_operation_count: 10000
+    maximum_operation_bytes: 16777216
+    target_path_scope: .mediasync/installations/<installation-id-short>/recovery
+    publication_order:
+      - TARGET_TEMP_FLUSHED
+      - TARGET_NO_OVERWRITE_PUBLISHED
+      - RECOVERY_ROW_DURABLE
+      - OPERATIONS_COMMIT_INTENT_RECORDED
+    checksum_binds_plan: true
+    checksum_binds_endpoint_and_lease: true
+    checksum_binds_canonical_operations: true
+    startup_scan_bounded: true
+    target_first_import_requires_historical_lease: true
+    target_first_import_requires_staging_verified_operations: true
+    missing_target_evidence_blocks_mutation: true
   - id: SRC-001_SOURCE_FILE_PRECONDITION
     requirement_id: SRC-001
     assertion: >

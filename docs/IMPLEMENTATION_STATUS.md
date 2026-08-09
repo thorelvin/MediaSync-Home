@@ -1,5 +1,25 @@
 # Implementeringsstatus
 
+Update 2026-08-09: Milestone 8 target-side recovery intent evidence is now
+implemented for the local executor. Each bounded commit batch serializes one
+canonical JSONL header plus canonical operation rows, checksum-bound to the
+sealed plan, endpoint revision, owner/epoch, lease/fencing token, relative
+paths, preconditions, fingerprints and staging evidence. The executor flushes
+a same-directory unique temp file and publishes it with a write-through
+no-overwrite move before `recovery.sqlite` records the segment and before any
+operation enters `COMMIT_INTENT_RECORDED`; fresh-lease intent refresh uses the
+same ordering. The 16 MiB bound now measures serialized intent bytes rather
+than user-file bytes, so large backup files are no longer rejected by the
+control-record limit. Startup scans at most 10,000 owned target documents,
+rejects reparse/path/schema/hash/endpoint conflicts, imports a target-first
+crash orphan only when its historical lease and still-`STAGING_VERIFIED` local
+operations match exactly, and blocks all executor mutation when database-side
+evidence is missing on the target or reconciliation remains ambiguous. Real
+local copy coverage proves both final user bytes and the target-side segment;
+strict parser, no-overwrite, idempotency, import and state-restore scans are
+covered separately. Segment terminal reconciliation and retention cleanup are
+the next Milestone 8 recovery slice.
+
 Update 2026-08-09: Milestone 7 now has a persistent, bounded identical-file
 scanner and evidence-typed hash cache. Catalog migration 55 adds immutable
 cache evidence, one deterministic duplicate scan per analysis and one durable

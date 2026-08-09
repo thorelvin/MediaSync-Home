@@ -19,6 +19,9 @@ from mediasync_home.adapters.sqlite.connection_policy import (
     catalog_reader_policy,
     recovery_reader_policy,
 )
+from mediasync_home.application.run_intent_segments import (
+    recovery_intent_installation_namespace,
+)
 
 
 STATE_BACKUP_SET_MANIFEST_SCHEMA_VERSION = 2
@@ -2097,7 +2100,7 @@ def _target_side_intent_marker_segments(
     scanned = 0
     for root_uri, owner_installation_id in rows:
         root = _local_path_from_file_uri(str(root_uri))
-        owner = _safe_file_name(str(owner_installation_id))
+        owner = recovery_intent_installation_namespace(str(owner_installation_id))
         owner_recovery_root = root / ".mediasync" / "installations" / owner / "recovery"
         if not owner_recovery_root.exists():
             continue
@@ -3470,7 +3473,6 @@ def _safe_file_name(value: str) -> str:
     if "/" in value or "\\" in value or value in {"", ".", ".."}:
         raise SqliteStateBackupViolation("STATE_BACKUP_FILE_NAME_INVALID")
     return value
-
 
 def _required_scalar(
     connection: sqlite3.Connection,

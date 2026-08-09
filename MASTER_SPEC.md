@@ -5936,7 +5936,11 @@ Materialisert lokal katalog over immutable target-side intentsegmenter.
 - unik `(run_target_id, segment_sequence)`
 - unik `(run_target_id, relative_path)`
 
-`relative_path` ligger alltid under den validerte installasjonsspesifikke `.mediasync/installations/<id>/recovery`-roten. Segmentet er immutable etter `DURABLE`; endring i byte/hash er `INTENT_SEGMENT_MISMATCH`. 0B-skjemaet håndhever én rad per `(run_target_id, segment_sequence)` og `(run_target_id, relative_path)`, 10 000-operasjons-/16 MiB-grensene og immutability for durable bevisfelt.
+`relative_path` ligger alltid under den validerte installasjonsspesifikke `.mediasync/installations/<id-short>/recovery`-roten. Segmentet er immutable etter `DURABLE`; endring i byte/hash er `INTENT_SEGMENT_MISMATCH`. 0B-skjemaet håndhever én rad per `(run_target_id, segment_sequence)` og `(run_target_id, relative_path)`, 10 000-operasjons-/16 MiB-grensene og immutability for durable bevisfelt.
+
+Den lokale executorimplementasjonen skriver ett canonical JSONL-dokument per segment: en streng header etterfulgt av ordinalsorterte operationrader. `byte_count` er antall serialiserte bytes i operationradene, ikke summen av brukerfilstørrelser. Headeren binder segmentet til planchecksum, endpoint/revision/generation, owner/epoch, lease/fencing, hashkjede og relative path; operationradene binder stabile IDs, relative source/final paths, operationtype, preconditions, fingerprints, guard-/stagingevidence og planrekkefølge. Segmenthashen dekker bindingen og alle canonical operationrader.
+
+Publiseringsrekkefølgen er target temp + flush, write-through no-overwrite publication, immutable rad i `recovery.sqlite`, deretter operation-CAS til `COMMIT_INTENT_RECORDED`. Startup scanner maksimalt 10 000 markører fra catalog-kjente, lokalt eide endepunkter. Et target-first krasjvindu importeres idempotent bare når historisk leasebinding finnes og alle operationrader matcher lokale `STAGING_VERIFIED`-rader eksakt. Manglende targetbevis for en unresolved databaserad, duplicate segment-ID, reparse/path-/endpointavvik, checksumfeil eller manglende lokal journal blokkerer executor-mutasjon til recovery er avstemt.
 
 #### `recovery_object_allocations`
 
