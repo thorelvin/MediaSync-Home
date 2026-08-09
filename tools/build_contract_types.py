@@ -21,6 +21,9 @@ MACHINE_CLASS_NAMES = {
     "cross_store_handoff": "CrossStoreHandoffState",
     "endpoint_ownership": "EndpointOwnershipState",
     "directory_create": "DirectoryCreateState",
+    "directory_metadata": "DirectoryMetadataState",
+    "directory_quarantine": "DirectoryQuarantineState",
+    "directory_restore": "DirectoryRestoreState",
     "command_receipt": "CommandReceiptState",
 }
 STATE_FIELDS = ("states", "linear_success_path", "optional_states", "terminal")

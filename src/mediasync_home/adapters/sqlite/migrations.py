@@ -318,6 +318,11 @@ def catalog_migration_plan() -> SqliteMigrationPlan:
                 name="catalog_cross_store_handoffs",
                 statements=CATALOG_CROSS_STORE_HANDOFFS,
             ),
+            SqliteMigration(
+                version=57,
+                name="catalog_directory_metadata_records",
+                statements=CATALOG_DIRECTORY_METADATA_RECORDS,
+            ),
         ),
     )
 
@@ -385,6 +390,11 @@ def recovery_migration_plan() -> SqliteMigrationPlan:
                 version=12,
                 name="recovery_cross_store_handoffs",
                 statements=RECOVERY_CROSS_STORE_HANDOFFS,
+            ),
+            SqliteMigration(
+                version=13,
+                name="recovery_directory_lifecycles",
+                statements=RECOVERY_DIRECTORY_LIFECYCLES,
             ),
         ),
     )
@@ -3802,6 +3812,56 @@ CATALOG_CROSS_STORE_HANDOFFS = (
 )
 
 
+CATALOG_DIRECTORY_METADATA_RECORDS = (
+    """
+    CREATE TABLE directory_metadata_records (
+        recovery_id TEXT PRIMARY KEY CHECK (length(trim(recovery_id)) > 0),
+        operation_id TEXT NOT NULL CHECK (length(trim(operation_id)) > 0),
+        run_id TEXT NOT NULL CHECK (length(trim(run_id)) > 0),
+        run_target_id TEXT NOT NULL CHECK (length(trim(run_target_id)) > 0),
+        target_endpoint_id TEXT NOT NULL CHECK (length(trim(target_endpoint_id)) > 0),
+        target_endpoint_revision_id TEXT NOT NULL CHECK (
+            length(trim(target_endpoint_revision_id)) > 0
+        ),
+        final_relative_path TEXT NOT NULL CHECK (
+            length(trim(final_relative_path)) > 0
+        ),
+        desired_metadata_json TEXT NOT NULL CHECK (json_valid(desired_metadata_json)),
+        applied_metadata_json TEXT NOT NULL CHECK (json_valid(applied_metadata_json)),
+        metadata_hash TEXT NOT NULL CHECK (
+            length(metadata_hash) = 64
+            AND metadata_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        recorded_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        UNIQUE (run_id, operation_id)
+    )
+    """,
+    """
+    CREATE INDEX idx_directory_metadata_records_target_path
+        ON directory_metadata_records (
+            target_endpoint_id,
+            target_endpoint_revision_id,
+            final_relative_path,
+            recorded_utc
+        )
+    """,
+    """
+    CREATE TRIGGER trg_directory_metadata_records_no_update
+    BEFORE UPDATE ON directory_metadata_records
+    BEGIN
+        SELECT RAISE(ABORT, 'DIRECTORY_METADATA_RECORD_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_directory_metadata_records_no_delete
+    BEFORE DELETE ON directory_metadata_records
+    BEGIN
+        SELECT RAISE(ABORT, 'DIRECTORY_METADATA_RECORD_IMMUTABLE');
+    END
+    """,
+)
+
+
 CATALOG_JOB_LIFECYCLE = (
     """
     ALTER TABLE jobs
@@ -5955,6 +6015,250 @@ RECOVERY_CROSS_STORE_HANDOFFS = (
     )
     BEGIN
         SELECT RAISE(ABORT, 'RECOVERY_HANDOFF_STATE_NOT_MONOTONE');
+    END
+    """,
+)
+
+
+RECOVERY_DIRECTORY_LIFECYCLES = (
+    """
+    CREATE TABLE directory_recovery_operations (
+        recovery_id TEXT PRIMARY KEY CHECK (length(trim(recovery_id)) > 0),
+        operation_id TEXT NOT NULL CHECK (length(trim(operation_id)) > 0),
+        run_id TEXT NOT NULL CHECK (length(trim(run_id)) > 0),
+        run_target_id TEXT NOT NULL CHECK (length(trim(run_target_id)) > 0),
+        target_endpoint_id TEXT NOT NULL CHECK (length(trim(target_endpoint_id)) > 0),
+        target_endpoint_revision_id TEXT NOT NULL CHECK (
+            length(trim(target_endpoint_revision_id)) > 0
+        ),
+        owner_installation_id TEXT NOT NULL CHECK (
+            length(trim(owner_installation_id)) > 0
+        ),
+        ownership_epoch INTEGER NOT NULL CHECK (ownership_epoch >= 1),
+        kind TEXT NOT NULL CHECK (
+            kind IN ('CREATE', 'METADATA', 'QUARANTINE', 'RESTORE')
+        ),
+        state TEXT NOT NULL,
+        final_relative_path TEXT NOT NULL CHECK (
+            length(trim(final_relative_path)) > 0
+        ),
+        expected_precondition_json TEXT CHECK (
+            expected_precondition_json IS NULL
+            OR json_valid(expected_precondition_json)
+        ),
+        desired_metadata_json TEXT CHECK (
+            desired_metadata_json IS NULL OR json_valid(desired_metadata_json)
+        ),
+        managed_object_id TEXT,
+        last_error_code TEXT,
+        event_sequence INTEGER NOT NULL DEFAULT 0 CHECK (event_sequence >= 0),
+        event_hash TEXT CHECK (
+            event_hash IS NULL
+            OR (
+                length(event_hash) = 64
+                AND event_hash NOT GLOB '*[^0-9a-f]*'
+            )
+        ),
+        row_version INTEGER NOT NULL DEFAULT 1 CHECK (row_version >= 1),
+        created_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        UNIQUE (run_id, operation_id, kind),
+        CHECK ((event_sequence = 0) = (event_hash IS NULL)),
+        CHECK (
+            state NOT IN (
+                'DIRECTORY_TYPE_CONFLICT',
+                'DIRECTORY_METADATA_CONFLICT',
+                'DIRECTORY_QUARANTINE_CONFLICT',
+                'DIRECTORY_RESTORE_CONFLICT'
+            )
+            OR length(trim(last_error_code)) > 0
+        ),
+        CHECK (
+            (kind = 'CREATE' AND state IN (
+                'DIRECTORY_PLANNED',
+                'DIRECTORY_PARENT_VALIDATED',
+                'DIRECTORY_CREATE_INTENT_RECORDED',
+                'DIRECTORY_CREATED',
+                'DIRECTORY_IDENTITY_VERIFIED',
+                'DIRECTORY_CATALOG_RECORDED',
+                'DIRECTORY_TYPE_CONFLICT'
+            ))
+            OR (kind = 'METADATA' AND state IN (
+                'DIRECTORY_METADATA_PLANNED',
+                'CHILDREN_TERMINAL',
+                'METADATA_PRECONDITION_VALIDATED',
+                'METADATA_INTENT_RECORDED',
+                'METADATA_APPLIED',
+                'METADATA_VERIFIED',
+                'DIRECTORY_CATALOG_RECORDED',
+                'DIRECTORY_METADATA_CONFLICT'
+            ))
+            OR (kind = 'QUARANTINE' AND state IN (
+                'DIRECTORY_QUARANTINE_PLANNED',
+                'DIRECTORY_EMPTY_REVALIDATED',
+                'QUARANTINE_INTENT_RECORDED',
+                'DIRECTORY_OBJECT_PRESERVED',
+                'SOURCE_PATH_REMOVED',
+                'QUARANTINE_CATALOG_RECORDED',
+                'DIRECTORY_QUARANTINE_CONFLICT'
+            ))
+            OR (kind = 'RESTORE' AND state IN (
+                'DIRECTORY_RESTORE_PLANNED',
+                'RESTORE_TARGET_ABSENT_REVALIDATED',
+                'RESTORE_INTENT_RECORDED',
+                'DIRECTORY_RESTORED',
+                'DIRECTORY_RESTORE_VERIFIED',
+                'RESTORE_CATALOG_RECORDED',
+                'DIRECTORY_RESTORE_CONFLICT'
+            ))
+        )
+    )
+    """,
+    """
+    CREATE INDEX idx_directory_recovery_unresolved
+        ON directory_recovery_operations (state, updated_utc, recovery_id)
+    """,
+    """
+    CREATE TABLE directory_recovery_events (
+        recovery_id TEXT NOT NULL,
+        event_sequence INTEGER NOT NULL CHECK (event_sequence >= 1),
+        from_state TEXT,
+        to_state TEXT NOT NULL,
+        process_instance_id TEXT NOT NULL CHECK (
+            length(trim(process_instance_id)) > 0
+        ),
+        event_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+        previous_event_hash TEXT CHECK (
+            previous_event_hash IS NULL
+            OR (
+                length(previous_event_hash) = 64
+                AND previous_event_hash NOT GLOB '*[^0-9a-f]*'
+            )
+        ),
+        event_hash TEXT NOT NULL CHECK (
+            length(event_hash) = 64
+            AND event_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        PRIMARY KEY (recovery_id, event_sequence),
+        FOREIGN KEY (recovery_id)
+            REFERENCES directory_recovery_operations (recovery_id)
+            ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TRIGGER trg_directory_recovery_immutable_binding
+    BEFORE UPDATE ON directory_recovery_operations
+    WHEN
+        NEW.recovery_id IS NOT OLD.recovery_id
+        OR NEW.operation_id IS NOT OLD.operation_id
+        OR NEW.run_id IS NOT OLD.run_id
+        OR NEW.run_target_id IS NOT OLD.run_target_id
+        OR NEW.target_endpoint_id IS NOT OLD.target_endpoint_id
+        OR NEW.target_endpoint_revision_id IS NOT OLD.target_endpoint_revision_id
+        OR NEW.owner_installation_id IS NOT OLD.owner_installation_id
+        OR NEW.ownership_epoch IS NOT OLD.ownership_epoch
+        OR NEW.kind IS NOT OLD.kind
+        OR NEW.final_relative_path IS NOT OLD.final_relative_path
+        OR NEW.expected_precondition_json IS NOT OLD.expected_precondition_json
+        OR NEW.desired_metadata_json IS NOT OLD.desired_metadata_json
+        OR NEW.created_utc IS NOT OLD.created_utc
+    BEGIN
+        SELECT RAISE(ABORT, 'DIRECTORY_RECOVERY_BINDING_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_directory_recovery_no_delete
+    BEFORE DELETE ON directory_recovery_operations
+    BEGIN
+        SELECT RAISE(ABORT, 'DIRECTORY_RECOVERY_RECORD_REQUIRED');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_directory_recovery_monotone_state
+    BEFORE UPDATE OF state ON directory_recovery_operations
+    WHEN NOT (
+        NEW.state = OLD.state
+        OR (OLD.state = 'DIRECTORY_PLANNED' AND NEW.state IN (
+            'DIRECTORY_PARENT_VALIDATED', 'DIRECTORY_TYPE_CONFLICT'
+        ))
+        OR (OLD.state = 'DIRECTORY_PARENT_VALIDATED' AND NEW.state IN (
+            'DIRECTORY_CREATE_INTENT_RECORDED', 'DIRECTORY_TYPE_CONFLICT'
+        ))
+        OR (OLD.state = 'DIRECTORY_CREATE_INTENT_RECORDED' AND NEW.state IN (
+            'DIRECTORY_CREATED', 'DIRECTORY_TYPE_CONFLICT'
+        ))
+        OR (OLD.state = 'DIRECTORY_CREATED' AND NEW.state IN (
+            'DIRECTORY_IDENTITY_VERIFIED', 'DIRECTORY_TYPE_CONFLICT'
+        ))
+        OR (OLD.state = 'DIRECTORY_IDENTITY_VERIFIED' AND NEW.state IN (
+            'DIRECTORY_CATALOG_RECORDED', 'DIRECTORY_TYPE_CONFLICT'
+        ))
+        OR (OLD.state = 'DIRECTORY_METADATA_PLANNED' AND NEW.state IN (
+            'CHILDREN_TERMINAL', 'DIRECTORY_METADATA_CONFLICT'
+        ))
+        OR (OLD.state = 'CHILDREN_TERMINAL' AND NEW.state IN (
+            'METADATA_PRECONDITION_VALIDATED', 'DIRECTORY_METADATA_CONFLICT'
+        ))
+        OR (OLD.state = 'METADATA_PRECONDITION_VALIDATED' AND NEW.state IN (
+            'METADATA_INTENT_RECORDED', 'DIRECTORY_METADATA_CONFLICT'
+        ))
+        OR (OLD.state = 'METADATA_INTENT_RECORDED' AND NEW.state IN (
+            'METADATA_APPLIED', 'DIRECTORY_METADATA_CONFLICT'
+        ))
+        OR (OLD.state = 'METADATA_APPLIED' AND NEW.state IN (
+            'METADATA_VERIFIED', 'DIRECTORY_METADATA_CONFLICT'
+        ))
+        OR (OLD.state = 'METADATA_VERIFIED' AND NEW.state IN (
+            'DIRECTORY_CATALOG_RECORDED', 'DIRECTORY_METADATA_CONFLICT'
+        ))
+        OR (OLD.state = 'DIRECTORY_QUARANTINE_PLANNED' AND NEW.state IN (
+            'DIRECTORY_EMPTY_REVALIDATED', 'DIRECTORY_QUARANTINE_CONFLICT'
+        ))
+        OR (OLD.state = 'DIRECTORY_EMPTY_REVALIDATED' AND NEW.state IN (
+            'QUARANTINE_INTENT_RECORDED', 'DIRECTORY_QUARANTINE_CONFLICT'
+        ))
+        OR (OLD.state = 'QUARANTINE_INTENT_RECORDED' AND NEW.state IN (
+            'DIRECTORY_OBJECT_PRESERVED', 'DIRECTORY_QUARANTINE_CONFLICT'
+        ))
+        OR (OLD.state = 'DIRECTORY_OBJECT_PRESERVED' AND NEW.state IN (
+            'SOURCE_PATH_REMOVED', 'DIRECTORY_QUARANTINE_CONFLICT'
+        ))
+        OR (OLD.state = 'SOURCE_PATH_REMOVED' AND NEW.state IN (
+            'QUARANTINE_CATALOG_RECORDED', 'DIRECTORY_QUARANTINE_CONFLICT'
+        ))
+        OR (OLD.state = 'DIRECTORY_RESTORE_PLANNED' AND NEW.state IN (
+            'RESTORE_TARGET_ABSENT_REVALIDATED', 'DIRECTORY_RESTORE_CONFLICT'
+        ))
+        OR (OLD.state = 'RESTORE_TARGET_ABSENT_REVALIDATED' AND NEW.state IN (
+            'RESTORE_INTENT_RECORDED', 'DIRECTORY_RESTORE_CONFLICT'
+        ))
+        OR (OLD.state = 'RESTORE_INTENT_RECORDED' AND NEW.state IN (
+            'DIRECTORY_RESTORED', 'DIRECTORY_RESTORE_CONFLICT'
+        ))
+        OR (OLD.state = 'DIRECTORY_RESTORED' AND NEW.state IN (
+            'DIRECTORY_RESTORE_VERIFIED', 'DIRECTORY_RESTORE_CONFLICT'
+        ))
+        OR (OLD.state = 'DIRECTORY_RESTORE_VERIFIED' AND NEW.state IN (
+            'RESTORE_CATALOG_RECORDED', 'DIRECTORY_RESTORE_CONFLICT'
+        ))
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'DIRECTORY_RECOVERY_STATE_NOT_MONOTONE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_directory_recovery_events_no_update
+    BEFORE UPDATE ON directory_recovery_events
+    BEGIN
+        SELECT RAISE(ABORT, 'DIRECTORY_RECOVERY_EVENT_IMMUTABLE');
+    END
+    """,
+    """
+    CREATE TRIGGER trg_directory_recovery_events_no_delete
+    BEFORE DELETE ON directory_recovery_events
+    BEGIN
+        SELECT RAISE(ABORT, 'DIRECTORY_RECOVERY_EVENT_IMMUTABLE');
     END
     """,
 )

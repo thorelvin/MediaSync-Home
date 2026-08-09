@@ -18,6 +18,9 @@ from mediasync_home.adapters.sqlite.connection_policy import (
 from mediasync_home.adapters.sqlite.lease_tokens import SqliteResourceLeaseStore
 from mediasync_home.adapters.sqlite.migrations import apply_sqlite_migrations, recovery_migration_plan
 from mediasync_home.adapters.sqlite.recovery_intents import SqliteRecoveryIntentSegmentStore
+from mediasync_home.adapters.sqlite.directory_recovery import (
+    SqliteDirectoryRecoveryStore,
+)
 from mediasync_home.adapters.sqlite.recovery_operations import SqliteRecoveryOperationStore
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
@@ -31,6 +34,11 @@ from mediasync_home.application.run_intent_segments import publish_run_target_re
 from mediasync_home.application.run_preserved_old_target_restore import (
     restore_next_run_target_preserved_old_target,
 )
+from mediasync_home.application.directory_recovery import (
+    DirectoryRecoveryKind,
+    directory_recovery_id,
+)
+from mediasync_home.generated.contract_types import DirectoryRestoreState
 
 
 def test_sqlite_run_final_commit_bridge_applies_lab_commit(
@@ -425,7 +433,11 @@ def test_sqlite_preserved_empty_directory_restore_records_cancelled_operation(
     connection = _prepared_recovery_connection(tmp_path)
     try:
         _register_resource_lease(connection)
-        recovery_operations = SqliteRecoveryOperationStore(connection)
+        directory_recovery = SqliteDirectoryRecoveryStore(connection)
+        recovery_operations = SqliteRecoveryOperationStore(
+            connection,
+            directory_recovery_store=directory_recovery,
+        )
         intent_segments = SqliteRecoveryIntentSegmentStore(connection)
         new_payload = b"new-image"
         operation = _record_staging_verified_operation(
@@ -481,14 +493,25 @@ def test_sqlite_preserved_empty_directory_restore_records_cancelled_operation(
             recovery_operations=recovery_operations,
             old_target_restore_port=adapter,
             process_instance_id="host-a",
+            directory_recovery_operations=directory_recovery,
+            directory_mutation_preparation_port=adapter,
         )
 
         loaded = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+        directory_restore = directory_recovery.load_directory_recovery_operation(
+            directory_recovery_id(
+                run_id="run-a",
+                operation_id="op-a",
+                kind=DirectoryRecoveryKind.RESTORE,
+            )
+        )
         assert outcome.restored is True
         assert outcome.validation_codes == ()
         assert loaded is not None
         assert loaded.phase is RecoveryOperationPhase.CANCELLED
         assert loaded.last_error_code == "RUN_TARGET_PRESERVED_OLD_TARGET_RESTORED"
+        assert directory_restore is not None
+        assert directory_restore.state is DirectoryRestoreState.RESTORE_CATALOG_RECORDED
         assert final.is_dir()
         assert list(final.iterdir()) == []
         assert quarantine_payload.is_dir()

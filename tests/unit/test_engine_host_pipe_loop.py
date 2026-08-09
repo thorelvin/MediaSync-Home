@@ -992,8 +992,8 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         assert runtime.recovery_connection is not None
         assert runtime.installation_state is not None
         assert runtime.installation_state.product_channel == "local-preview"
-        assert runtime.installation_state.catalog_schema_version == 56
-        assert runtime.installation_state.recovery_schema_version == 12
+        assert runtime.installation_state.catalog_schema_version == 57
+        assert runtime.installation_state.recovery_schema_version == 13
         assert runtime.installation_state.ipc_protocol_major == 1
         assert runtime.snapshot_materialization_refresh is not None
         assert runtime.snapshot_materialization_refresh.scanned_job_count == 0
@@ -1043,17 +1043,20 @@ def test_engine_host_runtime_state_root_initializes_sqlite_and_persists_receipts
         )
         assert (
             current_schema_version(runtime.catalog_connection, SqliteStore.CATALOG)
-            == 56
+            == 57
         )
         assert (
             current_schema_version(runtime.recovery_connection, SqliteStore.RECOVERY)
-            == 12
+            == 13
         )
         retention = runtime.run_version_retention_cycle()
         assert retention.planning.plan is None
         assert retention.planning.scanned == 0
         assert retention.apply.idle is True
         assert runtime.startup_reconciliation is not None
+        assert runtime.directory_recovery_reconciliation is not None
+        assert runtime.directory_recovery_reconciliation.scanned == 0
+        assert runtime.directory_recovery_reconciliation.mutation_safe is True
         assert runtime.run_start_handoff_reconciliation is not None
         assert runtime.run_start_handoff_reconciliation.scanned == 0
         assert runtime.startup_reconciliation.reconciler_instance_id == "host-new"

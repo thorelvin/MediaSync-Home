@@ -1,5 +1,18 @@
 # Implementeringsstatus
 
+Update 2026-08-09: `REC-004` now has four independent, monotone directory
+recovery protocols for create, metadata, quarantine and restore. Recovery
+migration 13 persists immutable lifecycle heads plus hash-chained events and
+catalog migration 57 persists immutable directory-metadata receipts. Real
+filesystem adapters record durable intent before each mutation, verify exact
+directory identity, quarantine manifests/payloads, restore postconditions and
+modified-time metadata, and only then acknowledge the catalog. Bounded Engine
+Host startup reconciliation inspects both SQLite stores and actual endpoint
+objects, advances only proven crash windows, leaves safe retries pending and
+persists ambiguity as a conflict that disables further mutations. Real
+filesystem/SQLite crash tests cover all four protocols, including both sides
+of the two-database metadata acknowledgment window.
+
 Update 2026-08-09: local versioned replacement now uses the documented native
 Windows fast path. Controlled writable registration proves `ReplaceFileW`
 against a real old/new/backup triplet before advertising atomic replacement.

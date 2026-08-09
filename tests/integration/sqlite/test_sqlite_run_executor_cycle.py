@@ -33,6 +33,9 @@ from mediasync_home.adapters.sqlite.operation_audit import SqliteOperationAuditS
 from mediasync_home.adapters.sqlite.endpoint_roots import SqliteEndpointRootResolver
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
 from mediasync_home.adapters.sqlite.recovery_intents import SqliteRecoveryIntentSegmentStore
+from mediasync_home.adapters.sqlite.directory_recovery import (
+    SqliteDirectoryRecoveryStore,
+)
 from mediasync_home.adapters.sqlite.recovery_operations import SqliteRecoveryOperationStore
 from mediasync_home.adapters.sqlite.runs import SqliteRunStore
 from mediasync_home.application.command_receipts import CommandReceipt
@@ -52,6 +55,14 @@ from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
     RecoveryOperationPhase,
     RecoveryTargetPreconditionKind,
+)
+from mediasync_home.application.directory_recovery import (
+    DirectoryRecoveryKind,
+    directory_recovery_id,
+)
+from mediasync_home.generated.contract_types import (
+    DirectoryCreateState,
+    DirectoryQuarantineState,
 )
 from mediasync_home.application.run_executor import HeldRunTargetLeaseRegistry, RunExecutorPumpStopReason
 from mediasync_home.application.run_executor_cycle import (
@@ -557,7 +568,11 @@ def test_sqlite_run_executor_cycle_creates_parent_before_copying_nested_file(
         _insert_receipt(catalog_connection)
         plans = SqlitePlanStore(catalog_connection)
         runs = SqliteRunStore(catalog_connection)
-        recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
+        directory_recovery = SqliteDirectoryRecoveryStore(recovery_connection)
+        recovery_operations = SqliteRecoveryOperationStore(
+            recovery_connection,
+            directory_recovery_store=directory_recovery,
+        )
         intent_segments = SqliteRecoveryIntentSegmentStore(recovery_connection)
         catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
         lease = FixedLiveLease()
@@ -612,6 +627,8 @@ def test_sqlite_run_executor_cycle_creates_parent_before_copying_nested_file(
             catalog_handoffs=catalog_handoffs,
             final_commit_port=final_commit,
             old_target_preservation_port=final_commit,
+            directory_recovery_operations=directory_recovery,
+            directory_mutation_preparation_port=final_commit,
             recovery_object_cleanup_port=final_commit,
             staging_transfer_port=staging,
             process_instance_id="host-a",
@@ -622,6 +639,13 @@ def test_sqlite_run_executor_cycle_creates_parent_before_copying_nested_file(
         operation = recovery_operations.load_operation(
             run_id="run-a",
             operation_id="op-directory",
+        )
+        directory_operation = directory_recovery.load_directory_recovery_operation(
+            directory_recovery_id(
+                run_id="run-a",
+                operation_id="op-directory",
+                kind=DirectoryRecoveryKind.CREATE,
+            )
         )
         handoff = catalog_handoffs.load_final_file_handoff(
             "final-directory:run-a:op-directory"
@@ -635,6 +659,11 @@ def test_sqlite_run_executor_cycle_creates_parent_before_copying_nested_file(
         assert operation is not None
         assert operation.phase is RecoveryOperationPhase.CLEANED
         assert operation.operation_kind.value == "CREATE_DIRECTORY"
+        assert directory_operation is not None
+        assert (
+            directory_operation.state
+            is DirectoryCreateState.DIRECTORY_CATALOG_RECORDED
+        )
         assert operation.plan_sequence_no == 10
         assert (target_root / "Pictures").is_dir()
         assert not (target_root / "Pictures" / DIRECTORY_MARKER_NAME).exists()
@@ -1086,7 +1115,11 @@ def test_sqlite_run_executor_cycle_quarantines_empty_directory_before_file_commi
         _insert_receipt(catalog_connection)
         plans = SqlitePlanStore(catalog_connection)
         runs = SqliteRunStore(catalog_connection)
-        recovery_operations = SqliteRecoveryOperationStore(recovery_connection)
+        directory_recovery = SqliteDirectoryRecoveryStore(recovery_connection)
+        recovery_operations = SqliteRecoveryOperationStore(
+            recovery_connection,
+            directory_recovery_store=directory_recovery,
+        )
         intent_segments = SqliteRecoveryIntentSegmentStore(recovery_connection)
         catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
         lease = FixedLiveLease()
@@ -1129,6 +1162,8 @@ def test_sqlite_run_executor_cycle_quarantines_empty_directory_before_file_commi
             catalog_handoffs=catalog_handoffs,
             final_commit_port=final_commit,
             old_target_preservation_port=final_commit,
+            directory_recovery_operations=directory_recovery,
+            directory_mutation_preparation_port=final_commit,
             recovery_object_cleanup_port=final_commit,
             staging_transfer_port=staging,
             process_instance_id="host-a",
@@ -1137,6 +1172,13 @@ def test_sqlite_run_executor_cycle_quarantines_empty_directory_before_file_commi
 
         loaded_run = runs.load_started_run("run-a")
         operation = recovery_operations.load_operation(run_id="run-a", operation_id="op-a")
+        directory_operation = directory_recovery.load_directory_recovery_operation(
+            directory_recovery_id(
+                run_id="run-a",
+                operation_id="op-a",
+                kind=DirectoryRecoveryKind.QUARANTINE,
+            )
+        )
         handoff = catalog_handoffs.load_final_file_handoff("final-file:run-a:op-a")
         quarantine_payload = target_root / ".mediasync" / "objects" / "quarantine" / "op-a.payload"
         quarantine_manifest = (
@@ -1156,6 +1198,11 @@ def test_sqlite_run_executor_cycle_quarantines_empty_directory_before_file_commi
         assert operation.phase is RecoveryOperationPhase.CLEANED
         assert operation.target_precondition_kind is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY
         assert operation.quarantine_object_id == "op-a"
+        assert directory_operation is not None
+        assert (
+            directory_operation.state
+            is DirectoryQuarantineState.QUARANTINE_CATALOG_RECORDED
+        )
         assert operation.expected_target_fingerprint_json == json.dumps(
             {
                 "entry_count": 0,

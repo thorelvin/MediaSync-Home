@@ -90,6 +90,15 @@ class RecoveryObjectCleanupReceipt:
 
 
 @dataclass(frozen=True)
+class DirectoryMutationPreparationReceipt:
+    operation_id: str
+    final_relative_path: RelativePath
+    observed_state: str
+    already_applied: bool = False
+    managed_object_id: str | None = None
+
+
+@dataclass(frozen=True)
 class FinalArtifactVerificationEvidence:
     fingerprint_json: str
 
@@ -132,3 +141,24 @@ class RecoveryObjectCleanupPort(Protocol):
         permit: MutationPermit,
         operation: RecoveryOperation,
     ) -> RecoveryObjectCleanupReceipt: ...
+
+
+class DirectoryMutationPreparationPort(Protocol):
+    def prepare_directory_create(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+        artifact: VerifiedStagingArtifact,
+    ) -> DirectoryMutationPreparationReceipt: ...
+
+    def prepare_directory_quarantine(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> DirectoryMutationPreparationReceipt: ...
+
+    def prepare_directory_restore(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> DirectoryMutationPreparationReceipt: ...

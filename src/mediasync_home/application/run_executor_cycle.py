@@ -15,10 +15,12 @@ from mediasync_home.application.operation_audit import (
 )
 from mediasync_home.application.plans import PlanStore
 from mediasync_home.application.ports import (
+    DirectoryMutationPreparationPort,
     FinalCommitPort,
     OldTargetPreservationPort,
     RecoveryObjectCleanupPort,
 )
+from mediasync_home.application.directory_recovery import DirectoryRecoveryStore
 from mediasync_home.application.recovery_intents import RecoveryIntentSegmentStore
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
@@ -190,6 +192,10 @@ def execute_bounded_run_executor_cycle(
     max_steps: int,
     final_commit_port: FinalCommitPort | None = None,
     old_target_preservation_port: OldTargetPreservationPort | None = None,
+    directory_recovery_operations: DirectoryRecoveryStore | None = None,
+    directory_mutation_preparation_port: (
+        DirectoryMutationPreparationPort | None
+    ) = None,
     recovery_object_cleanup_port: RecoveryObjectCleanupPort | None = None,
     staging_transfer_port: RunTargetStagingPort | None = None,
     operation_audits: OperationAuditCatalogStore | None = None,
@@ -217,6 +223,10 @@ def execute_bounded_run_executor_cycle(
             process_instance_id=process_instance_id,
             final_commit_port=final_commit_port,
             old_target_preservation_port=old_target_preservation_port,
+            directory_recovery_operations=directory_recovery_operations,
+            directory_mutation_preparation_port=(
+                directory_mutation_preparation_port
+            ),
             recovery_object_cleanup_port=recovery_object_cleanup_port,
             staging_transfer_port=staging_transfer_port,
             operation_audits=operation_audits,
@@ -263,6 +273,10 @@ def execute_one_run_executor_cycle(
     process_instance_id: str,
     final_commit_port: FinalCommitPort | None = None,
     old_target_preservation_port: OldTargetPreservationPort | None = None,
+    directory_recovery_operations: DirectoryRecoveryStore | None = None,
+    directory_mutation_preparation_port: (
+        DirectoryMutationPreparationPort | None
+    ) = None,
     recovery_object_cleanup_port: RecoveryObjectCleanupPort | None = None,
     staging_transfer_port: RunTargetStagingPort | None = None,
     operation_audits: OperationAuditCatalogStore | None = None,
@@ -364,6 +378,10 @@ def execute_one_run_executor_cycle(
             process_instance_id=process_instance_id,
             final_commit_port=final_commit_port,
             old_target_preservation_port=old_target_preservation_port,
+            directory_recovery_operations=directory_recovery_operations,
+            directory_mutation_preparation_port=(
+                directory_mutation_preparation_port
+            ),
             recovery_object_cleanup_port=recovery_object_cleanup_port,
             staging_transfer_port=staging_transfer_port,
             operation_audits=operation_audits,
@@ -504,6 +522,8 @@ def _advance_retained_target(
     process_instance_id: str,
     final_commit_port: FinalCommitPort | None,
     old_target_preservation_port: OldTargetPreservationPort | None,
+    directory_recovery_operations: DirectoryRecoveryStore | None,
+    directory_mutation_preparation_port: DirectoryMutationPreparationPort | None,
     recovery_object_cleanup_port: RecoveryObjectCleanupPort | None,
     staging_transfer_port: RunTargetStagingPort | None,
     operation_audits: OperationAuditCatalogStore | None,
@@ -669,6 +689,10 @@ def _advance_retained_target(
             recovery_operations=recovery_operations,
             final_commit_port=final_commit_port,
             old_target_preservation_port=old_target_preservation_port,
+            directory_recovery_operations=directory_recovery_operations,
+            directory_mutation_preparation_port=(
+                directory_mutation_preparation_port
+            ),
             process_instance_id=process_instance_id,
         )
         if final_commit_outcome.committed:
@@ -726,6 +750,10 @@ def _advance_retained_target(
             recovery_operations=recovery_operations,
             final_commit_port=final_commit_port,
             old_target_preservation_port=old_target_preservation_port,
+            directory_recovery_operations=directory_recovery_operations,
+            directory_mutation_preparation_port=(
+                directory_mutation_preparation_port
+            ),
             process_instance_id=process_instance_id,
         )
         if final_commit_outcome.committed:

@@ -77,6 +77,7 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
         54,
         55,
         56,
+        57,
     ]
     assert [migration.version for migration in recovery.migrations] == [
         1,
@@ -91,6 +92,7 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
         10,
         11,
         12,
+        13,
     ]
     assert catalog.migrations[0].name == "catalog_core_contract_skeleton"
     assert catalog.migrations[1].name == "catalog_standard_backup_drafts"
@@ -159,6 +161,7 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
     assert catalog.migrations[53].name == "catalog_duplicate_relation_materialization"
     assert catalog.migrations[54].name == "catalog_evidence_typed_hash_cache"
     assert catalog.migrations[55].name == "catalog_cross_store_handoffs"
+    assert catalog.migrations[56].name == "catalog_directory_metadata_records"
     assert recovery.migrations[0].name == "recovery_journal_skeleton"
     assert recovery.migrations[1].name == "recovery_lease_counters"
     assert recovery.migrations[2].name == "recovery_resource_leases"
@@ -171,6 +174,7 @@ def test_catalog_and_recovery_migration_plans_are_separate() -> None:
     assert recovery.migrations[9].name == "recovery_staging_retry_timing"
     assert recovery.migrations[10].name == "recovery_version_retention_metadata"
     assert recovery.migrations[11].name == "recovery_cross_store_handoffs"
+    assert recovery.migrations[12].name == "recovery_directory_lifecycles"
 
 
 def test_migration_plan_requires_contiguous_versions() -> None:

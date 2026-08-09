@@ -22,6 +22,7 @@ from mediasync_home.adapters.windows_durability import (
 from mediasync_home.application.clocks import ClockPort
 from mediasync_home.application.ports import (
     CommitReceipt,
+    DirectoryMutationPreparationReceipt,
     FinalCommitPort,
     OldTargetPreservationReceipt,
     OldTargetRestoreReceipt,
@@ -376,74 +377,57 @@ class LocalVersionedReplaceFinalCommitAdapter(FinalCommitPort):
             fingerprint_json=fingerprint_json,
         )
 
+    def prepare_directory_restore(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> DirectoryMutationPreparationReceipt:
+        self._permit_validator.assert_mutation_permit_current(permit)
+        _require_endpoint_marker(
+            self._target_root,
+            permit,
+            validation_code="LOCAL_DIRECTORY_RESTORE_ENDPOINT_MARKER_MISMATCH",
+            missing_code="LOCAL_DIRECTORY_RESTORE_ENDPOINT_MARKER_MISSING",
+        )
+        _validate_replace_operation_binding(operation=operation, permit=permit)
+        if operation.phase is not RecoveryOperationPhase.OLD_TARGET_PRESERVED:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_RESTORE_REQUIRES_PRESERVED_PHASE",
+                "Restore a directory only after its quarantine object is preserved.",
+            )
+        if (
+            operation.target_precondition_kind
+            is not RecoveryTargetPreconditionKind.DIRECTORY_EMPTY
+        ):
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_RESTORE_REQUIRES_EMPTY_PRECONDITION",
+                "Use directory restore only for a quarantined empty directory.",
+            )
+        final_path, fingerprint_json, already_applied = (
+            _prepare_empty_directory_restore_state(
+                target_root=self._target_root,
+                operation=operation,
+            )
+        )
+        return DirectoryMutationPreparationReceipt(
+            operation_id=operation.operation_id,
+            final_relative_path=RelativePath(operation.final_relative_path),
+            observed_state=fingerprint_json,
+            already_applied=already_applied,
+            managed_object_id=operation.quarantine_object_id,
+        )
+
     def _restore_empty_directory_target(
         self,
         operation: RecoveryOperation,
     ) -> OldTargetRestoreReceipt:
-        if operation.quarantine_object_id is None or not operation.quarantine_object_id.strip():
-            raise FinalCommitAdapterError(
-                "LOCAL_DIRECTORY_QUARANTINE_RESTORE_REQUIRES_QUARANTINE_OBJECT",
-                "Recover or reconcile the quarantined empty directory before restore.",
+        final_path, fingerprint_json, already_applied = (
+            _prepare_empty_directory_restore_state(
+                target_root=self._target_root,
+                operation=operation,
             )
-
-        quarantine_payload, quarantine_manifest = _quarantine_object_paths(
-            target_root=self._target_root,
-            quarantine_object_id=operation.quarantine_object_id,
-            create=False,
         )
-        manifest = _load_quarantine_manifest(
-            manifest_path=quarantine_manifest,
-            expected_operation_id=operation.operation_id,
-            expected_quarantine_object_id=operation.quarantine_object_id,
-            expected_final_relative_path=operation.final_relative_path,
-        )
-        expected = _manifest_empty_directory_precondition(
-            manifest,
-            validation_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_MANIFEST_INVALID",
-            next_action="Reload recovery state before restoring the quarantined directory.",
-        )
-        if operation.expected_target_fingerprint_json is not None:
-            bound_expected = _expected_empty_directory_precondition(
-                operation.expected_target_fingerprint_json,
-                validation_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_EVIDENCE_MISMATCH",
-                next_action="Reload recovery state before restoring the quarantined directory.",
-            )
-            if bound_expected != expected:
-                raise FinalCommitAdapterError(
-                    "LOCAL_DIRECTORY_QUARANTINE_RESTORE_EVIDENCE_MISMATCH",
-                    "Reload recovery state before restoring the quarantined directory.",
-                )
-        if manifest.get("payload_name") != quarantine_payload.name:
-            raise FinalCommitAdapterError(
-                "LOCAL_DIRECTORY_QUARANTINE_RESTORE_MANIFEST_MISMATCH",
-                "Reload recovery state before restoring the quarantined directory.",
-            )
-        if quarantine_payload.is_symlink() or not quarantine_payload.is_dir():
-            raise FinalCommitAdapterError(
-                "LOCAL_DIRECTORY_QUARANTINE_RESTORE_PAYLOAD_INVALID",
-                "Enter recovery because the quarantine object path is not an empty directory.",
-            )
-        _require_empty_directory(
-            quarantine_payload,
-            read_failed_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_PAYLOAD_READ_FAILED",
-            not_empty_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_PAYLOAD_NOT_EMPTY",
-            next_action="Enter recovery because the quarantine object contents changed.",
-        )
-
-        final_path = _directory_empty_final_path(self._target_root, operation.final_relative_path)
-        fingerprint_json = _canonical_json(expected)
-        if final_path.exists() or final_path.is_symlink():
-            if final_path.is_symlink() or not final_path.is_dir():
-                raise FinalCommitAdapterError(
-                    "LOCAL_DIRECTORY_QUARANTINE_RESTORE_TARGET_TYPE_CHANGED",
-                    "Inspect the final target path before restoring the empty directory.",
-                )
-            _require_empty_directory(
-                final_path,
-                read_failed_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_TARGET_READ_FAILED",
-                not_empty_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_TARGET_NOT_EMPTY",
-                next_action="Do not restore over an existing final directory with contents.",
-            )
+        if already_applied:
             return OldTargetRestoreReceipt(
                 operation_id=operation.operation_id,
                 final_relative_path=RelativePath(operation.final_relative_path),
@@ -630,6 +614,78 @@ def _insert_replacement_payload_without_overwrite(
         temp_path.unlink(missing_ok=True)
 
 
+def _prepare_empty_directory_restore_state(
+    *,
+    target_root: Path,
+    operation: RecoveryOperation,
+) -> tuple[Path, str, bool]:
+    if operation.quarantine_object_id is None or not operation.quarantine_object_id.strip():
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_RESTORE_REQUIRES_QUARANTINE_OBJECT",
+            "Recover or reconcile the quarantined empty directory before restore.",
+        )
+    quarantine_payload, quarantine_manifest = _quarantine_object_paths(
+        target_root=target_root,
+        quarantine_object_id=operation.quarantine_object_id,
+        create=False,
+    )
+    manifest = _load_quarantine_manifest(
+        manifest_path=quarantine_manifest,
+        expected_operation_id=operation.operation_id,
+        expected_quarantine_object_id=operation.quarantine_object_id,
+        expected_final_relative_path=operation.final_relative_path,
+    )
+    expected = _manifest_empty_directory_precondition(
+        manifest,
+        validation_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_MANIFEST_INVALID",
+        next_action="Reload recovery state before restoring the quarantined directory.",
+    )
+    if operation.expected_target_fingerprint_json is not None:
+        bound_expected = _expected_empty_directory_precondition(
+            operation.expected_target_fingerprint_json,
+            validation_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_EVIDENCE_MISMATCH",
+            next_action="Reload recovery state before restoring the quarantined directory.",
+        )
+        if bound_expected != expected:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_RESTORE_EVIDENCE_MISMATCH",
+                "Reload recovery state before restoring the quarantined directory.",
+            )
+    if manifest.get("payload_name") != quarantine_payload.name:
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_RESTORE_MANIFEST_MISMATCH",
+            "Reload recovery state before restoring the quarantined directory.",
+        )
+    if quarantine_payload.is_symlink() or not quarantine_payload.is_dir():
+        raise FinalCommitAdapterError(
+            "LOCAL_DIRECTORY_QUARANTINE_RESTORE_PAYLOAD_INVALID",
+            "Enter recovery because the quarantine object path is not an empty directory.",
+        )
+    _require_empty_directory(
+        quarantine_payload,
+        read_failed_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_PAYLOAD_READ_FAILED",
+        not_empty_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_PAYLOAD_NOT_EMPTY",
+        next_action="Enter recovery because the quarantine object contents changed.",
+    )
+
+    final_path = _directory_empty_final_path(target_root, operation.final_relative_path)
+    fingerprint_json = _canonical_json(expected)
+    already_applied = final_path.exists() or final_path.is_symlink()
+    if already_applied:
+        if final_path.is_symlink() or not final_path.is_dir():
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_QUARANTINE_RESTORE_TARGET_TYPE_CHANGED",
+                "Inspect the final target path before restoring the empty directory.",
+            )
+        _require_empty_directory(
+            final_path,
+            read_failed_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_TARGET_READ_FAILED",
+            not_empty_code="LOCAL_DIRECTORY_QUARANTINE_RESTORE_TARGET_NOT_EMPTY",
+            next_action="Do not restore over an existing final directory with contents.",
+        )
+    return final_path, fingerprint_json, already_applied
+
+
 def _restore_version_payload_without_overwrite(
     *,
     version_payload: Path,
@@ -681,6 +737,150 @@ class LocalResolvingFinalCommitAdapter(FinalCommitPort):
         self._permit_validator = permit_validator
         self._staging_root = None if staging_root is None else Path(staging_root)
         self._clock = clock or SystemClock()
+
+    def prepare_directory_create(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+        artifact: VerifiedStagingArtifact,
+    ) -> DirectoryMutationPreparationReceipt:
+        self._permit_validator.assert_mutation_permit_current(permit)
+        target_root = self._target_root(
+            permit=permit,
+            endpoint_id=operation.target_endpoint_id,
+            endpoint_revision_id=operation.target_endpoint_revision_id,
+        )
+        staging_root = self._staging_root_for(target_root)
+        _require_endpoint_marker(
+            target_root,
+            permit,
+            validation_code="LOCAL_DIRECTORY_PREPARE_ENDPOINT_MARKER_MISMATCH",
+            missing_code="LOCAL_DIRECTORY_PREPARE_ENDPOINT_MARKER_MISSING",
+        )
+        _require_staging_manifest_binding(
+            staging_root=staging_root,
+            permit=permit,
+            staging_object_id=artifact.object_id,
+            final_relative_path=artifact.relative_path.value,
+            operation_kind=artifact.operation_kind,
+            fingerprint_content_hash=artifact.content_hash,
+            fingerprint_json=artifact.fingerprint_json,
+        )
+        expected = directory_artifact_fingerprint(
+            run_id=permit.run_id,
+            run_target_id=permit.run_target_id,
+            operation_id=artifact.object_id,
+            final_relative_path=artifact.relative_path.value,
+        )
+        if expected["content_hash"] != artifact.content_hash:
+            raise FinalCommitAdapterError(
+                "LOCAL_DIRECTORY_PREPARE_ARTIFACT_HASH_MISMATCH",
+                "Reload the verified directory artifact before final commit.",
+            )
+        final_path = _local_final_path(target_root, artifact.relative_path.value)
+        already_applied = final_path.exists() or final_path.is_symlink()
+        if already_applied:
+            if not directory_artifact_matches(
+                final_path,
+                run_id=permit.run_id,
+                run_target_id=permit.run_target_id,
+                operation_id=artifact.object_id,
+                final_relative_path=artifact.relative_path.value,
+            ):
+                raise FinalCommitAdapterError(
+                    "LOCAL_DIRECTORY_PREPARE_TARGET_CONFLICT",
+                    "Refresh analysis because the planned directory path is no longer absent.",
+                )
+        else:
+            staging_payload = _local_staging_directory_payload_path(
+                staging_root,
+                artifact,
+            )
+            if not directory_artifact_matches(
+                staging_payload,
+                run_id=permit.run_id,
+                run_target_id=permit.run_target_id,
+                operation_id=artifact.object_id,
+                final_relative_path=artifact.relative_path.value,
+            ):
+                raise FinalCommitAdapterError(
+                    "LOCAL_DIRECTORY_PREPARE_STAGING_MARKER_MISMATCH",
+                    "Restage and verify the directory marker before final commit.",
+                )
+        return DirectoryMutationPreparationReceipt(
+            operation_id=operation.operation_id,
+            final_relative_path=RelativePath(operation.final_relative_path),
+            observed_state="DIRECTORY_MARKER_PRESENT" if already_applied else "TARGET_ABSENT",
+            already_applied=already_applied,
+        )
+
+    def prepare_directory_quarantine(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> DirectoryMutationPreparationReceipt:
+        target_root = self._target_root(
+            permit=permit,
+            endpoint_id=operation.target_endpoint_id,
+            endpoint_revision_id=operation.target_endpoint_revision_id,
+        )
+        self._permit_validator.assert_mutation_permit_current(permit)
+        _require_endpoint_marker(
+            target_root,
+            permit,
+            validation_code="LOCAL_DIRECTORY_QUARANTINE_ENDPOINT_MARKER_MISMATCH",
+            missing_code="LOCAL_DIRECTORY_QUARANTINE_ENDPOINT_MARKER_MISSING",
+        )
+        _validate_replace_operation_binding(operation=operation, permit=permit)
+        expected = _expected_empty_directory_precondition(
+            operation.expected_target_fingerprint_json,
+            validation_code="LOCAL_DIRECTORY_QUARANTINE_REQUIRES_EMPTY_DIRECTORY_EVIDENCE",
+            next_action="Revalidate the empty-directory target precondition before quarantine.",
+        )
+        final_path = _directory_empty_final_path(
+            target_root,
+            operation.final_relative_path,
+        )
+        quarantine_payload, _ = _quarantine_object_paths(
+            target_root=target_root,
+            quarantine_object_id=operation.operation_id,
+            create=False,
+        )
+        already_applied = quarantine_payload.exists() or quarantine_payload.is_symlink()
+        if already_applied:
+            _validate_existing_quarantine_payload(
+                payload_path=quarantine_payload,
+                final_path=final_path,
+            )
+        else:
+            if final_path.is_symlink() or not final_path.is_dir():
+                raise FinalCommitAdapterError(
+                    "LOCAL_DIRECTORY_QUARANTINE_TARGET_TYPE_CHANGED",
+                    "Refresh analysis because the target is no longer an empty directory.",
+                )
+            _require_empty_directory(final_path)
+        return DirectoryMutationPreparationReceipt(
+            operation_id=operation.operation_id,
+            final_relative_path=RelativePath(operation.final_relative_path),
+            observed_state=_canonical_json(expected),
+            already_applied=already_applied,
+            managed_object_id=operation.operation_id,
+        )
+
+    def prepare_directory_restore(
+        self,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+    ) -> DirectoryMutationPreparationReceipt:
+        target_root = self._target_root(
+            permit=permit,
+            endpoint_id=operation.target_endpoint_id,
+            endpoint_revision_id=operation.target_endpoint_revision_id,
+        )
+        return self._replace_adapter(target_root).prepare_directory_restore(
+            permit,
+            operation,
+        )
 
     def preserve_old_target(
         self,
@@ -1235,7 +1435,7 @@ def _cleanup_staging_directory_payload(
         ) from exc
 
 
-def _require_endpoint_marker(
+def require_endpoint_marker(
     target_root: Path,
     permit: MutationPermit,
     *,
@@ -1264,6 +1464,9 @@ def _require_endpoint_marker(
             validation_code,
             "Reacquire the endpoint lease for the currently adopted target endpoint.",
         )
+
+
+_require_endpoint_marker = require_endpoint_marker
 
 
 def _resolve_existing_root(

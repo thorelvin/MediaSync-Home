@@ -38,7 +38,7 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
         apply_sqlite_migrations(connection, plan)
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 56
+        assert current_schema_version(connection, plan.store) == 57
         assert _table_names(connection) >= {
             "endpoint_heads",
             "endpoint_root_claims",
@@ -95,8 +95,9 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "schema_migrations",
             "store_identity",
             "store_handoffs",
+            "directory_metadata_records",
         }
-        assert _row_count(connection, "schema_migrations") == 56
+        assert _row_count(connection, "schema_migrations") == 57
         assert {
             "idx_initial_backup_materializations_history",
             "idx_initial_backup_materializations_job_history",
@@ -178,6 +179,8 @@ def test_catalog_migration_creates_contract_skeleton_and_is_idempotent(
             "trg_run_target_endpoint_wait_events_retry_timing_required",
             "trg_run_target_endpoint_wait_events_no_update",
             "trg_run_target_endpoint_wait_events_no_delete",
+            "trg_directory_metadata_records_no_update",
+            "trg_directory_metadata_records_no_delete",
             "trg_operation_attempts_no_update",
             "trg_operation_attempts_no_delete",
             "trg_operation_attempts_verification_axes_valid",
@@ -1104,7 +1107,7 @@ def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(
 
         apply_sqlite_migrations(connection, plan)
 
-        assert current_schema_version(connection, plan.store) == 12
+        assert current_schema_version(connection, plan.store) == 13
         assert _table_names(connection) >= {
             "lease_counters",
             "resource_leases",
@@ -1118,6 +1121,8 @@ def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(
             "store_identity",
             "recovery_runs",
             "recovery_handoffs",
+            "directory_recovery_operations",
+            "directory_recovery_events",
         }
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
@@ -1141,6 +1146,8 @@ def test_recovery_migration_creates_journal_skeleton_and_enforces_epoch(
             "staging_retry_backoff_ms",
             "staging_retry_not_before_utc",
         } <= _column_names(connection, "recovery_operations")
+        assert "trg_directory_recovery_monotone_state" in _trigger_names(connection)
+        assert "trg_directory_recovery_events_no_update" in _trigger_names(connection)
 
 
 @pytest.mark.parametrize("store_name", ("catalog", "recovery"))
@@ -1275,7 +1282,7 @@ def test_migration_runner_rejects_schema_newer_than_runtime(tmp_path: Path) -> N
                 name,
                 migration_checksum
             )
-                        VALUES ('catalog', 57, 'future_migration', ?)
+                        VALUES ('catalog', 58, 'future_migration', ?)
             """,
             ("f" * 64,),
         )
@@ -1388,8 +1395,8 @@ def test_migration_runner_backfills_valid_legacy_history_checksums(
         preflight = inspect_sqlite_migration_state(connection, plan)
 
         assert preflight.initialized
-        assert preflight.current_version == 56
-        assert preflight.target_version == 56
+        assert preflight.current_version == 57
+        assert preflight.target_version == 57
         assert preflight.checksum_backfill_required
         assert "migration_checksum" not in _column_names(
             connection,

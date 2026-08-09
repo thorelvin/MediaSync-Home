@@ -12,10 +12,18 @@ from mediasync_home.application.file_object_fingerprints import (
 )
 from mediasync_home.application.ports import (
     CommitReceipt,
+    DirectoryMutationPreparationPort,
     FinalCommitPort,
     OldTargetPreservationPort,
     RelativePath,
     VerifiedStagingArtifact,
+)
+from mediasync_home.application.directory_recovery import (
+    SUCCESS_PATH_BY_KIND,
+    DirectoryRecoveryKind,
+    DirectoryRecoveryStore,
+    DirectoryRecoveryTransition,
+    directory_recovery_id,
 )
 from mediasync_home.application.recovery_failure_classification import (
     recovery_phase_for_commit_failure,
@@ -69,6 +77,10 @@ def commit_next_run_target_verified_artifact(
     recovery_operations: RunTargetFinalCommitOperationStore,
     final_commit_port: FinalCommitPort,
     old_target_preservation_port: OldTargetPreservationPort | None = None,
+    directory_recovery_operations: DirectoryRecoveryStore | None = None,
+    directory_mutation_preparation_port: (
+        DirectoryMutationPreparationPort | None
+    ) = None,
     process_instance_id: str,
 ) -> RunTargetFinalCommitOutcome:
     if not process_instance_id.strip():
@@ -113,6 +125,20 @@ def commit_next_run_target_verified_artifact(
 
     try:
         if operation.phase is RecoveryOperationPhase.OLD_TARGET_PRESERVED:
+            if (
+                operation.target_precondition_kind
+                is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY
+                and directory_recovery_operations is not None
+            ):
+                _reconcile_preserved_directory_quarantine(
+                    permit=permit,
+                    operation=operation,
+                    directory_recovery_operations=directory_recovery_operations,
+                    directory_mutation_preparation_port=(
+                        directory_mutation_preparation_port
+                    ),
+                    process_instance_id=process_instance_id,
+                )
             receipt = _commit_preserved_target_replacement(
                 permit=permit,
                 recovery_operations=recovery_operations,
@@ -126,6 +152,10 @@ def commit_next_run_target_verified_artifact(
                 recovery_operations=recovery_operations,
                 final_commit_port=final_commit_port,
                 old_target_preservation_port=old_target_preservation_port,
+                directory_recovery_operations=directory_recovery_operations,
+                directory_mutation_preparation_port=(
+                    directory_mutation_preparation_port
+                ),
                 process_instance_id=process_instance_id,
             )
             receipt = journaled_commit.commit_verified_artifact(permit, artifact)
@@ -150,6 +180,68 @@ def commit_next_run_target_verified_artifact(
         validation_codes=(),
         next_action="Final filesystem changes are applied and verified for the operation.",
     )
+
+
+def _reconcile_preserved_directory_quarantine(
+    *,
+    permit: MutationPermit,
+    operation: RecoveryOperation,
+    directory_recovery_operations: DirectoryRecoveryStore,
+    directory_mutation_preparation_port: DirectoryMutationPreparationPort | None,
+    process_instance_id: str,
+) -> None:
+    preparation = directory_mutation_preparation_port
+    if preparation is None:
+        raise RunTargetFinalCommitError(
+            "RUN_TARGET_DIRECTORY_PREPARATION_PORT_MISSING",
+            "Configure directory preparation before resuming quarantined replacement.",
+        )
+    receipt = preparation.prepare_directory_quarantine(permit, operation)
+    recovery_id = directory_recovery_id(
+        run_id=operation.run_id,
+        operation_id=operation.operation_id,
+        kind=DirectoryRecoveryKind.QUARANTINE,
+    )
+    directory_operation = (
+        directory_recovery_operations.load_directory_recovery_operation(recovery_id)
+    )
+    if directory_operation is None:
+        raise RunTargetFinalCommitError(
+            "RUN_TARGET_DIRECTORY_QUARANTINE_OPERATION_MISSING",
+            "Reload the dedicated directory recovery state before replacement.",
+        )
+    success_path = SUCCESS_PATH_BY_KIND[DirectoryRecoveryKind.QUARANTINE]
+    try:
+        current_index = success_path.index(directory_operation.state)
+    except ValueError as exc:
+        raise RunTargetFinalCommitError(
+            "RUN_TARGET_DIRECTORY_QUARANTINE_CONFLICTED",
+            "Resolve the dedicated directory conflict before replacement.",
+        ) from exc
+    while current_index < 4:
+        next_state = success_path[current_index + 1]
+        updated = directory_recovery_operations.transition_directory_recovery_operation(
+            DirectoryRecoveryTransition(
+                recovery_id=recovery_id,
+                expected_state=directory_operation.state,
+                next_state=next_state,
+                process_instance_id=process_instance_id,
+                payload={
+                    "already_applied": receipt.already_applied,
+                    "directory_state": next_state.value,
+                    "observed_state": receipt.observed_state,
+                    "resume_from_phase": operation.phase.value,
+                },
+                managed_object_id=receipt.managed_object_id,
+            )
+        )
+        if updated is None:
+            raise RunTargetFinalCommitError(
+                "RUN_TARGET_DIRECTORY_QUARANTINE_PHASE_CONFLICT",
+                "Reload dedicated directory recovery state before replacement.",
+            )
+        directory_operation = updated
+        current_index += 1
 
 
 def _next_commit_ready_operation(

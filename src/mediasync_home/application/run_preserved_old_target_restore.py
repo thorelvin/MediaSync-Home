@@ -3,7 +3,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from mediasync_home.application.ports import OldTargetRestorePort, OldTargetRestoreReceipt
+from mediasync_home.application.ports import (
+    DirectoryMutationPreparationPort,
+    OldTargetRestorePort,
+    OldTargetRestoreReceipt,
+)
+from mediasync_home.application.directory_recovery import (
+    SUCCESS_PATH_BY_KIND,
+    DirectoryRecoveryKind,
+    DirectoryRecoveryOperation,
+    DirectoryRecoveryStore,
+    DirectoryRecoveryTransition,
+    directory_recovery_id,
+    planned_directory_recovery_operation,
+)
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
     RecoveryOperationMetadata,
@@ -44,6 +57,10 @@ def restore_next_run_target_preserved_old_target(
     recovery_operations: RunTargetPreservedOldTargetRestoreOperationStore,
     old_target_restore_port: OldTargetRestorePort,
     process_instance_id: str,
+    directory_recovery_operations: DirectoryRecoveryStore | None = None,
+    directory_mutation_preparation_port: (
+        DirectoryMutationPreparationPort | None
+    ) = None,
 ) -> RunTargetPreservedOldTargetRestoreOutcome:
     if not process_instance_id.strip():
         return _failed(
@@ -88,9 +105,35 @@ def restore_next_run_target_preserved_old_target(
             next_action=precondition_error[1],
         )
 
+    directory_restore: DirectoryRecoveryOperation | None = None
     try:
+        if (
+            operation.target_precondition_kind
+            is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY
+            and directory_recovery_operations is not None
+        ):
+            directory_restore = _prepare_directory_restore(
+                permit=permit,
+                operation=operation,
+                directory_recovery_operations=directory_recovery_operations,
+                directory_mutation_preparation_port=(
+                    directory_mutation_preparation_port
+                ),
+                process_instance_id=process_instance_id,
+            )
         receipt = old_target_restore_port.restore_old_target(permit, operation)
         _validate_restore_receipt(operation=operation, receipt=receipt)
+        if directory_restore is not None:
+            directory_restore = _advance_directory_restore_to(
+                directory_restore,
+                target_index=4,
+                directory_recovery_operations=directory_recovery_operations,
+                process_instance_id=process_instance_id,
+                payload={
+                    "final_relative_path": receipt.final_relative_path.value,
+                    "fingerprint_json": receipt.fingerprint_json,
+                },
+            )
     except RuntimeError as exc:
         return _failed(
             permit=permit,
@@ -126,6 +169,29 @@ def restore_next_run_target_preserved_old_target(
             validation_code="RUN_TARGET_PRESERVED_OLD_TARGET_RESTORE_PHASE_CONFLICT",
             next_action="Reload recovery state before retrying old-target restore.",
         )
+    if directory_restore is not None:
+        try:
+            _advance_directory_restore_to(
+                directory_restore,
+                target_index=5,
+                directory_recovery_operations=directory_recovery_operations,
+                process_instance_id=process_instance_id,
+                payload={
+                    "generic_recovery_phase": restored.phase.value,
+                    "restore_reason": "EXPLICIT_OLD_TARGET_RESTORE",
+                },
+            )
+        except RuntimeError as exc:
+            return _failed(
+                permit=permit,
+                operation=restored,
+                receipt=receipt,
+                validation_code=_error_code(exc),
+                next_action=_error_next_action(
+                    exc,
+                    "Reconcile the restored directory catalog state before continuing.",
+                ),
+            )
     return RunTargetPreservedOldTargetRestoreOutcome(
         idle=False,
         restored=True,
@@ -137,6 +203,98 @@ def restore_next_run_target_preserved_old_target(
         validation_codes=(),
         next_action="Preserved old target bytes are restored and the replacement operation is cancelled.",
     )
+
+
+def _prepare_directory_restore(
+    *,
+    permit: MutationPermit,
+    operation: RecoveryOperation,
+    directory_recovery_operations: DirectoryRecoveryStore,
+    directory_mutation_preparation_port: DirectoryMutationPreparationPort | None,
+    process_instance_id: str,
+) -> DirectoryRecoveryOperation:
+    preparation = directory_mutation_preparation_port
+    if preparation is None:
+        raise RuntimeError("RUN_TARGET_DIRECTORY_RESTORE_PREPARATION_PORT_MISSING")
+    recovery_id = directory_recovery_id(
+        run_id=operation.run_id,
+        operation_id=operation.operation_id,
+        kind=DirectoryRecoveryKind.RESTORE,
+    )
+    directory_restore = directory_recovery_operations.record_directory_recovery_operation(
+        planned_directory_recovery_operation(
+            recovery_id=recovery_id,
+            operation_id=operation.operation_id,
+            run_id=operation.run_id,
+            run_target_id=operation.run_target_id,
+            target_endpoint_id=operation.target_endpoint_id,
+            target_endpoint_revision_id=operation.target_endpoint_revision_id,
+            owner_installation_id=operation.owner_installation_id,
+            ownership_epoch=operation.ownership_epoch,
+            kind=DirectoryRecoveryKind.RESTORE,
+            final_relative_path=operation.final_relative_path,
+            expected_precondition_json='{"kind":"ABSENT"}',
+            desired_metadata_json=operation.expected_target_fingerprint_json,
+        ),
+        process_instance_id=process_instance_id,
+        payload={
+            "generic_recovery_phase": operation.phase.value,
+            "quarantine_object_id": operation.quarantine_object_id,
+        },
+    )
+    preparation_receipt = preparation.prepare_directory_restore(permit, operation)
+    if (
+        preparation_receipt.operation_id != operation.operation_id
+        or _relative_path(preparation_receipt.final_relative_path.value)
+        != _relative_path(operation.final_relative_path)
+    ):
+        raise RuntimeError("RUN_TARGET_DIRECTORY_RESTORE_PREPARATION_MISMATCH")
+    return _advance_directory_restore_to(
+        directory_restore,
+        target_index=2,
+        directory_recovery_operations=directory_recovery_operations,
+        process_instance_id=process_instance_id,
+        payload={
+            "already_applied": preparation_receipt.already_applied,
+            "observed_state": preparation_receipt.observed_state,
+        },
+        managed_object_id=preparation_receipt.managed_object_id,
+    )
+
+
+def _advance_directory_restore_to(
+    operation: DirectoryRecoveryOperation,
+    *,
+    target_index: int,
+    directory_recovery_operations: DirectoryRecoveryStore | None,
+    process_instance_id: str,
+    payload: dict[str, object],
+    managed_object_id: str | None = None,
+) -> DirectoryRecoveryOperation:
+    if directory_recovery_operations is None:
+        raise RuntimeError("RUN_TARGET_DIRECTORY_RESTORE_STORE_MISSING")
+    success_path = SUCCESS_PATH_BY_KIND[DirectoryRecoveryKind.RESTORE]
+    try:
+        current_index = success_path.index(operation.state)
+    except ValueError as exc:
+        raise RuntimeError("RUN_TARGET_DIRECTORY_RESTORE_CONFLICTED") from exc
+    while current_index < target_index:
+        next_state = success_path[current_index + 1]
+        updated = directory_recovery_operations.transition_directory_recovery_operation(
+            DirectoryRecoveryTransition(
+                recovery_id=operation.recovery_id,
+                expected_state=operation.state,
+                next_state=next_state,
+                process_instance_id=process_instance_id,
+                payload={**payload, "directory_state": next_state.value},
+                managed_object_id=managed_object_id,
+            )
+        )
+        if updated is None:
+            raise RuntimeError("RUN_TARGET_DIRECTORY_RESTORE_PHASE_CONFLICT")
+        operation = updated
+        current_index += 1
+    return operation
 
 
 def _next_preserved_operation(

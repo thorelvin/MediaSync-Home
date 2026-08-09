@@ -12,6 +12,14 @@ from mediasync_home.application.operation_audit import (
     RecoveryOperationAuditEvent,
     RunProcessAuditEvidence,
 )
+from mediasync_home.application.directory_recovery import (
+    SUCCESS_PATH_BY_KIND,
+    DirectoryRecoveryKind,
+    DirectoryRecoveryStore,
+    DirectoryRecoveryTransition,
+    directory_recovery_id,
+    planned_directory_recovery_operation,
+)
 from mediasync_home.application.recovery_operations import (
     PRE_COMMIT_LEASE_REBIND_PHASES,
     TERMINAL_PHASES,
@@ -44,12 +52,14 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
         *,
         clock: ClockPort | None = None,
         staging_retry_scheduler: MonotonicStagingRetryScheduler | None = None,
+        directory_recovery_store: DirectoryRecoveryStore | None = None,
     ) -> None:
         if clock is not None and staging_retry_scheduler is not None:
             raise SqliteRecoveryOperationStoreError(
                 "RECOVERY_OPERATION_RETRY_CLOCK_IS_AMBIGUOUS"
             )
         self._connection = connection
+        self._directory_recovery = directory_recovery_store
         self._staging_retries = (
             staging_retry_scheduler
             or MonotonicStagingRetryScheduler(clock or SystemClock())
@@ -114,6 +124,10 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                     raise SqliteRecoveryOperationStoreError(
                         "RECOVERY_OPERATION_IDEMPOTENCY_CONFLICT"
                     )
+                self._record_directory_recovery_if_applicable(
+                    existing,
+                    process_instance_id=process_instance_id,
+                )
                 if not outer_transaction:
                     self._connection.execute("COMMIT")
                 return existing
@@ -127,6 +141,10 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                 to_phase=operation.phase,
                 process_instance_id=process_instance_id,
                 payload=payload,
+            )
+            self._record_directory_recovery_if_applicable(
+                operation,
+                process_instance_id=process_instance_id,
             )
             planned = self.load_operation(
                 run_id=operation.run_id, operation_id=operation.operation_id
@@ -268,6 +286,12 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
                 process_instance_id=process_instance_id,
                 payload=payload,
             )
+            if next_phase is RecoveryOperationPhase.CATALOG_RECORDED:
+                self._record_directory_catalog_terminal(
+                    updated,
+                    process_instance_id=process_instance_id,
+                    payload=payload,
+                )
             loaded = self.load_operation(run_id=run_id, operation_id=operation_id)
             if loaded is None:
                 raise SqliteRecoveryOperationStoreError(
@@ -296,6 +320,103 @@ class SqliteRecoveryOperationStore(RecoveryOperationStore):
             raise SqliteRecoveryOperationStoreError(
                 "RECOVERY_OPERATION_PERSISTENCE_FAILED"
             ) from exc
+
+    def _record_directory_recovery_if_applicable(
+        self,
+        operation: RecoveryOperation,
+        *,
+        process_instance_id: str,
+    ) -> None:
+        store = self._directory_recovery
+        if store is None:
+            return
+        expected_precondition_json: str | None
+        if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
+            kind = DirectoryRecoveryKind.CREATE
+            expected_precondition_json = '{"kind":"ABSENT"}'
+        elif (
+            operation.target_precondition_kind
+            is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY
+        ):
+            kind = DirectoryRecoveryKind.QUARANTINE
+            expected_precondition_json = operation.expected_target_fingerprint_json
+        else:
+            return
+        store.record_directory_recovery_operation(
+            planned_directory_recovery_operation(
+                recovery_id=directory_recovery_id(
+                    run_id=operation.run_id,
+                    operation_id=operation.operation_id,
+                    kind=kind,
+                ),
+                operation_id=operation.operation_id,
+                run_id=operation.run_id,
+                run_target_id=operation.run_target_id,
+                target_endpoint_id=operation.target_endpoint_id,
+                target_endpoint_revision_id=operation.target_endpoint_revision_id,
+                owner_installation_id=operation.owner_installation_id,
+                ownership_epoch=operation.ownership_epoch,
+                kind=kind,
+                final_relative_path=operation.final_relative_path,
+                expected_precondition_json=expected_precondition_json,
+            ),
+            process_instance_id=process_instance_id,
+            payload={"generic_recovery_phase": operation.phase.value},
+        )
+
+    def _record_directory_catalog_terminal(
+        self,
+        operation: RecoveryOperation,
+        *,
+        process_instance_id: str,
+        payload: Mapping[str, object] | None,
+    ) -> None:
+        store = self._directory_recovery
+        if store is None:
+            return
+        if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
+            kind = DirectoryRecoveryKind.CREATE
+        elif (
+            operation.target_precondition_kind
+            is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY
+        ):
+            kind = DirectoryRecoveryKind.QUARANTINE
+        else:
+            return
+        recovery_id = directory_recovery_id(
+            run_id=operation.run_id,
+            operation_id=operation.operation_id,
+            kind=kind,
+        )
+        directory_operation = store.load_directory_recovery_operation(recovery_id)
+        if directory_operation is None:
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_DIRECTORY_LIFECYCLE_MISSING"
+            )
+        terminal_state = SUCCESS_PATH_BY_KIND[kind][-1]
+        if directory_operation.state is terminal_state:
+            return
+        expected_state = SUCCESS_PATH_BY_KIND[kind][-2]
+        if directory_operation.state is not expected_state:
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_DIRECTORY_LIFECYCLE_NOT_VERIFIED"
+            )
+        transitioned = store.transition_directory_recovery_operation(
+            DirectoryRecoveryTransition(
+                recovery_id=recovery_id,
+                expected_state=expected_state,
+                next_state=terminal_state,
+                process_instance_id=process_instance_id,
+                payload={
+                    "catalog_handoff_id": operation.catalog_handoff_id,
+                    "generic_payload": {} if payload is None else dict(payload),
+                },
+            )
+        )
+        if transitioned is None:
+            raise SqliteRecoveryOperationStoreError(
+                "RECOVERY_OPERATION_DIRECTORY_CATALOG_CONFLICT"
+            )
 
     def record_staging_failure(
         self,

@@ -20,6 +20,9 @@ from mediasync_home.adapters.endpoint_leases import (
     MutationPermitIssueError,
 )
 from mediasync_home.adapters.endpoint_takeover import LocalEndpointTakeoverFilesystem
+from mediasync_home.adapters.directory_reconciliation import (
+    LocalDirectoryRecoveryObservationAdapter,
+)
 from mediasync_home.adapters.final_commit import LocalResolvingFinalCommitAdapter
 from mediasync_home.adapters.final_verification import (
     LocalFinalArtifactVerificationAdapter,
@@ -124,6 +127,12 @@ from mediasync_home.adapters.sqlite.operation_audit import SqliteOperationAuditS
 from mediasync_home.adapters.sqlite.plans import SqlitePlanStore
 from mediasync_home.adapters.sqlite.recovery_intents import (
     SqliteRecoveryIntentSegmentStore,
+)
+from mediasync_home.adapters.sqlite.directory_recovery import (
+    SqliteDirectoryRecoveryStore,
+)
+from mediasync_home.adapters.sqlite.directory_metadata import (
+    SqliteDirectoryMetadataCatalogStore,
 )
 from mediasync_home.adapters.sqlite.recovery_operations import (
     SqliteRecoveryOperationStore,
@@ -248,9 +257,15 @@ from mediasync_home.application.catalog_handoff import FinalFileCatalogHandoffSt
 from mediasync_home.application.plans import PlanStore
 from mediasync_home.application.operation_audit import OperationAuditCatalogStore
 from mediasync_home.application.ports import (
+    DirectoryMutationPreparationPort,
     FinalCommitPort,
     OldTargetPreservationPort,
     RecoveryObjectCleanupPort,
+)
+from mediasync_home.application.directory_recovery import DirectoryRecoveryStore
+from mediasync_home.application.directory_reconciliation import (
+    DirectoryRecoveryReconciliationReport,
+    reconcile_directory_recovery_after_startup,
 )
 from mediasync_home.application.recovery_intents import RecoveryIntentSegmentStore
 from mediasync_home.application.recovery_reconciliation import (
@@ -517,6 +532,9 @@ class EngineHostRuntime:
     target_intent_reconciliation: (
         TargetRecoveryIntentStartupReconciliationReport | None
     ) = None
+    directory_recovery_reconciliation: (
+        DirectoryRecoveryReconciliationReport | None
+    ) = None
     reconciler_instance_id: str | None = None
     run_executor_queue_store: RunExecutorCycleRunStore | None = None
     run_executor_lease_authority: EndpointLeaseAuthority | None = None
@@ -543,6 +561,10 @@ class EngineHostRuntime:
     run_executor_staging_transfer_port: RunTargetStagingPort | None = None
     run_executor_final_commit_port: FinalCommitPort | None = None
     run_executor_old_target_preservation_port: OldTargetPreservationPort | None = None
+    run_executor_directory_recovery_store: DirectoryRecoveryStore | None = None
+    run_executor_directory_mutation_preparation_port: (
+        DirectoryMutationPreparationPort | None
+    ) = None
     run_executor_recovery_object_cleanup_port: RecoveryObjectCleanupPort | None = None
     run_executor_process_instance_id: str | None = None
     version_retention_store: SqliteVersionRetentionStore | None = None
@@ -1026,6 +1048,29 @@ class EngineHostRuntime:
                 validation_codes=("TARGET_RECOVERY_INTENT_RECONCILIATION_REQUIRED",),
                 next_action="Inspect target-side recovery evidence before allowing mutations.",
             )
+        if (
+            self.directory_recovery_reconciliation is not None
+            and not self.directory_recovery_reconciliation.mutation_safe
+        ):
+            return RunExecutorCyclePumpOutcome(
+                steps_attempted=0,
+                stopped_reason=RunExecutorPumpStopReason.BLOCKED,
+                last_step=RunExecutorCycleOutcome(
+                    action=RunExecutorCycleAction.BLOCKED,
+                    advanced=False,
+                    idle=False,
+                    run_id=None,
+                    run_target_id=None,
+                    validation_codes=("DIRECTORY_RECOVERY_RECONCILIATION_REQUIRED",),
+                    next_action=(
+                        "Inspect conflicting directory recovery evidence before mutations."
+                    ),
+                ),
+                validation_codes=("DIRECTORY_RECOVERY_RECONCILIATION_REQUIRED",),
+                next_action=(
+                    "Inspect conflicting directory recovery evidence before mutations."
+                ),
+            )
         capacity_block = self._run_capacity_block()
         if capacity_block is not None:
             return capacity_block
@@ -1052,6 +1097,12 @@ class EngineHostRuntime:
                 old_target_preservation_port=(
                     old_target_preservation_port
                     or self.run_executor_old_target_preservation_port
+                ),
+                directory_recovery_operations=(
+                    self.run_executor_directory_recovery_store
+                ),
+                directory_mutation_preparation_port=(
+                    self.run_executor_directory_mutation_preparation_port
                 ),
                 recovery_object_cleanup_port=(
                     recovery_object_cleanup_port
@@ -2113,9 +2164,11 @@ def build_engine_host_runtime(
         catalog_handoffs = SqliteFinalFileCatalogHandoffStore(catalog_connection)
         operation_audits = SqliteOperationAuditStore(catalog_connection)
         resource_leases = SqliteResourceLeaseStore(recovery_connection)
+        directory_recovery = SqliteDirectoryRecoveryStore(recovery_connection)
         recovery_operations = SqliteRecoveryOperationStore(
             recovery_connection,
             staging_retry_scheduler=runtime_staging_retry_scheduler,
+            directory_recovery_store=directory_recovery,
         )
         recovery_transaction = SqliteImmediateTransactionRunner(recovery_connection)
         operation_catalog_cross_store_coordinator = (
@@ -2145,6 +2198,26 @@ def build_engine_host_runtime(
         )
         recovery_intent_segments = SqliteRecoveryIntentSegmentStore(recovery_connection)
         endpoint_root_resolver = SqliteEndpointRootResolver(catalog_connection)
+        directory_metadata_catalog = SqliteDirectoryMetadataCatalogStore(
+            catalog_connection
+        )
+        directory_recovery_reconciliation = (
+            reconcile_directory_recovery_after_startup(
+                store=directory_recovery,
+                observer=LocalDirectoryRecoveryObservationAdapter(
+                    root_resolver=endpoint_root_resolver,
+                    recovery_operations=recovery_operations,
+                    metadata_catalog=directory_metadata_catalog,
+                ),
+                process_instance_id=reconciler_instance_id,
+            )
+        )
+        if not directory_recovery_reconciliation.mutation_safe:
+            service_status = replace(
+                service_status,
+                mutations_enabled=False,
+                scope="RECOVERY_STATE_AMBIGUOUS",
+            )
         target_intent_segment_publisher = LocalTargetRecoveryIntentSegmentPublisher(
             root_resolver=endpoint_root_resolver,
             clock=runtime_clock,
@@ -2321,6 +2394,7 @@ def build_engine_host_runtime(
             operation_catalog_handoff_reconciliation
         ),
         target_intent_reconciliation=target_intent_reconciliation,
+        directory_recovery_reconciliation=directory_recovery_reconciliation,
         reconciler_instance_id=reconciler_instance_id,
         run_executor_queue_store=runs,
         run_executor_lease_authority=run_executor_lease_authority,
@@ -2339,6 +2413,10 @@ def build_engine_host_runtime(
         run_executor_staging_transfer_port=run_executor_staging_transfer_port,
         run_executor_final_commit_port=run_executor_final_commit_port,
         run_executor_old_target_preservation_port=run_executor_final_commit_port,
+        run_executor_directory_recovery_store=directory_recovery,
+        run_executor_directory_mutation_preparation_port=(
+            run_executor_final_commit_port
+        ),
         run_executor_recovery_object_cleanup_port=run_executor_final_commit_port,
         run_executor_process_instance_id=reconciler_instance_id,
         version_retention_store=version_retention_store,

@@ -4,16 +4,27 @@ from typing import Mapping
 
 from mediasync_home.application.ports import (
     CommitReceipt,
+    DirectoryMutationPreparationPort,
+    DirectoryMutationPreparationReceipt,
     FinalCommitPort,
     OldTargetPreservationPort,
     OldTargetPreservationReceipt,
     VerifiedStagingArtifact,
+)
+from mediasync_home.application.directory_recovery import (
+    SUCCESS_PATH_BY_KIND,
+    DirectoryRecoveryKind,
+    DirectoryRecoveryOperation,
+    DirectoryRecoveryStore,
+    DirectoryRecoveryTransition,
+    directory_recovery_id,
 )
 from mediasync_home.application.recovery_failure_classification import (
     recovery_phase_for_commit_failure,
 )
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationKind,
     RecoveryOperationMetadata,
     RecoveryOperationPhase,
     RecoveryOperationStore,
@@ -36,6 +47,10 @@ class JournaledFinalCommitPort(FinalCommitPort):
         recovery_operations: RecoveryOperationStore,
         final_commit_port: FinalCommitPort,
         old_target_preservation_port: OldTargetPreservationPort | None = None,
+        directory_recovery_operations: DirectoryRecoveryStore | None = None,
+        directory_mutation_preparation_port: (
+            DirectoryMutationPreparationPort | None
+        ) = None,
         process_instance_id: str,
     ) -> None:
         if not process_instance_id.strip():
@@ -46,6 +61,8 @@ class JournaledFinalCommitPort(FinalCommitPort):
         self._recovery_operations = recovery_operations
         self._final_commit_port = final_commit_port
         self._old_target_preservation_port = old_target_preservation_port
+        self._directory_recovery = directory_recovery_operations
+        self._directory_preparation = directory_mutation_preparation_port
         self._process_instance_id = process_instance_id
 
     def commit_verified_artifact(
@@ -54,6 +71,19 @@ class JournaledFinalCommitPort(FinalCommitPort):
         artifact: VerifiedStagingArtifact,
     ) -> CommitReceipt:
         operation = self._load_and_validate_operation(permit=permit, artifact=artifact)
+        directory_operation: DirectoryRecoveryOperation | None = None
+        directory_kind = _directory_kind(operation)
+        if directory_kind is not None and self._directory_recovery is not None:
+            try:
+                directory_operation = self._prepare_directory_mutation(
+                    permit=permit,
+                    operation=operation,
+                    artifact=artifact,
+                    kind=directory_kind,
+                )
+            except Exception as exc:
+                self._record_failure(operation=operation, exc=exc)
+                raise
         preconditions = self._transition(
             operation,
             RecoveryOperationPhase.COMMIT_PRECONDITIONS_REVALIDATED,
@@ -104,11 +134,48 @@ class JournaledFinalCommitPort(FinalCommitPort):
                     version_manifest_hash=preservation_receipt.version_manifest_hash,
                 ),
             )
+            if (
+                directory_kind is DirectoryRecoveryKind.QUARANTINE
+                and self._directory_recovery is not None
+            ):
+                if directory_operation is None:
+                    raise JournaledFinalCommitError(
+                        "RECOVERY_DIRECTORY_QUARANTINE_JOURNAL_MISSING",
+                        "Reload the dedicated directory recovery state before replacement.",
+                    )
+                directory_operation = self._advance_directory_to(
+                    directory_operation,
+                    target_index=4,
+                    payload={
+                        "final_relative_path": preservation_receipt.final_relative_path.value,
+                        "quarantine_object_id": preservation_receipt.quarantine_object_id,
+                        "version_manifest_hash": preservation_receipt.version_manifest_hash,
+                    },
+                    managed_object_id=preservation_receipt.quarantine_object_id,
+                )
         try:
             receipt = self._final_commit_port.commit_verified_artifact(permit, artifact)
         except Exception as exc:
             self._record_failure(operation=commit_source, exc=exc)
             raise
+
+        if (
+            directory_kind is DirectoryRecoveryKind.CREATE
+            and self._directory_recovery is not None
+        ):
+            if directory_operation is None:
+                raise JournaledFinalCommitError(
+                    "RECOVERY_DIRECTORY_CREATE_JOURNAL_MISSING",
+                    "Reload the dedicated directory recovery state before catalog handoff.",
+                )
+            directory_operation = self._advance_directory_to(
+                directory_operation,
+                target_index=3,
+                payload={
+                    "filesystem_apply_method": receipt.filesystem_apply_method,
+                    "final_relative_path": receipt.final_relative_path.value,
+                },
+            )
 
         applied = self._transition(
             commit_source,
@@ -124,6 +191,20 @@ class JournaledFinalCommitPort(FinalCommitPort):
         except JournaledFinalCommitError as exc:
             self._record_failure(operation=applied, exc=exc)
             raise
+
+        if (
+            directory_kind is DirectoryRecoveryKind.CREATE
+            and self._directory_recovery is not None
+        ):
+            assert directory_operation is not None
+            directory_operation = self._advance_directory_to(
+                directory_operation,
+                target_index=4,
+                payload={
+                    "artifact_content_hash": artifact.content_hash,
+                    "receipt_operation_id": receipt.operation_id,
+                },
+            )
 
         durable = self._transition(
             applied,
@@ -147,6 +228,99 @@ class JournaledFinalCommitPort(FinalCommitPort):
             },
         )
         return receipt
+
+    def _prepare_directory_mutation(
+        self,
+        *,
+        permit: MutationPermit,
+        operation: RecoveryOperation,
+        artifact: VerifiedStagingArtifact,
+        kind: DirectoryRecoveryKind,
+    ) -> DirectoryRecoveryOperation:
+        store = self._directory_recovery
+        preparation = self._directory_preparation
+        if store is None or preparation is None:
+            raise JournaledFinalCommitError(
+                "RECOVERY_DIRECTORY_PREPARATION_PORT_MISSING",
+                "Configure the directory recovery journal and preparation adapter together.",
+            )
+        recovery_id = directory_recovery_id(
+            run_id=operation.run_id,
+            operation_id=operation.operation_id,
+            kind=kind,
+        )
+        directory_operation = store.load_directory_recovery_operation(recovery_id)
+        if directory_operation is None:
+            raise JournaledFinalCommitError(
+                "RECOVERY_DIRECTORY_OPERATION_NOT_FOUND",
+                "Record the dedicated directory recovery operation before mutation.",
+            )
+        receipt = (
+            preparation.prepare_directory_create(permit, operation, artifact)
+            if kind is DirectoryRecoveryKind.CREATE
+            else preparation.prepare_directory_quarantine(permit, operation)
+        )
+        _validate_directory_preparation_receipt(
+            operation=operation,
+            receipt=receipt,
+        )
+        return self._advance_directory_to(
+            directory_operation,
+            target_index=2,
+            payload={
+                "already_applied": receipt.already_applied,
+                "final_relative_path": receipt.final_relative_path.value,
+                "observed_state": receipt.observed_state,
+            },
+        )
+
+    def _advance_directory_to(
+        self,
+        operation: DirectoryRecoveryOperation,
+        *,
+        target_index: int,
+        payload: Mapping[str, object],
+        managed_object_id: str | None = None,
+    ) -> DirectoryRecoveryOperation:
+        store = self._directory_recovery
+        if store is None:
+            raise JournaledFinalCommitError(
+                "RECOVERY_DIRECTORY_JOURNAL_MISSING",
+                "Reload the dedicated directory recovery state before mutation.",
+            )
+        success_path = SUCCESS_PATH_BY_KIND[operation.kind]
+        try:
+            current_index = success_path.index(operation.state)
+        except ValueError as exc:
+            raise JournaledFinalCommitError(
+                "RECOVERY_DIRECTORY_OPERATION_CONFLICTED",
+                "Resolve the directory recovery conflict before retrying mutation.",
+            ) from exc
+        if current_index > target_index:
+            return operation
+        while current_index < target_index:
+            next_state = success_path[current_index + 1]
+            updated = store.transition_directory_recovery_operation(
+                DirectoryRecoveryTransition(
+                    recovery_id=operation.recovery_id,
+                    expected_state=operation.state,
+                    next_state=next_state,
+                    process_instance_id=self._process_instance_id,
+                    payload={
+                        **dict(payload),
+                        "directory_state": next_state.value,
+                    },
+                    managed_object_id=managed_object_id,
+                )
+            )
+            if updated is None:
+                raise JournaledFinalCommitError(
+                    "RECOVERY_DIRECTORY_PHASE_CONFLICT",
+                    "Reload the dedicated directory recovery state before retrying mutation.",
+                )
+            operation = updated
+            current_index += 1
+        return operation
 
     def _load_and_validate_operation(
         self,
@@ -293,6 +467,31 @@ def _requires_old_target_preservation(operation: RecoveryOperation) -> bool:
         RecoveryTargetPreconditionKind.DIRECTORY_EMPTY,
         RecoveryTargetPreconditionKind.MATCH_FINGERPRINT,
     }
+
+
+def _directory_kind(operation: RecoveryOperation) -> DirectoryRecoveryKind | None:
+    if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
+        return DirectoryRecoveryKind.CREATE
+    if (
+        operation.target_precondition_kind
+        is RecoveryTargetPreconditionKind.DIRECTORY_EMPTY
+    ):
+        return DirectoryRecoveryKind.QUARANTINE
+    return None
+
+
+def _validate_directory_preparation_receipt(
+    *,
+    operation: RecoveryOperation,
+    receipt: DirectoryMutationPreparationReceipt,
+) -> None:
+    if receipt.operation_id != operation.operation_id or _relative_path(
+        receipt.final_relative_path.value
+    ) != _relative_path(operation.final_relative_path):
+        raise JournaledFinalCommitError(
+            "RECOVERY_DIRECTORY_PREPARATION_RECEIPT_MISMATCH",
+            "Reload recovery state because directory preparation evidence is inconsistent.",
+        )
 
 
 def _validate_preservation_receipt(
