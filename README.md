@@ -105,6 +105,18 @@ $env:PYTHONPATH = "src"
 
 Appen starter GUI og lokal Engine Host i samme brukersesjon. Språk velges med flagget øverst til høyre. Den lokale pakken er foreløpig usignert.
 
+## Bygg Windows-installer
+
+Den lokale alphaen kan pakkes som en usignert installer for gjeldende Windows-bruker. Installer Inno Setup 6 og kjør:
+
+```powershell
+winget install --id JRSoftware.InnoSetup -e --scope user
+.venv\Scripts\python.exe tools\build_installer.py
+.venv\Scripts\python.exe tools\installer_smoke.py dist\MediaSyncHome-Setup-0.1.0-unsigned.exe
+```
+
+Resultatet ligger i `dist\MediaSyncHome-Setup-0.1.0-unsigned.exe`. Installasjon og oppgradering stopper dersom MediaSync Home fortsatt kjører. Avinstallering fjerner programfilene, men beholder backupjobber, historikk og annen lokal state i brukerens AppData.
+
 ## Valider repositoryet
 
 Kjør dette i et rent repository på Windows før første Codex-endring:

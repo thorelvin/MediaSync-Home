@@ -1,0 +1,39 @@
+{
+  "app_version": "0.1.0",
+  "event": "INSTALLER_BUILD_COMPLETED",
+  "install_scope": "CURRENT_USER",
+  "installer": "<REPOSITORY_ROOT>\\dist\\MediaSyncHome-Setup-0.1.0-unsigned.exe",
+  "installer_bytes": 28750437,
+  "installer_command": [
+    "<USER_HOME>\\AppData\\Local\\Programs\\Inno Setup 6\\ISCC.exe",
+    "/DSourceDir=<REPOSITORY_ROOT>\\build\\installer\\20260811T054505Z-62b69437\\package\\__main__.dist",
+    "/DMetadataDir=<REPOSITORY_ROOT>\\build\\installer\\20260811T054831Z-a3d7caf2\\metadata",
+    "/DAppVersion=0.1.0",
+    "/DAppVersionNumeric=0.1.0.0",
+    "/DOutputDir=<REPOSITORY_ROOT>\\dist",
+    "<REPOSITORY_ROOT>\\installer\\MediaSyncHome.iss"
+  ],
+  "installer_sha256": "bc79cd9b0ce8952dd7200cbb4bfe991859ef9292dab5a7d5935c1216280d518f",
+  "metadata": {
+    "dependencies": 34,
+    "license_files": 54,
+    "notice_required": [
+      "blake3",
+      "packaging",
+      "pathspec",
+      "pyside6",
+      "pyside6-addons",
+      "pyside6-essentials",
+      "pywin32",
+      "regex",
+      "shiboken6",
+      "typing-extensions"
+    ]
+  },
+  "package_command": null,
+  "packaged_executable_sha256": "bcfa01f95b93a33690e9d23af621cb28e0a9dea5e7aa58db82d644a18bfa9819",
+  "source_directory": "<REPOSITORY_ROOT>\\build\\installer\\20260811T054505Z-62b69437\\package\\__main__.dist",
+  "source_file_count": 79,
+  "status": "PASS",
+  "unsigned": true
+}

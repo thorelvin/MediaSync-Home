@@ -287,6 +287,30 @@ def test_product_process_layout_uses_packaged_module_image(
     assert application_root == tmp_path
 
 
+def test_packaged_local_preview_status_launch_uses_same_executable(tmp_path: Path) -> None:
+    packaged_executable = (tmp_path / "MediaSyncHome0B.exe").resolve()
+
+    launch = build_local_preview_status_launch(
+        pipe_name="pipe-packaged",
+        executable=packaged_executable,
+        role_runner=None,
+        application_root=tmp_path.resolve(),
+        environment={"SystemRoot": "C:\\Windows"},
+    )
+
+    assert launch.engine_host.command_line_vector()[:3] == (
+        str(packaged_executable),
+        "--role",
+        "engine-host",
+    )
+    assert launch.gui_status.command_line_vector()[:3] == (
+        str(packaged_executable),
+        "--role",
+        "gui",
+    )
+    assert launch.engine_host.working_directory == tmp_path.resolve()
+
+
 def test_local_preview_host_run_can_enable_task_scheduler_startup_pump(
     tmp_path: Path,
 ) -> None:

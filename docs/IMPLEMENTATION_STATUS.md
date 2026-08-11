@@ -1,5 +1,18 @@
 # Implementeringsstatus
 
+Update 2026-08-11: MediaSync Home `0.1.0` now has a reproducible Inno Setup 6
+installer for the accepted local, unsigned, current-user scope. The installer
+includes the current Nuitka standalone runtime, English and Norwegian wizard
+languages, dependency metadata, third-party notices and copied license files.
+It refuses install, upgrade and uninstall while `MediaSyncHome0B.exe` is
+running, and it leaves the authoritative per-user AppData state outside the
+installation directory. The isolated installer smoke passes initial install,
+installed schema 58/13 startup, running-process upgrade rejection, stopped
+upgrade, uninstall and state preservation. That smoke also exposed and fixed a
+packaged status-launch bug which still referenced the source-only role runner.
+Code signing and independent clean-machine distribution proof remain outside
+the accepted local scope.
+
 Update 2026-08-10: the local unsigned release-readiness review is complete for
 the accepted same-user Windows scope. Permanent job deletion now preserves
 history and user files while tombstones exclude deleted jobs from endpoint
@@ -12,7 +25,7 @@ labels at the 900x560 minimum. The current source passes Ruff, strict mypy over
 skips plus 25 subtests. Live Robocopy and executor tests copy and verify real
 files, including two targets and versioned replacement. The current Nuitka
 standalone package passes protocol, schema 58/13 startup, same-user Task
-Scheduler, GUI status and cleanup checks; signed installer and independent
+Scheduler, GUI status and cleanup checks; code signing and independent
 clean-machine distribution proof remain outside the accepted local scope.
 
 Update 2026-08-09: `REC-004` now has four independent, monotone directory

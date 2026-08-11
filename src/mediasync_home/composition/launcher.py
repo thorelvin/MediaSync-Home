@@ -21,7 +21,6 @@ from mediasync_home.adapters.process_supervisor import (
 from mediasync_home.composition._role_runner import Emit, run_role
 from mediasync_home.application.process_supervision import (
     ProcessLaunchPlan,
-    build_internal_role_launch_plan,
     build_product_role_launch_plan,
 )
 from mediasync_home.application.host_locator import (
@@ -441,6 +440,8 @@ def build_local_preview_status_launch(
     state_root: Path | None = None,
     host_descriptor: LocalEngineHostDescriptor | None = None,
     executable: Path | None = None,
+    role_runner: Path | None = RUNNER,
+    application_root: Path = ROOT,
     reconcile_task_scheduler_resources: bool = False,
     task_scheduler_executable_path: Path | None = None,
     environment: dict[str, str] | None = None,
@@ -480,19 +481,19 @@ def build_local_preview_status_launch(
                 str(task_scheduler_executable_path.resolve()),
             )
         )
-    engine_host = build_internal_role_launch_plan(
+    engine_host = build_product_role_launch_plan(
         role=ProcessRole.ENGINE_HOST,
         executable=executable or Path(sys.executable).resolve(),
-        role_runner=RUNNER,
-        repo_root=ROOT,
+        role_runner=role_runner,
+        application_root=application_root,
         extra_args=tuple(engine_args),
         environment=environment,
     )
-    gui_status = build_internal_role_launch_plan(
+    gui_status = build_product_role_launch_plan(
         role=ProcessRole.GUI,
         executable=executable or Path(sys.executable).resolve(),
-        role_runner=RUNNER,
-        repo_root=ROOT,
+        role_runner=role_runner,
+        application_root=application_root,
         extra_args=("--pipe-name", pipe_name, "--query-status"),
         environment=environment,
     )
@@ -857,10 +858,14 @@ def _run_local_preview_status_from_args(args: argparse.Namespace) -> LocalPrevie
         pipe_name = args.pipe_name or make_pipe_name(installation_id=args.installation_id)
         state_root = args.state_root
         existing_publication = None
+    executable, role_runner, application_root = _current_product_process_layout()
     launch = build_local_preview_status_launch(
         pipe_name=pipe_name,
         state_root=state_root,
         host_descriptor=host_descriptor,
+        executable=executable,
+        role_runner=role_runner,
+        application_root=application_root,
         reconcile_task_scheduler_resources=args.reconcile_task_scheduler_resources,
         task_scheduler_executable_path=args.task_scheduler_executable_path,
         environment=dict(os.environ),

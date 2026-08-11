@@ -1,0 +1,233 @@
+{
+  "application_removed": true,
+  "event": "INSTALLER_SMOKE_COMPLETED",
+  "install_dir": "<TEMP_ROOT>\\MediaSyncHome-Installer-Smoke\\312f41da5f0543a9a67eb148ae440336\\app",
+  "install_exit_code": 0,
+  "installation_id": "installer-smoke-66491622074d",
+  "installed_runtime_exit_code": 0,
+  "installed_runtime_status": {
+    "accepted": true,
+    "adopted_existing_host": false,
+    "adoption_attempted": false,
+    "engine_host": {
+      "events": [
+        {
+          "event": "ENGINE_HOST_PIPE_STARTING",
+          "host_locator": {
+            "heartbeat_utc": "2026-08-11T05:50:07.912Z",
+            "installation_id": "installer-smoke-66491622074d",
+            "locator_key": "a5fd432f677c32dd467630c0",
+            "mutex_name": "Local\\MediaSyncHome-0B-a5fd432f677c32dd467630c0",
+            "pipe_name": "MediaSyncHome-0B-a5fd432f677c32dd467630c0",
+            "process_id": 12284,
+            "schema_version": 1,
+            "scope": "0B_SAME_USER_LOCAL_PREVIEW",
+            "state_root": "<TEMP_ROOT>\\MediaSyncHome-Installer-Smoke\\312f41da5f0543a9a67eb148ae440336\\state",
+            "status": "STARTING"
+          },
+          "host_locator_path": "<TEMP_ROOT>\\MediaSyncHome-Installer-Smoke\\312f41da5f0543a9a67eb148ae440336\\state\\engine-host.locator.json",
+          "host_mutex": {
+            "acquired": true,
+            "name": "Local\\MediaSyncHome-0B-a5fd432f677c32dd467630c0"
+          },
+          "host_status": {
+            "application": "MediaSync Home",
+            "mutations_enabled": false,
+            "protocol_version": 1,
+            "ready": true,
+            "role": "engine-host",
+            "runtime_policy": {
+              "compliant": true,
+              "controlled_current_directory": true,
+              "dll_search_policy": "LOCAL_DEV_NO_CHILD_PROCESS_DLL_SEARCH_SURFACE",
+              "elevated": false,
+              "evaluated": true,
+              "handle_inheritance_policy": "NO_CHILD_PROCESS_SPAWNED_BY_ROLE_RUNNER",
+              "reasons": []
+            },
+            "schema_version": 2,
+            "scope": "0B_NON_MUTATING_LOCAL_PREVIEW"
+          },
+          "pipe_name": "MediaSyncHome-0B-a5fd432f677c32dd467630c0",
+          "run_executor_cycle_after_request": false,
+          "run_executor_cycle_interval_ms": null,
+          "run_executor_cycle_max_interval_ms": 60000,
+          "run_executor_cycle_max_steps": 10,
+          "run_executor_staging_backend": "robocopy",
+          "serve_forever": false,
+          "serve_requests": 2,
+          "startup_reconciliation": {
+            "command_receipts": {
+              "pending_effect_reconciliation_keys": [],
+              "rejected_idempotency_keys": [],
+              "scanned": 0
+            },
+            "external_resources": null,
+            "outbox": null,
+            "reconciler_instance_id": "installer-smoke-66491622074d",
+            "recovery_operations": {
+              "findings": [],
+              "manual_decision_operation_ids": [],
+              "requires_recovery_mode": false,
+              "scanned": 0
+            },
+            "recovery_resume": {
+              "blocked_run_target_ids": [],
+              "completed_run_target_ids": [],
+              "findings": [],
+              "scanned": 0
+            },
+            "skipped_external_resource_requeue_reason": "EXTERNAL_RESOURCE_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF",
+            "skipped_outbox_requeue_reason": "OUTBOX_RECONCILIATION_SKIPPED_NO_INACTIVE_OWNER_PROOF"
+          },
+          "state_compaction_recovery": {
+            "committed_epoch_count": 0,
+            "previously_rolled_back_epoch_count": 0,
+            "recovered_epochs": [],
+            "scanned_epoch_count": 0
+          },
+          "state_migration": {
+            "committed_epoch_ids": [
+              "5be2b6d4-e7a2-4f48-ab47-ed5cb2f70478"
+            ],
+            "created_epoch_count": 1,
+            "latest_backup_set_path": null,
+            "latest_backup_state_set_hash": null,
+            "migration_performed": true,
+            "previously_committed_epoch_count": 0,
+            "resumed_epoch_count": 0,
+            "stores": [
+              {
+                "final_version": 58,
+                "initial_version": 0,
+                "store": "catalog",
+                "target_version": 58
+              },
+              {
+                "final_version": 13,
+                "initial_version": 0,
+                "store": "recovery",
+                "target_version": 13
+              }
+            ]
+          },
+          "state_restore_recovery": {
+            "committed_epoch_count": 0,
+            "previously_rolled_back_epoch_count": 0,
+            "recovered_epochs": [],
+            "scanned_epoch_count": 0
+          },
+          "state_restore_startup_reconciliation": {
+            "committed_epoch_count": 0,
+            "committed_epochs": [],
+            "latest_committed_epoch": null,
+            "previously_rolled_back_epoch_count": 0,
+            "scanned_epoch_count": 0
+          },
+          "state_root": "<TEMP_ROOT>\\MediaSyncHome-Installer-Smoke\\312f41da5f0543a9a67eb148ae440336\\state",
+          "target_intent_reconciliation": {
+            "conflicting_segment_ids": [],
+            "finalized_missing_segment_ids": [],
+            "imported_segment_ids": [],
+            "matched_segment_ids": [],
+            "missing_target_segment_ids": [],
+            "mutation_safe": true,
+            "scan_issues": [],
+            "scanned": 0,
+            "truncated": false,
+            "unreconciled_segment_ids": []
+          },
+          "task_scheduler_reconciliation": null,
+          "task_scheduler_reconciliation_interval_ms": null,
+          "task_scheduler_reconciliation_max_interval_ms": 3600000
+        },
+        {
+          "event": "ENGINE_HOST_PIPE_STOPPED",
+          "pipe_name": "MediaSyncHome-0B-a5fd432f677c32dd467630c0",
+          "served_requests": 2,
+          "stop_reason": "REQUEST_LIMIT_REACHED"
+        }
+      ],
+      "killed": false,
+      "returncode": 0,
+      "stderr": ""
+    },
+    "error_type": null,
+    "event": "LAUNCHER_LOCAL_PREVIEW_STATUS",
+    "gui": {
+      "response": {
+        "payload": {
+          "host_status": {
+            "application": "MediaSync Home",
+            "mutations_enabled": false,
+            "protocol_version": 1,
+            "ready": true,
+            "role": "engine-host",
+            "runtime_policy": {
+              "compliant": true,
+              "controlled_current_directory": true,
+              "dll_search_policy": "LOCAL_DEV_NO_CHILD_PROCESS_DLL_SEARCH_SURFACE",
+              "elevated": false,
+              "evaluated": true,
+              "handle_inheritance_policy": "NO_CHILD_PROCESS_SPAWNED_BY_ROLE_RUNNER",
+              "reasons": []
+            },
+            "schema_version": 2,
+            "scope": "0B_NON_MUTATING_LOCAL_PREVIEW"
+          },
+          "state_capacity": {
+            "allows_new_analysis_and_transfers": true,
+            "estimated_catalog_growth_bytes": 33554432,
+            "estimated_hash_cache_growth_bytes": 16777216,
+            "estimated_local_growth_bytes": 75497472,
+            "estimated_log_growth_bytes": 8388608,
+            "estimated_recovery_growth_bytes": 16777216,
+            "hard_stop_quota_bytes": 8589934592,
+            "internal_backup_reserve_bytes": 536870912,
+            "local_free_space_bytes": 218972938240,
+            "measurement_complete": true,
+            "measurement_error_code": null,
+            "minimum_free_space_bytes": 1073741824,
+            "projected_state_size_bytes": 75497485,
+            "reason_code": "STATE_CAPACITY_READY",
+            "recommended_action": "NONE",
+            "required_local_free_space_bytes": 1686110208,
+            "scanned_entry_count": 1,
+            "scope": "LOCAL_APPDATA_STATE",
+            "soft_quota_bytes": 4294967296,
+            "sqlite_full_store": null,
+            "state_size_bytes": 13,
+            "status": "READY"
+          }
+        },
+        "reason": null,
+        "request_id": "12010f47-de14-43b2-948d-9010a2d12245",
+        "status": "ACCEPTED"
+      },
+      "returncode": 0,
+      "stderr": ""
+    },
+    "host_locator": {
+      "installation_id": "installer-smoke-66491622074d",
+      "locator_key": "a5fd432f677c32dd467630c0",
+      "mutex_name": "Local\\MediaSyncHome-0B-a5fd432f677c32dd467630c0",
+      "pipe_name": "MediaSyncHome-0B-a5fd432f677c32dd467630c0",
+      "scope": "0B_SAME_USER_LOCAL_PREVIEW",
+      "state_root": "<TEMP_ROOT>\\MediaSyncHome-Installer-Smoke\\312f41da5f0543a9a67eb148ae440336\\state"
+    },
+    "host_locator_publication": null,
+    "pipe_name": "MediaSyncHome-0B-a5fd432f677c32dd467630c0",
+    "scope": "0B_SAME_USER_LOCAL_PREVIEW",
+    "stale_host_locator_publication_cleared": false
+  },
+  "installed_runtime_stderr_tail": "",
+  "installed_runtime_stdout_tail": "0,\"stderr\":\"\"},\"error_type\":null,\"event\":\"LAUNCHER_LOCAL_PREVIEW_STATUS\",\"gui\":{\"response\":{\"payload\":{\"host_status\":{\"application\":\"MediaSync Home\",\"mutations_enabled\":false,\"protocol_version\":1,\"ready\":true,\"role\":\"engine-host\",\"runtime_policy\":{\"compliant\":true,\"controlled_current_directory\":true,\"dll_search_policy\":\"LOCAL_DEV_NO_CHILD_PROCESS_DLL_SEARCH_SURFACE\",\"elevated\":false,\"evaluated\":true,\"handle_inheritance_policy\":\"NO_CHILD_PROCESS_SPAWNED_BY_ROLE_RUNNER\",\"reasons\":[]},\"schema_version\":2,\"scope\":\"0B_NON_MUTATING_LOCAL_PREVIEW\"},\"state_capacity\":{\"allows_new_analysis_and_transfers\":true,\"estimated_catalog_growth_bytes\":33554432,\"estimated_hash_cache_growth_bytes\":16777216,\"estimated_local_growth_bytes\":75497472,\"estimated_log_growth_bytes\":8388608,\"estimated_recovery_growth_bytes\":16777216,\"hard_stop_quota_bytes\":8589934592,\"internal_backup_reserve_bytes\":536870912,\"local_free_space_bytes\":218972938240,\"measurement_complete\":true,\"measurement_error_code\":null,\"minimum_free_space_bytes\":1073741824,\"projected_state_size_bytes\":75497485,\"reason_code\":\"STATE_CAPACITY_READY\",\"recommended_action\":\"NONE\",\"required_local_free_space_bytes\":1686110208,\"scanned_entry_count\":1,\"scope\":\"LOCAL_APPDATA_STATE\",\"soft_quota_bytes\":4294967296,\"sqlite_full_store\":null,\"state_size_bytes\":13,\"status\":\"READY\"}},\"reason\":null,\"request_id\":\"12010f47-de14-43b2-948d-9010a2d12245\",\"status\":\"ACCEPTED\"},\"returncode\":0,\"stderr\":\"\"},\"host_locator\":{\"installation_id\":\"installer-smoke-66491622074d\",\"locator_key\":\"a5fd432f677c32dd467630c0\",\"mutex_name\":\"Local\\\\MediaSyncHome-0B-a5fd432f677c32dd467630c0\",\"pipe_name\":\"MediaSyncHome-0B-a5fd432f677c32dd467630c0\",\"scope\":\"0B_SAME_USER_LOCAL_PREVIEW\",\"state_root\":\"<TEMP_ROOT>\\\\MediaSyncHome-Installer-Smoke\\\\312f41da5f0543a9a67eb148ae440336\\\\state\"},\"host_locator_publication\":null,\"pipe_name\":\"MediaSyncHome-0B-a5fd432f677c32dd467630c0\",\"scope\":\"0B_SAME_USER_LOCAL_PREVIEW\",\"stale_host_locator_publication_cleared\":false}\n",
+  "reason": null,
+  "running_upgrade_blocked": true,
+  "running_upgrade_exit_code": 7,
+  "state_preserved": true,
+  "status": "PASS",
+  "uninstall_exit_code": 0,
+  "upgrade_exit_code": 0,
+  "work_dir": "<TEMP_ROOT>\\MediaSyncHome-Installer-Smoke\\312f41da5f0543a9a67eb148ae440336"
+}

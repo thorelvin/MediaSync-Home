@@ -26,6 +26,8 @@ IGNORED_SCAN_DIRS = {
     ".ruff_cache",
     ".venv",
     "__pycache__",
+    "build",
+    "dist",
     "venv",
 }
 LOCAL_RUNTIME_ARTIFACT_DIR_PREFIXES = ("local-unsigned",)
