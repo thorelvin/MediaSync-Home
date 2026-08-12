@@ -1,5 +1,11 @@
 # Implementeringsstatus
 
+Update 2026-08-12: the project is now released under the MIT License. The
+product license is present at the repository root and copied into every local
+unsigned installer alongside the existing third-party dependency notices and
+package license files. Public GitHub distribution uses the verified `0.1.0`
+installer artifact; code signing remains a separate future release step.
+
 Update 2026-08-11: MediaSync Home `0.1.0` now has a reproducible Inno Setup 6
 installer for the accepted local, unsigned, current-user scope. The installer
 includes the current Nuitka standalone runtime, English and Norwegian wizard

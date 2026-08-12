@@ -74,7 +74,18 @@ def run_installer_smoke(
         install = _run_setup(installer, install_dir, base / "install.log")
         result["install_exit_code"] = install.returncode
         executable = install_dir / EXE_NAME
-        if install.returncode != 0 or not executable.is_file():
+        product_license = install_dir / "LICENSE.txt"
+        result["product_license"] = (
+            "MIT"
+            if product_license.is_file()
+            and product_license.read_text(encoding="utf-8").startswith("MIT License\n")
+            else None
+        )
+        if (
+            install.returncode != 0
+            or not executable.is_file()
+            or result["product_license"] != "MIT"
+        ):
             result["reason"] = "INSTALL_FAILED"
             return result
 

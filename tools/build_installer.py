@@ -275,9 +275,11 @@ def prepare_installer_metadata(destination: Path) -> dict[str, object]:
         "uninstalling.\n",
         encoding="utf-8",
     )
+    shutil.copy2(ROOT / "LICENSE", destination / "LICENSE.txt")
     return {
         "dependencies": len(audit.dependencies),
         "license_files": copied_license_files,
+        "product_license": "MIT",
         "notice_required": audit.notice_required,
     }
 

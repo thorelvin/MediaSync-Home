@@ -60,6 +60,7 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs 
 Source: "{#MetadataDir}\dependency-manifest.json"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "{#MetadataDir}\THIRD_PARTY_NOTICES.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "{#MetadataDir}\LOCAL_ALPHA_README.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MetadataDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MetadataDir}\licenses\*"; DestDir: "{app}\licenses\packages"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 [Icons]

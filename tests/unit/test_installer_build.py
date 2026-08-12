@@ -27,6 +27,15 @@ def test_installer_definition_is_per_user_and_preserves_external_state() -> None
     assert "[UninstallDelete]" not in script
     assert "{localappdata}\\MediaSyncHome" not in script
     assert "Norwegian.isl" in script
+    assert 'Source: "{#MetadataDir}\\LICENSE.txt"' in script
+
+
+def test_repository_has_mit_license() -> None:
+    license_text = (INSTALLER_SCRIPT.parents[1] / "LICENSE").read_text(encoding="utf-8")
+
+    assert license_text.startswith("MIT License\n")
+    assert "Copyright (c) 2026 MediaSync Home contributors" in license_text
+    assert 'THE SOFTWARE IS PROVIDED "AS IS"' in license_text
 
 
 def test_nuitka_installer_build_uses_product_entrypoint_and_gui_attach_mode(tmp_path: Path) -> None:

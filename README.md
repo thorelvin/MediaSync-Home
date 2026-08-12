@@ -64,8 +64,8 @@ Se [arkitekturen](docs/ARCHITECTURE.md), [recoveryprotokollen](docs/RECOVERY_PRO
 | Aktiv arbeidsordre | Lokal release-readiness og stabilisering |
 | Første leverbare produktmål | Lokal usignert alpha for samme Windows-bruker |
 | Støttet plattformmål | Windows 10 og Windows 11, x64 |
-| Nedlastbar app | Ingen offentlig nedlasting; lokal Nuitka-pakke består runtime-smoke |
-| Lisens | Ikke valgt ennå |
+| Nedlastbar app | [MediaSync Home 0.1.0 for Windows](https://github.com/thorelvin/MediaSync-Home/releases/tag/v0.1.0), lokal usignert alpha |
+| Lisens | [MIT](LICENSE) |
 
 Den detaljerte statusen vedlikeholdes i [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md). En tom eller blokkert test skal aldri omtales som bestått.
 
@@ -116,6 +116,8 @@ winget install --id JRSoftware.InnoSetup -e --scope user
 ```
 
 Resultatet ligger i `dist\MediaSyncHome-Setup-0.1.0-unsigned.exe`. Installasjon og oppgradering stopper dersom MediaSync Home fortsatt kjører. Avinstallering fjerner programfilene, men beholder backupjobber, historikk og annen lokal state i brukerens AppData.
+
+Den verifiserte installerpakken publiseres på [GitHub Releases](https://github.com/thorelvin/MediaSync-Home/releases). Den er foreløpig usignert, så Windows kan vise en SmartScreen-advarsel.
 
 ## Valider repositoryet
 
@@ -189,7 +191,7 @@ Eksakte versjoner fryses først etter reproduserbare Windows-bevis.
 
 - Den planlagte appen fungerer lokalt og offline; ingen telemetri skal sendes ut.
 - Repositoryet skal aldri inneholde NAS-passord, personlige filstier eller reelle brukerdata.
-- Prosjektlisens er ikke valgt. Ikke anta tillatelse til gjenbruk eller distribusjon før en eksplisitt `LICENSE`-fil er lagt til.
+- Prosjektets egen kode og dokumentasjon distribueres under [MIT-lisensen](LICENSE). Tredjepartsavhengigheter beholder sine egne lisenser og notices.
 - MediaSync Home er et uavhengig prosjekt. Allway Sync har bare vært en referanse for kjente arbeidsflyter; prosjektet bruker ikke proprietær kode, merkevareelementer eller kopiert grensesnitt.
 
 ---
