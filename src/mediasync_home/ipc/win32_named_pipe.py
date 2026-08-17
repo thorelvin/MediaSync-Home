@@ -813,6 +813,10 @@ class Win32NamedPipeServer:
             return self.service.handshake(request, identity)
         if message_type == "QUERY_STATUS":
             return self.service.query_status(str(request["client_instance_id"]))
+        if message_type == "REQUEST_ENGINE_HOST_SHUTDOWN":
+            return self.service.request_engine_host_shutdown(
+                str(request["client_instance_id"])
+            )
         if message_type == "QUERY_SELECTED_DIRECTORY_IDENTITIES":
             return self.service.query_selected_directory_identities(
                 str(request["client_instance_id"]),
@@ -1001,6 +1005,14 @@ class Win32NamedPipeClient:
         return self._roundtrip(
             {
                 "message_type": "QUERY_STATUS",
+                "client_instance_id": self.client_instance_id,
+            }
+        )
+
+    def request_engine_host_shutdown(self) -> IpcResponse:
+        return self._roundtrip(
+            {
+                "message_type": "REQUEST_ENGINE_HOST_SHUTDOWN",
                 "client_instance_id": self.client_instance_id,
             }
         )

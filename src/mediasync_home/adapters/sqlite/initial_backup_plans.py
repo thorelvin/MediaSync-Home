@@ -599,7 +599,7 @@ class SqliteInitialBackupPlanMaterializer:
             ORDER BY comparison_key, relative_path, id
             """,
             (snapshot_id,),
-        ).fetchall()
+        )
         return tuple(
             SnapshotFileEntry(
                 entry_id=str(row[0]),
@@ -636,7 +636,7 @@ class SqliteInitialBackupPlanMaterializer:
             ORDER BY entry_id
             """,
             (snapshot_id,),
-        ).fetchall()
+        )
         return tuple(
             CurrentReadHashEvidence(
                 snapshot_id=str(row[0]),

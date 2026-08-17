@@ -29,6 +29,9 @@ class StatusIpcClient(Protocol):
     def query_status(self) -> IpcResponse:
         pass
 
+    def request_engine_host_shutdown(self) -> IpcResponse:
+        pass
+
     def query_selected_directory_identities(
         self,
         *,
@@ -222,6 +225,11 @@ class EngineClient:
 
     def get_status(self) -> IpcResponse:
         return self._request_with_handshake_retry(self._ipc_client.query_status)
+
+    def shutdown_engine_host(self) -> IpcResponse:
+        return self._request_with_handshake_retry(
+            self._ipc_client.request_engine_host_shutdown
+        )
 
     def get_selected_directory_identities(
         self,

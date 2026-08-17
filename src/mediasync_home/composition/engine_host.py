@@ -9,6 +9,7 @@ import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
@@ -34,7 +35,11 @@ from mediasync_home.adapters.local_snapshot_scanner import (
     LocalFilesystemSnapshotScanner,
 )
 from mediasync_home.adapters.local_state_capacity import LocalStateCapacityProbe
-from mediasync_home.adapters.robocopy import RobocopyStagingTransferAdapter
+from mediasync_home.adapters.robocopy import (
+    RobocopyStagingTransferAdapter,
+    RobocopyTransferProfile,
+    robocopy_profile_for_performance_preset,
+)
 from mediasync_home.adapters.recovery_intents import (
     LocalTargetRecoveryIntentSegmentCleanup,
     LocalTargetRecoveryIntentSegmentPublisher,
@@ -210,7 +215,9 @@ from mediasync_home.application.run_executor_cycle import (
     RunExecutorCycleRunStore,
     execute_bounded_run_executor_cycle,
 )
+from mediasync_home.application.recovery_operations import RecoveryOperation
 from mediasync_home.application.host_locator import LocalEngineHostPublication
+from mediasync_home.application.host_lifecycle import EngineHostShutdownCoordinator
 from mediasync_home.application.endpoint_registration import (
     EndpointClassificationRefreshReport,
 )
@@ -1243,6 +1250,7 @@ class ExecutorMaintenanceLoop:
         max_steps: int,
         output: Emit,
         pipe_name: str,
+        lifecycle: EngineHostShutdownCoordinator | None = None,
     ) -> None:
         self._runtime_factory = runtime_factory
         self._base_interval_ms = interval_ms
@@ -1250,7 +1258,9 @@ class ExecutorMaintenanceLoop:
         self._max_steps = max_steps
         self._output = output
         self._pipe_name = pipe_name
+        self._lifecycle = lifecycle
         self._stop_event = threading.Event()
+        self._wake_event = threading.Event()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -1265,32 +1275,53 @@ class ExecutorMaintenanceLoop:
 
     def stop(self, *, timeout_seconds: float = 5.0) -> None:
         self._stop_event.set()
+        self._wake_event.set()
         if self._thread is not None:
             self._thread.join(timeout=timeout_seconds)
+
+    def wake(self) -> None:
+        """Request an immediate executor pass without running work on the caller."""
+        self._wake_event.set()
 
     def _run(self) -> None:
         runtime: EngineHostRuntime | None = None
         next_interval_ms = self._base_interval_ms
         try:
-            runtime = self._runtime_factory()
-            while not self._stop_event.wait(next_interval_ms / 1000):
+            if self._lifecycle is not None and not self._lifecycle.try_begin_maintenance():
+                return
+            try:
+                runtime = self._runtime_factory()
+            finally:
+                if self._lifecycle is not None:
+                    self._lifecycle.end_maintenance()
+            while True:
+                self._wake_event.wait(next_interval_ms / 1000)
+                self._wake_event.clear()
+                if self._stop_event.is_set():
+                    return
+                if self._lifecycle is not None and not self._lifecycle.try_begin_maintenance():
+                    return
                 try:
-                    _run_backup_analysis_cycle_if_configured(runtime)
-                    outcome = runtime.run_executor_cycle(max_steps=self._max_steps)
-                    _run_duplicate_scan_cycle_if_configured(runtime)
-                    _run_version_restore_rollback_cycle_if_configured(runtime)
-                    _run_version_restore_cycle_if_configured(runtime)
-                    _run_version_retention_cycle_if_configured(runtime)
-                except Exception as exc:
-                    next_interval_ms = self._backed_off_interval(next_interval_ms)
-                    _emit_run_executor_cycle_failed_event(
-                        output=self._output,
-                        pipe_name=self._pipe_name,
-                        cycle_trigger="INTERVAL",
-                        error_type=type(exc).__name__,
-                        next_interval_ms=next_interval_ms,
-                    )
-                    continue
+                    try:
+                        _run_backup_analysis_cycle_if_configured(runtime)
+                        outcome = runtime.run_executor_cycle(max_steps=self._max_steps)
+                        _run_duplicate_scan_cycle_if_configured(runtime)
+                        _run_version_restore_rollback_cycle_if_configured(runtime)
+                        _run_version_restore_cycle_if_configured(runtime)
+                        _run_version_retention_cycle_if_configured(runtime)
+                    except Exception as exc:
+                        next_interval_ms = self._backed_off_interval(next_interval_ms)
+                        _emit_run_executor_cycle_failed_event(
+                            output=self._output,
+                            pipe_name=self._pipe_name,
+                            cycle_trigger="INTERVAL",
+                            error_type=type(exc).__name__,
+                            next_interval_ms=next_interval_ms,
+                        )
+                        continue
+                finally:
+                    if self._lifecycle is not None:
+                        self._lifecycle.end_maintenance()
                 next_interval_ms = self._next_interval_after_outcome(
                     current_interval_ms=next_interval_ms,
                     outcome=outcome,
@@ -1322,10 +1353,15 @@ class ExecutorMaintenanceLoop:
     ) -> int:
         if outcome.stopped_reason is RunExecutorPumpStopReason.IDLE:
             return self._backed_off_interval(current_interval_ms)
+        if outcome.stopped_reason is RunExecutorPumpStopReason.STEP_LIMIT_REACHED:
+            return 0
         return self._base_interval_ms
 
     def _backed_off_interval(self, current_interval_ms: int) -> int:
-        return min(self._max_interval_ms, current_interval_ms * 2)
+        return min(
+            self._max_interval_ms,
+            max(self._base_interval_ms, current_interval_ms * 2),
+        )
 
 
 class TaskSchedulerMaintenanceLoop:
@@ -1339,6 +1375,7 @@ class TaskSchedulerMaintenanceLoop:
         max_interval_ms: int | None = None,
         output: Emit,
         pipe_name: str,
+        lifecycle: EngineHostShutdownCoordinator | None = None,
     ) -> None:
         self._runtime_factory = runtime_factory
         self._registry_factory = registry_factory
@@ -1347,6 +1384,7 @@ class TaskSchedulerMaintenanceLoop:
         self._max_interval_ms = max_interval_ms or interval_ms
         self._output = output
         self._pipe_name = pipe_name
+        self._lifecycle = lifecycle
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -1371,33 +1409,45 @@ class TaskSchedulerMaintenanceLoop:
         after_schedule_id = self._options.after_schedule_id
         after_orphan_task_name = self._options.after_orphan_task_name
         try:
-            runtime = self._runtime_factory()
-            registry = self._registry_factory()
+            if self._lifecycle is not None and not self._lifecycle.try_begin_maintenance():
+                return
+            try:
+                runtime = self._runtime_factory()
+                registry = self._registry_factory()
+            finally:
+                if self._lifecycle is not None:
+                    self._lifecycle.end_maintenance()
             while not self._stop_event.wait(next_interval_ms / 1000):
+                if self._lifecycle is not None and not self._lifecycle.try_begin_maintenance():
+                    return
                 try:
-                    report = runtime.task_scheduler_reconcile_resources_bounded(
-                        installation_id=self._options.installation_id,
-                        executable_path=self._options.executable_path,
-                        registry=registry,
-                        schedule_page_limit=self._options.schedule_page_limit,
-                        max_schedule_pages=self._options.max_schedule_pages,
-                        max_claims=self._options.max_claims,
-                        claim_token_prefix=self._options.claim_token_prefix,
-                        claim_ttl_ms=self._options.claim_ttl_ms,
-                        after_schedule_id=after_schedule_id,
-                        orphan_task_page_limit=self._options.orphan_task_page_limit,
-                        after_orphan_task_name=after_orphan_task_name,
-                    )
-                except Exception as exc:
-                    next_interval_ms = self._backed_off_interval(next_interval_ms)
-                    _emit_task_scheduler_reconciliation_failed_event(
-                        output=self._output,
-                        pipe_name=self._pipe_name,
-                        cycle_trigger="INTERVAL",
-                        error_type=type(exc).__name__,
-                        next_interval_ms=next_interval_ms,
-                    )
-                    continue
+                    try:
+                        report = runtime.task_scheduler_reconcile_resources_bounded(
+                            installation_id=self._options.installation_id,
+                            executable_path=self._options.executable_path,
+                            registry=registry,
+                            schedule_page_limit=self._options.schedule_page_limit,
+                            max_schedule_pages=self._options.max_schedule_pages,
+                            max_claims=self._options.max_claims,
+                            claim_token_prefix=self._options.claim_token_prefix,
+                            claim_ttl_ms=self._options.claim_ttl_ms,
+                            after_schedule_id=after_schedule_id,
+                            orphan_task_page_limit=self._options.orphan_task_page_limit,
+                            after_orphan_task_name=after_orphan_task_name,
+                        )
+                    except Exception as exc:
+                        next_interval_ms = self._backed_off_interval(next_interval_ms)
+                        _emit_task_scheduler_reconciliation_failed_event(
+                            output=self._output,
+                            pipe_name=self._pipe_name,
+                            cycle_trigger="INTERVAL",
+                            error_type=type(exc).__name__,
+                            next_interval_ms=next_interval_ms,
+                        )
+                        continue
+                finally:
+                    if self._lifecycle is not None:
+                        self._lifecycle.end_maintenance()
                 after_schedule_id = (
                     report.stage_next_cursor or self._options.after_schedule_id
                 )
@@ -1716,6 +1766,9 @@ def run_engine_host(
     executor_maintenance_loop: ExecutorMaintenanceLoop | None = None
     task_scheduler_maintenance_loop: TaskSchedulerMaintenanceLoop | None = None
     task_scheduler_reconciliation: TaskSchedulerResourcePumpReport | None = None
+    lifecycle = EngineHostShutdownCoordinator(
+        idle_blockers=lambda: _engine_host_shutdown_idle_blockers(args.state_root)
+    )
     try:
         runtime = build_engine_host_runtime(
             authorization=authorization,
@@ -1731,6 +1784,7 @@ def run_engine_host(
             ),
             run_executor_staging_backend=args.run_executor_staging_backend,
             task_scheduler_executable_path=args.task_scheduler_executable_path,
+            host_shutdown=lifecycle,
         )
         if args.publish_host_locator:
             host_locator_publication, host_locator_path = _publish_local_host_locator(
@@ -1828,6 +1882,7 @@ def run_engine_host(
                 output=output,
                 endpoint_retry_scheduler=runtime.endpoint_retry_scheduler,
                 staging_retry_scheduler=runtime.staging_retry_scheduler,
+                lifecycle=lifecycle,
             )
             executor_maintenance_loop.start()
         if host_locator_publication is not None:
@@ -1841,6 +1896,7 @@ def run_engine_host(
                 authorization=authorization,
                 service_status=service_status,
                 output=output,
+                lifecycle=lifecycle,
             )
             task_scheduler_maintenance_loop.start()
         server = Win32NamedPipeServer(
@@ -1855,15 +1911,20 @@ def run_engine_host(
                 output=output,
                 pipe_name=args.pipe_name,
             )
+        elif executor_maintenance_loop is not None:
+            after_request = executor_maintenance_loop.wake
         if args.serve_forever:
             result = serve_pipe_requests_until_interrupted(
-                server, after_request=after_request
+                server,
+                after_request=after_request,
+                stop_requested=lambda: lifecycle.shutdown_requested,
             )
         else:
             result = serve_bounded_pipe_requests(
                 server,
                 request_limit=args.serve_requests,
                 after_request=after_request,
+                stop_requested=lambda: lifecycle.shutdown_requested,
             )
         if result.completed:
             output(
@@ -1898,14 +1959,14 @@ def run_engine_host(
         if host_locator_heartbeat_loop is not None:
             host_locator_heartbeat_loop.stop()
             host_locator_publication = host_locator_heartbeat_loop.publication
-        if host_locator_publication is not None:
-            _clear_local_host_locator_publication(host_locator_publication)
         if task_scheduler_maintenance_loop is not None:
             task_scheduler_maintenance_loop.stop()
         if executor_maintenance_loop is not None:
             executor_maintenance_loop.stop()
         if runtime is not None:
             runtime.close()
+        if host_locator_publication is not None:
+            _clear_local_host_locator_publication(host_locator_publication)
         if host_mutex is not None:
             host_mutex.close()
 
@@ -1928,6 +1989,7 @@ def build_engine_host_runtime(
     recover_interrupted_analyses: bool = True,
     task_scheduler_executable_path: str | None = None,
     task_scheduler_time_zone_id: str | None = None,
+    host_shutdown: EngineHostShutdownCoordinator | None = None,
 ) -> EngineHostRuntime:
     runtime_clock = clock or SystemClock()
     runtime_endpoint_retry_scheduler = (
@@ -1956,6 +2018,7 @@ def build_engine_host_runtime(
                 ),
                 task_scheduler_executable_path=task_scheduler_executable_path,
                 task_scheduler_time_zone_id=resolved_task_scheduler_time_zone_id,
+                host_shutdown=host_shutdown,
             ),
             clock=runtime_clock,
         )
@@ -2244,6 +2307,9 @@ def build_engine_host_runtime(
         run_executor_staging_transfer_port = build_run_executor_staging_transfer_port(
             backend=run_executor_staging_backend,
             root_resolver=endpoint_root_resolver,
+            robocopy_profile_resolver=_build_robocopy_profile_resolver(
+                standard_backup_jobs
+            ),
         )
         run_executor_lease_registry = HeldRunTargetLeaseRegistry()
         run_executor_permit_validator = RetainedRunTargetPermitValidator(
@@ -2373,6 +2439,7 @@ def build_engine_host_runtime(
             command_effect_transaction=catalog_transaction,
             outbox_store=outbox,
             state_capacity_provider=lambda: capacity_gate.latest_report().to_dict(),
+            host_shutdown=host_shutdown,
         )
     except Exception:
         catalog_connection.close()
@@ -2479,12 +2546,47 @@ def build_run_executor_staging_transfer_port(
     *,
     backend: str,
     root_resolver: EndpointRootResolver,
+    robocopy_profile_resolver: (
+        Callable[[RecoveryOperation], RobocopyTransferProfile] | None
+    ) = None,
 ) -> RunTargetStagingPort:
     if backend == "local-file":
         return LocalFileStagingTransferAdapter(root_resolver=root_resolver)
     if backend == "robocopy":
-        return RobocopyStagingTransferAdapter(root_resolver=root_resolver)
+        return RobocopyStagingTransferAdapter(
+            root_resolver=root_resolver,
+            profile_resolver=robocopy_profile_resolver,
+        )
     raise RuntimeError("RUN_EXECUTOR_STAGING_BACKEND_UNSUPPORTED")
+
+
+def _build_robocopy_profile_resolver(
+    jobs: SqliteStandardBackupJobCatalog,
+) -> Callable[[RecoveryOperation], RobocopyTransferProfile]:
+    @lru_cache(maxsize=256)
+    def load_profile(
+        job_id: str,
+        job_revision_id: str,
+    ) -> RobocopyTransferProfile:
+        job = jobs.load_standard_backup_job_revision(
+            job_id=job_id,
+            job_revision_id=job_revision_id,
+        )
+        return (
+            RobocopyTransferProfile()
+            if job is None
+            else robocopy_profile_for_performance_preset(job.defaults.performance)
+        )
+
+    def resolve(operation: RecoveryOperation) -> RobocopyTransferProfile:
+        if operation.job_id is None or operation.job_revision_id is None:
+            return RobocopyTransferProfile()
+        return load_profile(
+            operation.job_id,
+            operation.job_revision_id,
+        )
+
+    return resolve
 
 
 def _execute_state_restore_command(
@@ -2525,17 +2627,49 @@ def reconcile_task_scheduler_resources_for_engine_host_startup(
     )
 
 
+def _engine_host_shutdown_idle_blockers(state_root: Path | None) -> tuple[str, ...]:
+    if state_root is None:
+        return ()
+    admission = admit_sqlite_state_restore_maintenance(
+        build_state_store_layout(state_root)
+    )
+    blockers: list[str] = []
+    if admission.active_run_count:
+        blockers.append("ENGINE_HOST_ACTIVE_RUNS")
+    if admission.active_run_target_count:
+        blockers.append("ENGINE_HOST_ACTIVE_RUN_TARGETS")
+    if admission.active_resource_lease_count:
+        blockers.append("ENGINE_HOST_ACTIVE_RESOURCE_LEASES")
+    if any(
+        blocker.code
+        in {
+            "STATE_RESTORE_MAINTENANCE_CATALOG_UNREADABLE",
+            "STATE_RESTORE_MAINTENANCE_RECOVERY_UNREADABLE",
+        }
+        for blocker in admission.blockers
+    ):
+        blockers.append("ENGINE_HOST_STATE_UNREADABLE")
+    return tuple(blockers)
+
+
 def serve_bounded_pipe_requests(
     server: PipeServer,
     *,
     request_limit: int,
     after_request: Callable[[], None] | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> PipeLoopResult:
     served_requests = 0
     try:
         for _ in range(request_limit):
             server.serve_once()
             served_requests += 1
+            if stop_requested is not None and stop_requested():
+                return PipeLoopResult(
+                    served_requests=served_requests,
+                    completed=True,
+                    stop_reason="SHUTDOWN_REQUESTED",
+                )
             if after_request is not None:
                 after_request()
     except Exception as exc:
@@ -2555,12 +2689,19 @@ def serve_pipe_requests_until_interrupted(
     server: PipeServer,
     *,
     after_request: Callable[[], None] | None = None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> PipeLoopResult:
     served_requests = 0
     try:
         while True:
             server.serve_once()
             served_requests += 1
+            if stop_requested is not None and stop_requested():
+                return PipeLoopResult(
+                    served_requests=served_requests,
+                    completed=True,
+                    stop_reason="SHUTDOWN_REQUESTED",
+                )
             if after_request is not None:
                 after_request()
     except KeyboardInterrupt:
@@ -2642,6 +2783,7 @@ def _build_executor_maintenance_loop(
     output: Emit,
     endpoint_retry_scheduler: MonotonicEndpointRetryScheduler | None = None,
     staging_retry_scheduler: MonotonicStagingRetryScheduler | None = None,
+    lifecycle: EngineHostShutdownCoordinator | None = None,
 ) -> ExecutorMaintenanceLoop:
     if args.state_root is None:
         raise RuntimeError("RUN_EXECUTOR_MAINTENANCE_REQUIRES_STATE_ROOT")
@@ -2667,6 +2809,7 @@ def _build_executor_maintenance_loop(
         max_steps=args.run_executor_cycle_max_steps,
         output=output,
         pipe_name=args.pipe_name,
+        lifecycle=lifecycle,
     )
 
 
@@ -2676,6 +2819,7 @@ def _build_task_scheduler_maintenance_loop(
     authorization: ClientAuthorizationPolicy,
     service_status: RuntimeStatus,
     output: Emit,
+    lifecycle: EngineHostShutdownCoordinator | None = None,
 ) -> TaskSchedulerMaintenanceLoop:
     if args.state_root is None:
         raise RuntimeError("TASK_SCHEDULER_MAINTENANCE_REQUIRES_STATE_ROOT")
@@ -2701,6 +2845,7 @@ def _build_task_scheduler_maintenance_loop(
         max_interval_ms=args.task_scheduler_reconciliation_max_interval_ms,
         output=output,
         pipe_name=args.pipe_name,
+        lifecycle=lifecycle,
     )
 
 

@@ -562,6 +562,69 @@ def test_robocopy_staging_transfer_starts_contained_process_and_publishes_payloa
     assert supervisor.process.closed is True
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows argv parsing requires Windows")
+def test_robocopy_staging_batches_compatible_allocated_files(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_parent = source_root / "Pictures"
+    source_parent.mkdir(parents=True)
+    source_a = source_parent / "A.jpg"
+    source_b = source_parent / "B.jpg"
+    source_a.write_bytes(b"image-a")
+    source_b.write_bytes(b"image-b")
+    target_root.mkdir()
+    operation_a = _operation(source_a)
+    operation_b = replace(
+        operation_a,
+        operation_id="op-b",
+        plan_sequence_no=2,
+        final_relative_path="Pictures/B.jpg",
+        source_relative_path="Pictures/B.jpg",
+        source_precondition_json=SourceFilePrecondition(
+            snapshot_id="source-snapshot-a",
+            snapshot_entry_id="source-entry-b",
+            relative_path="Pictures/B.jpg",
+            size_bytes=source_b.stat().st_size,
+            identity_fingerprint_hash=stable_file_identity_hash(source_b.stat()),
+        ).to_json(),
+        expected_source_fingerprint_json=json.dumps(
+            _fingerprint(source_b.read_bytes()),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        staging_object_id="object-b",
+    )
+    staging_root = tmp_path / "staging"
+    supervisor = _FakeRobocopySupervisor(exit_code=1)
+    adapter = RobocopyStagingTransferAdapter(
+        root_resolver=_RootResolver(
+            source_root=source_root,
+            target_root=target_root,
+        ),
+        staging_root=staging_root,
+        robocopy_work_root=tmp_path / "work",
+        process_supervisor=supervisor,
+        executable_resolver=_FakeExecutableResolver(_resolved_executable(tmp_path)),
+    )
+
+    first = adapter.transfer_batch_to_staging(
+        operation_a,
+        (operation_a, operation_b),
+    )
+    second = adapter.transfer_to_staging(operation_b)
+
+    assert first.transfer_state == "ROBOCOPY_EXIT_1_COPIED_TRANSFERRED_TO_STAGING"
+    assert second.transfer_state == "ROBOCOPY_BATCH_TRANSFERRED_EXISTING"
+    assert len(supervisor.launch_plans) == 1
+    arguments = supervisor.launch_plans[0].arguments
+    assert arguments[2:4] == ("A.jpg", "B.jpg")
+    assert "/MT:8" in arguments
+    assert (staging_root / "object-a.payload").read_bytes() == b"image-a"
+    assert (staging_root / "object-b.payload").read_bytes() == b"image-b"
+
+
 def test_robocopy_staging_routes_directory_marker_without_child_process(
     tmp_path: Path,
 ) -> None:
@@ -1142,15 +1205,21 @@ class _FakeRobocopySupervisor:
         arguments = getattr(plan, "arguments")
         source_parent = Path(arguments[0])
         staging_inbox = Path(arguments[1])
-        file_name = str(arguments[2])
+        file_names = tuple(
+            str(argument)
+            for argument in arguments[2:]
+            if not str(argument).startswith("/")
+        )
+        file_name = file_names[0]
         if self.exit_code is not None:
             if self.expected_entry_kind == "directory":
                 (staging_inbox / file_name).mkdir()
             elif self.copy_manifest_files:
-                payload = self.copied_payload
-                if payload is None:
-                    payload = (source_parent / file_name).read_bytes()
-                (staging_inbox / file_name).write_bytes(payload)
+                for copy_name in file_names:
+                    payload = self.copied_payload
+                    if payload is None:
+                        payload = (source_parent / copy_name).read_bytes()
+                    (staging_inbox / copy_name).write_bytes(payload)
             for extra_name, extra_payload in self.extra_inbox_files.items():
                 (staging_inbox / extra_name).write_bytes(extra_payload)
             if self.mutate_source_after_copy is not None:

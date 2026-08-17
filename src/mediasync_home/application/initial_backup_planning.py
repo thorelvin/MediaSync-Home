@@ -273,10 +273,7 @@ def _plan_target(
         role="TARGET",
         target_case_mode=target.root_case_mode,
     )
-    target_descendant_counts = _descendant_counts(
-        target.entries,
-        target_case_mode=target.root_case_mode,
-    )
+    target_descendant_counts = _directory_descendant_counts(target_entries)
     source_hash_evidence = _hash_evidence_by_entry_id(source)
     target_hash_evidence = _hash_evidence_by_entry_id(target)
     destructive_block_reason = _destructive_block_reason(source, target)
@@ -412,25 +409,24 @@ def _entries_by_comparison_key(
     return result
 
 
-def _descendant_counts(
-    entries: tuple[SnapshotFileEntry, ...],
-    *,
-    target_case_mode: str,
+def _directory_descendant_counts(
+    entries_by_comparison_key: dict[str, SnapshotFileEntry],
 ) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for parent in entries:
-        parent_key = _target_comparison_key(
-            parent.relative_path,
-            target_case_mode,
-        )
-        prefix = f"{parent_key}/"
-        counts[parent_key] = sum(
-            _target_comparison_key(
-                child.relative_path,
-                target_case_mode,
-            ).startswith(prefix)
-            for child in entries
-        )
+    counts = {
+        key: 0
+        for key, entry in entries_by_comparison_key.items()
+        if entry.object_type == "directory"
+    }
+    for child_key in entries_by_comparison_key:
+        parent_key = child_key.rsplit("/", 1)[0] if "/" in child_key else None
+        while parent_key is not None:
+            if parent_key in counts:
+                counts[parent_key] += 1
+            parent_key = (
+                parent_key.rsplit("/", 1)[0]
+                if "/" in parent_key
+                else None
+            )
     return counts
 
 

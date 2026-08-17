@@ -31,6 +31,24 @@ class FilesystemSnapshotScan:
     control_area_excluded: bool
     filter_decisions: tuple[SnapshotFilterDecision, ...] = ()
     rescan_attempt_count: int = 0
+    streamed_entry_count: int = 0
+    streamed_total_bytes: int = 0
+    streamed_filter_decision_count: int = 0
+    streamed_batch_count: int = 0
+
+    @property
+    def entry_count(self) -> int:
+        return self.streamed_entry_count + len(self.entries)
+
+    @property
+    def total_bytes(self) -> int:
+        return self.streamed_total_bytes + sum(
+            entry.size_bytes or 0 for entry in self.entries
+        )
+
+    @property
+    def filter_decision_count(self) -> int:
+        return self.streamed_filter_decision_count + len(self.filter_decisions)
 
     @property
     def complete(self) -> bool:
@@ -99,6 +117,24 @@ class FilesystemSnapshotScanner(Protocol):
         exclude_control_area: bool,
         filter_policy: FileFilterPolicy | None = None,
     ) -> FilesystemSnapshotScan: ...
+
+
+class SnapshotScanBatchSink(Protocol):
+    @property
+    def batch_count(self) -> int: ...
+
+    def checkpoint(self) -> object: ...
+
+    def emit(
+        self,
+        *,
+        entries: tuple[SnapshotFileEntry, ...],
+        filter_decisions: tuple[SnapshotFilterDecision, ...],
+    ) -> None: ...
+
+    def accept(self, checkpoint: object) -> None: ...
+
+    def rollback(self, checkpoint: object) -> None: ...
 
 
 class SnapshotMaterializationIdFactory(Protocol):

@@ -91,6 +91,150 @@ def test_engine_host_and_gui_roles_complete_non_mutating_status_roundtrip() -> N
     assert host_events[-1]["served_requests"] == 2
 
 
+def test_persistent_local_preview_host_accepts_controlled_shutdown(
+    tmp_path: Path,
+) -> None:
+    installation_id = f"shutdown-integration-{uuid4().hex[:12]}"
+    state_root = tmp_path / "state"
+    root = Path(__file__).resolve().parents[3]
+    host = subprocess.Popen(
+        [
+            sys.executable,
+            "scripts/run_role.py",
+            "--role",
+            "launcher",
+            "--local-preview-host",
+            "--installation-id",
+            installation_id,
+            "--state-root",
+            str(state_root),
+        ],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        locator_path = state_root / LOCAL_ENGINE_HOST_PUBLICATION_FILENAME
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not locator_path.is_file():
+            if host.poll() is not None:
+                break
+            time.sleep(0.05)
+        assert locator_path.is_file()
+
+        shutdown = subprocess.run(
+            [
+                sys.executable,
+                "scripts/run_role.py",
+                "--role",
+                "launcher",
+                "--shutdown-local-preview-host",
+                "--installation-id",
+                installation_id,
+                "--state-root",
+                str(state_root),
+                "--timeout-seconds",
+                "10",
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        stdout, stderr = host.communicate(timeout=20)
+    finally:
+        if host.poll() is None:
+            host.kill()
+            host.communicate(timeout=5)
+
+    shutdown_payload = json.loads(shutdown.stdout)
+    host_events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+    assert shutdown.returncode == 0
+    assert shutdown_payload["requested"] is True
+    assert shutdown_payload["stopped"] is True
+    assert stderr == ""
+    assert host_events[-1]["event"] == "ENGINE_HOST_PIPE_STOPPED"
+    assert host_events[-1]["stop_reason"] == "SHUTDOWN_REQUESTED"
+
+
+def test_launcher_cleanup_removes_verified_owned_scheduled_task() -> None:
+    from mediasync_home.adapters.task_scheduler import (
+        Pywin32TaskSchedulerGateway,
+        WindowsTaskSchedulerRegistry,
+    )
+    from mediasync_home.application.schedules import ScheduleDefinition
+    from mediasync_home.application.task_scheduler import (
+        bind_same_user_task_scheduler_definition_hash,
+        build_same_user_task_scheduler_definition,
+    )
+    from mediasync_home.application.trigger_occurrences import TriggerKind
+
+    installation_id = f"cleanup-integration-{uuid4().hex[:12]}"
+    executable_path = str(Path(sys.executable).resolve())
+    schedule = ScheduleDefinition(
+        schedule_id="owned-task",
+        job_id="job-a",
+        plan_id="plan-a",
+        plan_checksum="a" * 64,
+        trigger_type=TriggerKind.SCHEDULED_TIME,
+        configuration_json='{"hour":23,"kind":"daily","minute":59}',
+        definition_generation=1,
+        desired_definition_hash="0" * 64,
+        time_zone_id=None,
+        dst_policy="PRESERVE_WALL_TIME",
+        misfire_policy="QUEUE_ONCE",
+        coalescing_window_seconds=60,
+        task_logon_type="INTERACTIVE_TOKEN",
+        requires_network=False,
+        run_only_when_logged_on=True,
+        enabled=False,
+        row_version=1,
+    )
+    schedule = bind_same_user_task_scheduler_definition_hash(
+        schedule,
+        installation_id=installation_id,
+        executable_path=executable_path,
+    )
+    definition = build_same_user_task_scheduler_definition(
+        schedule,
+        installation_id=installation_id,
+        executable_path=executable_path,
+    )
+    registry = WindowsTaskSchedulerRegistry(Pywin32TaskSchedulerGateway())
+    registry.apply_task_definition(definition)
+    try:
+        cleanup = subprocess.run(
+            [
+                sys.executable,
+                "scripts/run_role.py",
+                "--role",
+                "launcher",
+                "--cleanup-owned-scheduled-tasks",
+                "--installation-id",
+                installation_id,
+            ],
+            cwd=Path(__file__).resolve().parents[3],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+
+        assert cleanup.returncode == 0
+        assert json.loads(cleanup.stdout) == {
+            "blocked": 0,
+            "completed": True,
+            "deleted": 1,
+            "event": "OWNED_SCHEDULED_TASK_CLEANUP",
+            "scanned": 1,
+        }
+        assert registry.load_task(definition.task_path) is None
+    finally:
+        registry.delete_task(definition.task_path)
+
+
 def test_gui_creates_durable_backup_job_through_local_writable_pipe(
     tmp_path: Path,
 ) -> None:

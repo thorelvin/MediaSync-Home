@@ -177,6 +177,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="run the persistent same-user local-preview Engine Host",
     )
+    mode.add_argument(
+        "--shutdown-local-preview-host",
+        action="store_true",
+        help="request an idle same-user local-preview Engine Host to stop",
+    )
+    mode.add_argument(
+        "--cleanup-owned-scheduled-tasks",
+        action="store_true",
+        help="remove verified same-user MediaSync tasks before uninstall",
+    )
     parser.add_argument("--installation-id", default="local-dev")
     parser.add_argument("--pipe-name")
     parser.add_argument("--state-root", type=Path)
@@ -230,6 +240,10 @@ def run_launcher(argv: Sequence[str] | None = None, *, emit: Emit | None = None)
         return _run_local_preview_desktop_from_args(args, emit=emit)
     if args.local_preview_host:
         return _run_local_preview_host_from_args(args, emit=emit)
+    if args.shutdown_local_preview_host:
+        return _run_local_preview_shutdown_from_args(args, emit=emit)
+    if args.cleanup_owned_scheduled_tasks:
+        return _run_owned_scheduled_task_cleanup_from_args(args, emit=emit)
     if args.local_preview_status:
         result = _run_local_preview_status_from_args(args)
         output = emit or print
@@ -929,6 +943,262 @@ def _run_local_preview_host_from_args(
     from mediasync_home.composition.engine_host import run_engine_host
 
     return run_engine_host(host_run.engine_host_args, emit=emit)
+
+
+def _run_local_preview_shutdown_from_args(
+    args: argparse.Namespace,
+    *,
+    emit: Emit | None = None,
+) -> int:
+    if os.name != "nt":
+        raise RuntimeError("local preview host shutdown is Windows-only")
+    if args.pipe_name is not None:
+        raise ValueError("HOST_SHUTDOWN_EXPLICIT_PIPE_UNSUPPORTED")
+
+    from mediasync_home.adapters.local_host_locator import (
+        LocalProcessLivenessProbe,
+        build_local_engine_host_descriptor_for_user,
+    )
+    from mediasync_home.ipc.win32_named_pipe import (
+        Win32NamedPipeClient,
+        current_process_identity,
+    )
+    from mediasync_home.presentation.engine_client import EngineClient
+
+    output = emit or print
+    identity = current_process_identity()
+    descriptor = build_local_engine_host_descriptor_for_user(
+        installation_id=args.installation_id,
+        user_scope_hash=identity.user_sid_hash,
+        state_root=args.state_root,
+        environ=os.environ,
+    )
+    publication = _load_matching_host_publication(descriptor)
+    if publication is None:
+        output(
+            json.dumps(
+                {
+                    "event": "ENGINE_HOST_SHUTDOWN",
+                    "requested": False,
+                    "already_stopped": True,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return 0
+    try:
+        client = EngineClient(
+            Win32NamedPipeClient(
+                pipe_name=publication.pipe_name,
+                role=ProcessRole.GUI,
+                timeout_ms=max(1, int(args.timeout_seconds * 1000)),
+            )
+        )
+        handshake = client.connect()
+        response = (
+            client.shutdown_engine_host()
+            if handshake.status is IpcStatus.ACCEPTED
+            else handshake
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        output(
+            json.dumps(
+                {
+                    "event": "ENGINE_HOST_SHUTDOWN",
+                    "requested": False,
+                    "error_type": type(exc).__name__,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return 2
+    if response.status is not IpcStatus.ACCEPTED:
+        output(
+            json.dumps(
+                {
+                    "event": "ENGINE_HOST_SHUTDOWN",
+                    "requested": False,
+                    "reason": None if response.reason is None else response.reason.value,
+                    "payload": response.payload,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return 2
+
+    probe = LocalProcessLivenessProbe()
+    deadline = time.monotonic() + args.timeout_seconds
+    while time.monotonic() < deadline:
+        publication_withdrawn = _load_matching_host_publication(descriptor) is None
+        if publication_withdrawn or probe.is_process_running(publication.process_id) is False:
+            output(
+                json.dumps(
+                    {
+                        "event": "ENGINE_HOST_SHUTDOWN",
+                        "requested": True,
+                        "stopped": True,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            return 0
+        time.sleep(0.05)
+    output(
+        json.dumps(
+            {
+                "event": "ENGINE_HOST_SHUTDOWN",
+                "requested": True,
+                "stopped": False,
+                "reason": "ENGINE_HOST_STOP_TIMEOUT",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    return 2
+
+
+def _run_owned_scheduled_task_cleanup_from_args(
+    args: argparse.Namespace,
+    *,
+    emit: Emit | None = None,
+) -> int:
+    if os.name != "nt":
+        raise RuntimeError("scheduled task cleanup is Windows-only")
+
+    from mediasync_home.adapters.task_scheduler import (
+        Pywin32TaskSchedulerGateway,
+        WindowsTaskSchedulerRegistry,
+    )
+    from mediasync_home.application.task_scheduler import (
+        TaskSchedulerUninstallCleanupRequest,
+        cleanup_owned_task_scheduler_page,
+    )
+
+    output = emit or print
+    executable, _, _ = _current_product_process_layout()
+    registry = WindowsTaskSchedulerRegistry(Pywin32TaskSchedulerGateway())
+    scanned = 0
+    deleted = 0
+    blocked = 0
+    try:
+        cursor: str | None = None
+        for _ in range(100):
+            report = cleanup_owned_task_scheduler_page(
+                TaskSchedulerUninstallCleanupRequest(
+                    installation_id=args.installation_id,
+                    executable_path=str(executable.resolve()),
+                    limit=100,
+                    after_task_name=cursor,
+                ),
+                registry=registry,
+                delete_verified=False,
+            )
+            scanned += report.scanned
+            blocked += report.blocked
+            if report.next_cursor is None:
+                break
+            cursor = report.next_cursor
+        else:
+            return _emit_scheduled_task_cleanup_result(
+                output,
+                completed=False,
+                scanned=scanned,
+                deleted=0,
+                blocked=blocked,
+                reason="TASK_SCHEDULER_CLEANUP_PAGE_LIMIT_REACHED",
+            )
+        if blocked:
+            return _emit_scheduled_task_cleanup_result(
+                output,
+                completed=False,
+                scanned=scanned,
+                deleted=0,
+                blocked=blocked,
+                reason="TASK_SCHEDULER_OWNERSHIP_VERIFICATION_BLOCKED",
+            )
+
+        cursor = None
+        for _ in range(100):
+            report = cleanup_owned_task_scheduler_page(
+                TaskSchedulerUninstallCleanupRequest(
+                    installation_id=args.installation_id,
+                    executable_path=str(executable.resolve()),
+                    limit=100,
+                    after_task_name=cursor,
+                ),
+                registry=registry,
+            )
+            deleted += report.deleted
+            blocked += report.blocked
+            if report.blocked:
+                return _emit_scheduled_task_cleanup_result(
+                    output,
+                    completed=False,
+                    scanned=scanned,
+                    deleted=deleted,
+                    blocked=blocked,
+                    reason="TASK_SCHEDULER_OWNERSHIP_CHANGED_DURING_CLEANUP",
+                )
+            if report.next_cursor is None:
+                return _emit_scheduled_task_cleanup_result(
+                    output,
+                    completed=True,
+                    scanned=scanned,
+                    deleted=deleted,
+                    blocked=0,
+                )
+            cursor = report.next_cursor
+    except (OSError, RuntimeError, ValueError) as exc:
+        output(
+            json.dumps(
+                {
+                    "event": "OWNED_SCHEDULED_TASK_CLEANUP",
+                    "completed": False,
+                    "error_type": type(exc).__name__,
+                    "scanned": scanned,
+                    "deleted": deleted,
+                    "blocked": blocked,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return 2
+    return _emit_scheduled_task_cleanup_result(
+        output,
+        completed=False,
+        scanned=scanned,
+        deleted=deleted,
+        blocked=blocked,
+        reason="TASK_SCHEDULER_CLEANUP_PAGE_LIMIT_REACHED",
+    )
+
+
+def _emit_scheduled_task_cleanup_result(
+    output: Emit,
+    *,
+    completed: bool,
+    scanned: int,
+    deleted: int,
+    blocked: int,
+    reason: str | None = None,
+) -> int:
+    payload: dict[str, object] = {
+        "event": "OWNED_SCHEDULED_TASK_CLEANUP",
+        "completed": completed,
+        "scanned": scanned,
+        "deleted": deleted,
+        "blocked": blocked,
+    }
+    if reason is not None:
+        payload["reason"] = reason
+    output(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    return 0 if completed and blocked == 0 else 2
 
 
 def _load_matching_host_publication(

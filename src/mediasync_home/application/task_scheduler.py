@@ -165,6 +165,14 @@ class TaskSchedulerOrphanReconciliationRequest:
 
 
 @dataclass(frozen=True)
+class TaskSchedulerUninstallCleanupRequest:
+    installation_id: str
+    executable_path: str
+    limit: int
+    after_task_name: str | None = None
+
+
+@dataclass(frozen=True)
 class TaskSchedulerReconciliationFinding:
     schedule_id: str
     action: TaskSchedulerReconciliationAction
@@ -227,6 +235,25 @@ class TaskSchedulerOrphanReconciliationReport:
     blocked: int
     next_cursor: str | None
     findings: tuple[TaskSchedulerOrphanReconciliationFinding, ...]
+
+
+@dataclass(frozen=True)
+class TaskSchedulerUninstallCleanupFinding:
+    task_path: str
+    task_name: str
+    deleted: bool
+    blocked: bool
+    schedule_id: str | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskSchedulerUninstallCleanupReport:
+    scanned: int
+    deleted: int
+    blocked: int
+    next_cursor: str | None
+    findings: tuple[TaskSchedulerUninstallCleanupFinding, ...]
 
 
 @dataclass(frozen=True)
@@ -758,6 +785,44 @@ def reconcile_task_scheduler_orphan_page(
     )
 
 
+def cleanup_owned_task_scheduler_page(
+    request: TaskSchedulerUninstallCleanupRequest,
+    *,
+    registry: TaskSchedulerRegistryPort,
+    delete_verified: bool = True,
+) -> TaskSchedulerUninstallCleanupReport:
+    _validate_task_scheduler_orphan_reconciliation_request(
+        TaskSchedulerOrphanReconciliationRequest(
+            installation_id=request.installation_id,
+            executable_path=request.executable_path,
+            limit=request.limit,
+            after_task_name=request.after_task_name,
+        )
+    )
+    page = registry.list_tasks(
+        _task_folder_path(request.installation_id),
+        limit=request.limit,
+        after_task_name=request.after_task_name,
+    )
+    findings = tuple(
+        _cleanup_owned_task_scheduler_task(
+            observed,
+            installation_id=request.installation_id,
+            executable_path=request.executable_path,
+            registry=registry,
+            delete_verified=delete_verified,
+        )
+        for observed in page
+    )
+    return TaskSchedulerUninstallCleanupReport(
+        scanned=len(page),
+        deleted=sum(1 for finding in findings if finding.deleted),
+        blocked=sum(1 for finding in findings if finding.blocked),
+        next_cursor=_task_name(page[-1].task_path) if len(page) == request.limit else None,
+        findings=findings,
+    )
+
+
 def reconcile_task_scheduler_resources_bounded(
     request: TaskSchedulerResourcePumpRequest,
     *,
@@ -1194,4 +1259,81 @@ def _reconcile_task_scheduler_orphan(
         blocked=False,
         schedule_id=binding.schedule_id,
         reason="TASK_SCHEDULER_OWNED_TASK_ORPHANED",
+    )
+
+
+def _cleanup_owned_task_scheduler_task(
+    observed: ObservedTaskSchedulerDefinition,
+    *,
+    installation_id: str,
+    executable_path: str,
+    registry: TaskSchedulerRegistryPort,
+    delete_verified: bool,
+) -> TaskSchedulerUninstallCleanupFinding:
+    task_name = _task_name(observed.task_path)
+    binding = parse_trigger_task_arguments(observed.arguments)
+    if binding is None:
+        return TaskSchedulerUninstallCleanupFinding(
+            task_path=observed.task_path,
+            task_name=task_name,
+            deleted=False,
+            blocked=True,
+            reason="TASK_SCHEDULER_ARGUMENTS_NOT_RECOGNIZED",
+        )
+    if binding.installation_id != installation_id:
+        return TaskSchedulerUninstallCleanupFinding(
+            task_path=observed.task_path,
+            task_name=task_name,
+            deleted=False,
+            blocked=True,
+            schedule_id=binding.schedule_id,
+            reason="TASK_SCHEDULER_ARGUMENT_OWNER_MISMATCH",
+        )
+    if binding.schedule_revision_hash != binding.task_definition_hash:
+        return TaskSchedulerUninstallCleanupFinding(
+            task_path=observed.task_path,
+            task_name=task_name,
+            deleted=False,
+            blocked=True,
+            schedule_id=binding.schedule_id,
+            reason="TASK_SCHEDULER_ARGUMENT_HASH_MISMATCH",
+        )
+    expected_path = _task_path(installation_id, binding.schedule_id)
+    if _windows_path_key(observed.task_path) != _windows_path_key(expected_path):
+        return TaskSchedulerUninstallCleanupFinding(
+            task_path=observed.task_path,
+            task_name=task_name,
+            deleted=False,
+            blocked=True,
+            schedule_id=binding.schedule_id,
+            reason="TASK_SCHEDULER_TASK_PATH_MISMATCH",
+        )
+    if _windows_path_key(observed.executable_path) != _windows_path_key(
+        _normalized_executable_path(executable_path)
+    ):
+        return TaskSchedulerUninstallCleanupFinding(
+            task_path=observed.task_path,
+            task_name=task_name,
+            deleted=False,
+            blocked=True,
+            schedule_id=binding.schedule_id,
+            reason="TASK_SCHEDULER_EXECUTABLE_DRIFT",
+        )
+    if not delete_verified:
+        return TaskSchedulerUninstallCleanupFinding(
+            task_path=observed.task_path,
+            task_name=task_name,
+            deleted=False,
+            blocked=False,
+            schedule_id=binding.schedule_id,
+            reason="TASK_SCHEDULER_OWNERSHIP_VERIFIED",
+        )
+    registry.delete_task(observed.task_path)
+    return TaskSchedulerUninstallCleanupFinding(
+        task_path=observed.task_path,
+        task_name=task_name,
+        deleted=True,
+        blocked=False,
+        schedule_id=binding.schedule_id,
+        reason="TASK_SCHEDULER_OWNED_TASK_REMOVED_FOR_UNINSTALL",
     )

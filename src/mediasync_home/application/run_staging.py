@@ -5,6 +5,7 @@ from typing import Mapping, Protocol
 
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
+    RecoveryOperationKind,
     RecoveryOperationMetadata,
     RecoveryOperationPhase,
     RecoveryOperationStore,
@@ -146,6 +147,7 @@ STAGING_EXECUTION_PHASES = (
     RecoveryOperationPhase.TRANSFERRED,
     RecoveryOperationPhase.STAGING_DURABLE,
 )
+MAX_STAGING_TRANSFER_BATCH_OPERATIONS = 256
 MAX_STAGING_ATTEMPTS = 3
 RETRYABLE_STAGING_FAILURE_CODES = frozenset(
     {
@@ -220,10 +222,23 @@ def execute_next_run_target_staging_step(
         )
 
     try:
+        transfer_candidates: tuple[RecoveryOperation, ...] = ()
+        if operation.phase is RecoveryOperationPhase.STAGING_ALLOCATED:
+            transfer_candidates = tuple(
+                candidate
+                for candidate in recovery_operations.list_operations_for_run_target_in_phase(
+                    run_id=permit.run_id,
+                    run_target_id=permit.run_target_id,
+                    phase=RecoveryOperationPhase.STAGING_ALLOCATED,
+                    limit=MAX_STAGING_TRANSFER_BATCH_OPERATIONS,
+                )
+                if recovery_operations.staging_retry_is_due(candidate)
+            )
         next_phase, metadata, payload = _execute_phase(
             permit=permit,
             operation=operation,
             staging_port=staging_port,
+            transfer_candidates=transfer_candidates,
         )
     except RunTargetEndpointWaitRequired as exc:
         return RunTargetStagingOutcome(
@@ -328,21 +343,49 @@ def _next_staging_operation(
     recovery_operations: RunTargetStagingOperationStore,
 ) -> RecoveryOperation | None:
     candidates: list[RecoveryOperation] = []
+    allocated_count = 0
     for phase in STAGING_EXECUTION_PHASES:
         operations = recovery_operations.list_operations_for_run_target_in_phase(
             run_id=permit.run_id,
             run_target_id=permit.run_target_id,
             phase=phase,
-            limit=1,
+            limit=(
+                MAX_STAGING_TRANSFER_BATCH_OPERATIONS
+                if phase is RecoveryOperationPhase.STAGING_ALLOCATED
+                else 1
+            ),
         )
         if operations:
             candidates.append(operations[0])
+            if phase is RecoveryOperationPhase.STAGING_ALLOCATED:
+                allocated_count = len(operations)
     if not candidates:
         return None
-    return min(
-        candidates,
-        key=lambda operation: (operation.plan_sequence_no, operation.operation_id),
+    head = min(candidates, key=lambda candidate: candidate.plan_sequence_no)
+    if (
+        head.phase is not RecoveryOperationPhase.STAGING_ALLOCATED
+        or head.operation_kind is not RecoveryOperationKind.COPY_NEW
+        or allocated_count >= MAX_STAGING_TRANSFER_BATCH_OPERATIONS
+    ):
+        return head
+
+    allocated_index = STAGING_EXECUTION_PHASES.index(
+        RecoveryOperationPhase.STAGING_ALLOCATED
     )
+    preparatory_candidates = [
+        candidate
+        for candidate in candidates
+        if STAGING_EXECUTION_PHASES.index(candidate.phase) < allocated_index
+    ]
+    if not preparatory_candidates:
+        return head
+    next_preparatory = min(
+        preparatory_candidates,
+        key=lambda candidate: candidate.plan_sequence_no,
+    )
+    if next_preparatory.operation_kind is not RecoveryOperationKind.COPY_NEW:
+        return head
+    return next_preparatory
 
 
 def _execute_phase(
@@ -350,6 +393,7 @@ def _execute_phase(
     permit: MutationPermit,
     operation: RecoveryOperation,
     staging_port: RunTargetStagingPort,
+    transfer_candidates: tuple[RecoveryOperation, ...] = (),
 ) -> tuple[RecoveryOperationPhase, RecoveryOperationMetadata, Mapping[str, object]]:
     if operation.phase is RecoveryOperationPhase.PLANNED:
         source_evidence = staging_port.validate_source_file(operation)
@@ -398,7 +442,11 @@ def _execute_phase(
         )
 
     if operation.phase is RecoveryOperationPhase.STAGING_ALLOCATED:
-        transfer_evidence = staging_port.transfer_to_staging(operation)
+        batch_transfer = getattr(staging_port, "transfer_batch_to_staging", None)
+        if callable(batch_transfer) and transfer_candidates:
+            transfer_evidence = batch_transfer(operation, transfer_candidates)
+        else:
+            transfer_evidence = staging_port.transfer_to_staging(operation)
         return (
             RecoveryOperationPhase.TRANSFERRED,
             RecoveryOperationMetadata(transfer_state=transfer_evidence.transfer_state),

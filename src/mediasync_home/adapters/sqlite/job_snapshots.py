@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,7 +26,9 @@ from mediasync_home.application.snapshot_scanning import (
     FilesystemSnapshotScanner,
     JobSnapshotMaterializationResult,
     SnapshotMaterializationIdFactory,
+    SnapshotMaterializationIds,
     SnapshotMaterializationRefreshReport,
+    SnapshotScanBatchSink,
 )
 from mediasync_home.application.state_capacity import (
     StateCapacityGate,
@@ -33,6 +36,8 @@ from mediasync_home.application.state_capacity import (
 )
 from mediasync_home.application.snapshots import (
     SnapshotEntryMaterializationStore,
+    SnapshotFileEntry,
+    SnapshotFilterDecision,
     SnapshotSealRequest,
     SnapshotSealStore,
     snapshot_entry_batch,
@@ -80,6 +85,57 @@ class _SnapshotJobCandidate:
 class _ScannedEndpoint:
     endpoint: _SnapshotEndpointCandidate
     scan: FilesystemSnapshotScan
+
+
+class _SqliteSnapshotScanBatchSink(SnapshotScanBatchSink):
+    def __init__(
+        self,
+        *,
+        connection: sqlite3.Connection,
+        entry_store: SnapshotEntryMaterializationStore,
+        snapshot_id: str,
+    ) -> None:
+        self._connection = connection
+        self._entry_store = entry_store
+        self._snapshot_id = snapshot_id
+        self._batch_count = 0
+        self._checkpoint_serial = 0
+
+    @property
+    def batch_count(self) -> int:
+        return self._batch_count
+
+    def checkpoint(self) -> object:
+        self._checkpoint_serial += 1
+        name = f"snapshot_scan_{self._checkpoint_serial}"
+        self._connection.execute(f"SAVEPOINT {name}")
+        return (name, self._batch_count)
+
+    def emit(
+        self,
+        *,
+        entries: tuple[SnapshotFileEntry, ...],
+        filter_decisions: tuple[SnapshotFilterDecision, ...],
+    ) -> None:
+        self._entry_store.commit_snapshot_entry_batch(
+            snapshot_entry_batch(
+                snapshot_id=self._snapshot_id,
+                sequence_no=self._batch_count,
+                entries=entries,
+                filter_decisions=filter_decisions,
+            )
+        )
+        self._batch_count += 1
+
+    def accept(self, checkpoint: object) -> None:
+        name, _ = _scan_sink_checkpoint(checkpoint)
+        self._connection.execute(f"RELEASE SAVEPOINT {name}")
+
+    def rollback(self, checkpoint: object) -> None:
+        name, batch_count = _scan_sink_checkpoint(checkpoint)
+        self._connection.execute(f"ROLLBACK TO SAVEPOINT {name}")
+        self._connection.execute(f"RELEASE SAVEPOINT {name}")
+        self._batch_count = batch_count
 
 
 class SqliteJobSnapshotMaterializer:
@@ -360,6 +416,15 @@ class SqliteJobSnapshotMaterializer:
                 state="FAILED",
                 reason_code="JOB_SNAPSHOT_ID_ALLOCATION_FAILED",
             )
+        scan_streaming = getattr(self._scanner, "scan_streaming", None)
+        if callable(scan_streaming):
+            return self._scan_and_persist_streaming_candidate(
+                candidate,
+                ids=ids,
+                filter_policy=filter_policy,
+                observed_utc=observed_utc,
+                scan_streaming=scan_streaming,
+            )
         try:
             scanned = tuple(
                 _ScannedEndpoint(
@@ -401,7 +466,7 @@ class SqliteJobSnapshotMaterializer:
             )
         capacity_reason = self._analysis_capacity_block_reason(
             endpoint_count=len(scanned),
-            entry_count=sum(len(item.scan.entries) for item in scanned),
+            entry_count=sum(item.scan.entry_count for item in scanned),
             coverage_count=sum(len(item.scan.coverage) for item in scanned),
             issue_count=sum(len(item.scan.issues) for item in scanned),
         )
@@ -423,7 +488,7 @@ class SqliteJobSnapshotMaterializer:
             self._insert_snapshot_parent_rows(
                 candidate,
                 analysis_id=ids.analysis_id,
-                scanned=scanned,
+                snapshot_ids=ids.snapshot_ids,
             )
             for item in scanned:
                 self._commit_scan_batches(item.scan)
@@ -463,12 +528,128 @@ class SqliteJobSnapshotMaterializer:
             snapshot_ids=tuple(item.scan.snapshot_id for item in scanned),
         )
 
+    def _scan_and_persist_streaming_candidate(
+        self,
+        candidate: _SnapshotJobCandidate,
+        *,
+        ids: SnapshotMaterializationIds,
+        filter_policy: FileFilterPolicy,
+        observed_utc: str,
+        scan_streaming: Callable[..., FilesystemSnapshotScan],
+    ) -> JobSnapshotMaterializationResult:
+        analysis_id = ids.analysis_id
+        snapshot_ids = ids.snapshot_ids
+        scanned: list[_ScannedEndpoint] = []
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            self._insert_snapshot_parent_rows(
+                candidate,
+                analysis_id=analysis_id,
+                snapshot_ids=snapshot_ids,
+            )
+            for endpoint, snapshot_id in zip(
+                candidate.endpoints,
+                snapshot_ids,
+                strict=True,
+            ):
+                sink = _SqliteSnapshotScanBatchSink(
+                    connection=self._connection,
+                    entry_store=self._entry_store,
+                    snapshot_id=snapshot_id,
+                )
+                scan = scan_streaming(
+                    _local_root(endpoint.root_uri),
+                    snapshot_id=snapshot_id,
+                    exclude_control_area=_exclude_control_area(endpoint),
+                    filter_policy=filter_policy,
+                    batch_sink=sink,
+                )
+                if not isinstance(scan, FilesystemSnapshotScan):
+                    raise SqliteJobSnapshotMaterializationError(
+                        "JOB_SNAPSHOT_STREAM_RESULT_INVALID"
+                    )
+                if scan.streamed_batch_count != sink.batch_count:
+                    raise SqliteJobSnapshotMaterializationError(
+                        "JOB_SNAPSHOT_STREAM_BATCH_COUNT_MISMATCH"
+                    )
+                scanned.append(_ScannedEndpoint(endpoint=endpoint, scan=scan))
+                self._commit_scan_batches(scan)
+
+            capacity_reason = self._analysis_capacity_block_reason(
+                endpoint_count=len(scanned),
+                entry_count=sum(item.scan.entry_count for item in scanned),
+                coverage_count=sum(len(item.scan.coverage) for item in scanned),
+                issue_count=sum(len(item.scan.issues) for item in scanned),
+            )
+            if capacity_reason is not None:
+                _rollback(self._connection)
+                persisted_reason = self._persist_blocked_without_analysis(
+                    candidate,
+                    reason_code=capacity_reason,
+                    observed_utc=observed_utc,
+                )
+                return _result(
+                    candidate,
+                    state="BLOCKED",
+                    reason_code=persisted_reason,
+                )
+            all_complete = all(item.scan.complete for item in scanned)
+            state = "SEALED" if all_complete else "BLOCKED"
+            reason_code = (
+                "JOB_SNAPSHOTS_SEALED"
+                if all_complete
+                else "JOB_SNAPSHOT_SCAN_INCOMPLETE"
+            )
+            if all_complete:
+                for item in scanned:
+                    self._seal_scan(item.scan)
+            self._upsert_materialization(
+                candidate,
+                analysis_id=analysis_id,
+                state=state,
+                reason_code=reason_code,
+                snapshot_count=len(scanned),
+                sealed_snapshot_count=len(scanned) if all_complete else 0,
+                observed_utc=observed_utc,
+            )
+            self._connection.execute("COMMIT")
+        except (EndpointLeaseUnavailable, LocalSnapshotScanError, OSError) as exc:
+            _rollback(self._connection)
+            reason_code = self._persist_blocked_without_analysis(
+                candidate,
+                reason_code=_scan_failure_reason(exc),
+                observed_utc=observed_utc,
+            )
+            return _result(candidate, state="BLOCKED", reason_code=reason_code)
+        except Exception as exc:
+            _rollback(self._connection)
+            persistence_reason = self._persistence_failure_reason(
+                exc,
+                default="JOB_SNAPSHOT_SCAN_OR_PERSISTENCE_FAILED",
+            )
+            return _result(
+                candidate,
+                state=(
+                    "BLOCKED"
+                    if persistence_reason == "STATE_CAPACITY_SQLITE_FULL"
+                    else "FAILED"
+                ),
+                reason_code=persistence_reason,
+            )
+        return _result(
+            candidate,
+            analysis_id=analysis_id,
+            state=state,
+            reason_code=reason_code,
+            snapshot_ids=tuple(item.scan.snapshot_id for item in scanned),
+        )
+
     def _insert_snapshot_parent_rows(
         self,
         candidate: _SnapshotJobCandidate,
         *,
         analysis_id: str,
-        scanned: tuple[_ScannedEndpoint, ...],
+        snapshot_ids: tuple[str, ...],
     ) -> None:
         self._connection.execute(
             """
@@ -477,8 +658,11 @@ class SqliteJobSnapshotMaterializer:
             """,
             (analysis_id, candidate.job_id, candidate.job_revision_id),
         )
-        for item in scanned:
-            endpoint = item.endpoint
+        for endpoint, snapshot_id in zip(
+            candidate.endpoints,
+            snapshot_ids,
+            strict=True,
+        ):
             self._connection.execute(
                 """
                 INSERT INTO analysis_targets (
@@ -506,7 +690,7 @@ class SqliteJobSnapshotMaterializer:
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (
-                    item.scan.snapshot_id,
+                    snapshot_id,
                     analysis_id,
                     endpoint.endpoint_id,
                     endpoint.endpoint_revision_id,
@@ -515,59 +699,86 @@ class SqliteJobSnapshotMaterializer:
             )
 
     def _commit_scan_batches(self, scan: FilesystemSnapshotScan) -> None:
-        entry_chunks = tuple(
-            scan.entries[index : index + MAX_SNAPSHOT_BATCH_ENTRIES]
-            for index in range(0, len(scan.entries), MAX_SNAPSHOT_BATCH_ENTRIES)
+        if scan.streamed_batch_count:
+            self._entry_store.commit_snapshot_entry_batch(
+                snapshot_entry_batch(
+                    snapshot_id=scan.snapshot_id,
+                    sequence_no=scan.streamed_batch_count,
+                    entries=scan.entries,
+                    coverage_updates=scan.coverage,
+                    issues=scan.issues,
+                    filter_decisions=scan.filter_decisions,
+                )
+            )
+            return
+        batch_count = max(
+            1,
+            _bounded_batch_count(len(scan.entries)),
+            _bounded_batch_count(len(scan.filter_decisions)),
         )
-        decision_chunks = tuple(
-            scan.filter_decisions[index : index + MAX_SNAPSHOT_BATCH_ENTRIES]
-            for index in range(0, len(scan.filter_decisions), MAX_SNAPSHOT_BATCH_ENTRIES)
-        )
-        batch_count = max(1, len(entry_chunks), len(decision_chunks))
         for sequence_no in range(batch_count):
+            entry_offset = sequence_no * MAX_SNAPSHOT_BATCH_ENTRIES
+            decision_offset = sequence_no * MAX_SNAPSHOT_BATCH_ENTRIES
             self._entry_store.commit_snapshot_entry_batch(
                 snapshot_entry_batch(
                     snapshot_id=scan.snapshot_id,
                     sequence_no=sequence_no,
-                    entries=(
-                        entry_chunks[sequence_no]
-                        if sequence_no < len(entry_chunks)
-                        else ()
-                    ),
+                    entries=scan.entries[
+                        entry_offset : entry_offset + MAX_SNAPSHOT_BATCH_ENTRIES
+                    ],
                     coverage_updates=scan.coverage if sequence_no == 0 else (),
                     issues=scan.issues if sequence_no == 0 else (),
-                    filter_decisions=(
-                        decision_chunks[sequence_no]
-                        if sequence_no < len(decision_chunks)
-                        else ()
-                    ),
+                    filter_decisions=scan.filter_decisions[
+                        decision_offset : decision_offset
+                        + MAX_SNAPSHOT_BATCH_ENTRIES
+                    ],
                 )
             )
 
     def _seal_scan(self, scan: FilesystemSnapshotScan) -> None:
+        expected_batch_count = (
+            scan.streamed_batch_count + 1
+            if scan.streamed_batch_count
+            else max(
+                1,
+                _bounded_batch_count(len(scan.entries)),
+                _bounded_batch_count(len(scan.filter_decisions)),
+            )
+        )
         self._seal_store.seal_snapshot(
             SnapshotSealRequest(
                 snapshot_id=scan.snapshot_id,
-                expected_entry_count=len(scan.entries),
-                expected_total_bytes=sum(
-                    entry.size_bytes or 0 for entry in scan.entries
-                ),
-                expected_batch_count=max(
-                    1,
-                    _bounded_batch_count(len(scan.entries)),
-                    _bounded_batch_count(len(scan.filter_decisions)),
-                ),
+                expected_entry_count=scan.entry_count,
+                expected_total_bytes=scan.total_bytes,
+                expected_batch_count=expected_batch_count,
                 expected_directory_coverage_count=len(scan.coverage),
                 expected_issue_count=len(scan.issues),
                 expected_blocking_issue_count=sum(
                     issue.blocks_destructive_actions for issue in scan.issues
                 ),
-                expected_case_collision_group_count=_case_collision_group_count(
-                    scan
+                expected_case_collision_group_count=(
+                    self._persisted_case_collision_group_count(scan.snapshot_id)
+                    if scan.streamed_batch_count
+                    else _case_collision_group_count(scan)
                 ),
-                expected_filter_decision_count=len(scan.filter_decisions),
+                expected_filter_decision_count=scan.filter_decision_count,
             )
         )
+
+    def _persisted_case_collision_group_count(self, snapshot_id: str) -> int:
+        row = self._connection.execute(
+            """
+            SELECT count(*)
+            FROM case_collision_groups
+            WHERE snapshot_id = ?
+            """,
+            (snapshot_id,),
+        ).fetchone()
+        if row is None:
+            raise SqliteJobSnapshotMaterializationError(
+                "JOB_SNAPSHOT_CASE_COLLISION_COUNT_FAILED"
+            )
+        return int(row[0])
 
     def _persist_blocked_without_analysis(
         self,
@@ -695,6 +906,22 @@ def _rollback(connection: sqlite3.Connection) -> None:
         connection.execute("ROLLBACK")
     except sqlite3.Error:
         pass
+
+
+def _scan_sink_checkpoint(checkpoint: object) -> tuple[str, int]:
+    if (
+        not isinstance(checkpoint, tuple)
+        or len(checkpoint) != 2
+        or not isinstance(checkpoint[0], str)
+        or not checkpoint[0].startswith("snapshot_scan_")
+        or not checkpoint[0][len("snapshot_scan_") :].isdigit()
+        or not isinstance(checkpoint[1], int)
+        or checkpoint[1] < 0
+    ):
+        raise SqliteJobSnapshotMaterializationError(
+            "JOB_SNAPSHOT_STREAM_CHECKPOINT_INVALID"
+        )
+    return checkpoint[0], checkpoint[1]
 
 
 def _job_scan_precondition_reason(

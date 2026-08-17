@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -12,12 +13,18 @@ from uuid import uuid4
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 EXE_NAME = "MediaSyncHome0B.exe"
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Smoke install, launch, upgrade-protect, upgrade, and uninstall the installer"
+        description=(
+            "Smoke install, launch, graceful upgrade, scheduled-task cleanup, and "
+            "uninstall the installer"
+        )
     )
     parser.add_argument("installer", type=Path)
     parser.add_argument(
@@ -55,10 +62,19 @@ def run_installer_smoke(
 
     base = _smoke_work_dir(work_dir)
     install_dir = base / "app"
-    state_root = base / "state"
-    installation_id = f"installer-smoke-{uuid4().hex[:12]}"
+    installation_id = "local-dev"
+    smoke_environment = dict(os.environ)
+    smoke_environment["LOCALAPPDATA"] = str(base / "local-app-data")
+    from mediasync_home.adapters.local_host_locator import (
+        default_local_preview_state_root,
+    )
+
+    state_root = default_local_preview_state_root(
+        installation_id,
+        environ=smoke_environment,
+    )
     base.mkdir(parents=True, exist_ok=False)
-    state_root.mkdir()
+    state_root.mkdir(parents=True)
     marker = state_root / "uninstall-preservation-marker.txt"
     marker.write_text("preserve me\n", encoding="utf-8")
 
@@ -70,8 +86,14 @@ def run_installer_smoke(
         "installation_id": installation_id,
     }
     host: subprocess.Popen[str] | None = None
+    owned_task_path: str | None = None
     try:
-        install = _run_setup(installer, install_dir, base / "install.log")
+        install = _run_setup(
+            installer,
+            install_dir,
+            base / "install.log",
+            environment=smoke_environment,
+        )
         result["install_exit_code"] = install.returncode
         executable = install_dir / EXE_NAME
         product_license = install_dir / "LICENSE.txt"
@@ -125,24 +147,39 @@ def run_installer_smoke(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
+            env=smoke_environment,
         )
         time.sleep(3)
         if host.poll() is not None:
             result["reason"] = "UPGRADE_PROTECTION_HOST_DID_NOT_START"
             return result
-        blocked_upgrade = _run_setup(installer, install_dir, base / "blocked-upgrade.log")
-        result["running_upgrade_exit_code"] = blocked_upgrade.returncode
-        result["running_upgrade_blocked"] = blocked_upgrade.returncode != 0
-        if blocked_upgrade.returncode == 0:
-            result["reason"] = "RUNNING_UPGRADE_NOT_BLOCKED"
+        upgrade = _run_setup(
+            installer,
+            install_dir,
+            base / "running-upgrade.log",
+            environment=smoke_environment,
+        )
+        result["running_upgrade_exit_code"] = upgrade.returncode
+        result["running_upgrade_graceful_shutdown"] = host.wait(timeout=20) == 0
+        host = None
+        result["upgrade_exit_code"] = upgrade.returncode
+        if (
+            upgrade.returncode != 0
+            or not result["running_upgrade_graceful_shutdown"]
+            or not executable.is_file()
+        ):
+            result["reason"] = "RUNNING_UPGRADE_GRACEFUL_SHUTDOWN_FAILED"
             return result
 
-        _stop_process(host)
-        host = None
-        upgrade = _run_setup(installer, install_dir, base / "upgrade.log")
-        result["upgrade_exit_code"] = upgrade.returncode
-        if upgrade.returncode != 0 or not executable.is_file():
-            result["reason"] = "STOPPED_UPGRADE_FAILED"
+        owned_task_path = _create_owned_scheduled_task(
+            installation_id=installation_id,
+            executable=executable,
+        )
+        result["owned_scheduled_task_created"] = _owned_scheduled_task_exists(
+            owned_task_path
+        )
+        if not result["owned_scheduled_task_created"]:
+            result["reason"] = "OWNED_SCHEDULED_TASK_NOT_CREATED"
             return result
 
         uninstaller = install_dir / "unins000.exe"
@@ -152,11 +189,20 @@ def run_installer_smoke(
         uninstall = _run(
             [str(uninstaller), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
             timeout_seconds=120,
+            environment=smoke_environment,
         )
         result["uninstall_exit_code"] = uninstall.returncode
         result["application_removed"] = not executable.exists()
         result["state_preserved"] = marker.read_text(encoding="utf-8") == "preserve me\n"
-        if uninstall.returncode != 0 or executable.exists() or not result["state_preserved"]:
+        result["owned_scheduled_task_removed"] = not _owned_scheduled_task_exists(
+            owned_task_path
+        )
+        if (
+            uninstall.returncode != 0
+            or executable.exists()
+            or not result["state_preserved"]
+            or not result["owned_scheduled_task_removed"]
+        ):
             result["reason"] = "UNINSTALL_FAILED"
             return result
 
@@ -171,18 +217,98 @@ def run_installer_smoke(
     finally:
         if host is not None:
             _stop_process(host)
+        if owned_task_path is not None:
+            _delete_owned_scheduled_task(owned_task_path)
         uninstaller = install_dir / "unins000.exe"
         if "uninstall_exit_code" not in result and uninstaller.is_file():
             cleanup_uninstall = _run(
                 [str(uninstaller), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
                 timeout_seconds=120,
+                environment=smoke_environment,
             )
             result["cleanup_uninstall_exit_code"] = cleanup_uninstall.returncode
         if not keep_work_dir:
             _remove_smoke_work_dir(base)
 
 
-def _run_setup(installer: Path, install_dir: Path, log_path: Path) -> subprocess.CompletedProcess[str]:
+def _create_owned_scheduled_task(
+    *,
+    installation_id: str,
+    executable: Path,
+) -> str:
+    from mediasync_home.adapters.task_scheduler import (
+        Pywin32TaskSchedulerGateway,
+        WindowsTaskSchedulerRegistry,
+    )
+    from mediasync_home.application.schedules import ScheduleDefinition
+    from mediasync_home.application.task_scheduler import (
+        bind_same_user_task_scheduler_definition_hash,
+        build_same_user_task_scheduler_definition,
+    )
+    from mediasync_home.application.trigger_occurrences import TriggerKind
+
+    executable_path = str(executable.resolve())
+    schedule = ScheduleDefinition(
+        schedule_id=f"smoke-{uuid4().hex[:12]}",
+        job_id="smoke-job",
+        plan_id="smoke-plan",
+        plan_checksum="a" * 64,
+        trigger_type=TriggerKind.SCHEDULED_TIME,
+        configuration_json='{"hour":23,"kind":"daily","minute":59}',
+        definition_generation=1,
+        desired_definition_hash="0" * 64,
+        time_zone_id=None,
+        dst_policy="PRESERVE_WALL_TIME",
+        misfire_policy="QUEUE_ONCE",
+        coalescing_window_seconds=60,
+        task_logon_type="INTERACTIVE_TOKEN",
+        requires_network=False,
+        run_only_when_logged_on=True,
+        enabled=False,
+        row_version=1,
+    )
+    schedule = bind_same_user_task_scheduler_definition_hash(
+        schedule,
+        installation_id=installation_id,
+        executable_path=executable_path,
+    )
+    definition = build_same_user_task_scheduler_definition(
+        schedule,
+        installation_id=installation_id,
+        executable_path=executable_path,
+    )
+    registry = WindowsTaskSchedulerRegistry(Pywin32TaskSchedulerGateway())
+    registry.apply_task_definition(definition)
+    return definition.task_path
+
+
+def _owned_scheduled_task_exists(task_path: str) -> bool:
+    from mediasync_home.adapters.task_scheduler import (
+        Pywin32TaskSchedulerGateway,
+        WindowsTaskSchedulerRegistry,
+    )
+
+    registry = WindowsTaskSchedulerRegistry(Pywin32TaskSchedulerGateway())
+    return registry.load_task(task_path) is not None
+
+
+def _delete_owned_scheduled_task(task_path: str) -> None:
+    from mediasync_home.adapters.task_scheduler import (
+        Pywin32TaskSchedulerGateway,
+        WindowsTaskSchedulerRegistry,
+    )
+
+    registry = WindowsTaskSchedulerRegistry(Pywin32TaskSchedulerGateway())
+    registry.delete_task(task_path)
+
+
+def _run_setup(
+    installer: Path,
+    install_dir: Path,
+    log_path: Path,
+    *,
+    environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return _run(
         [
             str(installer),
@@ -194,6 +320,7 @@ def _run_setup(installer: Path, install_dir: Path, log_path: Path) -> subprocess
             f"/LOG={log_path}",
         ],
         timeout_seconds=180,
+        environment=environment,
     )
 
 
@@ -202,6 +329,7 @@ def _run(
     *,
     timeout_seconds: int,
     cwd: Path | None = None,
+    environment: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
@@ -212,6 +340,7 @@ def _run(
         encoding="utf-8",
         errors="replace",
         timeout=timeout_seconds,
+        env=environment,
     )
 
 

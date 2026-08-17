@@ -1117,6 +1117,10 @@ class MediaSyncWindow(QMainWindow):
         self._settings_status_label: QLabel | None = None
         self._settings_open_data_button: QPushButton | None = None
         self._settings_copy_diagnostics_button: QPushButton | None = None
+        self._settings_exit_button: QPushButton | None = None
+        self._engine_exit_requested = False
+        self._engine_exit_pending = False
+        self._engine_exit_accepted = False
         self._language_options = (
             ("nb", "Norsk"),
             ("en", "English"),
@@ -1222,6 +1226,11 @@ class MediaSyncWindow(QMainWindow):
             if self._setup_autosave_saved_revision < self._setup_autosave_revision:
                 event.ignore()
                 return
+        if self._engine_exit_requested and not self._engine_exit_accepted:
+            event.ignore()
+            if not self._engine_exit_pending:
+                self._request_engine_host_shutdown()
+            return
         self._setup_autosave_timer.stop()
         self._duplicate_scan_timer.stop()
         if self._background_queries is not None:
@@ -1290,6 +1299,7 @@ class MediaSyncWindow(QMainWindow):
         self._apply_history_operation_retry(self._history_operation_audit_state)
         self._apply_retained_version_protect_action()
         self._apply_duplicate_scan_state(self._duplicate_scan_state)
+        self._refresh_settings_exit_button()
 
     def refresh_engine_status(self) -> None:
         if self._background_queries is not None and self._engine_client is not None:
@@ -11468,10 +11478,18 @@ class MediaSyncWindow(QMainWindow):
         copy_button.setObjectName("settingsActionButton")
         copy_button.clicked.connect(self._copy_diagnostics)
         self._settings_copy_diagnostics_button = copy_button
+        exit_button = QPushButton(text.exit_app)
+        exit_button.setObjectName("settingsActionButton")
+        exit_button.setIcon(self._icons.icon("exit"))
+        exit_button.setIconSize(QSize(18, 18))
+        exit_button.clicked.connect(self._confirm_engine_host_exit)
+        self._settings_exit_button = exit_button
         action_layout.addWidget(open_button)
         action_layout.addWidget(copy_button)
+        action_layout.addWidget(exit_button)
         action_layout.addStretch(1)
         self._settings_action_layout = action_layout
+        self._refresh_settings_exit_button()
         layout.addWidget(actions, 4, 0, 1, 3)
 
         status = QLabel()
@@ -12246,6 +12264,77 @@ class MediaSyncWindow(QMainWindow):
             status_kind="saved",
         )
 
+    def _confirm_engine_host_exit(self) -> None:
+        text = settings_text(self._selected_language_code)
+        answer = QMessageBox.question(
+            self,
+            text.exit_title,
+            text.exit_confirmation,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._engine_exit_requested = True
+        self.close()
+
+    def _request_engine_host_shutdown(self) -> None:
+        text = settings_text(self._selected_language_code)
+        if self._command_worker_active():
+            self._engine_exit_requested = False
+            self._set_settings_status(text.exit_wait, status_kind="warning")
+            self._refresh_settings_exit_button()
+            return
+
+        def command(client: object) -> object:
+            shutdown = getattr(client, "shutdown_engine_host", None)
+            if not callable(shutdown):
+                raise RuntimeError("ENGINE_HOST_SHUTDOWN_UNAVAILABLE")
+            return shutdown()
+
+        def accept(raw_response: object) -> None:
+            response = cast(IpcResponse, raw_response)
+            shutdown_payload = response.payload.get("engine_host_shutdown")
+            requested = (
+                isinstance(shutdown_payload, dict)
+                and shutdown_payload.get("requested") is True
+            )
+            self._engine_exit_pending = False
+            if response.status is IpcStatus.ACCEPTED and requested:
+                self._engine_exit_accepted = True
+                QTimer.singleShot(0, self.close)
+                return
+            self._engine_exit_requested = False
+            self._set_settings_status(text.exit_blocked, status_kind="warning")
+            self._refresh_settings_exit_button()
+
+        def reject(_error: Exception) -> None:
+            self._engine_exit_pending = False
+            self._engine_exit_requested = False
+            self._set_settings_status(text.exit_failed, status_kind="error")
+            self._refresh_settings_exit_button()
+
+        self._engine_exit_pending = True
+        submitted = self._submit_engine_command(
+            name="shutdown-engine-host",
+            operation=command,
+            on_result=accept,
+            on_error=reject,
+        )
+        if not submitted:
+            reject(RuntimeError("ENGINE_HOST_SHUTDOWN_NOT_SUBMITTED"))
+
+    def _refresh_settings_exit_button(self) -> None:
+        if self._settings_exit_button is None:
+            return
+        shutdown = getattr(self._engine_client, "shutdown_engine_host", None)
+        self._settings_exit_button.setEnabled(
+            callable(shutdown)
+            and not self._engine_exit_pending
+            and not self._engine_exit_accepted
+            and not self._command_worker_active()
+        )
+
     def _set_settings_status(self, text: str, *, status_kind: str) -> None:
         if self._settings_status_label is None:
             return
@@ -12753,6 +12842,8 @@ class MediaSyncWindow(QMainWindow):
             self._settings_open_data_button.setText(text.open_data_folder)
         if self._settings_copy_diagnostics_button is not None:
             self._settings_copy_diagnostics_button.setText(text.copy_diagnostics)
+        if self._settings_exit_button is not None:
+            self._settings_exit_button.setText(text.exit_app)
 
 
 def _add_key_value(

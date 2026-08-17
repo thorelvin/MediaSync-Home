@@ -24,6 +24,9 @@ def test_installer_definition_is_per_user_and_preserves_external_state() -> None
     assert "DefaultDirName={localappdata}\\Programs\\MediaSync Home" in script
     assert "CloseApplications=no" in script
     assert "IsMediaSyncRunning" in script
+    assert "--shutdown-local-preview-host --timeout-seconds 15" in script
+    assert "--cleanup-owned-scheduled-tasks" in script
+    assert "CleanupOwnedScheduledTasks" in script
     assert "[UninstallDelete]" not in script
     assert "{localappdata}\\MediaSyncHome" not in script
     assert "Norwegian.isl" in script

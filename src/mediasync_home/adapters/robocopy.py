@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 import re
+from collections import deque
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +35,7 @@ from mediasync_home.application.process_supervision import (
 from mediasync_home.application.file_object_fingerprints import (
     file_object_fingerprints_match,
 )
+from mediasync_home.application.job_drafts import PerformancePreset
 from mediasync_home.application.recovery_operations import (
     RecoveryOperation,
     RecoveryOperationKind,
@@ -54,11 +57,15 @@ DEFAULT_ROBOCOPY_SWITCHES = (
     "/NP",
     "/NFL",
     "/NDL",
+    "/MT:8",
 )
 ROBOCOPY_SUCCESS_MAX_EXIT_CODE = 7
 ROBOCOPY_CONTAINMENT_TIMEOUT_EXIT_CODE = 98
 ROBOCOPY_MANIFEST_SCHEMA_VERSION = 1
 ROBOCOPY_CONSERVATIVE_COMMAND_LINE_LIMIT = 24_000
+ROBOCOPY_MAX_BATCH_FILES = 256
+ROBOCOPY_BATCH_FILE_NAME_BUDGET = 12_000
+ROBOCOPY_RECENT_BATCH_OPERATION_LIMIT = 1_024
 ROBOCOPY_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _DISCARD_ROBOCOPY_INBOX_ERROR_CODES = frozenset(
@@ -95,6 +102,14 @@ class RobocopyTransferProfile:
     switches: tuple[str, ...] = DEFAULT_ROBOCOPY_SWITCHES
     timeout_seconds: float | None = None
     success_max_exit_code: int = ROBOCOPY_SUCCESS_MAX_EXIT_CODE
+
+
+def robocopy_profile_for_performance_preset(
+    preset: PerformancePreset,
+) -> RobocopyTransferProfile:
+    if preset is PerformancePreset.AUTO:
+        return RobocopyTransferProfile()
+    raise RobocopyConfigurationError("ROBOCOPY_PERFORMANCE_PRESET_UNSUPPORTED")
 
 
 @dataclass(frozen=True)
@@ -221,6 +236,7 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
         executable_resolver: SystemExecutableResolver | None = None,
         reparse_guard: ReparseGuard | None = None,
         profile: RobocopyTransferProfile = RobocopyTransferProfile(),
+        profile_resolver: Callable[[RecoveryOperation], RobocopyTransferProfile] | None = None,
     ) -> None:
         super().__init__(
             root_resolver=root_resolver,
@@ -232,14 +248,36 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
         self._process_supervisor = process_supervisor or Win32JobObjectTransferSupervisor()
         self._executable_resolver = executable_resolver or WindowsSystemExecutableResolver()
         self._profile = profile
+        self._profile_resolver = profile_resolver
+        self._published_batch_operations: set[tuple[str, str, str | None]] = set()
+        self._published_batch_operation_order: deque[
+            tuple[str, str, str | None]
+        ] = deque()
 
     def transfer_to_staging(self, operation: RecoveryOperation) -> StagingTransferEvidence:
+        return self.transfer_batch_to_staging(operation, (operation,))
+
+    def transfer_batch_to_staging(
+        self,
+        operation: RecoveryOperation,
+        candidates: Sequence[RecoveryOperation],
+    ) -> StagingTransferEvidence:
         if operation.operation_kind is RecoveryOperationKind.CREATE_DIRECTORY:
             return super().transfer_to_staging(operation)
         expected = _expected_fingerprint(operation.expected_source_fingerprint_json)
         payload_path = self._staging_payload_path(operation)
         self._ensure_staging_manifest(operation)
         if payload_path.exists():
+            batch_key = _operation_batch_key(operation)
+            if batch_key in self._published_batch_operations:
+                if (
+                    payload_path.is_file()
+                    and not payload_path.is_symlink()
+                    and payload_path.stat().st_size == expected["byte_count"]
+                ):
+                    return StagingTransferEvidence(
+                        transfer_state="ROBOCOPY_BATCH_TRANSFERRED_EXISTING"
+                    )
             existing = self._file_object_fingerprints.fingerprint(payload_path)
             if file_object_fingerprints_match(existing, expected):
                 return StagingTransferEvidence(
@@ -257,6 +295,13 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
                 "Refresh analysis because the planned source file is no longer readable.",
             )
         self._validate_source_identity(operation, source_path)
+        profile = self._profile_for(operation)
+        batch_operations = self._select_batch_operations(
+            operation=operation,
+            candidates=candidates,
+            source_parent=source_path.parent,
+            profile=profile,
+        )
         inbox = self._robocopy_inbox_path(operation)
         if inbox.exists():
             if not quarantine_robocopy_batch_inbox(inbox=inbox):
@@ -269,20 +314,28 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
         manifest: RobocopyBatchManifest | None = None
 
         try:
+            entries: list[RobocopyBatchManifestEntry] = []
+            for batch_operation in batch_operations:
+                batch_source = self._source_path(batch_operation)
+                self._validate_source_identity(batch_operation, batch_source)
+                self._ensure_staging_manifest(batch_operation)
+                entries.append(
+                    build_robocopy_manifest_entry(
+                        operation=batch_operation,
+                        source_file=batch_source,
+                        payload_path=self._staging_payload_path(batch_operation),
+                        expected_fingerprint=_expected_fingerprint(
+                            batch_operation.expected_source_fingerprint_json
+                        ),
+                    )
+                )
             manifest = build_robocopy_batch_manifest(
                 batch_id=_safe_staging_name(operation),
                 source_parent=source_path.parent,
                 staging_inbox=inbox,
                 log_path=log_path,
-                entries=(
-                    build_robocopy_manifest_entry(
-                        operation=operation,
-                        source_file=source_path,
-                        payload_path=payload_path,
-                        expected_fingerprint=expected,
-                    ),
-                ),
-                profile=self._profile,
+                entries=tuple(entries),
+                profile=profile,
             )
             write_robocopy_batch_manifest_for_retry(
                 manifest=manifest,
@@ -296,14 +349,18 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
                 manifest_path=manifest_path,
                 working_directory=self._robocopy_work_root_for(operation),
                 working_directory_root=self._robocopy_work_root_for(operation),
-                profile=self._profile,
+                profile=profile,
             )
             result = build_robocopy_result(
                 command_plan=command_plan,
                 exit_code=self._run_robocopy(command_plan.launch_plan),
             )
-            self._validate_source_identity(operation, source_path)
-            if result.failed or result.exit_code > self._profile.success_max_exit_code:
+            for batch_operation in batch_operations:
+                self._validate_source_identity(
+                    batch_operation,
+                    self._source_path(batch_operation),
+                )
+            if result.failed or result.exit_code > profile.success_max_exit_code:
                 self._raise_endpoint_wait_if_unavailable(
                     operation,
                     include_source=True,
@@ -313,6 +370,7 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
                     "Retry the transfer after reviewing the Robocopy batch log.",
                 )
             publish_robocopy_batch_inbox(manifest)
+            self._remember_published_batch_operations(batch_operations)
         except RunTargetEndpointWaitRequired:
             discard_robocopy_batch_inbox(inbox=inbox, manifest=manifest)
             raise
@@ -343,6 +401,83 @@ class RobocopyStagingTransferAdapter(LocalFileStagingTransferAdapter):
         return StagingTransferEvidence(
             transfer_state=_robocopy_transfer_state(result)
         )
+
+    def _profile_for(self, operation: RecoveryOperation) -> RobocopyTransferProfile:
+        profile = (
+            self._profile
+            if self._profile_resolver is None
+            else self._profile_resolver(operation)
+        )
+        validate_robocopy_profile(profile)
+        return profile
+
+    def _remember_published_batch_operations(
+        self,
+        operations: Sequence[RecoveryOperation],
+    ) -> None:
+        for operation in operations:
+            key = _operation_batch_key(operation)
+            if key in self._published_batch_operations:
+                continue
+            if (
+                len(self._published_batch_operation_order)
+                >= ROBOCOPY_RECENT_BATCH_OPERATION_LIMIT
+            ):
+                expired = self._published_batch_operation_order.popleft()
+                self._published_batch_operations.discard(expired)
+            self._published_batch_operation_order.append(key)
+            self._published_batch_operations.add(key)
+
+    def _select_batch_operations(
+        self,
+        *,
+        operation: RecoveryOperation,
+        candidates: Sequence[RecoveryOperation],
+        source_parent: Path,
+        profile: RobocopyTransferProfile,
+    ) -> tuple[RecoveryOperation, ...]:
+        selected = [operation]
+        selected_ids = {operation.operation_id}
+        selected_names = {self._source_path(operation).name.casefold()}
+        name_budget = len(self._source_path(operation).name) + 3
+        ordered = sorted(
+            candidates,
+            key=lambda item: (item.plan_sequence_no, item.operation_id),
+        )
+        for candidate in ordered:
+            if candidate.operation_id in selected_ids:
+                continue
+            if len(selected) >= ROBOCOPY_MAX_BATCH_FILES:
+                break
+            if candidate.operation_kind is not RecoveryOperationKind.COPY_NEW:
+                continue
+            if candidate.run_id != operation.run_id or candidate.run_target_id != operation.run_target_id:
+                continue
+            try:
+                if self._profile_for(candidate) != profile:
+                    continue
+                candidate_source = self._source_path(candidate)
+                candidate_name = candidate_source.name
+                if candidate_source.parent != source_parent:
+                    continue
+                if candidate_name.casefold() in selected_names:
+                    continue
+                if self._staging_payload_path(candidate).exists():
+                    continue
+                _expected_fingerprint(candidate.expected_source_fingerprint_json)
+                if not candidate_source.is_file() or candidate_source.is_symlink():
+                    continue
+                self._validate_source_identity(candidate, candidate_source)
+            except (LocalFileStagingError, OSError):
+                continue
+            candidate_cost = len(candidate_name) + 3
+            if name_budget + candidate_cost > ROBOCOPY_BATCH_FILE_NAME_BUDGET:
+                continue
+            selected.append(candidate)
+            selected_ids.add(candidate.operation_id)
+            selected_names.add(candidate_name.casefold())
+            name_budget += candidate_cost
+        return tuple(selected)
 
     def _run_robocopy(self, launch_plan: ProcessLaunchPlan) -> int:
         try:
@@ -453,6 +588,10 @@ def build_robocopy_manifest_entry(
         expected_byte_count=byte_count,
         expected_content_hash=content_hash,
     )
+
+
+def _operation_batch_key(operation: RecoveryOperation) -> tuple[str, str, str | None]:
+    return (operation.run_id, operation.operation_id, operation.staging_object_id)
 
 
 def build_robocopy_batch_manifest(

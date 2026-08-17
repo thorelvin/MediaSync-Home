@@ -77,6 +77,7 @@ from mediasync_home.application.history_read_models import (
     HistoryTimelineReadModelStore,
     query_history_timeline,
 )
+from mediasync_home.application.host_lifecycle import EngineHostShutdownPort
 from mediasync_home.application.endpoint_registration import (
     EndpointClassificationRefreshReport,
 )
@@ -426,6 +427,7 @@ class EngineHostIpcService:
     state_restore_executor: StateRestoreCommandExecutor | None = None
     outbox_store: OutboxStore | None = None
     state_capacity_provider: Callable[[], dict[str, object]] | None = None
+    host_shutdown: EngineHostShutdownPort | None = None
     _accepted_clients: dict[str, _AcceptedClient] = field(default_factory=dict)
     _global_frame_times: deque[float] = field(default_factory=deque)
 
@@ -484,6 +486,21 @@ class EngineHostIpcService:
         response_payload: dict[str, object] = {"host_status": self.status.to_dict()}
         self._add_state_capacity_payload(response_payload)
         return IpcResponse.accepted(response_payload)
+
+    def request_engine_host_shutdown(self, client_instance_id: str) -> IpcResponse:
+        rejection = self._authorize_client_request(client_instance_id)
+        if rejection is not None:
+            return rejection
+        if self.host_shutdown is None:
+            return IpcResponse.rejected(IpcReason.COMMAND_DISPATCHER_NOT_CONFIGURED)
+        decision = self.host_shutdown.request_shutdown()
+        payload = {"engine_host_shutdown": decision.to_payload()}
+        if not decision.requested:
+            return IpcResponse.rejected(
+                IpcReason.COMMAND_PRECONDITION_FAILED,
+                payload,
+            )
+        return IpcResponse.accepted(payload)
 
     def query_selected_directory_identities(
         self,
