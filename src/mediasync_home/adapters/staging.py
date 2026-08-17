@@ -140,16 +140,10 @@ class LocalFileStagingTransferAdapter:
                 source_path,
                 precondition=_source_precondition(operation),
             )
-            fingerprint = self._file_object_fingerprints.fingerprint(source_path)
-            if (
-                fingerprint.get("byte_count") != primary_fingerprint["byte_count"]
-                or fingerprint.get("content_hash")
-                != primary_fingerprint["content_hash"]
-            ):
-                raise LocalFileStagingError(
-                    "LOCAL_STAGING_SOURCE_CHANGED_DURING_STREAM_INVENTORY",
-                    "Refresh analysis because the source changed during validation.",
-                )
+            fingerprint = self._file_object_fingerprints.fingerprint_with_primary(
+                source_path,
+                primary_fingerprint=primary_fingerprint,
+            )
             self._validate_source_identity(operation, source_path)
         except LocalFileStagingError as exc:
             self._raise_endpoint_wait_if_unavailable(
@@ -409,11 +403,6 @@ class LocalFileStagingTransferAdapter:
                     destination=temp_path,
                     expected_fingerprint=expected,
                 )
-                if self._file_object_fingerprints.fingerprint(temp_path) != expected:
-                    raise LocalFileStagingError(
-                        "LOCAL_STAGING_FILE_OBJECT_MISMATCH",
-                        "Refresh analysis because the source file object changed during transfer.",
-                    )
                 os.replace(temp_path, payload_path)
             finally:
                 temp_path.unlink(missing_ok=True)
@@ -519,18 +508,10 @@ class LocalFileStagingTransferAdapter:
                 self._source_path(operation),
                 precondition=_source_precondition(operation),
             )
-            current_source = self._file_object_fingerprints.fingerprint(
-                self._source_path(operation)
+            current_source = self._file_object_fingerprints.fingerprint_with_primary(
+                self._source_path(operation),
+                primary_fingerprint=current_primary,
             )
-            if (
-                current_source.get("byte_count") != current_primary["byte_count"]
-                or current_source.get("content_hash")
-                != current_primary["content_hash"]
-            ):
-                raise LocalFileStagingError(
-                    "LOCAL_STAGING_SOURCE_CHANGED_AFTER_TRANSFER",
-                    "Refresh analysis because the source changed after transfer.",
-                )
         except LocalFileStagingError as exc:
             self._raise_endpoint_wait_if_unavailable(
                 operation,

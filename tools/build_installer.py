@@ -271,8 +271,9 @@ def prepare_installer_metadata(destination: Path) -> dict[str, object]:
         "This build is unsigned and intended for local evaluation by the current Windows user.\n"
         "Application state is stored outside the installation directory and is preserved when "
         "the app is uninstalled.\n"
-        "Close MediaSync Home and wait for backup activity to finish before upgrading or "
-        "uninstalling.\n",
+        "The installer requests a controlled stop and will wait for active backup work to "
+        "finish before upgrading or uninstalling. Verified MediaSync scheduled tasks are "
+        "removed during uninstall.\n",
         encoding="utf-8",
     )
     shutil.copy2(ROOT / "LICENSE", destination / "LICENSE.txt")

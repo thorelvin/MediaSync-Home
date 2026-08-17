@@ -147,6 +147,23 @@ def test_bounded_pipe_loop_runs_after_request_callback() -> None:
     assert callbacks == [1, 2, 3]
 
 
+def test_bounded_pipe_loop_stops_before_after_request_on_shutdown() -> None:
+    server = _FakePipeServer()
+    callbacks: list[int] = []
+
+    result = serve_bounded_pipe_requests(
+        server,
+        request_limit=3,
+        after_request=lambda: callbacks.append(server.calls),
+        stop_requested=lambda: server.calls == 1,
+    )
+
+    assert result.completed is True
+    assert result.stop_reason == "SHUTDOWN_REQUESTED"
+    assert result.served_requests == 1
+    assert callbacks == []
+
+
 def test_engine_host_parser_requires_positive_serve_request_limit() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--serve-requests", "0"])
@@ -261,11 +278,62 @@ def test_executor_maintenance_loop_resets_interval_after_non_idle_work() -> None
     loop.stop()
 
     events = [json.loads(line) for line in lines]
-    assert [event["next_interval_ms"] for event in events[:2]] == [2, 1]
+    assert [event["next_interval_ms"] for event in events[:2]] == [2, 0]
     assert [event["run_executor_cycle"]["stopped_reason"] for event in events[:2]] == [
         "IDLE",
         "STEP_LIMIT_REACHED",
     ]
+
+
+def test_executor_maintenance_loop_wakes_without_waiting_for_idle_backoff() -> None:
+    runtime = _ScriptedRuntime(
+        (
+            RunExecutorPumpStopReason.IDLE,
+            RunExecutorPumpStopReason.IDLE,
+        )
+    )
+    loop = ExecutorMaintenanceLoop(
+        runtime_factory=lambda: runtime,
+        interval_ms=60_000,
+        max_interval_ms=60_000,
+        max_steps=4,
+        output=lambda line: None,
+        pipe_name="pipe-a",
+    )
+
+    loop.start()
+    loop.wake()
+    _wait_until(lambda: len(runtime.cycle_max_steps) == 1)
+    loop.wake()
+    _wait_until(lambda: len(runtime.cycle_max_steps) == 2)
+    loop.stop()
+
+    assert runtime.cycle_max_steps == [4, 4]
+
+
+def test_executor_maintenance_loop_restores_idle_delay_after_immediate_continuation() -> None:
+    runtime = _ScriptedRuntime(
+        (
+            RunExecutorPumpStopReason.STEP_LIMIT_REACHED,
+            RunExecutorPumpStopReason.IDLE,
+        )
+    )
+    lines: list[str] = []
+    loop = ExecutorMaintenanceLoop(
+        runtime_factory=lambda: runtime,
+        interval_ms=50,
+        max_interval_ms=200,
+        max_steps=4,
+        output=lines.append,
+        pipe_name="pipe-a",
+    )
+
+    loop.start()
+    _wait_until(lambda: len(runtime.cycle_max_steps) == 2)
+    loop.stop()
+
+    events = [json.loads(line) for line in lines]
+    assert [event["next_interval_ms"] for event in events[:2]] == [0, 50]
 
 
 def test_executor_maintenance_loop_reports_sanitized_runtime_failure() -> None:
@@ -943,6 +1011,57 @@ def test_engine_host_runtime_without_state_root_preserves_non_persistent_service
             runtime.admit_state_restore_maintenance()
     finally:
         runtime.close()
+
+
+def test_engine_host_shutdown_idle_probe_rejects_nonterminal_run(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    runtime = build_engine_host_runtime(
+        authorization=_authorization(),
+        service_status=startup_status(ProcessRole.ENGINE_HOST),
+        state_root=state_root,
+    )
+    runtime.close()
+    with sqlite3.connect(state_root / "catalog.sqlite") as connection:
+        connection.execute(
+            """
+            INSERT INTO runs (
+                id, job_id, job_revision_id, plan_id, command_request_id,
+                logical_run_group_id, trigger_type, state, summary_json,
+                app_version, plan_checksum, idempotency_key,
+                planned_operations, planned_bytes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run-a",
+                "job-a",
+                "revision-a",
+                "plan-a",
+                "request-a",
+                "group-a",
+                "MANUAL_LOCAL_PREVIEW",
+                "PAUSED",
+                "{}",
+                "test",
+                "a" * 64,
+                "idempotency-a",
+                0,
+                0,
+            ),
+        )
+
+    assert engine_host_module._engine_host_shutdown_idle_blockers(state_root) == (
+        "ENGINE_HOST_ACTIVE_RUNS",
+    )
+
+    with sqlite3.connect(state_root / "catalog.sqlite") as connection:
+        connection.execute(
+            "UPDATE runs SET state = 'CANCELLED', finished_utc = ? WHERE id = 'run-a'",
+            ("2026-08-15T20:00:00.000Z",),
+        )
+
+    assert engine_host_module._engine_host_shutdown_idle_blockers(state_root) == ()
 
 
 def test_engine_host_runtime_migration_failure_opens_no_repository_connections(

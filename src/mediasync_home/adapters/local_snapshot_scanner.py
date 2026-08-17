@@ -28,6 +28,7 @@ from mediasync_home.application.snapshot_scanning import (
     DirectoryCaseContext,
     DirectoryCaseModeProbe,
     FilesystemSnapshotScan,
+    SnapshotScanBatchSink,
 )
 from mediasync_home.application.file_filters import (
     FileFilterDecision,
@@ -62,9 +63,10 @@ FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 FILE_CASE_SENSITIVE_INFO_CLASS = 23
 FILE_CS_FLAG_CASE_SENSITIVE_DIR = 0x00000001
 INVALID_HANDLE_VALUE = int(wintypes.HANDLE(-1).value or -1)
-MAX_LOCAL_SNAPSHOT_ENTRIES = 100_000
-MAX_LOCAL_SNAPSHOT_DIRECTORIES = 25_000
+MAX_LOCAL_SNAPSHOT_ENTRIES = 1_000_000
+MAX_LOCAL_SNAPSHOT_DIRECTORIES = 250_000
 MAX_VOLATILE_DIRECTORY_RESCANS = 2
+STREAMING_SCAN_BATCH_ENTRIES = 1_000
 
 
 class LocalSnapshotScanError(RuntimeError):
@@ -177,11 +179,47 @@ class LocalFilesystemSnapshotScanner:
         exclude_control_area: bool,
         filter_policy: FileFilterPolicy | None = None,
     ) -> FilesystemSnapshotScan:
+        return self._scan(
+            root,
+            snapshot_id=snapshot_id,
+            exclude_control_area=exclude_control_area,
+            filter_policy=filter_policy,
+            batch_sink=None,
+        )
+
+    def scan_streaming(
+        self,
+        root: Path,
+        *,
+        snapshot_id: str,
+        exclude_control_area: bool,
+        batch_sink: SnapshotScanBatchSink,
+        filter_policy: FileFilterPolicy | None = None,
+    ) -> FilesystemSnapshotScan:
+        return self._scan(
+            root,
+            snapshot_id=snapshot_id,
+            exclude_control_area=exclude_control_area,
+            filter_policy=filter_policy,
+            batch_sink=batch_sink,
+        )
+
+    def _scan(
+        self,
+        root: Path,
+        *,
+        snapshot_id: str,
+        exclude_control_area: bool,
+        filter_policy: FileFilterPolicy | None,
+        batch_sink: SnapshotScanBatchSink | None,
+    ) -> FilesystemSnapshotScan:
         root = Path(root)
         self._validate_root(root)
         filter_session = self._filter_session_factory(
             filter_policy or default_file_filter_policy()
         )
+        if filter_session.has_empty_directory_rules:
+            batch_sink = None
         entries: list[SnapshotFileEntry] = []
         coverage: list[SnapshotDirectoryCoverage] = []
         issues: list[SnapshotIssue] = []
@@ -193,6 +231,29 @@ class LocalFilesystemSnapshotScanner:
         examined_entries = 0
         control_area_excluded = False
         rescan_attempt_count = 0
+        streamed_entry_count = 0
+        streamed_total_bytes = 0
+        streamed_filter_decision_count = 0
+
+        def flush_stream_batch() -> None:
+            nonlocal streamed_entry_count
+            nonlocal streamed_total_bytes
+            nonlocal streamed_filter_decision_count
+            if batch_sink is None or (not entries and not filter_decisions):
+                return
+            entry_batch = tuple(entries)
+            decision_batch = tuple(filter_decisions)
+            batch_sink.emit(
+                entries=entry_batch,
+                filter_decisions=decision_batch,
+            )
+            streamed_entry_count += len(entry_batch)
+            streamed_total_bytes += sum(
+                entry.size_bytes or 0 for entry in entry_batch
+            )
+            streamed_filter_decision_count += len(decision_batch)
+            entries.clear()
+            filter_decisions.clear()
 
         while queue:
             queued = queue.popleft()
@@ -263,6 +324,14 @@ class LocalFilesystemSnapshotScanner:
             control_area_excluded_checkpoint = control_area_excluded
             reported_filter_errors_checkpoint = reported_filter_errors.copy()
             attempt_directory_subjects: list[str] = []
+            sink_checkpoint = (
+                batch_sink.checkpoint() if batch_sink is not None else None
+            )
+            streamed_counts_checkpoint = (
+                streamed_entry_count,
+                streamed_total_bytes,
+                streamed_filter_decision_count,
+            )
             self._append_named_stream_issue(
                 issues,
                 path=queued.path,
@@ -286,6 +355,8 @@ class LocalFilesystemSnapshotScanner:
                         "SNAPSHOT_DIRECTORY_DISAPPEARED",
                     )
                 )
+                if batch_sink is not None:
+                    batch_sink.accept(sink_checkpoint)
                 continue
             try:
                 with os.scandir(queued.path) as iterator:
@@ -308,11 +379,18 @@ class LocalFilesystemSnapshotScanner:
                         "SNAPSHOT_DIRECTORY_ENUMERATION_FAILED",
                     )
                 )
+                if batch_sink is not None:
+                    batch_sink.accept(sink_checkpoint)
                 continue
 
             limit_hit = False
             directory_filter_incomplete = False
             for child in children:
+                if batch_sink is not None and (
+                    len(entries) >= STREAMING_SCAN_BATCH_ENTRIES
+                    or len(filter_decisions) >= STREAMING_SCAN_BATCH_ENTRIES
+                ):
+                    flush_stream_batch()
                 if (
                     queued.relative_path == "."
                     and child.name == CONTROL_DIRECTORY_NAME
@@ -550,7 +628,11 @@ class LocalFilesystemSnapshotScanner:
                     )
                 )
             if limit_hit:
+                flush_stream_batch()
+                if batch_sink is not None:
+                    batch_sink.accept(sink_checkpoint)
                 break
+            flush_stream_batch()
             after = _directory_signature(queued.path)
             after_inspection = self._inspect_queued_directory(queued)
             coverage_state = (
@@ -599,6 +681,13 @@ class LocalFilesystemSnapshotScanner:
                 or _inspection_changed(before_inspection, after_inspection)
             ):
                 if queued.rescan_attempt < self._max_volatile_rescans:
+                    if batch_sink is not None:
+                        batch_sink.rollback(sink_checkpoint)
+                        (
+                            streamed_entry_count,
+                            streamed_total_bytes,
+                            streamed_filter_decision_count,
+                        ) = streamed_counts_checkpoint
                     del entries[entries_checkpoint:]
                     del coverage[coverage_checkpoint:]
                     del issues[issues_checkpoint:]
@@ -637,6 +726,8 @@ class LocalFilesystemSnapshotScanner:
                     coverage_state=coverage_state,
                 )
             )
+            if batch_sink is not None:
+                batch_sink.accept(sink_checkpoint)
 
         if filter_session.has_empty_directory_rules:
             entries, coverage, issues, filter_decisions = _apply_empty_directory_filters(
@@ -658,6 +749,10 @@ class LocalFilesystemSnapshotScanner:
             control_area_excluded=control_area_excluded,
             filter_decisions=tuple(filter_decisions),
             rescan_attempt_count=rescan_attempt_count,
+            streamed_entry_count=streamed_entry_count,
+            streamed_total_bytes=streamed_total_bytes,
+            streamed_filter_decision_count=streamed_filter_decision_count,
+            streamed_batch_count=(0 if batch_sink is None else batch_sink.batch_count),
         )
 
     def _validate_root(self, root: Path) -> None:

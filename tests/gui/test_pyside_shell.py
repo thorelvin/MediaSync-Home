@@ -1275,6 +1275,41 @@ def test_settings_apply_and_persist_with_private_diagnostics(
         window.deleteLater()
 
 
+def test_explicit_settings_exit_stops_engine_host_and_closes_window(
+    qapp,
+    monkeypatch,
+) -> None:
+    provider = _FakeEngineClient()
+    window = build_main_window(
+        initial_state=_ready_state(),
+        engine_client=provider,
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    try:
+        window.show()
+        qapp.processEvents()
+        exit_button = next(
+            button
+            for button in window.findChildren(QPushButton, "settingsActionButton")
+            if button.text() == "Avslutt MediaSync Home"
+        )
+
+        QTest.mouseClick(exit_button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        qapp.processEvents()
+
+        assert provider.calls.count("shutdown_engine_host") == 1
+        assert window.isVisible() is False
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_main_window_loads_stored_preferences_on_next_launch(qapp, tmp_path) -> None:
     store = LocalUserPreferencesStore(tmp_path / "user-preferences.json")
     store.save(
@@ -5418,6 +5453,18 @@ class _FakeEngineClient:
         self.calls.append("get_status")
         return IpcResponse.accepted(
             {"host_status": startup_status(ProcessRole.ENGINE_HOST).to_dict()}
+        )
+
+    def shutdown_engine_host(self) -> IpcResponse:
+        self.calls.append("shutdown_engine_host")
+        return IpcResponse.accepted(
+            {
+                "engine_host_shutdown": {
+                    "requested": True,
+                    "already_requested": False,
+                    "blockers": [],
+                }
+            }
         )
 
 

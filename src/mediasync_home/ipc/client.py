@@ -49,6 +49,11 @@ class InProcessIpcClient:
     def query_status(self) -> IpcResponse:
         return self._correlated_response(self.service.query_status(self.client_instance_id))
 
+    def request_engine_host_shutdown(self) -> IpcResponse:
+        return self._correlated_response(
+            self.service.request_engine_host_shutdown(self.client_instance_id)
+        )
+
     def query_selected_directory_identities(
         self,
         *,

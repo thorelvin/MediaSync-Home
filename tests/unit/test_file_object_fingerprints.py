@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import pytest
 
+from mediasync_home.adapters.file_object_fingerprints import (
+    LocalFileObjectFingerprintAdapter,
+)
+
 from mediasync_home.application.file_object_fingerprints import (
     FileObjectFingerprintError,
     canonical_file_object_fingerprint,
@@ -56,6 +60,26 @@ def test_file_object_fingerprint_preserves_legacy_primary_only_evidence() -> Non
             legacy,
             require_named_stream_inventory=True,
         )
+
+
+def test_file_object_adapter_reuses_verified_primary_digest(tmp_path) -> None:
+    path = tmp_path / "payload.bin"
+    path.write_bytes(b"content-that-is-not-rehashed")
+    supplied_hash = "d" * 64
+
+    fingerprint = LocalFileObjectFingerprintAdapter().fingerprint_with_primary(
+        path,
+        primary_fingerprint={
+            "byte_count": 123,
+            "content_hash": supplied_hash,
+        },
+    )
+
+    assert fingerprint == {
+        "byte_count": 123,
+        "content_hash": supplied_hash,
+        "named_streams": [],
+    }
 
 
 @pytest.mark.parametrize(

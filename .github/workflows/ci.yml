@@ -42,3 +42,4 @@ jobs:
           python tools\check_imports.py
           python tools\audit_dependencies.py
           python tools\audit_vulnerabilities.py
+          python tools\check_performance_gates.py --self-test

@@ -44,6 +44,20 @@ class LocalFileObjectFingerprintAdapter:
 
     def fingerprint(self, path: Path) -> dict[str, object]:
         byte_count, content_hash = self._hash_path(path)
+        return self.fingerprint_with_primary(
+            path,
+            primary_fingerprint={
+                "byte_count": byte_count,
+                "content_hash": content_hash,
+            },
+        )
+
+    def fingerprint_with_primary(
+        self,
+        path: Path,
+        *,
+        primary_fingerprint: dict[str, object],
+    ) -> dict[str, object]:
         inspection = self._inspection(path)
         streams: list[dict[str, object]] = []
         for record in inspection.named_streams:
@@ -63,8 +77,8 @@ class LocalFileObjectFingerprintAdapter:
             )
         return canonical_file_object_fingerprint(
             {
-                "byte_count": byte_count,
-                "content_hash": content_hash,
+                "byte_count": primary_fingerprint.get("byte_count"),
+                "content_hash": primary_fingerprint.get("content_hash"),
                 "named_streams": streams,
             },
             require_named_stream_inventory=True,

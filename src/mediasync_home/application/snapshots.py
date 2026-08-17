@@ -43,7 +43,7 @@ class SnapshotMaterializationError(ValueError):
     pass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SnapshotFileEntry:
     entry_id: str
     relative_path: str
@@ -54,7 +54,7 @@ class SnapshotFileEntry:
     identity_fingerprint_hash: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SnapshotDirectoryCoverage:
     relative_path: str
     comparison_key: str
@@ -65,7 +65,7 @@ class SnapshotDirectoryCoverage:
     case_probe_error: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SnapshotIssue:
     relative_path: str
     issue_type: str
@@ -74,7 +74,7 @@ class SnapshotIssue:
     sanitized_message: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SnapshotFilterDecision:
     relative_path: str
     object_type: str

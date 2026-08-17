@@ -13,11 +13,13 @@ from mediasync_home.application.task_scheduler import (
     TaskSchedulerOrphanReconciliationRequest,
     TaskSchedulerPendingResourceReconciliationRequest,
     TaskSchedulerResourcePumpRequest,
+    TaskSchedulerUninstallCleanupRequest,
     TaskSchedulerReconciliationAction,
     TaskSchedulerReconciliationRequest,
     bind_same_user_task_scheduler_definition_hash,
     build_same_user_task_scheduler_definition,
     classify_task_scheduler_reconciliation,
+    cleanup_owned_task_scheduler_page,
     parse_trigger_task_arguments,
     reconcile_claimed_task_scheduler_resource,
     reconcile_next_pending_task_scheduler_resource,
@@ -834,6 +836,94 @@ def test_task_scheduler_orphan_page_blocks_unknown_or_ambiguous_tasks() -> None:
         "TASK_SCHEDULER_ARGUMENTS_NOT_RECOGNIZED",
     )
     assert registry.deleted == ()
+
+
+def test_uninstall_cleanup_deletes_only_strictly_verified_owned_tasks() -> None:
+    owned = build_same_user_task_scheduler_definition(
+        _bound_schedule(schedule_id="schedule-a"),
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    binary_drift = build_same_user_task_scheduler_definition(
+        _bound_schedule(schedule_id="schedule-b"),
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    registry = _Registry(
+        _observed(owned),
+        _observed(binary_drift, executable_path=r"C:\Other\App.exe"),
+    )
+
+    report = cleanup_owned_task_scheduler_page(
+        TaskSchedulerUninstallCleanupRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            limit=10,
+        ),
+        registry=registry,
+    )
+
+    assert report.scanned == 2
+    assert report.deleted == 1
+    assert report.blocked == 1
+    assert registry.deleted == (r"\MediaSync Home\install-a\schedule-a",)
+    assert report.findings[1].reason == "TASK_SCHEDULER_EXECUTABLE_DRIFT"
+
+
+def test_uninstall_cleanup_can_verify_page_without_deleting_owned_tasks() -> None:
+    owned = build_same_user_task_scheduler_definition(
+        _bound_schedule(schedule_id="schedule-a"),
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    drifted = build_same_user_task_scheduler_definition(
+        _bound_schedule(schedule_id="schedule-b"),
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    registry = _Registry(
+        _observed(owned),
+        _observed(drifted, executable_path=r"C:\Other\App.exe"),
+    )
+
+    report = cleanup_owned_task_scheduler_page(
+        TaskSchedulerUninstallCleanupRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            limit=10,
+        ),
+        registry=registry,
+        delete_verified=False,
+    )
+
+    assert report.deleted == 0
+    assert report.blocked == 1
+    assert report.findings[0].reason == "TASK_SCHEDULER_OWNERSHIP_VERIFIED"
+    assert registry.deleted == ()
+
+
+def test_uninstall_cleanup_blocks_inconsistent_argument_hashes() -> None:
+    definition = build_same_user_task_scheduler_definition(
+        _bound_schedule(schedule_id="schedule-a"),
+        installation_id="install-a",
+        executable_path=EXECUTABLE,
+    )
+    arguments = list(definition.arguments)
+    arguments[-1] = "f" * 64
+    registry = _Registry(replace(_observed(definition), arguments=tuple(arguments)))
+
+    report = cleanup_owned_task_scheduler_page(
+        TaskSchedulerUninstallCleanupRequest(
+            installation_id="install-a",
+            executable_path=EXECUTABLE,
+            limit=10,
+        ),
+        registry=registry,
+    )
+
+    assert report.deleted == 0
+    assert report.blocked == 1
+    assert report.findings[0].reason == "TASK_SCHEDULER_ARGUMENT_HASH_MISMATCH"
 
 
 def test_task_scheduler_orphan_page_is_bounded_with_task_cursor() -> None:

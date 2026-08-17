@@ -30,6 +30,7 @@ from mediasync_home.application.command_receipts import (
     ensure_idempotency_compatible,
 )
 from mediasync_home.application.command_payloads import canonical_command_payload_hash
+from mediasync_home.application.host_lifecycle import EngineHostShutdownCoordinator
 from mediasync_home.application.duplicates import DuplicateAnalysisSummary
 from mediasync_home.application.duplicate_scanning import (
     DuplicateGroupCursor,
@@ -4035,6 +4036,43 @@ def test_query_requires_prior_handshake() -> None:
     assert response.status is IpcStatus.REJECTED
     assert response.reason is IpcReason.HANDSHAKE_REQUIRED
     assert response.request_id is not None
+
+
+def test_engine_host_shutdown_requires_handshake_and_returns_blockers() -> None:
+    lifecycle = EngineHostShutdownCoordinator(
+        idle_blockers=lambda: ("ENGINE_HOST_ACTIVE_RUNS",)
+    )
+    service = _service()
+    service.host_shutdown = lifecycle
+    client = _client(service=service)
+
+    unauthenticated = client.request_engine_host_shutdown()
+    client.connect()
+    blocked = client.request_engine_host_shutdown()
+
+    assert unauthenticated.status is IpcStatus.REJECTED
+    assert unauthenticated.reason is IpcReason.HANDSHAKE_REQUIRED
+    assert blocked.status is IpcStatus.REJECTED
+    assert blocked.reason is IpcReason.COMMAND_PRECONDITION_FAILED
+    assert blocked.payload["engine_host_shutdown"] == {
+        "requested": False,
+        "already_requested": False,
+        "blockers": ["ENGINE_HOST_ACTIVE_RUNS"],
+    }
+
+
+def test_engine_client_requests_authenticated_engine_host_shutdown() -> None:
+    lifecycle = EngineHostShutdownCoordinator(idle_blockers=lambda: ())
+    service = _service()
+    service.host_shutdown = lifecycle
+    client = EngineClient(_client(service=service))
+
+    response = client.shutdown_engine_host()
+
+    assert response.status is IpcStatus.ACCEPTED
+    shutdown_payload = response.payload["engine_host_shutdown"]
+    assert shutdown_payload["requested"] is True
+    assert lifecycle.shutdown_requested is True
 
 
 def test_in_process_client_correlates_each_request_with_a_distinct_uuid() -> None:

@@ -51,6 +51,12 @@ class SettingsText:
     open_data_folder: str
     copy_diagnostics: str
     diagnostics_copied: str
+    exit_app: str
+    exit_title: str
+    exit_confirmation: str
+    exit_wait: str
+    exit_blocked: str
+    exit_failed: str
     preference_save_failed: str
     open_data_folder_failed: str
 
@@ -1463,6 +1469,18 @@ NB_SETTINGS_TEXT = SettingsText(
     open_data_folder="Åpne datamappe",
     copy_diagnostics="Kopier diagnostikk",
     diagnostics_copied="Diagnostikk kopiert",
+    exit_app="Avslutt MediaSync Home",
+    exit_title="Avslutt MediaSync Home",
+    exit_confirmation=(
+        "Grensesnittet og Engine Host avsluttes. Planlagte sikkerhetskopier kan "
+        "starte Engine Host igjen."
+    ),
+    exit_wait="Vent til den aktive handlingen er ferdig.",
+    exit_blocked=(
+        "Engine Host kan ikke avsluttes nå. Vent til aktivt arbeid er ferdig og "
+        "prøv igjen."
+    ),
+    exit_failed="Kunne ikke avslutte Engine Host.",
     preference_save_failed="Kunne ikke lagre innstillingen",
     open_data_folder_failed="Kunne ikke åpne datamappen",
 )
@@ -1510,6 +1528,17 @@ EN_SETTINGS_TEXT = SettingsText(
     open_data_folder="Open data folder",
     copy_diagnostics="Copy diagnostics",
     diagnostics_copied="Diagnostics copied",
+    exit_app="Exit MediaSync Home",
+    exit_title="Exit MediaSync Home",
+    exit_confirmation=(
+        "The interface and Engine Host will close. Scheduled backups can start "
+        "Engine Host again."
+    ),
+    exit_wait="Wait for the active action to finish.",
+    exit_blocked=(
+        "Engine Host cannot exit now. Wait for active work to finish and try again."
+    ),
+    exit_failed="Could not exit Engine Host.",
     preference_save_failed="Could not save the setting",
     open_data_folder_failed="Could not open the data folder",
 )

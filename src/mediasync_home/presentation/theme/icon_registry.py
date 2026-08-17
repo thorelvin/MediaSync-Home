@@ -13,6 +13,7 @@ ICON_COLORS = {
     "back": "#94a3b8",
     "dashboard": "#0f766e",
     "edit": "#2563eb",
+    "exit": "#b42318",
     "folder": "#14b8a6",
     "history": "#9a6a12",
     "next": "#94a3b8",
@@ -85,6 +86,9 @@ class IconRegistry:
             painter.drawLine(17, 5, 19, 7)
             painter.drawLine(6, 18, 7, 14)
             painter.drawLine(7, 14, 17, 5)
+        elif name == "exit":
+            painter.drawArc(QRectF(5, 5, 14, 14), 130 * 16, 280 * 16)
+            painter.drawLine(12, 3, 12, 12)
         elif name == "folder":
             painter.drawLine(4, 8, 9, 8)
             painter.drawLine(9, 8, 11, 10)

@@ -92,11 +92,72 @@ begin
     Result := 'MediaSync Home is still running. Close the app and wait for backup activity to finish before continuing.';
 end;
 
+function CleanupMessage(): String;
+begin
+  if ActiveLanguage = 'norwegian' then
+    Result := 'MediaSync Home kunne ikke fjerne alle verifiserte planlagte oppgaver. Avinstallasjonen er stoppet for å unngå å etterlate oppgaver som peker til et slettet program.'
+  else
+    Result := 'MediaSync Home could not remove every verified scheduled task. Uninstall was stopped to avoid leaving tasks that point to a deleted application.';
+end;
+
+function TryStopMediaSync(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := True;
+  if FileExists(ExpandConstant('{app}\{#ProductExeName}')) then
+    Result := Exec(
+      ExpandConstant('{app}\{#ProductExeName}'),
+      '--shutdown-local-preview-host --timeout-seconds 15',
+      ExpandConstant('{app}'),
+      SW_HIDE,
+      ewWaitUntilTerminated,
+      ResultCode) and (ResultCode = 0);
+end;
+
+function StopRunningMediaSync(): Boolean;
+var
+  Attempt: Integer;
+begin
+  if not IsMediaSyncRunning() then
+  begin
+    Result := True;
+    Exit;
+  end;
+  TryStopMediaSync();
+  for Attempt := 1 to 150 do
+  begin
+    if not IsMediaSyncRunning() then
+    begin
+      Result := True;
+      Exit;
+    end;
+    Sleep(100);
+  end;
+  Result := False;
+end;
+
+function CleanupOwnedScheduledTasks(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := False;
+  if not FileExists(ExpandConstant('{app}\{#ProductExeName}')) then
+    Exit;
+  Result := Exec(
+    ExpandConstant('{app}\{#ProductExeName}'),
+    '--cleanup-owned-scheduled-tasks',
+    ExpandConstant('{app}'),
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode) and (ResultCode = 0);
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
   try
-    if IsMediaSyncRunning() then
+    if not StopRunningMediaSync() then
       Result := RunningMessage();
   except
     Result := 'MediaSync Home could not verify that the application is stopped. Close it and try again.';
@@ -107,10 +168,20 @@ function InitializeUninstall(): Boolean;
 begin
   Result := False;
   try
-    Result := not IsMediaSyncRunning();
+    Result := StopRunningMediaSync();
   except
     Result := False;
   end;
   if not Result then
+  begin
     MsgBox(RunningMessage(), mbError, MB_OK);
+    Exit;
+  end;
+  try
+    Result := CleanupOwnedScheduledTasks();
+  except
+    Result := False;
+  end;
+  if not Result then
+    MsgBox(CleanupMessage(), mbError, MB_OK);
 end;

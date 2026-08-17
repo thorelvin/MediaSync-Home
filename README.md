@@ -1,199 +1,164 @@
 # MediaSync Home
 
-**Rask, trygg og oversiktlig backup av store bilde- og videosamlinger på Windows.**
+[![Windows quality gates](https://github.com/thorelvin/MediaSync-Home/actions/workflows/ci.yml/badge.svg)](https://github.com/thorelvin/MediaSync-Home/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/thorelvin/MediaSync-Home?include_prereleases&label=release)](https://github.com/thorelvin/MediaSync-Home/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4.svg)](#system-requirements)
 
-MediaSync Home er et lokalt Windows-program under alpha-utvikling for å kopiere og synkronisere filer mellom lokale disker, USB-disker og SMB/NAS. Hovedflyten er enkel: velg én kilde, velg opptil tre backupmål, kontroller endringene og start backupen.
+**A local-first Windows backup application for photos, videos, documents, and other important files.**
 
-[Prosjektstatus](docs/IMPLEMENTATION_STATUS.md) · [Roadmap](docs/RELEASE_SCOPE.md) · [Dokumentasjon](docs/README.md) · [GUI og UX](docs/GUI_AND_UX.md) · [Start med Codex](docs/CODEX_START_PROMPT.md)
+MediaSync Home helps you back up one source folder to local drives, USB disks, and SMB/NAS locations. It shows what will happen before a backup starts, verifies copied data, keeps a durable history, and is designed to recover safely if a run is interrupted.
 
-> **Prosjektstatus: lokal alpha-kandidat.** Repositoryet inneholder en kjørbar Windows-app og reproduserbart bevis for lokal usignert pakking, ekte filkopiering, recovery og samme-bruker-automatisering. Den er ikke en signert eller offentlig distribuert produksjonsutgivelse ennå. Test alltid med egne testdata før appen brukes på den eneste kopien av verdifulle filer.
+It works locally, requires no cloud account, and sends no telemetry.
 
-![Konseptskisse av MediaSync Home med én kilde og tre backupmål](docs/assets/gui-concept-v1.png)
+> [!IMPORTANT]
+> MediaSync Home is currently an **unsigned alpha release**. Use test data first, keep another known-good copy of important files, and review every plan before starting a backup. Windows SmartScreen may warn about the installer because it is not yet code-signed.
 
-*Konseptskissen viser ønsket stemning, informasjonsmengde og dataflyt. Den er ikke pikselbindende; den kanoniske navigasjonen og de bindende UX-reglene finnes i [GUI- og UX-spesifikasjonen](docs/GUI_AND_UX.md).*
+![MediaSync Home jobs workspace showing two backup jobs](docs/assets/jobs-workspace-dark.png)
 
-## Kort fortalt
+## Why MediaSync Home?
 
-MediaSync Home skal gjøre dette lett å forstå:
+- **Understand the plan first.** Review planned copies, replacements, conflicts, and target status before execution.
+- **Back up to independent destinations.** Protect one source with up to three local, removable, or network targets.
+- **Verify the result.** MediaSync distinguishes between transferred, metadata-checked, content-verified, and durably committed data.
+- **Recover from interruptions.** Staging, operation journals, retries, and idempotent recovery make interrupted runs resumable.
+- **Keep control of your data.** Backup state remains on your computer and files are never uploaded to a MediaSync service.
+- **Use it in English or Norwegian.** The flag button in the upper-right corner changes the application language.
 
-```text
-Dette vil jeg beskytte
-        ↓
-Her vil jeg ha opptil tre kopier
-        ↓
-Kontroller endringer
-        ↓
-Kjør backup og se hva som faktisk ble verifisert
-```
+## Download And Install
 
-Prosjektet er laget for store private samlinger med bilder, RAW-filer, video, sidecar-filer og andre filtyper. Det skal fungere uten internett og uten telemetri.
+1. Open the [MediaSync Home releases page](https://github.com/thorelvin/MediaSync-Home/releases).
+2. Download the newest `MediaSyncHome-Setup-*-unsigned.exe` installer.
+3. Close any running MediaSync Home window before installing an update.
+4. Run the installer for your current Windows user.
 
-## Hovedfunksjoner og retning
+The current public package is [MediaSync Home 0.1.0](https://github.com/thorelvin/MediaSync-Home/releases/tag/v0.1.0). The source tree contains the upcoming `0.1.1` alpha update.
 
-| Område | Opplevelse |
+The installer does not require administrator access for the standard same-user installation. It can configure same-user startup and scheduled backup tasks. Uninstalling removes verified MediaSync tasks and application files while preserving backup jobs, history, and local state in the user's AppData directory.
+
+### SmartScreen Warning
+
+The alpha installer is not digitally signed. Windows may display a SmartScreen warning even when the file came directly from this repository. Confirm that the download URL belongs to `github.com/thorelvin/MediaSync-Home` and review the release notes before continuing.
+
+## Create Your First Backup
+
+1. **Choose what to protect.** Select a source folder containing the files you care about.
+2. **Choose where copies should go.** Add one or more local, USB, or SMB/NAS target folders.
+3. **Review the plan.** MediaSync scans both sides and explains the proposed operations.
+4. **Start the backup.** Follow per-target progress from the Jobs page and inspect the final result in History.
+
+Targets are registered before MediaSync writes to them. A target must be available, writable, and owned by the current installation before a mutating operation can proceed.
+
+## Current Capabilities
+
+| Area | Available in the alpha |
 |---|---|
-| Backup til flere mål | Én kilde kan sikkerhetskopieres til opptil tre uavhengige disker eller NAS-mål. |
-| Synkroniseringsmoduser | Oppdater, speil med karantene og senere avansert toveissynkronisering. |
-| Forhåndskontroll | Vis kopieringer, erstatninger, konflikter og karantene før risikofylt kjøring. |
-| Identiske filer | Behovsstyrt BLAKE3-verifisering og tydelig skille mellom bekreftet identiske filer og metadata-likhet. |
-| Høy ytelse | Robocopy som kontrollert overføringsmotor, strømmet skanning, avgrensede køer og adaptiv ressursbruk. |
-| Gjenoppretting | Staging, versjonslager, karantene, historikk og krasjsikker recoveryprotokoll. |
-| Automatisering | Manuell kjøring, tidsplan, pålogging, oppstart, disktilkobling og filendringer uten Windows-tjeneste. |
-| Windows-GUI | Norsk og engelsk PySide6-grensesnitt med lys/mørk modus, tilgjengelighet og full fremdriftsvisning. |
+| Backup jobs | Create, edit, archive, permanently delete, and run saved jobs |
+| Destinations | Local folders, removable drives, and SMB/NAS paths |
+| Multiple targets | Up to three independently tracked targets per job |
+| Planning | Snapshot-based preview with copy, replacement, conflict, and safety decisions |
+| Execution | Controlled Robocopy batching into staging, followed by verified final commit |
+| Verification | File-size, metadata, content-hash, named-stream, and durability evidence where supported |
+| Recovery | Durable operation journals, bounded retries, pause/resume, and restart recovery |
+| History | Run, target, operation, verification, version, and recovery details |
+| Automation | Manual runs and same-user Windows Task Scheduler integration |
+| Interface | Responsive PySide6 desktop UI in English and Norwegian, with light and dark themes |
 
-## Sikkerhet før bekvemmelighet
+## Safety Model
 
-MediaSync Home skal aldri oppnå høy hastighet ved å skjule risiko. De viktigste løftene i designet er:
+MediaSync Home is deliberately conservative around existing data:
 
-- Robocopy får bare skrive til et kontrollert stagingområde, aldri direkte til sluttområdet.
-- `/MIR`, `/PURGE`, direkte overskriving og skjult permanent sletting er forbudt.
-- Eksisterende filer bevares gjennom versjonering eller karantene før erstatning.
-- En ufullstendig eller utdatert analyse kan ikke autorisere destruktive operasjoner.
-- Hvert skrivbart mål identifiseres og eies av én autorisert installasjon per eierskapsepoke.
-- Recovery baseres på varig journal, idempotente steg og faktisk filtilstand etter krasj.
-- GUI-et skiller mellom overført, metadata-kontrollert, innholdsverifisert og varig skrevet data.
+- Robocopy writes only into a controlled staging area, never directly over the final file.
+- Destructive Robocopy modes such as `/MIR` and `/PURGE` are not used.
+- Existing data is preserved through version or quarantine workflows before replacement.
+- A stale, incomplete, or identity-mismatched analysis cannot authorize destructive work.
+- Each writable target uses ownership records, endpoint leases, and fencing tokens.
+- Recovery decisions use durable journal state and the file system's observed state after a crash.
+- Permanent job deletion removes MediaSync metadata; it does not delete the user's source or backup files.
 
-Se [arkitekturen](docs/ARCHITECTURE.md), [recoveryprotokollen](docs/RECOVERY_PROTOCOL.md) og [endepunkteierskap](docs/ENDPOINT_OWNERSHIP.md) for detaljene.
+The detailed design is documented in [Architecture](docs/ARCHITECTURE.md), [Recovery Protocol](docs/RECOVERY_PROTOCOL.md), and [Endpoint Ownership](docs/ENDPOINT_OWNERSHIP.md).
 
-## Prosjektstatus
+## Performance
 
-| Felt | Nåværende status |
-|---|---|
-| Spesifikasjonspakke | `v2.9.2` |
-| Produktkode | Lokal Windows-runtime implementert |
-| Aktiv arbeidsordre | Lokal release-readiness og stabilisering |
-| Første leverbare produktmål | Lokal usignert alpha for samme Windows-bruker |
-| Støttet plattformmål | Windows 10 og Windows 11, x64 |
-| Nedlastbar app | [MediaSync Home 0.1.0 for Windows](https://github.com/thorelvin/MediaSync-Home/releases/tag/v0.1.0), lokal usignert alpha |
-| Lisens | [MIT](LICENSE) |
+The current implementation batches compatible Robocopy transfers, avoids redundant full-file reads, wakes queued work immediately, and streams large snapshot datasets through bounded SQLite batches.
 
-Den detaljerte statusen vedlikeholdes i [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md). En tom eller blokkert test skal aldri omtales som bestått.
+Local development measurements for the `0.1.1` source tree include:
 
-## Roadmap
+- **200 small files:** 71.402 ms in one batch versus 2775.242 ms with one process per file, a 38.868x process-amortization improvement.
+- **1,000,000 snapshot entries:** 80.544 seconds with 31.3 MiB peak RSS in the bounded pipeline benchmark.
 
-| Leveranse | Omfang |
-|---|---|
-| **Arkitekturbevis 0A** | Verifiser Windows-prosessmodell, IPC, Robocopy-containment, SMB-lås, recovery, SQLite og pakking. |
-| **Alpha 0.1** | Én kilde, ett mål, bare nye filer, manuell kontroll, staging og verifisering. Ingen erstatning eller sletting. |
-| **Alpha 0.2** | Erstatning, versjoner, recovery og historikk. |
-| **Beta** | Tre mål, NAS/USB, automatikk og duplikatvisning. |
-| **1.0** | Speiling med karantene og full gjenoppretting. |
-| **Senere** | Reverse-moduser, toveis synkronisering og kontrollert overtakelse av fremmed endpoint. |
+These are development measurements, not universal speed guarantees. Hardware, antivirus software, storage, network conditions, and verification settings all affect real backup performance. Reproduction commands and raw evidence are listed in [Benchmarks](docs/BENCHMARKS.md), and release limits are defined in [Performance](docs/PERFORMANCE.md).
 
-[Se den kanoniske leveransestigen.](docs/RELEASE_SCOPE.md)
+## System Requirements
 
-## Finn riktig inngang
+- Windows 10 or Windows 11, x64
+- A standard same-user Windows account
+- Enough free space on each target for the selected backup
+- Network access to any configured SMB/NAS destination
 
-| Jeg vil … | Start her |
-|---|---|
-| forstå produktet | [Produktkrav](docs/PRODUCT_REQUIREMENTS.md) og [GUI/UX](docs/GUI_AND_UX.md) |
-| se hva som skjer nå | [Implementeringsstatus](docs/IMPLEMENTATION_STATUS.md) og [milepæler](docs/MILESTONES.md) |
-| vurdere sikkerheten | [Arkitektur](docs/ARCHITECTURE.md), [recovery](docs/RECOVERY_PROTOCOL.md) og [testplan](docs/TEST_PLAN.md) |
-| finne en bestemt fagfil | [Dokumentasjonsindeksen](docs/README.md) |
-| gi første oppgave til Codex | [AGENTS.md](AGENTS.md), [overleveringssjekklisten](docs/HANDOFF_CHECKLIST.md) og [startprompten](docs/CODEX_START_PROMPT.md) |
-| arbeide med kontrakter | [schema/README.md](schema/README.md) og [kontraktsmanifestet](schema/contracts-manifest.yaml) |
-| forstå beslutningene | [ADR-katalogen](docs/adr/README.md) og [beslutningsregisteret](docs/DECISION_REGISTER.md) |
+Building from source additionally requires Python 3.10 or newer. Creating the Windows installer requires [Inno Setup 6](https://jrsoftware.org/isinfo.php).
 
-## Kjør appen lokalt
+## Run From Source
 
-Fra repositoryroten i PowerShell:
+From PowerShell in the repository root:
 
 ```powershell
+py -3.10 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 $env:PYTHONPATH = "src"
 .venv\Scripts\python.exe -m mediasync_home
 ```
 
-Appen starter GUI og lokal Engine Host i samme brukersesjon. Språk velges med flagget øverst til høyre. Den lokale pakken er foreløpig usignert.
+The desktop UI starts a local Engine Host in the same user session. Application databases and runtime state are stored below the user's local AppData directory.
 
-## Bygg Windows-installer
+## Build The Windows Installer
 
-Den lokale alphaen kan pakkes som en usignert installer for gjeldende Windows-bruker. Installer Inno Setup 6 og kjør:
+Install Inno Setup and run the verified build and smoke-test tools:
 
 ```powershell
 winget install --id JRSoftware.InnoSetup -e --scope user
 .venv\Scripts\python.exe tools\build_installer.py
-.venv\Scripts\python.exe tools\installer_smoke.py dist\MediaSyncHome-Setup-0.1.0-unsigned.exe
+.venv\Scripts\python.exe tools\installer_smoke.py dist\MediaSyncHome-Setup-0.1.1-unsigned.exe
 ```
 
-Resultatet ligger i `dist\MediaSyncHome-Setup-0.1.0-unsigned.exe`. Installasjon og oppgradering stopper dersom MediaSync Home fortsatt kjører. Avinstallering fjerner programfilene, men beholder backupjobber, historikk og annen lokal state i brukerens AppData.
+The unsigned installer is written to `dist\MediaSyncHome-Setup-0.1.1-unsigned.exe`.
 
-Den verifiserte installerpakken publiseres på [GitHub Releases](https://github.com/thorelvin/MediaSync-Home/releases). Den er foreløpig usignert, så Windows kan vise en SmartScreen-advarsel.
+## Development And Validation
 
-## Valider repositoryet
+The repository uses domain, application, adapter, IPC, presentation, composition, and process boundaries enforced by import contracts. SQLite schemas and protocol contracts are versioned and validated alongside the code.
 
-Kjør dette i et rent repository på Windows før første Codex-endring:
+Common checks:
 
 ```powershell
-python -m pip install -r requirements-handoff.txt
-python tools/validate_handoff.py --verify-bundle
-git add .
-git commit -m "chore: add MediaSync Home specification v2.9.2"
+.venv\Scripts\python.exe -m pytest -q
+.venv\Scripts\python.exe -m ruff check .
+.venv\Scripts\python.exe -m mypy src
+.venv\Scripts\python.exe tools\check_imports.py
+.venv\Scripts\python.exe tools\validate_contracts.py
+.venv\Scripts\python.exe tools\check_performance_gates.py --self-test
 ```
 
-Etter at baselinefilene er endret, brukes vanlig validering uten hashkontroll:
+Start with the [documentation index](docs/README.md) for the product requirements, architecture, UI behavior, contracts, test strategy, and release scope. The consolidated [MASTER_SPEC.md](MASTER_SPEC.md) is generated from the canonical documents under `docs/` and should not be edited directly.
 
-```powershell
-python tools/validate_handoff.py
-python tools/build_adr_docs.py --check
-python tools/build_master.py --check
-```
+## Project Status And Limitations
 
-0B-utviklingskontrollene bruker de ekstra verktøyene i `requirements-dev.txt`:
+MediaSync Home is under active alpha development. The repository contains a working Windows application, installer, real-file copy tests, recovery coverage, and same-user automation. It is not yet a signed production release.
 
-```powershell
-python -m pip install -r requirements-dev.txt
-python -m mypy src
-python tools/check_imports.py
-python tools/audit_dependencies.py
-```
+The current release does not promise:
 
-## Repositoryet i korte trekk
+- code-signed installation packages;
+- macOS or Linux support;
+- cloud-storage destinations;
+- unattended Windows service operation;
+- general-purpose two-way synchronization;
+- a substitute for maintaining multiple independent backups.
 
-```text
-AGENTS.md                  Operativ arbeidsordre og sikkerhetsgrenser for Codex
-README.md                  Denne GitHub-forsiden
-MASTER_SPEC.md             Generert, konsolidert referanse — ikke rediger direkte
-docs/README.md             Menneskevennlig dokumentasjonsindeks
-docs/                      Kanoniske produkt-, UX-, arkitektur- og testdokumenter
-docs/adr/catalog.yaml      Kanonisk ADR-status og eierbeslutning
-schema/                    Maskinlesbare kontraktsutkast og tilstandsmaskiner
-tools/                     Generatorer og streng overleveringsvalidator
-```
+See [Implementation Status](docs/IMPLEMENTATION_STATUS.md) and [Release Scope](docs/RELEASE_SCOPE.md) for detailed progress and planned work.
 
-Fagfilene under `docs/` er kanoniske. `MASTER_SPEC.md`, `docs/adr/README.md` og `docs/DECISION_REGISTER.md` er genererte visninger og skal ikke redigeres direkte.
+## Privacy And License
 
-## Arbeidsregler for Codex og fremtidige bidragsytere
+MediaSync Home is designed to operate locally and offline. The application does not send telemetry and this repository must not contain credentials, personal paths, or real user data.
 
-- Arbeid i én avgrenset arbeidspakke om gangen.
-- Bruk aldri ekte bilder, personlige filnavn eller produksjons-NAS i tester.
-- Registrer eksakte kommandoer, miljøversjoner, råartefakter og blockers.
-- Ikke erstatt manglende Windows- eller SMB-bevis med mocks og kall det bestått.
-- Codex kan anbefale ADR-er, men bare prosjekteieren kan godkjenne dem.
-- Sikkerhetsinvarianter kan ikke reduseres for å få en milepæl til å se ferdig ut.
+The project is licensed under the [MIT License](LICENSE). Third-party components retain their own licenses and notices.
 
-Detaljer finnes i [AGENTS.md](AGENTS.md), [governance](docs/GOVERNANCE.md) og [repository-/kodekvalitetsreglene](docs/REPOSITORY_AND_CODE_QUALITY.md).
-
-## Teknologi
-
-Den planlagte stakken er:
-
-- Python 3.14;
-- PySide6 / Qt 6;
-- SQLite for lokal tilstand;
-- Robocopy som isolert overføringsmotor;
-- BLAKE3 for behovsstyrt innholdsverifisering;
-- Windows Task Scheduler for automatisering;
-- Nuitka-basert Windows-pakking dersom arkitekturspiken bekrefter retningen.
-
-Eksakte versjoner fryses først etter reproduserbare Windows-bevis.
-
-## Personvern, lisens og uavhengighet
-
-- Den planlagte appen fungerer lokalt og offline; ingen telemetri skal sendes ut.
-- Repositoryet skal aldri inneholde NAS-passord, personlige filstier eller reelle brukerdata.
-- Prosjektets egen kode og dokumentasjon distribueres under [MIT-lisensen](LICENSE). Tredjepartsavhengigheter beholder sine egne lisenser og notices.
-- MediaSync Home er et uavhengig prosjekt. Allway Sync har bare vært en referanse for kjente arbeidsflyter; prosjektet bruker ikke proprietær kode, merkevareelementer eller kopiert grensesnitt.
-
----
-
-**Neste kontrollerte steg:** [Milepæl 0A.0 — miljø- og sikkerhetspreflight](docs/CODEX_START_PROMPT.md).
+MediaSync Home is an independent project. It does not contain proprietary code, branding, or interface assets from other synchronization products.

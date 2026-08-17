@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
+from collections.abc import Iterable, Iterator
 
 from mediasync_home.application.snapshots import (
     SNAPSHOT_COMPLETE_COVERAGE_STATE,
+    SNAPSHOT_CHECKSUM_ALGORITHM,
+    SNAPSHOT_SCHEMA_VERSION,
+    SNAPSHOT_SERIALIZER_VERSION,
     SealedSnapshot,
     SnapshotBatchCommitReceipt,
     SnapshotBatchSummary,
@@ -38,7 +43,6 @@ from mediasync_home.application.snapshots import (
     SnapshotSealStore,
     validate_snapshot_coverage_page_query,
     validate_snapshot_filter_decision_page_query,
-    snapshot_seal,
     validate_snapshot_issue_page_query,
     validate_snapshot_entry_page_query,
     validate_snapshot_entry_batch,
@@ -120,9 +124,8 @@ class SqliteSnapshotEntryStore(
                     batch.approximate_bytes,
                 ),
             )
-            for entry in batch.entries:
-                self._connection.execute(
-                    """
+            self._connection.executemany(
+                """
                     INSERT INTO file_entries (
                         snapshot_id,
                         endpoint_id,
@@ -135,7 +138,8 @@ class SqliteSnapshotEntryStore(
                         identity_fingerprint_hash
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
+                """,
+                (
                     (
                         batch.snapshot_id,
                         endpoint_id,
@@ -146,11 +150,12 @@ class SqliteSnapshotEntryStore(
                         entry.size_bytes,
                         entry.birthtime_ns,
                         entry.identity_fingerprint_hash,
-                    ),
-                )
-            for coverage in batch.coverage_updates:
-                self._connection.execute(
-                    """
+                    )
+                    for entry in batch.entries
+                ),
+            )
+            self._connection.executemany(
+                """
                     INSERT INTO directory_coverage (
                         snapshot_id,
                         relative_path,
@@ -162,7 +167,8 @@ class SqliteSnapshotEntryStore(
                         case_probe_error
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
+                """,
+                (
                     (
                         batch.snapshot_id,
                         coverage.relative_path,
@@ -172,11 +178,12 @@ class SqliteSnapshotEntryStore(
                         coverage.case_mode_evidence,
                         coverage.case_context_hash,
                         coverage.case_probe_error,
-                    ),
-                )
-            for issue in batch.issues:
-                self._connection.execute(
-                    """
+                    )
+                    for coverage in batch.coverage_updates
+                ),
+            )
+            self._connection.executemany(
+                """
                     INSERT INTO snapshot_issues (
                         snapshot_id,
                         relative_path,
@@ -186,7 +193,8 @@ class SqliteSnapshotEntryStore(
                         blocks_destructive_actions
                     )
                     VALUES (?, ?, ?, ?, ?, ?)
-                    """,
+                """,
+                (
                     (
                         batch.snapshot_id,
                         issue.relative_path,
@@ -194,11 +202,12 @@ class SqliteSnapshotEntryStore(
                         issue.error_code,
                         issue.sanitized_message,
                         1 if issue.blocks_destructive_actions else 0,
-                    ),
-                )
-            for decision in batch.filter_decisions:
-                self._connection.execute(
-                    """
+                    )
+                    for issue in batch.issues
+                ),
+            )
+            self._connection.executemany(
+                """
                     INSERT INTO snapshot_filter_decisions (
                         snapshot_id,
                         relative_path,
@@ -209,7 +218,8 @@ class SqliteSnapshotEntryStore(
                         evaluation_stage
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
+                """,
+                (
                     (
                         batch.snapshot_id,
                         decision.relative_path,
@@ -218,9 +228,16 @@ class SqliteSnapshotEntryStore(
                         decision.reason_code,
                         decision.matched_rule_id,
                         decision.evaluation_stage,
-                    ),
-                )
-            self._materialize_case_collisions(batch.snapshot_id)
+                    )
+                    for decision in batch.filter_decisions
+                ),
+            )
+            self._materialize_case_collisions(
+                batch.snapshot_id,
+                comparison_keys=tuple(
+                    {entry.comparison_key for entry in batch.entries}
+                ),
+            )
             self._connection.execute(
                 """
                 UPDATE snapshots
@@ -515,31 +532,34 @@ class SqliteSnapshotEntryStore(
 
             snapshot_counts = self._load_snapshot_counts_for_seal(request.snapshot_id)
             batches = self._load_batch_summaries(request.snapshot_id)
-            entries = self.load_snapshot_entries(request.snapshot_id)
-            coverage = self.load_directory_coverage(request.snapshot_id)
-            issues = self.load_snapshot_issues(request.snapshot_id)
-            filter_decisions = self.load_snapshot_filter_decisions(request.snapshot_id)
+            self._materialize_case_collisions(request.snapshot_id)
             actual_case_groups = self._expected_case_collision_group_count(request.snapshot_id)
-            self._validate_snapshot_ready_for_seal(
+            self._validate_snapshot_ready_for_streaming_seal(
                 request=request,
                 snapshot_entry_count=snapshot_counts[0],
                 snapshot_total_bytes=snapshot_counts[1],
                 snapshot_filter_decision_count=snapshot_counts[2],
                 batches=batches,
-                entries=entries,
-                coverage=coverage,
-                issues=issues,
-                filter_decisions=filter_decisions,
                 actual_case_groups=actual_case_groups,
             )
-            sealed = snapshot_seal(
+            sealed = SealedSnapshot(
                 snapshot_id=request.snapshot_id,
-                entries=entries,
-                coverage=coverage,
-                issues=issues,
-                filter_decisions=filter_decisions,
-                batches=batches,
+                snapshot_schema_version=SNAPSHOT_SCHEMA_VERSION,
+                checksum_algorithm=SNAPSHOT_CHECKSUM_ALGORITHM,
+                serializer_version=SNAPSHOT_SERIALIZER_VERSION,
+                snapshot_checksum=self._stream_snapshot_checksum(
+                    request=request,
+                    batches=batches,
+                    case_collision_group_count=actual_case_groups,
+                ),
+                entry_count=request.expected_entry_count,
+                total_bytes=request.expected_total_bytes,
+                batch_count=len(batches),
+                directory_coverage_count=request.expected_directory_coverage_count,
+                issue_count=request.expected_issue_count,
+                blocking_issue_count=request.expected_blocking_issue_count,
                 case_collision_group_count=actual_case_groups,
+                filter_decision_count=request.expected_filter_decision_count,
             )
             cursor = self._connection.execute(
                 """
@@ -676,47 +696,72 @@ class SqliteSnapshotEntryStore(
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_IMMUTABLE")
         return str(row[0])
 
-    def _materialize_case_collisions(self, snapshot_id: str) -> None:
+    def _materialize_case_collisions(
+        self,
+        snapshot_id: str,
+        *,
+        comparison_keys: tuple[str, ...] | None = None,
+    ) -> None:
+        if comparison_keys == ():
+            return
+        key_filter = ""
+        parameters: tuple[object, ...] = (snapshot_id,)
+        if comparison_keys is not None:
+            placeholders = ",".join("?" for _ in comparison_keys)
+            key_filter = f"AND comparison_key IN ({placeholders})"
+            parameters = (snapshot_id, *comparison_keys)
         rows = self._connection.execute(
-            """
+            f"""
             SELECT comparison_key
             FROM file_entries
             WHERE snapshot_id = ?
+                {key_filter}
             GROUP BY comparison_key
             HAVING count(*) > 1
             ORDER BY comparison_key
             """,
-            (snapshot_id,),
+            parameters,
         ).fetchall()
-        for row in rows:
-            comparison_key = str(row[0])
-            group_id = self._case_group_id(snapshot_id=snapshot_id, comparison_key=comparison_key)
-            self._connection.execute(
-                """
+        groups = tuple(
+            (
+                snapshot_id,
+                self._case_group_id(
+                    snapshot_id=snapshot_id,
+                    comparison_key=str(row[0]),
+                ),
+                str(row[0]),
+            )
+            for row in rows
+        )
+        self._connection.executemany(
+            """
                 INSERT INTO case_collision_groups (snapshot_id, id, comparison_key)
                 VALUES (?, ?, ?)
                 ON CONFLICT(snapshot_id, comparison_key) DO NOTHING
-                """,
-                (snapshot_id, group_id, comparison_key),
+            """,
+            groups,
+        )
+        if not groups:
+            return
+        collision_keys = tuple(str(row[0]) for row in rows)
+        collision_placeholders = ",".join("?" for _ in collision_keys)
+        self._connection.execute(
+            f"""
+            INSERT OR IGNORE INTO case_collision_members (
+                snapshot_id,
+                group_id,
+                file_entry_id
             )
-            persisted_group_id = self._case_group_id(
-                snapshot_id=snapshot_id,
-                comparison_key=comparison_key,
-            )
-            self._connection.execute(
-                """
-                INSERT OR IGNORE INTO case_collision_members (
-                    snapshot_id,
-                    group_id,
-                    file_entry_id
-                )
-                SELECT snapshot_id, ?, id
-                FROM file_entries
-                WHERE snapshot_id = ?
-                    AND comparison_key = ?
-                """,
-                (persisted_group_id, snapshot_id, comparison_key),
-            )
+            SELECT entry.snapshot_id, group_row.id, entry.id
+            FROM file_entries AS entry
+            INNER JOIN case_collision_groups AS group_row
+                ON group_row.snapshot_id = entry.snapshot_id
+                AND group_row.comparison_key = entry.comparison_key
+            WHERE entry.snapshot_id = ?
+                AND entry.comparison_key IN ({collision_placeholders})
+            """,
+            (snapshot_id, *collision_keys),
+        )
 
     def _case_group_id(self, *, snapshot_id: str, comparison_key: str) -> str:
         row = self._connection.execute(
@@ -778,7 +823,7 @@ class SqliteSnapshotEntryStore(
             for row in rows
         )
 
-    def _validate_snapshot_ready_for_seal(
+    def _validate_snapshot_ready_for_streaming_seal(
         self,
         *,
         request: SnapshotSealRequest,
@@ -786,46 +831,277 @@ class SqliteSnapshotEntryStore(
         snapshot_total_bytes: int,
         snapshot_filter_decision_count: int,
         batches: tuple[SnapshotBatchSummary, ...],
-        entries: tuple[SnapshotFileEntry, ...],
-        coverage: tuple[SnapshotDirectoryCoverage, ...],
-        issues: tuple[SnapshotIssue, ...],
-        filter_decisions: tuple[SnapshotFilterDecision, ...],
         actual_case_groups: int,
     ) -> None:
-        if snapshot_entry_count != request.expected_entry_count or len(entries) != request.expected_entry_count:
+        entry_row = self._connection.execute(
+            """
+            SELECT count(*), coalesce(sum(size_bytes), 0)
+            FROM file_entries
+            WHERE snapshot_id = ?
+            """,
+            (request.snapshot_id,),
+        ).fetchone()
+        coverage_row = self._connection.execute(
+            """
+            SELECT
+                count(*),
+                coalesce(sum(coverage_state <> ?), 0)
+            FROM directory_coverage
+            WHERE snapshot_id = ?
+            """,
+            (SNAPSHOT_COMPLETE_COVERAGE_STATE, request.snapshot_id),
+        ).fetchone()
+        issue_row = self._connection.execute(
+            """
+            SELECT count(*), coalesce(sum(blocks_destructive_actions), 0)
+            FROM snapshot_issues
+            WHERE snapshot_id = ?
+            """,
+            (request.snapshot_id,),
+        ).fetchone()
+        filter_row = self._connection.execute(
+            """
+            SELECT count(*)
+            FROM snapshot_filter_decisions
+            WHERE snapshot_id = ?
+            """,
+            (request.snapshot_id,),
+        ).fetchone()
+        if None in {entry_row, coverage_row, issue_row, filter_row}:
+            raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_PERSISTENCE_FAILED")
+        assert entry_row is not None
+        assert coverage_row is not None
+        assert issue_row is not None
+        assert filter_row is not None
+        entry_count, entry_bytes = int(entry_row[0]), int(entry_row[1])
+        coverage_count, incomplete_coverage = (
+            int(coverage_row[0]),
+            int(coverage_row[1]),
+        )
+        issue_count, blocking_issue_count = int(issue_row[0]), int(issue_row[1])
+        filter_count = int(filter_row[0])
+        if snapshot_entry_count != request.expected_entry_count or entry_count != request.expected_entry_count:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_ENTRY_COUNT_MISMATCH")
         if snapshot_total_bytes != request.expected_total_bytes:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_BYTES_MISMATCH")
-        if sum(entry.size_bytes or 0 for entry in entries) != request.expected_total_bytes:
+        if entry_bytes != request.expected_total_bytes:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_ENTRY_BYTES_MISMATCH")
         if len(batches) != request.expected_batch_count:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_BATCH_COUNT_MISMATCH")
         if sum(batch.entry_count for batch in batches) != request.expected_entry_count:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_BATCH_ENTRY_COUNT_MISMATCH")
-        if len(coverage) != request.expected_directory_coverage_count:
+        if coverage_count != request.expected_directory_coverage_count:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_COVERAGE_COUNT_MISMATCH")
-        if sum(batch.coverage_update_count for batch in batches) != request.expected_directory_coverage_count:
+        if sum(batch.coverage_update_count for batch in batches) != coverage_count:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_BATCH_COVERAGE_COUNT_MISMATCH")
-        if len(issues) != request.expected_issue_count:
+        if issue_count != request.expected_issue_count:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_ISSUE_COUNT_MISMATCH")
-        if sum(batch.issue_count for batch in batches) != request.expected_issue_count:
+        if sum(batch.issue_count for batch in batches) != issue_count:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_BATCH_ISSUE_COUNT_MISMATCH")
         if snapshot_filter_decision_count != request.expected_filter_decision_count:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_FILTER_COUNT_MISMATCH")
-        if len(filter_decisions) != request.expected_filter_decision_count:
+        if filter_count != request.expected_filter_decision_count:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_FILTER_COUNT_MISMATCH")
-        if sum(batch.filter_decision_count for batch in batches) != request.expected_filter_decision_count:
+        if sum(batch.filter_decision_count for batch in batches) != filter_count:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_BATCH_FILTER_COUNT_MISMATCH")
-        if sum(1 for issue in issues if issue.blocks_destructive_actions) != request.expected_blocking_issue_count:
+        if blocking_issue_count != request.expected_blocking_issue_count:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_BLOCKING_COUNT_MISMATCH")
-        if any(item.coverage_state != SNAPSHOT_COMPLETE_COVERAGE_STATE for item in coverage):
+        if incomplete_coverage:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_COVERAGE_INCOMPLETE")
-        if any(issue.blocks_destructive_actions for issue in issues):
+        if blocking_issue_count:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_BLOCKING_ISSUES")
         if actual_case_groups != request.expected_case_collision_group_count:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_CASE_GROUP_COUNT_MISMATCH")
         if self._missing_case_collision_member_count(request.snapshot_id) != 0:
             raise SqliteSnapshotEntryStoreError("SNAPSHOT_SEAL_CASE_COLLISIONS_INCOMPLETE")
+
+    def _stream_snapshot_checksum(
+        self,
+        *,
+        request: SnapshotSealRequest,
+        batches: tuple[SnapshotBatchSummary, ...],
+        case_collision_group_count: int,
+    ) -> str:
+        digest = hashlib.sha256()
+        first_field = True
+
+        def write(value: str) -> None:
+            digest.update(value.encode("utf-8"))
+
+        def encoded(value: object) -> str:
+            return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+        def field(name: str, value: object) -> None:
+            nonlocal first_field
+            if not first_field:
+                write(",")
+            first_field = False
+            write(encoded(name))
+            write(":")
+            write(encoded(value))
+
+        def list_field(name: str, values: Iterable[object]) -> None:
+            nonlocal first_field
+            if not first_field:
+                write(",")
+            first_field = False
+            write(encoded(name))
+            write(":[")
+            first_item = True
+            for value in values:
+                if not first_item:
+                    write(",")
+                first_item = False
+                write(encoded(value))
+            write("]")
+
+        snapshot_id = request.snapshot_id
+        write("{")
+        field("batch_count", len(batches))
+        list_field(
+            "batches",
+            (
+                {
+                    "approximate_bytes": batch.approximate_bytes,
+                    "coverage_update_count": batch.coverage_update_count,
+                    "entry_count": batch.entry_count,
+                    "filter_decision_count": batch.filter_decision_count,
+                    "issue_count": batch.issue_count,
+                    "payload_hash": batch.payload_hash,
+                    "sequence_no": batch.sequence_no,
+                }
+                for batch in batches
+            ),
+        )
+        field("blocking_issue_count", request.expected_blocking_issue_count)
+        field("case_collision_group_count", case_collision_group_count)
+        field("checksum_algorithm", SNAPSHOT_CHECKSUM_ALGORITHM)
+        field("complete", True)
+        list_field("coverage", self._stream_coverage_payloads(snapshot_id))
+        field("directory_coverage_count", request.expected_directory_coverage_count)
+        list_field("entries", self._stream_entry_payloads(snapshot_id))
+        field("entry_count", request.expected_entry_count)
+        field("filter_decision_count", request.expected_filter_decision_count)
+        list_field(
+            "filter_decisions",
+            self._stream_filter_decision_payloads(snapshot_id),
+        )
+        field("immutable", True)
+        field("issue_count", request.expected_issue_count)
+        list_field("issues", self._stream_issue_payloads(snapshot_id))
+        field("serializer_version", SNAPSHOT_SERIALIZER_VERSION)
+        field("snapshot_id", snapshot_id)
+        field("snapshot_schema_version", SNAPSHOT_SCHEMA_VERSION)
+        field("total_bytes", request.expected_total_bytes)
+        write("}")
+        return digest.hexdigest()
+
+    def _stream_entry_payloads(
+        self,
+        snapshot_id: str,
+    ) -> Iterator[dict[str, object]]:
+        rows = self._connection.execute(
+            """
+            SELECT id, relative_path, comparison_key, object_type,
+                   size_bytes, birthtime_ns, identity_fingerprint_hash
+            FROM file_entries
+            WHERE snapshot_id = ?
+            ORDER BY relative_path, id
+            """,
+            (snapshot_id,),
+        )
+        return (
+            {
+                "birthtime_ns": None if row[5] is None else int(row[5]),
+                "comparison_key": str(row[2]),
+                "entry_id": str(row[0]),
+                "identity_fingerprint_hash": None if row[6] is None else str(row[6]),
+                "object_type": str(row[3]),
+                "relative_path": str(row[1]),
+                "size_bytes": None if row[4] is None else int(row[4]),
+            }
+            for row in rows
+        )
+
+    def _stream_coverage_payloads(
+        self,
+        snapshot_id: str,
+    ) -> Iterator[dict[str, object]]:
+        rows = self._connection.execute(
+            """
+            SELECT relative_path, comparison_key, coverage_state, case_mode,
+                   case_mode_evidence, case_context_hash, case_probe_error
+            FROM directory_coverage
+            WHERE snapshot_id = ?
+            ORDER BY relative_path
+            """,
+            (snapshot_id,),
+        )
+        return (
+            {
+                "case_context_hash": str(row[5]),
+                "case_mode": str(row[3]),
+                "case_mode_evidence": str(row[4]),
+                "case_probe_error": None if row[6] is None else str(row[6]),
+                "comparison_key": str(row[1]),
+                "coverage_state": str(row[2]),
+                "relative_path": str(row[0]),
+            }
+            for row in rows
+        )
+
+    def _stream_issue_payloads(
+        self,
+        snapshot_id: str,
+    ) -> Iterator[dict[str, object]]:
+        rows = self._connection.execute(
+            """
+            SELECT relative_path, issue_type, blocks_destructive_actions,
+                   error_code, sanitized_message
+            FROM snapshot_issues
+            WHERE snapshot_id = ?
+            ORDER BY relative_path, issue_type, coalesce(error_code, ''),
+                     coalesce(sanitized_message, ''), blocks_destructive_actions
+            """,
+            (snapshot_id,),
+        )
+        return (
+            {
+                "blocks_destructive_actions": bool(row[2]),
+                "error_code": None if row[3] is None else str(row[3]),
+                "issue_type": str(row[1]),
+                "relative_path": str(row[0]),
+                "sanitized_message": None if row[4] is None else str(row[4]),
+            }
+            for row in rows
+        )
+
+    def _stream_filter_decision_payloads(
+        self,
+        snapshot_id: str,
+    ) -> Iterator[dict[str, object]]:
+        rows = self._connection.execute(
+            """
+            SELECT relative_path, object_type, decision_state, reason_code,
+                   matched_rule_id, evaluation_stage
+            FROM snapshot_filter_decisions
+            WHERE snapshot_id = ?
+            ORDER BY relative_path, decision_state, reason_code,
+                     coalesce(matched_rule_id, ''), evaluation_stage
+            """,
+            (snapshot_id,),
+        )
+        return (
+            {
+                "decision_state": str(row[2]),
+                "evaluation_stage": str(row[5]),
+                "matched_rule_id": None if row[4] is None else str(row[4]),
+                "object_type": str(row[1]),
+                "reason_code": str(row[3]),
+                "relative_path": str(row[0]),
+            }
+            for row in rows
+        )
 
     def _validate_existing_seal_matches_request(
         self,
